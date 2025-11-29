@@ -1,0 +1,14 @@
+{
+  "log_path": "/home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+  "player_name": "YourPlayerName",
+  "default_deck": "mono_red",
+  "deck_strategy": "mono_red",
+  "default_strategy": "play_games",
+  "default_color": "red",
+  "image_dir": "images/",
+  "dry_run": false,
+  "poll_interval": 1.0,
+  "image_confidence": 0.9,
+  "decks_path": "decks.example.json",
+  "log_level": "DEBUG"
+}
