@@ -129,6 +129,12 @@ def run_bot(config_path: Path) -> None:
         confidence=float(config.get("image_confidence", 0.9)),
         click_region=parse_click_region(config),
         user_mouse_pause_seconds=float(config.get("user_mouse_pause_seconds", 7.0)),
+        target_overrides=config.get("click_targets"),
+        hand_y_ratio=float(config.get("hand_y_ratio", 0.85)),
+        hand_x_ratios=config.get("hand_x_ratios"),
+        land_y_ratio=float(config.get("land_y_ratio", 0.84)),
+        land_x_ratios=config.get("land_x_ratios"),
+        use_image_search=bool(config.get("use_image_search", True)),
     )
     default_strategy = config.get("default_strategy") or config.get("deck_strategy") or "play_games"
     quest_ai = QuestAI(default_color=load_deck_color(config), default_strategy=default_strategy)

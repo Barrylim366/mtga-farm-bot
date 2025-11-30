@@ -351,3 +351,281 @@
 2025-11-30 14:56:27,130 [DEBUG] ydotool click failed at (1990.1999999999998,1202.2): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1990', '1202']' returned non-zero exit status 2.
 2025-11-30 14:56:27,876 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
 2025-11-30 14:56:34,876 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:25:53,939 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 15:25:53,939 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 15:25:53,979 [INFO] Loaded card database from cards.json
+2025-11-30 15:25:54,979 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 15:25:55,980 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 15:25:56,980 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 267)
+2025-11-30 15:25:56,980 [DEBUG] Unparsed log line (idle): Unloading 7445 unused Assets to reduce memory usage. Loaded Objects now: 25001.
+2025-11-30 15:25:56,980 [DEBUG] Unparsed log line (idle): Total: 65.374100 ms (FindLiveObjects: 1.404700 ms CreateObjectMapping: 1.141300 ms MarkObjects: 58.704600 ms  DeleteObjects: 4.123000 ms)
+2025-11-30 15:25:57,980 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 15:25:57,980 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 15:25:58,506 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 15:25:58,507 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 15:25:58,914 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 15:25:58,914 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 15:25:59,516 [DEBUG] ydotool click failed at (1721.0,297.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1721', '297']' returned non-zero exit status 2.
+2025-11-30 15:26:00,073 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 15:26:00,073 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:26:07,074 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:26:14,075 [DEBUG] ydotool click failed at (2919.0,1341.2): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '2919', '1341']' returned non-zero exit status 2.
+2025-11-30 15:26:14,106 [DEBUG] Clicked keep_hand at (2919.0, 1341.2)
+2025-11-30 15:26:14,708 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:26:21,710 [DEBUG] ydotool click failed at (2228.0,1244.4): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '2228', '1244']' returned non-zero exit status 2.
+2025-11-30 15:26:22,311 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:26:29,313 [DEBUG] ydotool click failed at (1998.1999999999998,1203.2): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1998', '1203']' returned non-zero exit status 2.
+2025-11-30 15:26:29,981 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:26:36,982 [DEBUG] ydotool key failed for space (57): Command '['/usr/bin/ydotool', 'key', '57:1', '57:0']' returned non-zero exit status 2.
+2025-11-30 15:26:37,421 [DEBUG] ydotool key failed for enter (28): Command '['/usr/bin/ydotool', 'key', '28:1', '28:0']' returned non-zero exit status 2.
+2025-11-30 15:26:38,378 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 15:26:38,379 [DEBUG] ydotool click failed at (2928.0,1329.2): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '2928', '1329']' returned non-zero exit status 2.
+2025-11-30 15:26:38,410 [DEBUG] Clicked keep_hand at (2928.0, 1329.2)
+2025-11-30 15:26:39,124 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:26:46,126 [DEBUG] ydotool click failed at (2229.0,1242.4): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '2229', '1242']' returned non-zero exit status 2.
+2025-11-30 15:26:46,863 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:26:53,864 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:27:00,865 [DEBUG] ydotool click failed at (1998.1999999999998,1188.2): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1998', '1188']' returned non-zero exit status 2.
+2025-11-30 15:27:01,466 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:27:08,467 [DEBUG] ydotool key failed for space (57): Command '['/usr/bin/ydotool', 'key', '57:1', '57:0']' returned non-zero exit status 2.
+2025-11-30 15:27:08,972 [DEBUG] ydotool key failed for enter (28): Command '['/usr/bin/ydotool', 'key', '28:1', '28:0']' returned non-zero exit status 2.
+2025-11-30 15:27:09,794 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 15:27:09,796 [DEBUG] ydotool click failed at (2923.0,1333.2): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '2923', '1333']' returned non-zero exit status 2.
+2025-11-30 15:27:09,827 [DEBUG] Clicked keep_hand at (2923.0, 1333.2)
+2025-11-30 15:27:10,563 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:27:17,564 [DEBUG] ydotool click failed at (2234.0,1229.4): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '2234', '1229']' returned non-zero exit status 2.
+2025-11-30 15:27:18,282 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:27:25,283 [DEBUG] ydotool click failed at (1998.1999999999998,1186.2): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1998', '1186']' returned non-zero exit status 2.
+2025-11-30 15:27:25,874 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:40:40,094 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 15:40:40,094 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 15:40:40,147 [INFO] Loaded card database from cards.json
+2025-11-30 15:40:41,147 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 15:40:41,147 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 15:40:43,148 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 297)
+2025-11-30 15:40:43,148 [DEBUG] Unparsed log line (idle): Unloading 7248 unused Assets to reduce memory usage. Loaded Objects now: 25550.
+2025-11-30 15:40:43,148 [DEBUG] Unparsed log line (idle): Total: 57.303900 ms (FindLiveObjects: 1.354100 ms CreateObjectMapping: 0.581000 ms MarkObjects: 51.727700 ms  DeleteObjects: 3.640300 ms)
+2025-11-30 15:40:44,148 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 15:40:44,148 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 15:40:44,941 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 15:40:44,941 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 15:40:45,650 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 15:40:45,650 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 15:40:46,252 [DEBUG] ydotool click failed at (1717.0,283.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1717', '283']' returned non-zero exit status 2.
+2025-11-30 15:40:46,786 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 15:40:46,786 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:40:53,786 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/barrylim/Dokumente/mtga_bot/mtga_bot/main.py", line 209, in <module>
+    main()
+    ~~~~^^
+  File "/home/barrylim/Dokumente/mtga_bot/mtga_bot/main.py", line 205, in main
+    run_bot(Path(args.config).expanduser())
+    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/barrylim/Dokumente/mtga_bot/mtga_bot/main.py", line 177, in run_bot
+    ui_controller.perform(action)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "/home/barrylim/Dokumente/mtga_bot/mtga_bot/ui_controller.py", line 63, in perform
+    self.confirm_keep_hand()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/barrylim/Dokumente/mtga_bot/mtga_bot/ui_controller.py", line 107, in confirm_keep_hand
+    self.click_named_target("keep_hand")
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/home/barrylim/Dokumente/mtga_bot/mtga_bot/ui_controller.py", line 144, in click_named_target
+    location = self._pyautogui.locateCenterOnScreen(str(candidate), confidence=self.confidence)
+  File "/home/barrylim/Dokumente/mtga_bot/.venv/lib/python3.13/site-packages/pyautogui/__init__.py", line 172, in wrapper
+    return wrappedFunction(*args, **kwargs)
+  File "/home/barrylim/Dokumente/mtga_bot/.venv/lib/python3.13/site-packages/pyautogui/__init__.py", line 204, in locateCenterOnScreen
+    return pyscreeze.locateCenterOnScreen(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/barrylim/Dokumente/mtga_bot/.venv/lib/python3.13/site-packages/pyscreeze/__init__.py", line 447, in locateCenterOnScreen
+    coords = locateOnScreen(image, **kwargs)
+  File "/home/barrylim/Dokumente/mtga_bot/.venv/lib/python3.13/site-packages/pyscreeze/__init__.py", line 404, in locateOnScreen
+    screenshotIm = screenshot(region=None)
+  File "/home/barrylim/Dokumente/mtga_bot/.venv/lib/python3.13/site-packages/pyscreeze/__init__.py", line 628, in _screenshot_linux
+    raise Exception(
+        'To take screenshots, you must install Pillow version 9.2.0 or greater and gnome-screenshot by running `sudo apt install gnome-screenshot`'  # noqa
+    )
+Exception: To take screenshots, you must install Pillow version 9.2.0 or greater and gnome-screenshot by running `sudo apt install gnome-screenshot`
+2025-11-30 15:48:39,999 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 15:48:39,999 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 15:48:40,038 [INFO] Loaded card database from cards.json
+2025-11-30 15:48:42,039 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 15:48:42,039 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 15:48:44,039 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 361)
+2025-11-30 15:48:44,040 [DEBUG] Unparsed log line (idle): Unloading 7746 unused Assets to reduce memory usage. Loaded Objects now: 25597.
+2025-11-30 15:48:44,040 [DEBUG] Unparsed log line (idle): Total: 78.069600 ms (FindLiveObjects: 1.588100 ms CreateObjectMapping: 0.775500 ms MarkObjects: 70.235300 ms  DeleteObjects: 5.469900 ms)
+2025-11-30 15:48:46,040 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 15:48:46,040 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 15:48:46,652 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 15:48:46,652 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 15:48:47,017 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 15:48:47,017 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 15:48:47,619 [DEBUG] ydotool click failed at (1711.0,280.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1711', '280']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 15:48:48,129 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 15:48:48,129 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+
+(gnome-screenshot:13851): Handy-WARNING **: 15:48:55.176: Using GtkSettings:gtk-application-prefer-dark-theme together with HdyStyleManager is unsupported. Please use HdyStyleManager:color-scheme instead.
+
+** (org.gnome.Screenshot:13851): WARNING **: 15:48:55.233: Unable to use GNOME Shell's builtin screenshot interface: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+
+** (org.gnome.Screenshot:13851): CRITICAL **: 15:48:55.233: Unable to capture a screenshot of any window
+2025-11-30 15:48:55,240 [DEBUG] Importing AvifImagePlugin
+2025-11-30 15:48:55,241 [DEBUG] Importing BlpImagePlugin
+2025-11-30 15:48:55,242 [DEBUG] Importing BmpImagePlugin
+2025-11-30 15:48:55,242 [DEBUG] Importing BufrStubImagePlugin
+2025-11-30 15:48:55,242 [DEBUG] Importing CurImagePlugin
+2025-11-30 15:48:55,242 [DEBUG] Importing DcxImagePlugin
+2025-11-30 15:48:55,242 [DEBUG] Importing DdsImagePlugin
+2025-11-30 15:48:55,246 [DEBUG] Importing EpsImagePlugin
+2025-11-30 15:48:55,246 [DEBUG] Importing FitsImagePlugin
+2025-11-30 15:48:55,247 [DEBUG] Importing FliImagePlugin
+2025-11-30 15:48:55,247 [DEBUG] Importing FpxImagePlugin
+2025-11-30 15:48:55,247 [DEBUG] Image: failed to import FpxImagePlugin: No module named 'olefile'
+2025-11-30 15:48:55,247 [DEBUG] Importing FtexImagePlugin
+2025-11-30 15:48:55,247 [DEBUG] Importing GbrImagePlugin
+2025-11-30 15:48:55,247 [DEBUG] Importing GifImagePlugin
+2025-11-30 15:48:55,247 [DEBUG] Importing GribStubImagePlugin
+2025-11-30 15:48:55,248 [DEBUG] Importing Hdf5StubImagePlugin
+2025-11-30 15:48:55,248 [DEBUG] Importing IcnsImagePlugin
+2025-11-30 15:48:55,248 [DEBUG] Importing IcoImagePlugin
+2025-11-30 15:48:55,249 [DEBUG] Importing ImImagePlugin
+2025-11-30 15:48:55,249 [DEBUG] Importing ImtImagePlugin
+2025-11-30 15:48:55,249 [DEBUG] Importing IptcImagePlugin
+2025-11-30 15:48:55,249 [DEBUG] Importing JpegImagePlugin
+2025-11-30 15:48:55,249 [DEBUG] Importing Jpeg2KImagePlugin
+2025-11-30 15:48:55,249 [DEBUG] Importing McIdasImagePlugin
+2025-11-30 15:48:55,250 [DEBUG] Importing MicImagePlugin
+2025-11-30 15:48:55,250 [DEBUG] Image: failed to import MicImagePlugin: No module named 'olefile'
+2025-11-30 15:48:55,250 [DEBUG] Importing MpegImagePlugin
+2025-11-30 15:48:55,250 [DEBUG] Importing MpoImagePlugin
+2025-11-30 15:48:55,254 [DEBUG] Importing MspImagePlugin
+2025-11-30 15:48:55,254 [DEBUG] Importing PalmImagePlugin
+2025-11-30 15:48:55,254 [DEBUG] Importing PcdImagePlugin
+2025-11-30 15:48:55,254 [DEBUG] Importing PcxImagePlugin
+2025-11-30 15:48:55,254 [DEBUG] Importing PdfImagePlugin
+2025-11-30 15:48:55,262 [DEBUG] Importing PixarImagePlugin
+2025-11-30 15:48:55,262 [DEBUG] Importing PngImagePlugin
+2025-11-30 15:48:55,262 [DEBUG] Importing PpmImagePlugin
+2025-11-30 15:48:55,262 [DEBUG] Importing PsdImagePlugin
+2025-11-30 15:48:55,262 [DEBUG] Importing QoiImagePlugin
+2025-11-30 15:48:55,262 [DEBUG] Importing SgiImagePlugin
+2025-11-30 15:48:55,263 [DEBUG] Importing SpiderImagePlugin
+2025-11-30 15:48:55,263 [DEBUG] Importing SunImagePlugin
+2025-11-30 15:48:55,263 [DEBUG] Importing TgaImagePlugin
+2025-11-30 15:48:55,263 [DEBUG] Importing TiffImagePlugin
+2025-11-30 15:48:55,263 [DEBUG] Importing WebPImagePlugin
+2025-11-30 15:48:55,264 [DEBUG] Importing WmfImagePlugin
+2025-11-30 15:48:55,264 [DEBUG] Importing XbmImagePlugin
+2025-11-30 15:48:55,264 [DEBUG] Importing XpmImagePlugin
+2025-11-30 15:48:55,265 [DEBUG] Importing XVThumbImagePlugin
+2025-11-30 15:48:55,265 [WARNING] Image search disabled (screenshot backend missing?): cannot identify image file '/tmp/tmpazykyr3d.png'
+2025-11-30 15:48:55,298 [DEBUG] Clicked keep_hand at (2927.0, 1346.2)
+2025-11-30 15:48:55,898 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:03,551 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:11,311 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:20,085 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 15:49:20,117 [DEBUG] Clicked keep_hand at (2927.0, 1340.2)
+2025-11-30 15:49:20,650 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:27,650 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:35,276 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:42,929 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:51,612 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 15:49:51,644 [DEBUG] Clicked keep_hand at (2924.0, 1333.2)
+2025-11-30 15:49:52,434 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:49:59,944 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:50:07,492 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:50:15,957 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 15:50:15,989 [DEBUG] Clicked keep_hand at (2930.0, 1337.2)
+2025-11-30 15:50:16,586 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:50:24,305 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:50:31,828 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:50:38,828 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 15:50:45,829 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 16:09:46,676 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 16:09:46,677 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 16:09:46,721 [INFO] Loaded card database from cards.json
+2025-11-30 16:09:51,722 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 16:09:51,722 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 16:09:52,722 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 271)
+2025-11-30 16:09:52,722 [DEBUG] Unparsed log line (idle): Unloading 9363 unused Assets to reduce memory usage. Loaded Objects now: 25004.
+2025-11-30 16:09:52,723 [DEBUG] Unparsed log line (idle): Total: 71.565700 ms (FindLiveObjects: 1.393400 ms CreateObjectMapping: 0.687300 ms MarkObjects: 64.422400 ms  DeleteObjects: 5.062000 ms)
+2025-11-30 16:09:54,723 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 16:09:54,723 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 16:09:55,598 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 16:09:55,598 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 16:09:56,063 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 16:09:56,063 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 16:09:56,665 [DEBUG] ydotool click failed at (1729.0,288.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1729', '288']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 16:09:57,115 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 16:09:57,115 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 16:10:04,115 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 16:10:11,116 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 16:10:18,149 [DEBUG] Clicked keep_hand at (2928.0, 1329.2)
+2025-11-30 16:10:21,224 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 16:10:21,257 [DEBUG] Clicked keep_hand at (2927.0, 1335.2)
+2025-11-30 16:10:24,287 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 16:10:24,319 [DEBUG] Clicked keep_hand at (2921.0, 1335.2)
+2025-11-30 16:10:27,039 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 16:10:27,071 [DEBUG] Clicked keep_hand at (2917.0, 1340.2)
+2025-11-30 16:10:30,466 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 16:10:30,498 [DEBUG] Clicked keep_hand at (2930.0, 1347.2)
+2025-11-30 16:10:33,782 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 16:10:33,814 [DEBUG] Clicked keep_hand at (2928.0, 1331.2)
+2025-11-30 16:10:37,352 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 16:10:37,384 [DEBUG] Clicked keep_hand at (2923.0, 1343.2)
+2025-11-30 16:10:40,970 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 16:10:41,002 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 16:10:44,309 [DEBUG] Keep-hand attempt 9/10
+2025-11-30 16:10:44,341 [DEBUG] Clicked keep_hand at (2925.0, 1335.2)
+2025-11-30 16:10:47,609 [DEBUG] Keep-hand attempt 10/10
+2025-11-30 16:10:47,641 [DEBUG] Clicked keep_hand at (2930.0, 1332.2)
+2025-11-30 16:10:51,349 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 16:10:51,349 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 16:10:51,350 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 16:16:50,901 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 16:16:50,901 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 16:16:50,941 [INFO] Loaded card database from cards.json
+2025-11-30 16:17:08,944 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_END: 5>, payload={'state': 'MatchCompleted'})
+2025-11-30 16:17:08,944 [INFO] Action: ActionType.QUEUE_FOR_MATCH (Idle: queue for next match)
+2025-11-30 16:17:09,075 [DEBUG] ydotool click failed at (1720.0,1078.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1720', '1078']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 16:17:09,108 [DEBUG] Clicked queue_button at (1720.0, 1078.0)
+2025-11-30 16:17:11,744 [DEBUG] Unparsed log line (idle): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 16:17:11,744 [DEBUG] Unparsed log line (idle): OnSceneLoaded for MatchEndScene
+2025-11-30 16:17:16,745 [DEBUG] Unparsed log line (idle): OnSceneUnloaded for Battlefield_LCI
+2025-11-30 16:17:17,745 [DEBUG] Unparsed log line (idle): OnSceneUnloaded for DuelScene
+2025-11-30 16:17:17,745 [DEBUG] Unparsed log line (idle): OnSceneUnloaded for MatchEndScene
+2025-11-30 16:17:35,580 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 16:17:35,581 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 16:17:35,621 [INFO] Loaded card database from cards.json
+2025-11-30 16:17:37,621 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 301)
+2025-11-30 16:17:37,621 [DEBUG] Unparsed log line (idle): Unloading 8051 unused Assets to reduce memory usage. Loaded Objects now: 29148.
+2025-11-30 16:17:37,621 [DEBUG] Unparsed log line (idle): Total: 59.320100 ms (FindLiveObjects: 1.574700 ms CreateObjectMapping: 1.661300 ms MarkObjects: 50.622500 ms  DeleteObjects: 5.461100 ms)
+2025-11-30 16:17:37,621 [DEBUG] Unparsed log line (idle): 
+2025-11-30 16:17:37,621 [DEBUG] Unparsed log line (idle): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 16:17:38,622 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 16:17:38,622 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 16:17:39,385 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 16:17:39,386 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 16:17:39,910 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 16:17:39,911 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 16:17:40,512 [DEBUG] ydotool click failed at (1725.0,296.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1725', '296']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 16:17:41,270 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 16:17:41,303 [DEBUG] Clicked keep_hand at (2933.0, 1341.2)
+2025-11-30 16:17:44,189 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 16:17:44,222 [DEBUG] Clicked keep_hand at (2922.0, 1347.2)
+2025-11-30 16:17:47,653 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 16:17:47,685 [DEBUG] Clicked keep_hand at (2927.0, 1338.2)
+2025-11-30 16:17:50,407 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 16:17:50,440 [DEBUG] Clicked keep_hand at (2914.0, 1348.2)
+2025-11-30 16:17:53,625 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 16:17:53,658 [DEBUG] Clicked keep_hand at (2933.0, 1345.2)
+2025-11-30 16:17:57,297 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 16:17:57,329 [DEBUG] Clicked keep_hand at (2921.0, 1337.2)
+2025-11-30 16:18:00,720 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 16:18:00,752 [DEBUG] Clicked keep_hand at (2933.0, 1349.2)
+2025-11-30 16:18:03,697 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 16:18:03,729 [DEBUG] Clicked keep_hand at (2929.0, 1340.2)
+2025-11-30 16:18:04,939 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds

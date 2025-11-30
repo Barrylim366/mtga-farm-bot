@@ -5,6 +5,7 @@ import random
 import shutil
 import subprocess
 import time
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,12 @@ class UIController:
         pause_range: tuple[float, float] = (0.35, 0.75),
         click_region: Optional[tuple[int, int, int, int]] = None,
         user_mouse_pause_seconds: float = 7.0,
+        target_overrides: Optional[dict[str, tuple[float, float]]] = None,
+        hand_y_ratio: float = 0.85,
+        hand_x_ratios: Optional[list[float]] = None,
+        land_y_ratio: float = 0.84,
+        land_x_ratios: Optional[list[float]] = None,
+        use_image_search: bool = True,
     ) -> None:
         self.image_dir = Path(image_dir) if image_dir else None
         self.dry_run = dry_run
@@ -43,6 +50,13 @@ class UIController:
         self._user_pause_until: float = 0.0
         self._user_pause_seconds = float(user_mouse_pause_seconds)
         self._bot_move_grace = 0.4
+        self.target_overrides = self._normalize_target_overrides(target_overrides or {})
+        self.hand_y_ratio = float(hand_y_ratio)
+        self.hand_x_ratios = self._normalize_ratio_list(hand_x_ratios, [0.52, 0.58, 0.64])
+        self.land_y_ratio = float(land_y_ratio)
+        self.land_x_ratios = self._normalize_ratio_list(land_x_ratios, [0.38, 0.44, 0.5])
+        self._image_search_available = use_image_search
+        self._prefer_scrot = bool(os.environ.get("MTGA_BOT_USE_SCROT", "1") != "0")
 
     def perform(self, action: Action) -> None:
         """Dispatch an Action to the appropriate UI gesture."""
@@ -112,6 +126,13 @@ class UIController:
         Click a cached screenshot of a UI element if available, otherwise falls back to a generic click.
         """
         self._maybe_pause_for_user_mouse()
+        if target_name in self.target_overrides:
+            rel_x, rel_y = self.target_overrides[target_name]
+            logger.debug("Using configured target for %s at rel (%s, %s)", target_name, rel_x, rel_y)
+            self._click_relative(rel_x, rel_y, label=target_name)
+            self.sleep_briefly()
+            return
+
         if self.dry_run:
             logger.info("[dry-run] Would click %s", target_name)
             self.sleep_briefly()
@@ -120,30 +141,39 @@ class UIController:
         self._ensure_pyautogui()
         if self.image_dir:
             candidate = self.image_dir / f"{target_name}.png"
-            if candidate.exists():
-                location = self._pyautogui.locateCenterOnScreen(str(candidate), confidence=self.confidence)
+            # fallback alias keep_hand -> keep7_button.png
+            if not candidate.exists() and target_name == "keep_hand":
+                candidate = self.image_dir / "keep7_button.png"
+            if candidate.exists() and self._image_search_available:
+                try:
+                    location = self._pyautogui.locateCenterOnScreen(str(candidate), confidence=self.confidence)
+                except Exception as exc:
+                    self._image_search_available = False
+                    logger.warning("Image search disabled (screenshot backend missing?): %s", exc)
+                    location = None
                 if location:
-                    self._click_absolute(location.x, location.y)
+                    logger.debug("Found %s via image at (%s, %s)", target_name, location.x, location.y)
+                    self._click_absolute(location.x, location.y, label=target_name)
                     self.sleep_briefly()
                     return
 
         # Heuristic fallback positions for known targets.
         if target_name == "keep_hand":
             # Keep button sits bottom-right in mulligan view.
-            self._click_relative(0.85, 0.93)
+            self._click_relative(0.85, 0.93, label=target_name)
             return
         if target_name == "queue_button":
-            self._click_relative(0.5, 0.75)
+            self._click_relative(0.5, 0.75, label=target_name)
             return
         if target_name == "concede":
-            self._click_relative(0.55, 0.6)
+            self._click_relative(0.55, 0.6, label=target_name)
             return
 
         # Generic click near the center as a last resort.
         screen_size = self._pyautogui.size()
         x = screen_size.width * 0.5 + random.randint(-40, 40)
         y = screen_size.height * 0.75 + random.randint(-30, 30)
-        self._click_absolute(x, y)
+        self._click_absolute(x, y, label=f"target:{target_name}")
         self.sleep_briefly()
 
     def press_key(self, key: str) -> None:
@@ -172,13 +202,13 @@ class UIController:
         # Casting is highly deck-specific; here we just click the hand area to play a card.
         self._ensure_pyautogui()
         screen_size = self._pyautogui.size()
-        y = screen_size.height * 0.85 + random.randint(-25, 25)
+        y = screen_size.height * self.hand_y_ratio + random.randint(-25, 25)
         # Click a couple of slots across the hand to improve reliability.
-        rel_x_choices = [0.52, 0.58, 0.64]
+        rel_x_choices = list(self.hand_x_ratios)
         random.shuffle(rel_x_choices)
         for rel_x in rel_x_choices[:2]:
             x = screen_size.width * rel_x + random.randint(-40, 40)
-            self._click_absolute(x, y)
+            self._click_absolute(x, y, label="cast_spell")
             time.sleep(0.1)
         self.sleep_briefly()
 
@@ -192,12 +222,12 @@ class UIController:
         # Lands usually sit on the left side of the hand; click a couple of nearby slots.
         self._ensure_pyautogui()
         screen_size = self._pyautogui.size()
-        y = screen_size.height * 0.84 + random.randint(-20, 20)
-        rel_x_choices = [0.38, 0.44, 0.5]
+        y = screen_size.height * self.land_y_ratio + random.randint(-20, 20)
+        rel_x_choices = list(self.land_x_ratios)
         random.shuffle(rel_x_choices)
         for rel_x in rel_x_choices[:2]:
             x = screen_size.width * rel_x + random.randint(-30, 30)
-            self._click_absolute(x, y)
+            self._click_absolute(x, y, label="play_land")
             time.sleep(0.12)
         self.sleep_briefly()
 
@@ -223,10 +253,13 @@ class UIController:
             import pyautogui
 
             self._pyautogui = pyautogui
+            if self._prefer_scrot and not os.environ.get("PYAUTOGUI_SCREENSHOT"):
+                # scrot works on X11/Xwayland; harmless on Wayland if present.
+                os.environ["PYAUTOGUI_SCREENSHOT"] = "scrot"
             self._pyautogui.PAUSE = 0
             self._pyautogui.FAILSAFE = False
 
-    def _click_relative(self, rel_x: float, rel_y: float) -> None:
+    def _click_relative(self, rel_x: float, rel_y: float, label: Optional[str] = None) -> None:
         """Click at a relative screen position (0..1 in both axes) with slight jitter."""
         self._maybe_pause_for_user_mouse()
         if self.click_region:
@@ -239,7 +272,7 @@ class UIController:
         jitter_y = random.randint(-10, 10)
         x = origin_x + width * rel_x + jitter_x
         y = origin_y + height * rel_y + jitter_y
-        self._click_absolute(x, y)
+        self._click_absolute(x, y, label=label)
         # Extra down/up to ensure click is registered in windowed mode
         if not self.dry_run and not self._use_ydotool:
             try:
@@ -250,7 +283,7 @@ class UIController:
                 pass
         self.sleep_briefly()
 
-    def _click_absolute(self, x: float, y: float) -> None:
+    def _click_absolute(self, x: float, y: float, label: Optional[str] = None) -> None:
         """Perform a left-click at absolute screen coordinates, preferring ydotool on Wayland."""
         self._maybe_pause_for_user_mouse()
         if self._use_ydotool:
@@ -268,10 +301,11 @@ class UIController:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                self._record_bot_mouse_position(x, y)
+                self._record_bot_mouse_position(x, y, label=label)
                 return
             except Exception as exc:  # pragma: no cover - best effort
-                logger.debug("ydotool click failed at (%s,%s): %s", x, y, exc)
+                logger.debug("ydotool click failed at (%s,%s): %s (falling back to pyautogui)", x, y, exc)
+                self._use_ydotool = False
 
         self._ensure_pyautogui()
         # Use a down/up sequence; .click can be ignored in some windowed/overlay scenarios.
@@ -279,7 +313,7 @@ class UIController:
         self._pyautogui.mouseDown()
         time.sleep(0.03)
         self._pyautogui.mouseUp()
-        self._record_bot_mouse_position(x, y)
+        self._record_bot_mouse_position(x, y, label=label)
 
     def _press_key_with_ydotool(self, key: str) -> bool:
         """
@@ -320,12 +354,15 @@ class UIController:
             )
             return True
         except Exception as exc:  # pragma: no cover - best-effort
-            logger.debug("ydotool key failed for %s (%s): %s", key, code, exc)
+            logger.debug("ydotool key failed for %s (%s): %s (disabling ydotool)", key, code, exc)
+            self._use_ydotool = False
             return False
 
-    def _record_bot_mouse_position(self, x: float, y: float) -> None:
+    def _record_bot_mouse_position(self, x: float, y: float, label: Optional[str] = None) -> None:
         self._last_bot_move_time = time.time()
         self._last_known_mouse_pos = (int(x), int(y))
+        if label:
+            logger.debug("Clicked %s at (%.1f, %.1f)", label, x, y)
 
     def _maybe_pause_for_user_mouse(self) -> None:
         """Pause UI actions if manual mouse movement is detected."""
@@ -360,3 +397,26 @@ class UIController:
             return self._user_pause_seconds
 
         return 0.0
+
+    @staticmethod
+    def _normalize_target_overrides(raw: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
+        cleaned: dict[str, tuple[float, float]] = {}
+        for key, value in raw.items():
+            try:
+                x, y = value
+                cleaned[key] = (float(x), float(y))
+            except Exception:
+                continue
+        return cleaned
+
+    @staticmethod
+    def _normalize_ratio_list(raw: Optional[list[float]], fallback: list[float]) -> list[float]:
+        if not raw:
+            return list(fallback)
+        cleaned: list[float] = []
+        for item in raw:
+            try:
+                cleaned.append(float(item))
+            except Exception:
+                continue
+        return cleaned or list(fallback)
