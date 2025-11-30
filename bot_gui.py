@@ -199,6 +199,9 @@ def create_window(base_dir: Path) -> tk.Tk:
         "end_turn_button",
         "submit_button",
         "concede",
+        "all_attack_btn",
+        "no_attack_btn",
+        "no_blocks_btn",
         "hand_7",
     ]
     target_var = tk.StringVar(value=COMMON_TARGETS[0])
@@ -324,11 +327,19 @@ def create_window(base_dir: Path) -> tk.Tk:
     def show_targets() -> None:
         cfg = controller.load_config()
         targets = cfg.get("click_targets") or {}
-        if not targets:
+        parts = []
+        if targets:
+            items = [f"{k}: ({v[0]:.4f}, {v[1]:.4f})" for k, v in targets.items()]
+            parts.append("Targets -> " + " | ".join(items))
+        hand_x = cfg.get("hand_x_ratios")
+        hand_y = cfg.get("hand_y_ratio")
+        if hand_x and hand_y is not None:
+            hx = ", ".join(f"{x:.4f}" for x in hand_x)
+            parts.append(f"Hand_7 -> y={hand_y:.4f}, x=[{hx}]")
+        if not parts:
             status_var.set("No targets captured yet.")
             return
-        items = [f"{k}: ({v[0]:.4f}, {v[1]:.4f})" for k, v in targets.items()]
-        status_var.set("Captured targets: " + " | ".join(items))
+        status_var.set(" | ".join(parts))
 
     tk.Button(calib_frame, text="Show captured targets", command=show_targets).grid(
         row=5, column=0, padx=4, pady=6, sticky="w"

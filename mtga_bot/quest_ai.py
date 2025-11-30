@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from enum import Enum
 from typing import Dict, Optional
 
 from .game_model import GameState, MatchPhase, QuestProgress
+
+logger = logging.getLogger(__name__)
 
 
 class ActionType(str, Enum):
@@ -45,9 +48,19 @@ class PlayGamesStrategy(BaseStrategy):
         if state.phase == MatchPhase.IN_MATCH:
             # Simple flow: keep hand → try to play/cast → attack → optionally exit later.
             if state.turn == 0:
+                if state.hand_kept:
+                    return Action(ActionType.WAIT, reason="Hand already kept; waiting for first turn")
                 return Action(ActionType.KEEP_HAND, reason="Accept starting hand by default")
-            lands_in_hand = int((state.hand_info or {}).get("lands", 0))
-            if lands_in_hand > 0 and state.turn <= 3:
+            hand_info = state.hand_info or {}
+            lands_raw = hand_info.get("lands", 0)
+            lands_in_hand = int(lands_raw) if isinstance(lands_raw, (int, float)) else 0
+            has_land_info = "lands" in hand_info
+            if state.turn <= 2:
+                if lands_in_hand > 0 and state.last_play_land_turn != state.turn:
+                    return Action(ActionType.PLAY_LAND, reason="Play a land early (known land)")
+                if not has_land_info and state.last_play_land_turn != state.turn:
+                    return Action(ActionType.PLAY_LAND, reason="Play a land early (no hand info)")
+            if lands_in_hand > 0 and state.turn <= 3 and state.last_play_land_turn != state.turn:
                 return Action(ActionType.PLAY_LAND, reason="Play a land early")
             cheapest_spell = (state.hand_info or {}).get("cheapest_spell")
             if isinstance(cheapest_spell, int) and cheapest_spell <= max(1, state.turn):
@@ -122,11 +135,27 @@ class QuestAI:
 
     def get_action(self, state: GameState) -> Optional[Action]:
         if state.phase == MatchPhase.IN_MATCH and not state.hand_kept:
+            logger.debug(
+                "QuestAI: KEEP_HAND requested (phase=%s turn=%s hand_kept=%s match_id=%s)",
+                state.phase,
+                state.turn,
+                state.hand_kept,
+                state.match_id,
+            )
             return Action(ActionType.KEEP_HAND, reason="Keep opening hand once per match")
 
         quest = self._select_quest(state)
         strategy = self._select_strategy(quest)
-        return strategy.get_action(state, quest)
+        action = strategy.get_action(state, quest)
+        if logger.isEnabledFor(logging.DEBUG) and action and action.action_type == ActionType.KEEP_HAND:
+            logger.debug(
+                "Strategy KEEP_HAND returned (strategy=%s hand_kept=%s turn=%s phase=%s)",
+                strategy.__class__.__name__,
+                state.hand_kept,
+                state.turn,
+                state.phase,
+            )
+        return action
 
     def _select_quest(self, state: GameState) -> Optional[QuestProgress]:
         active = state.active_quests()

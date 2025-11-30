@@ -19,6 +19,7 @@ class EventType(Enum):
     QUEUE_EXITED = auto()
     ERROR = auto()
     HAND_UPDATE = auto()
+    PRIORITY_UPDATE = auto()
 
 
 @dataclass
@@ -58,6 +59,22 @@ class LogParser:
             re.IGNORECASE,
         )
         self._grp_id_pattern = re.compile(r'"grpId"\\?":\\?(\d+)')
+        self._priority_pattern = re.compile(r'"?priorityPlayer"?\s*:\s*(\d+)', re.IGNORECASE)
+        self._active_pattern = re.compile(r'"?activePlayer"?\s*:\s*(\d+)', re.IGNORECASE)
+        # Turn info with phase/step, tolerant to long JSON blobs.
+        self._turn_info_pattern = re.compile(
+            r'"turnInfo"\s*:\s*\{[^}]*?"turnNumber"\s*:\s*(?P<turn>\d+)[^}]*?'
+            r'"activePlayer"\s*:\s*(?P<active>\d+)[^}]*?'
+            r'"priorityPlayer"\s*:\s*(?P<prio>\d+)?',
+            re.IGNORECASE | re.DOTALL,
+        )
+        # Capture a hand zone for a given owner seat.
+        self._hand_zone_full_pattern = re.compile(
+            r'"type"\s*:\s*"ZoneType_Hand"[^}]*?'
+            r'"ownerSeatId"\s*:\s*(?P<owner>\d+)[^}]*?'
+            r'"objectInstanceIds"\s*:\s*\[(?P<ids>[^\]]*)\]',
+            re.IGNORECASE,
+        )
 
     def follow(self, poll_interval: float = 1.0, yield_unparsed: bool = False) -> Generator[LogEvent, None, None]:
         """
@@ -86,6 +103,26 @@ class LogParser:
         text = line.strip()
         if not text:
             return None
+
+        # Priority / turn info first, to avoid short-circuit by other patterns.
+        if "priority" in text.lower() or "activeplayer" in text.lower() or "turninfo" in text.lower():
+            active_match = self._active_pattern.search(text)
+            prio_match = self._priority_pattern.search(text)
+            turn_match = self._turn_info_pattern.search(text)
+            if active_match or prio_match or turn_match:
+                payload: Dict[str, object] = {}
+                if turn_match:
+                    payload["turn"] = int(turn_match.group("turn"))
+                    payload["active_player"] = int(turn_match.group("active"))
+                    prio = turn_match.group("prio")
+                    if prio:
+                        payload["priority_player"] = int(prio)
+                else:
+                    if active_match:
+                        payload["active_player"] = int(active_match.group(1))
+                    if prio_match:
+                        payload["priority_player"] = int(prio_match.group(1))
+                return LogEvent(EventType.PRIORITY_UPDATE, payload)
 
         quest_match = self._quest_pattern.search(text)
         if quest_match:
@@ -148,6 +185,45 @@ class LogParser:
                 return LogEvent(EventType.MATCH_START, {"scene": scene})
             if "home" in scene or "mainmenu" in scene:
                 return LogEvent(EventType.QUEUE_EXITED, {"scene": scene})
+
+        # Priority / active player hints (requires detailed logs).
+        if "priority" in text.lower() or "activeplayer" in text.lower():
+            active_match = self._active_pattern.search(text)
+            prio_match = self._priority_pattern.search(text)
+            if active_match or prio_match:
+                payload: Dict[str, object] = {}
+                if active_match:
+                    payload["active_player"] = int(active_match.group(1))
+                if prio_match:
+                    payload["priority_player"] = int(prio_match.group(1))
+                return LogEvent(EventType.PRIORITY_UPDATE, payload)
+
+        # Turn info and priority embedded in turnInfo blocks.
+        turn_match = self._turn_info_pattern.search(text)
+        if turn_match:
+            payload = {
+                "turn": int(turn_match.group("turn")),
+                "active_player": int(turn_match.group("active")),
+            }
+            prio = turn_match.group("prio")
+            if prio:
+                payload["priority_player"] = int(prio)
+            return LogEvent(EventType.PRIORITY_UPDATE, payload)
+
+        # Full hand zone update (Detailed logs).
+        if "ZoneType_Hand" in text:
+            hand_match = self._hand_zone_full_pattern.search(text)
+            if hand_match:
+                ids_raw = hand_match.group("ids")
+                grp_ids = []
+                try:
+                    for part in ids_raw.split(","):
+                        part = part.strip()
+                        if part:
+                            grp_ids.append(int(part))
+                except Exception:
+                    grp_ids = []
+                return LogEvent(EventType.HAND_UPDATE, {"grp_ids": grp_ids})
 
         if "error" in text.lower():
             return LogEvent(EventType.ERROR, {"message": text})

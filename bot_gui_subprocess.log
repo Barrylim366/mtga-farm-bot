@@ -629,3 +629,1285 @@ Exception: To take screenshots, you must install Pillow version 9.2.0 or greater
 2025-11-30 16:18:03,697 [DEBUG] Keep-hand attempt 8/10
 2025-11-30 16:18:03,729 [DEBUG] Clicked keep_hand at (2929.0, 1340.2)
 2025-11-30 16:18:04,939 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:05:03,830 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 17:05:03,830 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 17:05:03,869 [INFO] Loaded card database from cards.json
+2025-11-30 17:05:05,870 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 17:05:05,870 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 17:05:07,871 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 312)
+2025-11-30 17:05:07,871 [DEBUG] Unparsed log line (idle): Unloading 8233 unused Assets to reduce memory usage. Loaded Objects now: 24754.
+2025-11-30 17:05:07,871 [DEBUG] Unparsed log line (idle): Total: 58.999500 ms (FindLiveObjects: 1.468900 ms CreateObjectMapping: 1.524600 ms MarkObjects: 50.252400 ms  DeleteObjects: 5.753000 ms)
+2025-11-30 17:05:08,871 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 17:05:08,872 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 17:05:09,476 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 17:05:09,477 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 17:05:10,108 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 17:05:10,109 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 17:05:10,710 [DEBUG] ydotool click failed at (1720.0,291.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1720', '291']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 17:05:11,525 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 17:05:11,526 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:05:18,526 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:05:25,527 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:05:32,527 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:05:32,559 [DEBUG] Clicked keep_hand at (1928.0, 1152.0)
+2025-11-30 17:05:36,391 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 17:05:36,392 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:05:36,424 [DEBUG] Clicked keep_hand at (1940.0, 1158.0)
+2025-11-30 17:05:40,157 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 17:05:40,157 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:05:40,190 [DEBUG] Clicked keep_hand at (1943.0, 1162.0)
+2025-11-30 17:05:43,997 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 17:05:43,998 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:05:44,030 [DEBUG] Clicked keep_hand at (1929.0, 1158.0)
+2025-11-30 17:05:48,178 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 17:05:48,178 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:05:48,210 [DEBUG] Clicked keep_hand at (1946.0, 1151.0)
+2025-11-30 17:05:51,946 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 17:05:51,946 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:05:51,978 [DEBUG] Clicked keep_hand at (1937.0, 1167.0)
+2025-11-30 17:05:56,138 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 17:05:56,138 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:05:56,170 [DEBUG] Clicked keep_hand at (1943.0, 1162.0)
+2025-11-30 17:06:00,362 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 17:06:00,362 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:00,394 [DEBUG] Clicked keep_hand at (1928.0, 1166.0)
+2025-11-30 17:06:04,598 [DEBUG] Keep-hand attempt 9/10
+2025-11-30 17:06:04,598 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:04,630 [DEBUG] Clicked keep_hand at (1937.0, 1152.0)
+2025-11-30 17:06:05,570 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:06:12,571 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:06:22,415 [DEBUG] Keep-hand attempt 10/10
+2025-11-30 17:06:22,416 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:22,448 [DEBUG] Clicked keep_hand at (1933.0, 1160.0)
+2025-11-30 17:06:23,602 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:06:30,602 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:06:39,925 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 17:06:39,925 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 17:06:41,154 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 17:06:41,154 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:41,186 [DEBUG] Clicked keep_hand at (1939.0, 1158.0)
+2025-11-30 17:06:45,197 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 17:06:45,197 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:45,229 [DEBUG] Clicked keep_hand at (1932.0, 1162.0)
+2025-11-30 17:06:49,514 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 17:06:49,515 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:49,547 [DEBUG] Clicked keep_hand at (1932.0, 1158.0)
+2025-11-30 17:06:53,239 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 17:06:53,240 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:53,272 [DEBUG] Clicked keep_hand at (1943.0, 1167.0)
+2025-11-30 17:06:57,138 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 17:06:57,138 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:06:57,170 [DEBUG] Clicked keep_hand at (1947.0, 1157.0)
+2025-11-30 17:07:01,200 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 17:07:01,201 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:01,233 [DEBUG] Clicked keep_hand at (1943.0, 1158.0)
+2025-11-30 17:07:05,668 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 17:07:05,668 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:05,700 [DEBUG] Clicked keep_hand at (1938.0, 1170.0)
+2025-11-30 17:07:09,569 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 17:07:09,569 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:09,602 [DEBUG] Clicked keep_hand at (1946.0, 1167.0)
+2025-11-30 17:07:12,004 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:07:19,004 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:07:27,595 [DEBUG] Keep-hand attempt 9/10
+2025-11-30 17:07:27,595 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:27,627 [DEBUG] Clicked keep_hand at (1936.0, 1157.0)
+2025-11-30 17:07:31,041 [DEBUG] Keep-hand attempt 10/10
+2025-11-30 17:07:31,041 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:31,073 [DEBUG] Clicked keep_hand at (1946.0, 1166.0)
+2025-11-30 17:07:35,032 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_fdn'})
+2025-11-30 17:07:35,032 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 17:07:36,410 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 17:07:36,410 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:36,442 [DEBUG] Clicked keep_hand at (1930.0, 1166.0)
+2025-11-30 17:07:40,156 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 17:07:40,157 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:40,188 [DEBUG] Clicked keep_hand at (1943.0, 1169.0)
+2025-11-30 17:07:43,681 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 17:07:43,682 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:43,714 [DEBUG] Clicked keep_hand at (1946.0, 1153.0)
+2025-11-30 17:07:47,626 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 17:07:47,626 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:47,658 [DEBUG] Clicked keep_hand at (1943.0, 1164.0)
+2025-11-30 17:07:51,773 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 17:07:51,773 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:51,805 [DEBUG] Clicked keep_hand at (1939.0, 1170.0)
+2025-11-30 17:07:55,416 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 17:07:55,416 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:55,448 [DEBUG] Clicked keep_hand at (1939.0, 1163.0)
+2025-11-30 17:07:58,971 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 17:07:58,971 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:07:59,004 [DEBUG] Clicked keep_hand at (1929.0, 1152.0)
+2025-11-30 17:08:03,043 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 17:08:03,043 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:08:03,075 [DEBUG] Clicked keep_hand at (1945.0, 1152.0)
+2025-11-30 17:08:04,288 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:08:11,288 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:08:18,289 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:08:27,102 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:19:47,611 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 17:19:47,611 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 17:19:47,648 [INFO] Loaded card database from cards.json
+2025-11-30 17:19:49,649 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 17:19:51,649 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 314)
+2025-11-30 17:19:51,649 [DEBUG] Unparsed log line (idle): Unloading 8173 unused Assets to reduce memory usage. Loaded Objects now: 29198.
+2025-11-30 17:19:51,649 [DEBUG] Unparsed log line (idle): Total: 60.261500 ms (FindLiveObjects: 1.584200 ms CreateObjectMapping: 1.604600 ms MarkObjects: 51.594700 ms  DeleteObjects: 5.477300 ms)
+2025-11-30 17:19:51,649 [DEBUG] Unparsed log line (idle): 
+2025-11-30 17:19:52,650 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 17:19:52,650 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 17:19:53,295 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 17:19:53,295 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 17:19:53,823 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 17:19:53,823 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 17:19:54,424 [DEBUG] ydotool click failed at (1719.0,284.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1719', '284']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 17:19:55,228 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 17:19:55,229 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:20:02,229 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:20:09,229 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:09,261 [DEBUG] Clicked keep_hand at (1927.0, 1163.0)
+2025-11-30 17:20:13,306 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 17:20:13,307 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:13,339 [DEBUG] Clicked keep_hand at (1946.0, 1153.0)
+2025-11-30 17:20:17,500 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 17:20:17,501 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:17,533 [DEBUG] Clicked keep_hand at (1931.0, 1167.0)
+2025-11-30 17:20:21,605 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 17:20:21,605 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:21,637 [DEBUG] Clicked keep_hand at (1934.0, 1168.0)
+2025-11-30 17:20:25,159 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 17:20:25,159 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:25,191 [DEBUG] Clicked keep_hand at (1930.0, 1165.0)
+2025-11-30 17:20:26,914 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:20:33,915 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:20:43,200 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 17:20:43,200 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:43,232 [DEBUG] Clicked keep_hand at (1939.0, 1168.0)
+2025-11-30 17:20:46,629 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 17:20:46,629 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:46,662 [DEBUG] Clicked keep_hand at (1941.0, 1152.0)
+2025-11-30 17:20:50,344 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 17:20:50,345 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:50,377 [DEBUG] Clicked keep_hand at (1932.0, 1168.0)
+2025-11-30 17:20:54,230 [DEBUG] Keep-hand attempt 9/10
+2025-11-30 17:20:54,230 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:54,263 [DEBUG] Clicked keep_hand at (1944.0, 1167.0)
+2025-11-30 17:20:58,051 [DEBUG] Keep-hand attempt 10/10
+2025-11-30 17:20:58,051 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:20:58,084 [DEBUG] Clicked keep_hand at (1945.0, 1164.0)
+2025-11-30 17:20:59,615 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:21:06,615 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:21:13,615 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:21:20,616 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:21:27,616 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:21:37,493 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 17:21:37,493 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 17:21:38,551 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 17:21:38,551 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:21:38,583 [DEBUG] Clicked keep_hand at (1930.0, 1161.0)
+2025-11-30 17:21:42,382 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 17:21:42,383 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:21:42,415 [DEBUG] Clicked keep_hand at (1931.0, 1154.0)
+2025-11-30 17:21:45,630 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 17:21:45,630 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:21:45,663 [DEBUG] Clicked keep_hand at (1940.0, 1164.0)
+2025-11-30 17:21:49,938 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 17:21:49,938 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:21:49,970 [DEBUG] Clicked keep_hand at (1934.0, 1155.0)
+2025-11-30 17:21:53,716 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 17:21:53,716 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:21:53,748 [DEBUG] Clicked keep_hand at (1935.0, 1152.0)
+2025-11-30 17:21:57,701 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 17:21:57,701 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:21:57,733 [DEBUG] Clicked keep_hand at (1930.0, 1168.0)
+2025-11-30 17:22:01,595 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 17:22:01,595 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:01,628 [DEBUG] Clicked keep_hand at (1936.0, 1151.0)
+2025-11-30 17:22:05,598 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 17:22:05,598 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:05,630 [DEBUG] Clicked keep_hand at (1932.0, 1160.0)
+2025-11-30 17:22:09,019 [DEBUG] Keep-hand attempt 9/10
+2025-11-30 17:22:09,020 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:22:16,020 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:22:23,021 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:22:30,021 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:22:37,021 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:37,053 [DEBUG] Clicked keep_hand at (1932.0, 1164.0)
+2025-11-30 17:22:40,775 [DEBUG] Keep-hand attempt 10/10
+2025-11-30 17:22:40,776 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:40,808 [DEBUG] Clicked keep_hand at (1931.0, 1171.0)
+2025-11-30 17:22:45,046 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_dft'})
+2025-11-30 17:22:45,046 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 17:22:46,179 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 17:22:46,180 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:46,212 [DEBUG] Clicked keep_hand at (1945.0, 1155.0)
+2025-11-30 17:22:50,288 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 17:22:50,289 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:50,321 [DEBUG] Clicked keep_hand at (1930.0, 1170.0)
+2025-11-30 17:22:53,937 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 17:22:53,937 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:53,970 [DEBUG] Clicked keep_hand at (1946.0, 1170.0)
+2025-11-30 17:22:58,087 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 17:22:58,088 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:22:58,120 [DEBUG] Clicked keep_hand at (1934.0, 1160.0)
+2025-11-30 17:23:01,884 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 17:23:01,885 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:23:01,917 [DEBUG] Clicked keep_hand at (1947.0, 1167.0)
+2025-11-30 17:23:05,690 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 17:23:05,690 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:23:12,691 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:23:19,691 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:23:19,723 [DEBUG] Clicked keep_hand at (1933.0, 1171.0)
+2025-11-30 17:23:20,834 [INFO] User mouse movement detected; pausing UI actions for 7.0 seconds
+2025-11-30 17:27:26,141 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 17:27:26,141 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 17:27:26,182 [INFO] Loaded card database from cards.json
+2025-11-30 17:27:29,183 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 17:27:29,183 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 17:27:31,184 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 266)
+2025-11-30 17:27:31,184 [DEBUG] Unparsed log line (idle): Unloading 7433 unused Assets to reduce memory usage. Loaded Objects now: 25533.
+2025-11-30 17:27:31,184 [DEBUG] Unparsed log line (idle): Total: 71.293100 ms (FindLiveObjects: 1.374900 ms CreateObjectMapping: 1.504800 ms MarkObjects: 64.725400 ms  DeleteObjects: 3.687300 ms)
+2025-11-30 17:27:32,184 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 17:27:32,184 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 17:27:32,882 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 17:27:32,882 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 17:27:33,586 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 17:27:33,587 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 17:27:34,188 [DEBUG] ydotool click failed at (1713.0,283.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1713', '283']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 17:27:34,718 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 17:27:34,719 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:27:34,751 [DEBUG] Clicked keep_hand at (1946.0, 1152.0)
+2025-11-30 17:27:38,961 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 17:27:38,961 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:27:38,993 [DEBUG] Clicked keep_hand at (1941.0, 1153.0)
+2025-11-30 17:27:43,093 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 17:27:43,093 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:27:43,125 [DEBUG] Clicked keep_hand at (1934.0, 1157.0)
+2025-11-30 17:27:47,574 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 17:27:47,574 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:27:47,606 [DEBUG] Clicked keep_hand at (1940.0, 1166.0)
+2025-11-30 17:27:50,996 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 17:27:50,996 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:27:51,028 [DEBUG] Clicked keep_hand at (1933.0, 1162.0)
+2025-11-30 17:27:54,867 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 17:27:54,867 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:27:54,899 [DEBUG] Clicked keep_hand at (1934.0, 1153.0)
+2025-11-30 17:27:58,536 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 17:27:58,536 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:27:58,568 [DEBUG] Clicked keep_hand at (1946.0, 1165.0)
+2025-11-30 17:28:01,370 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 17:28:05,370 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 17:28:09,371 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 17:28:14,937 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 17:28:14,938 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625)
+2025-11-30 17:28:14,970 [DEBUG] Clicked keep_hand at (1931.0, 1160.0)
+2025-11-30 17:28:16,133 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 17:28:20,133 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 17:28:24,133 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:49:15,515 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 19:49:15,515 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 19:49:15,550 [INFO] Loaded card database from cards.json
+2025-11-30 19:49:15,845 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 19:49:18,846 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 19:49:18,846 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 19:49:19,846 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 281)
+2025-11-30 19:49:19,846 [DEBUG] Unparsed log line (idle): Unloading 10156 unused Assets to reduce memory usage. Loaded Objects now: 25014.
+2025-11-30 19:49:19,847 [DEBUG] Unparsed log line (idle): Total: 55.047900 ms (FindLiveObjects: 1.597600 ms CreateObjectMapping: 1.638200 ms MarkObjects: 46.584300 ms  DeleteObjects: 5.227100 ms)
+2025-11-30 19:49:20,847 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 19:49:20,847 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 19:49:22,228 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 19:49:22,228 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 19:49:22,693 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 19:49:22,694 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 19:49:23,295 [DEBUG] ydotool click failed at (1720.0,278.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1720', '278']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 19:49:24,070 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 19:49:24,070 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:49:28,070 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:49:32,071 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:49:32,103 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:49:32,235 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:49:32,369 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:49:32,503 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:49:32,636 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:49:33,411 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:49:33,544 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:49:33,677 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:49:33,811 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:49:33,944 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:49:37,443 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 19:49:37,443 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:49:37,476 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:49:37,609 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:49:37,743 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:49:37,877 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:49:38,010 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:49:38,755 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:49:38,888 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:49:39,022 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:49:39,155 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:49:39,289 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:49:42,565 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 19:49:42,565 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:49:42,597 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:49:42,730 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:49:42,863 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:49:42,997 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:49:43,131 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:49:43,986 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:49:44,119 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:49:44,253 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:49:44,386 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:49:44,519 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:49:48,368 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 19:49:48,368 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:49:48,400 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:49:48,533 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:49:48,667 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:49:48,801 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:49:48,935 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:49:49,753 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:49:49,886 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:49:50,020 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:49:50,154 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:49:50,288 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:49:53,915 [DEBUG] Keep-hand attempt 5/10
+2025-11-30 19:49:53,915 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:49:53,947 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:49:54,080 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:49:54,214 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:49:54,347 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:49:54,480 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:49:54,997 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:49:55,130 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:49:55,264 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:49:55,398 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:49:55,531 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:49:59,085 [DEBUG] Keep-hand attempt 6/10
+2025-11-30 19:49:59,086 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:49:59,118 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:49:59,251 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:49:59,384 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:49:59,518 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:49:59,651 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:50:00,181 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:50:00,315 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:50:00,449 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:50:00,582 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:50:00,715 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:50:03,799 [DEBUG] Keep-hand attempt 7/10
+2025-11-30 19:50:03,799 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:50:03,831 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:50:03,964 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:50:04,097 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:50:04,230 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:50:04,364 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:50:04,963 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:50:05,096 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:50:05,230 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:50:05,363 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:50:05,497 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:50:08,948 [DEBUG] Keep-hand attempt 8/10
+2025-11-30 19:50:08,949 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:50:12,949 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:50:16,950 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:50:20,950 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:50:24,950 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:50:24,982 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:50:25,116 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:50:25,250 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:50:25,382 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:50:25,515 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:50:26,036 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:50:26,169 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:50:26,302 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:50:26,434 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:50:26,567 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:50:27,399 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:53:12,538 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 19:53:12,538 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 19:53:12,577 [INFO] Loaded card database from cards.json
+2025-11-30 19:53:12,705 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 19:53:14,705 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 19:53:14,705 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 19:53:17,706 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 264)
+2025-11-30 19:53:17,706 [DEBUG] Unparsed log line (idle): Unloading 9957 unused Assets to reduce memory usage. Loaded Objects now: 24671.
+2025-11-30 19:53:17,706 [DEBUG] Unparsed log line (idle): Total: 80.393700 ms (FindLiveObjects: 1.598300 ms CreateObjectMapping: 1.644000 ms MarkObjects: 70.166600 ms  DeleteObjects: 6.983400 ms)
+2025-11-30 19:53:18,706 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 19:53:18,707 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 19:53:19,283 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 19:53:19,284 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 19:53:19,778 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 19:53:19,779 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 19:53:20,380 [DEBUG] ydotool click failed at (1712.0,294.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1712', '294']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 19:53:20,999 [DEBUG] Keep-hand attempt 1/10
+2025-11-30 19:53:21,000 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:53:25,000 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:53:25,032 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:53:25,165 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:53:25,299 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:53:25,432 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:53:25,567 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:53:26,420 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:53:26,553 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:53:26,686 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:53:26,820 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:53:26,953 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:53:30,814 [DEBUG] Keep-hand attempt 2/10
+2025-11-30 19:53:30,814 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:53:30,846 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:53:30,980 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:53:31,113 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:53:31,247 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:53:31,380 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:53:32,144 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:53:32,277 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:53:32,410 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:53:32,543 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:53:32,677 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:53:35,882 [DEBUG] Keep-hand attempt 3/10
+2025-11-30 19:53:35,883 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:53:35,915 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:53:36,049 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:53:36,183 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:53:36,316 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:53:36,449 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:53:36,973 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:53:37,107 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:53:37,240 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:53:37,374 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:53:37,507 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:53:40,564 [DEBUG] Keep-hand attempt 4/10
+2025-11-30 19:53:40,565 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:53:44,565 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:57:11,698 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 19:57:11,698 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 19:57:11,746 [INFO] Loaded card database from cards.json
+2025-11-30 19:57:11,871 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 19:57:31,873 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_END: 5>, payload={'state': 'MatchCompleted'})
+2025-11-30 19:57:31,874 [INFO] Action: ActionType.QUEUE_FOR_MATCH (Idle: queue for next match)
+2025-11-30 19:57:31,874 [DEBUG] Using configured target for queue_button at rel (0.5511627906976744, 0.8173611111111111) with cluster_px=0
+2025-11-30 19:57:31,875 [DEBUG] ydotool click failed at (1895.9999999999998,1177.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1895', '1177']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 19:57:31,909 [DEBUG] Clicked queue_button at (1896.0, 1177.0)
+2025-11-30 19:57:32,556 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]Client.TcpConnection.Close {"status":7,"reason":"Closed by remote end","host":"matchdoor-mtga-production-2025-53-25-3.w2.mtgarena.com","port":30003,"rtTicksRollingAvg":200.6,"rtTicksSamples":[201.0,201.0,200.0,200.0,201.0],"lastLocalActivity":[{"type":"Send","time":"2025-11-30T18:56:32.7736169Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:32.8589357Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:47.7835503Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:47.8517592Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:02.7954889Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:02.8637886Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:14.1436981Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:17.8065225Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:17.8577262Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:31.0114544Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:31.9314312Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Close","time":"2025-11-30T18:57:32.1314935Z","status":7,"reason":"Closed by remote end"}],"lastRemoteActivity":[{"type":"Pong","time":"2025-11-30T18:56:17.9625782Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:56:32.8510284Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:56:32.9733058Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:56:47.8510417Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:56:47.9832768Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:57:02.8518721Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:57:02.9958596Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:57:17.8508586Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:57:18.0068237Z","msgVersion":4},{"type":"Msg","time":"2025-11-30T18:57:31.2156384Z","msgVersion":4},{"type":"Msg","time":"2025-11-30T18:57:31.2165643Z","msgVersion":4},{"type":"Close","time":"2025-11-30T18:57:32.1314828Z"}],"lastRemotePing":"2025-11-30T19:57:17.8508382+01:00","inactivityTimeoutMs":60000}
+2025-11-30 19:57:32,557 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]GREConnection.HandleWebSocketClosed {"closeType":7,"reason":"Closed by remote end","tcpConn":{"host":"matchdoor-mtga-production-2025-53-25-3.w2.mtgarena.com","port":30003,"rtTicksRollingAvg":200.6,"rtTicksSamples":[201.0,201.0,200.0,200.0,201.0],"lastLocalActivity":[{"type":"Send","time":"2025-11-30T18:56:32.7736169Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:32.8589357Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:47.7835503Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:47.8517592Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:02.7954889Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:02.8637886Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:14.1436981Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:17.8065225Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:17.8577262Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:31.0114544Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:31.9314312Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Close","time":"2025-11-30T18:57:32.1314935Z","status":7,"reason":"Closed by remote end"}],"lastRemoteActivity":[{"type":"Pong","time":"2025-11-30T18:56:17.9625782Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:56:32.8510284Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:56:32.9733058Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:56:47.8510417Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:56:47.9832768Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:57:02.8518721Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:57:02.9958596Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:57:17.8508586Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:57:18.0068237Z","msgVersion":4},{"type":"Msg","time":"2025-11-30T18:57:31.2156384Z","msgVersion":4},{"type":"Msg","time":"2025-11-30T18:57:31.2165643Z","msgVersion":4},{"type":"Close","time":"2025-11-30T18:57:32.1314828Z"}],"lastRemotePing":"2025-11-30T19:57:17.8508382+01:00","inactivityTimeoutMs":60000}}
+2025-11-30 19:57:32,557 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]STATE CHANGED {"old":"MatchCompleted","new":"Disconnected"}
+2025-11-30 19:57:32,557 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]Client.TcpConnection.Close {"status":7,"reason":"Closed by remote end","host":"matchdoor-mtga-production-2025-53-25-3.w2.mtgarena.com","port":30003,"rtTicksRollingAvg":200.6,"rtTicksSamples":[201.0,201.0,200.0,200.0,201.0],"lastLocalActivity":[{"type":"Send","time":"2025-11-30T18:56:32.8589357Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:47.7835503Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:56:47.8517592Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:02.7954889Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:02.8637886Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:14.1436981Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:17.8065225Z","msgType":"Ping","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:17.8577262Z","msgType":"Pong","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:31.0114544Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Send","time":"2025-11-30T18:57:31.9314312Z","msgType":"ClientToMatchSvcMsgWrapper","msgVersion":4},{"type":"Close","time":"2025-11-30T18:57:32.1314935Z","status":7,"reason":"Closed by remote end"},{"type":"Close","time":"2025-11-30T18:57:32.1437812Z","status":7,"reason":"Closed by remote end"}],"lastRemoteActivity":[{"type":"Pong","time":"2025-11-30T18:56:17.9625782Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:56:32.8510284Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:56:32.9733058Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:56:47.8510417Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:56:47.9832768Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:57:02.8518721Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:57:02.9958596Z","msgVersion":4},{"type":"Ping","time":"2025-11-30T18:57:17.8508586Z","msgVersion":4},{"type":"Pong","time":"2025-11-30T18:57:18.0068237Z","msgVersion":4},{"type":"Msg","time":"2025-11-30T18:57:31.2156384Z","msgVersion":4},{"type":"Msg","time":"2025-11-30T18:57:31.2165643Z","msgVersion":4},{"type":"Close","time":"2025-11-30T18:57:32.1314828Z"}],"lastRemotePing":"2025-11-30T19:57:17.8508382+01:00","inactivityTimeoutMs":60000}
+2025-11-30 19:57:34,557 [DEBUG] Unparsed log line (idle): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 19:57:47,560 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 19:57:47,560 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 19:57:47,561 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:57:52,286 [INFO] Action: KEEP_HAND (timer fallback after queue)
+2025-11-30 19:57:53,640 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 19:57:53,640 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:57:53,672 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:57:53,805 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:57:53,939 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:57:54,072 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:57:54,206 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:57:54,800 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:57:54,933 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:57:55,067 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:57:55,200 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:57:55,333 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:57:57,733 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 19:57:57,734 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 19:57:58,260 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 19:57:58,261 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 19:57:59,314 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 19:57:59,315 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:57:59,347 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:57:59,481 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:57:59,614 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:57:59,746 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:57:59,880 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:58:00,595 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:58:00,728 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:58:00,861 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:58:00,995 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:58:01,128 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:58:03,219 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 19:58:03,219 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 19:58:04,357 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 19:58:04,358 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 19:58:04,390 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 19:58:04,524 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 19:58:04,657 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 19:58:04,790 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 19:58:04,924 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 19:58:05,638 [DEBUG] Clicked keep_hand at (2924.0, 1339.2)
+2025-11-30 19:58:05,772 [DEBUG] Clicked keep_hand at (2932.0, 1339.2)
+2025-11-30 19:58:05,905 [DEBUG] Clicked keep_hand at (2916.0, 1339.2)
+2025-11-30 19:58:06,038 [DEBUG] Clicked keep_hand at (2924.0, 1347.2)
+2025-11-30 19:58:06,172 [DEBUG] Clicked keep_hand at (2924.0, 1331.2)
+2025-11-30 19:58:06,629 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 19:58:10,630 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:00:05,747 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:00:05,747 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:00:05,786 [INFO] Loaded card database from cards.json
+2025-11-30 20:00:05,910 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:00:06,910 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:00:06,910 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:00:09,911 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 259)
+2025-11-30 20:00:09,911 [DEBUG] Unparsed log line (idle): Unloading 8283 unused Assets to reduce memory usage. Loaded Objects now: 24666.
+2025-11-30 20:00:09,911 [DEBUG] Unparsed log line (idle): Total: 64.951200 ms (FindLiveObjects: 1.390600 ms CreateObjectMapping: 1.508500 ms MarkObjects: 56.530700 ms  DeleteObjects: 5.520700 ms)
+2025-11-30 20:00:10,911 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:00:10,911 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:00:11,444 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:00:11,444 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:00:11,965 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:00:11,965 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:00:12,566 [DEBUG] ydotool click failed at (1712.0,297.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1712', '297']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 20:00:13,031 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:00:13,031 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:00:13,064 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:00:13,197 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:00:13,331 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:00:13,465 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:00:13,598 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:00:15,653 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:00:15,653 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:00:17,049 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:00:17,049 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:00:17,082 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:00:17,215 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:00:17,348 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:00:17,481 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:00:17,614 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:00:19,687 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_om1'})
+2025-11-30 20:00:19,687 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:00:20,848 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:00:20,849 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:00:20,880 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:00:21,013 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:00:21,147 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:00:21,280 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:00:21,414 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:00:23,441 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:00:23,442 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:00:24,504 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:00:24,504 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:00:24,536 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:00:24,669 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:00:24,803 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:00:24,936 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:00:25,070 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:00:27,067 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:00:27,067 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:00:28,488 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:00:28,488 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:00:28,519 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:00:28,652 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:00:28,785 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:00:28,919 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:00:29,053 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:00:31,268 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:00:31,268 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:00:32,645 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:00:32,645 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:00:32,677 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:00:32,810 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:00:32,943 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:00:33,076 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:00:33,209 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:03:55,647 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:03:55,647 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:03:55,687 [INFO] Loaded card database from cards.json
+2025-11-30 20:03:55,811 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:03:57,812 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:03:57,812 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:04:00,812 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 250)
+2025-11-30 20:04:00,812 [DEBUG] Unparsed log line (idle): Unloading 8500 unused Assets to reduce memory usage. Loaded Objects now: 24697.
+2025-11-30 20:04:00,812 [DEBUG] Unparsed log line (idle): Total: 65.401000 ms (FindLiveObjects: 1.558000 ms CreateObjectMapping: 0.822100 ms MarkObjects: 57.474500 ms  DeleteObjects: 5.545800 ms)
+2025-11-30 20:04:01,813 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:04:01,813 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:04:02,289 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:04:02,289 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:04:02,859 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:04:02,859 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:04:02,859 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:04:02,859 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:04:02,859 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:04:02,859 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:04:03,460 [DEBUG] ydotool click failed at (1723.0,289.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1723', '289']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 20:04:04,168 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:04:04,168 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:04:04,200 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:04:04,334 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:04:04,467 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:04:04,601 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:04:04,734 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:04:06,891 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:04:06,892 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:04:06,892 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:04:06,892 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:04:06,892 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:04:08,136 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:04:08,136 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:04:08,168 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:04:08,301 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:04:08,435 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:04:08,568 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:04:08,702 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:04:10,949 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:04:10,949 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_dft'})
+2025-11-30 20:04:10,949 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:04:10,949 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:04:10,949 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:04:12,050 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:04:12,050 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:04:12,082 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:04:12,215 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:04:12,348 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:04:12,481 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:04:12,615 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:04:14,592 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:04:14,593 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:04:14,593 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:04:14,593 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:04:14,593 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:04:15,824 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:04:15,824 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:04:15,856 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:04:15,990 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:04:16,123 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:04:16,256 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:04:16,390 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:04:18,430 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:04:18,430 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:04:18,430 [INFO] Action: ActionType.KEEP_HAND (Accept starting hand by default)
+2025-11-30 20:04:18,430 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:04:18,431 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:04:19,651 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:04:19,651 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:04:19,683 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:04:19,816 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:04:19,950 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:04:20,084 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:04:20,217 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:04:20,973 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:06:26,190 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:06:26,191 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:06:26,230 [INFO] Loaded card database from cards.json
+2025-11-30 20:06:26,354 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:06:27,355 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:06:27,355 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:06:29,355 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 293)
+2025-11-30 20:06:29,355 [DEBUG] Unparsed log line (idle): Unloading 8003 unused Assets to reduce memory usage. Loaded Objects now: 24731.
+2025-11-30 20:06:29,355 [DEBUG] Unparsed log line (idle): Total: 59.474200 ms (FindLiveObjects: 1.441600 ms CreateObjectMapping: 1.472200 ms MarkObjects: 51.109300 ms  DeleteObjects: 5.450500 ms)
+2025-11-30 20:06:30,356 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:06:30,356 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:06:30,911 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:06:30,911 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:06:31,553 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:06:31,553 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:06:31,554 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:06:31,554 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:06:31,554 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:06:31,554 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:06:32,155 [DEBUG] ydotool click failed at (1722.0,282.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1722', '282']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 20:06:32,640 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:06:32,641 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:06:32,672 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:06:32,806 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:06:32,939 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:06:33,073 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:06:33,207 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:06:35,135 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:06:35,135 [DEBUG] Unparsed log line (in match/queue): The AnimationClip 'LightningFlash3' used by the Animation component 'Battlefield_MKM' must be marked as Legacy.
+2025-11-30 20:06:35,136 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:06:35,650 [DEBUG] Unparsed log line (in match/queue): Default clip could not be found in attached animations list.
+2025-11-30 20:06:35,650 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:06:36,241 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:06:36,241 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:06:36,826 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_mkm'})
+2025-11-30 20:06:36,826 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:06:37,535 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:06:37,535 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:06:37,948 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:06:37,948 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:06:39,585 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:06:39,585 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:07:28,705 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:07:28,705 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:07:28,744 [INFO] Loaded card database from cards.json
+2025-11-30 20:07:28,865 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:10:30,034 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:10:30,034 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:10:30,073 [INFO] Loaded card database from cards.json
+2025-11-30 20:10:30,195 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:10:32,195 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:10:32,195 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:10:34,196 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 246)
+2025-11-30 20:10:34,196 [DEBUG] Unparsed log line (idle): Unloading 9335 unused Assets to reduce memory usage. Loaded Objects now: 24684.
+2025-11-30 20:10:34,196 [DEBUG] Unparsed log line (idle): Total: 56.350200 ms (FindLiveObjects: 1.638300 ms CreateObjectMapping: 1.606600 ms MarkObjects: 47.314100 ms  DeleteObjects: 5.790400 ms)
+2025-11-30 20:10:35,196 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:10:35,196 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:10:35,808 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:10:35,808 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:10:36,558 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:10:36,558 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:10:36,558 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:10:36,558 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:10:36,558 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:10:36,558 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:10:37,160 [DEBUG] ydotool click failed at (1718.0,278.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1718', '278']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 20:10:37,830 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:10:37,831 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:10:37,863 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:10:37,996 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:10:38,129 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:10:38,262 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:10:38,396 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:10:40,716 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:10:40,716 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:10:40,716 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:10:41,149 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_tla'})
+2025-11-30 20:10:41,150 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:10:41,679 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:10:41,679 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:10:42,349 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:10:42,349 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:10:44,920 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:10:44,920 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:12:51,342 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:12:51,342 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:12:51,381 [INFO] Loaded card database from cards.json
+2025-11-30 20:12:51,505 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:12:52,506 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:12:52,506 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:12:54,506 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 293)
+2025-11-30 20:12:54,506 [DEBUG] Unparsed log line (idle): Unloading 8004 unused Assets to reduce memory usage. Loaded Objects now: 24719.
+2025-11-30 20:12:54,506 [DEBUG] Unparsed log line (idle): Total: 71.848100 ms (FindLiveObjects: 1.633100 ms CreateObjectMapping: 1.453500 ms MarkObjects: 63.090400 ms  DeleteObjects: 5.670400 ms)
+2025-11-30 20:12:55,507 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:12:55,507 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:12:56,099 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:12:56,100 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:12:56,459 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:12:56,460 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:12:56,460 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:12:56,460 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:12:56,460 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:12:56,460 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:12:57,061 [DEBUG] ydotool click failed at (1713.0,279.0): Command '['/usr/bin/ydotool', 'mousemove', '--absolute', '1713', '279']' returned non-zero exit status 2. (falling back to pyautogui)
+2025-11-30 20:12:57,638 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:12:57,638 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:12:57,671 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:12:57,804 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:12:57,938 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:12:58,071 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:12:58,204 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:13:00,241 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:13:00,241 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:13:00,242 [INFO] Action: ActionType.WAIT (Hand already kept; waiting for first turn)
+2025-11-30 20:13:00,967 [DEBUG] Fallback: assuming turn=1 after keep (delay 4.5s since keep_hand); TURN_START not seen
+2025-11-30 20:13:00,967 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_dft'})
+2025-11-30 20:13:00,967 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:13:01,650 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:13:01,650 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:13:02,333 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:13:02,333 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:13:04,724 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:13:04,724 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:16:45,339 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:16:45,339 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:16:45,380 [INFO] Loaded card database from cards.json
+2025-11-30 20:16:45,507 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:16:47,508 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:16:47,508 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:16:48,508 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 294)
+2025-11-30 20:16:48,509 [DEBUG] Unparsed log line (idle): Unloading 7994 unused Assets to reduce memory usage. Loaded Objects now: 24720.
+2025-11-30 20:16:48,509 [DEBUG] Unparsed log line (idle): Total: 61.070700 ms (FindLiveObjects: 1.466400 ms CreateObjectMapping: 0.697200 ms MarkObjects: 53.163900 ms  DeleteObjects: 5.742400 ms)
+2025-11-30 20:16:50,509 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:16:50,509 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:16:51,115 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:16:51,115 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:16:51,478 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:16:51,478 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:16:51,478 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:16:51,478 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:16:51,478 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:16:51,479 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:16:52,239 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:16:52,699 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:16:52,699 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:16:56,700 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:17:00,700 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:17:00,727 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:17:00,804 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:17:00,881 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:17:00,958 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:17:01,035 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:17:01,481 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:17:07,260 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:17:07,260 [DEBUG] Fallback: assuming turn=1 after keep (delay 15.8s since keep_hand); TURN_START not seen
+2025-11-30 20:17:07,260 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:17:07,260 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:17:07,658 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_eoe'})
+2025-11-30 20:17:07,658 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:17:08,148 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:17:08,148 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:17:08,885 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:17:08,886 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:17:09,599 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:17:09,599 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:21:29,211 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:21:29,211 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:21:29,252 [INFO] Loaded card database from cards.json
+2025-11-30 20:21:29,367 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:21:32,367 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:21:32,368 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:21:34,368 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 245)
+2025-11-30 20:21:34,368 [DEBUG] Unparsed log line (idle): Unloading 7538 unused Assets to reduce memory usage. Loaded Objects now: 24977.
+2025-11-30 20:21:34,368 [DEBUG] Unparsed log line (idle): Total: 63.284300 ms (FindLiveObjects: 1.293200 ms CreateObjectMapping: 0.645500 ms MarkObjects: 57.259400 ms  DeleteObjects: 4.085400 ms)
+2025-11-30 20:21:35,368 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:21:35,369 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:21:35,796 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:21:35,796 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:21:36,181 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:21:36,181 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:21:36,181 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:21:36,181 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:21:36,181 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:21:36,181 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:21:36,932 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:21:37,444 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:21:37,444 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:21:41,445 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:21:41,472 [DEBUG] Clicked keep_hand at (1937.0, 1161.0)
+2025-11-30 20:21:41,550 [DEBUG] Clicked keep_hand at (1947.0, 1161.0)
+2025-11-30 20:21:41,627 [DEBUG] Clicked keep_hand at (1927.0, 1161.0)
+2025-11-30 20:21:41,704 [DEBUG] Clicked keep_hand at (1937.0, 1171.0)
+2025-11-30 20:21:41,781 [DEBUG] Clicked keep_hand at (1937.0, 1151.0)
+2025-11-30 20:21:42,334 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:21:47,957 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:21:47,957 [DEBUG] Fallback: assuming turn=1 after keep (delay 11.8s since keep_hand); TURN_START not seen
+2025-11-30 20:21:47,957 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:21:47,957 [INFO] Action: ActionType.PLAY_LAND (Play a land early (no hand info))
+2025-11-30 20:21:48,189 [DEBUG] Clicked play_land at (1559.0, 814.2)
+2025-11-30 20:21:48,538 [DEBUG] Clicked play_land at (1520.0, 814.2)
+2025-11-30 20:21:49,172 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_tdm'})
+2025-11-30 20:21:49,172 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:21:49,172 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:21:53,686 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:21:53,687 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:21:54,162 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:21:54,162 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:21:54,731 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:21:54,731 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:24:32,759 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:24:32,759 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:24:32,795 [INFO] Loaded card database from cards.json
+2025-11-30 20:24:32,917 [INFO] Auto-guessed click_region for ultrawide: x=440 y=0 w=2560 h=1440 (disable via MTGA_BOT_AUTOGUESS_REGION=0)
+2025-11-30 20:24:32,917 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:24:33,917 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:24:33,917 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:24:35,918 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 369)
+2025-11-30 20:24:35,918 [DEBUG] Unparsed log line (idle): Unloading 7248 unused Assets to reduce memory usage. Loaded Objects now: 25608.
+2025-11-30 20:24:35,918 [DEBUG] Unparsed log line (idle): Total: 75.394400 ms (FindLiveObjects: 1.392300 ms CreateObjectMapping: 1.479100 ms MarkObjects: 68.839300 ms  DeleteObjects: 3.683100 ms)
+2025-11-30 20:24:36,918 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:24:36,918 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:24:37,433 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:24:37,433 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:24:37,951 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:24:37,951 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:24:37,951 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:24:37,951 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:24:37,951 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:24:37,951 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:24:38,702 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:24:39,292 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:24:39,293 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:24:43,293 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:24:43,320 [DEBUG] Clicked keep_hand at (1881.5, 1161.0)
+2025-11-30 20:24:43,397 [DEBUG] Clicked keep_hand at (1891.5, 1161.0)
+2025-11-30 20:24:43,474 [DEBUG] Clicked keep_hand at (1871.5, 1161.0)
+2025-11-30 20:24:43,551 [DEBUG] Clicked keep_hand at (1881.5, 1171.0)
+2025-11-30 20:24:43,628 [DEBUG] Clicked keep_hand at (1881.5, 1151.0)
+2025-11-30 20:24:44,283 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:24:49,601 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:24:49,601 [DEBUG] Fallback: assuming turn=1 after keep (delay 11.6s since keep_hand); TURN_START not seen
+2025-11-30 20:24:49,601 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:24:49,601 [INFO] Action: ActionType.PLAY_LAND (Play a land early (no hand info))
+2025-11-30 20:24:49,832 [DEBUG] Clicked play_land at (1521.0, 847.2)
+2025-11-30 20:24:50,182 [DEBUG] Clicked play_land at (1519.0, 847.2)
+2025-11-30 20:24:50,879 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_eoe'})
+2025-11-30 20:24:50,879 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:24:50,879 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:24:55,614 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:24:55,614 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:24:56,383 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:24:56,383 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:24:56,778 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:24:56,778 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:29:52,087 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:29:52,087 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:29:52,124 [INFO] Loaded card database from cards.json
+2025-11-30 20:29:52,253 [INFO] Auto-guessed click_region for ultrawide: x=440 y=0 w=2560 h=1440 (disable via MTGA_BOT_AUTOGUESS_REGION=0)
+2025-11-30 20:29:52,253 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:29:53,253 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:29:53,253 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:29:55,254 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 262)
+2025-11-30 20:29:55,254 [DEBUG] Unparsed log line (idle): Unloading 9631 unused Assets to reduce memory usage. Loaded Objects now: 29959.
+2025-11-30 20:29:55,254 [DEBUG] Unparsed log line (idle): Total: 73.249900 ms (FindLiveObjects: 1.712500 ms CreateObjectMapping: 1.030900 ms MarkObjects: 65.609200 ms  DeleteObjects: 4.896700 ms)
+2025-11-30 20:29:56,254 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:29:56,254 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:29:56,719 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:29:56,719 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:29:57,233 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:29:57,234 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:29:57,234 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:29:57,234 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:29:57,234 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:29:57,234 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:29:57,985 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:29:58,431 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:29:58,431 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:30:02,432 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:30:02,458 [DEBUG] Clicked keep_hand at (1881.5, 1161.0)
+2025-11-30 20:30:02,535 [DEBUG] Clicked keep_hand at (1891.5, 1161.0)
+2025-11-30 20:30:02,612 [DEBUG] Clicked keep_hand at (1871.5, 1161.0)
+2025-11-30 20:30:02,689 [DEBUG] Clicked keep_hand at (1881.5, 1171.0)
+2025-11-30 20:30:02,766 [DEBUG] Clicked keep_hand at (1881.5, 1151.0)
+2025-11-30 20:30:03,556 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:30:09,035 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:30:09,035 [DEBUG] Fallback: assuming turn=1 after keep (delay 11.8s since keep_hand); TURN_START not seen
+2025-11-30 20:30:09,035 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:30:09,035 [INFO] Action: ActionType.PLAY_LAND (Play a land early (no hand info))
+2025-11-30 20:30:09,035 [DEBUG] play_land drag from (1332.1, 1375.0) -> (1625.0, 858.2) rel_x=0.344 region=(440, 0, 2560, 1440)
+2025-11-30 20:30:09,267 [DEBUG] Clicked play_land at (1625.0, 858.2)
+2025-11-30 20:30:09,387 [DEBUG] play_land drag from (2045.1, 1375.0) -> (1581.0, 858.2) rel_x=0.632 region=(440, 0, 2560, 1440)
+2025-11-30 20:30:09,616 [DEBUG] Clicked play_land at (1581.0, 858.2)
+2025-11-30 20:30:10,382 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_dft'})
+2025-11-30 20:30:10,382 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:30:10,805 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:30:10,805 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:30:11,552 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:30:11,553 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:30:11,987 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:30:11,987 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:30:38,736 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_END: 5>, payload={'state': 'MatchCompleted'})
+2025-11-30 20:30:38,736 [DEBUG] GameState: MATCH_END -> reset hand_kept
+2025-11-30 20:30:38,736 [INFO] Action: ActionType.QUEUE_FOR_MATCH (Idle: queue for next match)
+2025-11-30 20:30:38,737 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:37:53,409 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:37:53,409 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:37:53,451 [INFO] Loaded card database from cards.json
+2025-11-30 20:37:53,579 [INFO] Auto-guessed click_region for ultrawide: x=440 y=0 w=2560 h=1440 (disable via MTGA_BOT_AUTOGUESS_REGION=0)
+2025-11-30 20:37:53,579 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:37:57,579 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_END: 5>, payload={'state': 'MatchCompleted'})
+2025-11-30 20:37:57,580 [DEBUG] GameState: MATCH_END -> reset hand_kept
+2025-11-30 20:37:57,580 [INFO] Action: ActionType.QUEUE_FOR_MATCH (Idle: queue for next match)
+2025-11-30 20:37:57,580 [DEBUG] Using configured target for queue_button at rel (0.5511627906976744, 0.8173611111111111) with cluster_px=0
+2025-11-30 20:37:57,731 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:37:57,758 [DEBUG] Clicked queue_button at (1851.0, 1177.0)
+2025-11-30 20:38:00,415 [DEBUG] Unparsed log line (idle): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:38:00,415 [DEBUG] Unparsed log line (idle): OnSceneLoaded for MatchEndScene
+2025-11-30 20:38:38,924 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:38:38,924 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:38:38,965 [INFO] Loaded card database from cards.json
+2025-11-30 20:38:39,093 [INFO] Auto-guessed click_region for ultrawide: x=440 y=0 w=2560 h=1440 (disable via MTGA_BOT_AUTOGUESS_REGION=0)
+2025-11-30 20:38:39,094 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:38:40,094 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:38:40,094 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:38:42,094 [DEBUG] Unparsed log line (idle): Unloading 4 Unused Serialized files (Serialized files now loaded: 270)
+2025-11-30 20:38:42,095 [DEBUG] Unparsed log line (idle): Unloading 8050 unused Assets to reduce memory usage. Loaded Objects now: 25537.
+2025-11-30 20:38:42,095 [DEBUG] Unparsed log line (idle): Total: 58.085600 ms (FindLiveObjects: 1.357200 ms CreateObjectMapping: 0.757000 ms MarkObjects: 50.844500 ms  DeleteObjects: 5.126200 ms)
+2025-11-30 20:38:43,095 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:38:43,095 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:38:43,716 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:38:43,716 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:38:44,186 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:38:44,186 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:38:44,186 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:38:44,186 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:38:44,186 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:38:44,186 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:38:44,937 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:38:45,580 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:38:45,580 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:38:49,581 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:38:49,607 [DEBUG] Clicked keep_hand at (1881.5, 1161.0)
+2025-11-30 20:38:49,684 [DEBUG] Clicked keep_hand at (1891.5, 1161.0)
+2025-11-30 20:38:49,762 [DEBUG] Clicked keep_hand at (1871.5, 1161.0)
+2025-11-30 20:38:49,839 [DEBUG] Clicked keep_hand at (1881.5, 1171.0)
+2025-11-30 20:38:49,916 [DEBUG] Clicked keep_hand at (1881.5, 1151.0)
+2025-11-30 20:38:50,536 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:38:56,161 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:38:56,161 [DEBUG] Fallback: assuming turn=1 after keep (delay 12.0s since keep_hand); TURN_START not seen
+2025-11-30 20:38:56,161 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:38:56,162 [INFO] Action: ActionType.PLAY_LAND (Play a land early (no hand info))
+2025-11-30 20:38:56,162 [DEBUG] play_land drag from (2231.9, 1387.3) -> (1600.0, 858.2) rel_x=0.692 region=(440, 0, 2560, 1440)
+2025-11-30 20:38:56,393 [DEBUG] Clicked play_land at (1600.0, 858.2)
+2025-11-30 20:38:56,513 [DEBUG] play_land drag from (1864.5, 1387.3) -> (1601.0, 858.2) rel_x=0.563 region=(440, 0, 2560, 1440)
+2025-11-30 20:38:56,742 [DEBUG] Clicked play_land at (1601.0, 858.2)
+2025-11-30 20:38:56,863 [DEBUG] play_land drag from (1383.6, 1387.3) -> (1589.0, 858.2) rel_x=0.369 region=(440, 0, 2560, 1440)
+2025-11-30 20:38:57,092 [DEBUG] Clicked play_land at (1589.0, 858.2)
+2025-11-30 20:38:57,212 [DEBUG] play_land drag from (1177.0, 1387.3) -> (1547.0, 858.2) rel_x=0.298 region=(440, 0, 2560, 1440)
+2025-11-30 20:38:57,441 [DEBUG] Clicked play_land at (1547.0, 858.2)
+2025-11-30 20:38:57,562 [DEBUG] play_land drag from (2028.4, 1387.3) -> (1544.0, 858.2) rel_x=0.628 region=(440, 0, 2560, 1440)
+2025-11-30 20:38:57,791 [DEBUG] Clicked play_land at (1544.0, 858.2)
+2025-11-30 20:38:58,470 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_eoe'})
+2025-11-30 20:38:58,470 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:38:58,964 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:38:58,964 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:38:59,477 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:38:59,477 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:39:00,055 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:39:00,055 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:39:15,694 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_END: 5>, payload={'state': 'MatchCompleted'})
+2025-11-30 20:39:15,695 [DEBUG] GameState: MATCH_END -> reset hand_kept
+2025-11-30 20:39:15,695 [INFO] Action: ActionType.QUEUE_FOR_MATCH (Idle: queue for next match)
+2025-11-30 20:39:15,695 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:39:19,695 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:39:23,696 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:39:27,696 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:39:31,697 [DEBUG] Using configured target for queue_button at rel (0.5511627906976744, 0.8173611111111111) with cluster_px=0
+2025-11-30 20:39:31,723 [DEBUG] Clicked queue_button at (1851.0, 1177.0)
+2025-11-30 20:53:43,481 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:53:43,482 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:53:43,529 [INFO] Loaded card database from cards.json
+2025-11-30 20:53:43,662 [INFO] Auto-guessed click_region for ultrawide: x=440 y=0 w=2560 h=1440 (disable via MTGA_BOT_AUTOGUESS_REGION=0)
+2025-11-30 20:53:43,662 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:53:44,662 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:53:44,662 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:53:45,663 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]==> DeckUpsertDeckV2 {"id":"de4450bf-8fcf-4804-bfcd-e3d3ae8425ae","request":"{\"Summary\":{\"DeckId\":\"4792e924-c693-4b06-b4e7-31bfeedd610d\",\"Mana\":\"\",\"Name\":\"Goblins Everywhere!\",\"Attributes\":[{\"name\":\"Version\",\"value\":\"11\"},{\"name\":\"TileID\",\"value\":\"75521\"},{\"name\":\"LastPlayed\",\"value\":\"\\\"2025-11-30T20:53:44.8601346+01:00\\\"\"},{\"name\":\"LastUpdated\",\"value\":\"\\\"0001-01-01T00:00:00\\\"\"},{\"name\":\"IsFavorite\",\"value\":\"false\"},{\"name\":\"Format\",\"value\":\"Alchemy\"}],\"Description\":\"Decks/Precon/CC_ANB_R_Desc\",\"DeckTileId\":75521,\"DeckArtId\":0,\"IsCompanionValid\":false,\"FormatLegalities\":{},\"PreferredCosmetics\":{\"Avatar\":\"\",\"Sleeve\":\"\",\"Pet\":\"\",\"Title\":\"\",\"Emotes\":[]},\"DeckValidationSummaries\":[],\"UnownedCards\":{},\"NetDeckFolderId\":null,\"IsNetDeck\":false,\"checkInbox\":false},\"Deck\":{\"MainDeck\":[{\"cardId\":75521,\"quantity\":2},{\"cardId\":75526,\"quantity\":2},{\"cardId\":75523,\"quantity\":2},{\"cardId\":75511,\"quantity\":2},{\"cardId\":75512,\"quantity\":4},{\"cardId\":75528,\"quantity\":3},{\"cardId\":75514,\"quantity\":2},{\"cardId\":75520,\"quantity\":4},{\"cardId\":75519,\"quantity\":2},{\"cardId\":75525,\"quantity\":3},{\"cardId\":75527,\"quantity\":2},{\"cardId\":75509,\"quantity\":2},{\"cardId\":75517,\"quantity\":2},{\"cardId\":75555,\"quantity\":25},{\"cardId\":75513,\"quantity\":1},{\"cardId\":75516,\"quantity\":1},{\"cardId\":75529,\"quantity\":1}],\"ReducedSideboard\":[],\"Sideboard\":[],\"CommandZone\":[],\"Companions\":[],\"CardSkins\":[],\"DoPreferReducedSideboard\":false},\"ActionType\":\"Updated\"}"}
+2025-11-30 20:53:45,663 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]==> EventAiBotMatch {"id":"f4bff1ae-985b-41c4-89ba-2e3a5d3348a3","request":"{\"deckId\":\"4792e924-c693-4b06-b4e7-31bfeedd610d\",\"botDeckId\":\"bb806fbb-c5b3-4c90-ad4f-798afa592016\",\"botMatchType\":1}"}
+2025-11-30 20:53:45,663 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]11/30/2025 8:53:45 PM
+2025-11-30 20:53:47,665 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:53:47,665 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:53:48,184 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:53:47 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: GreToClientEvent
+2025-11-30 20:53:48,185 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:53:48,536 [DEBUG] Unparsed log line (in match/queue): { "transactionId": "17c6bbfa-5139-439d-bcc1-3d34c4be0031", "requestId": 2, "timestamp": "1764532427235", "greToClientEvent": { "greToClientMessages": [ { "type": "GREMessageType_ConnectResp", "systemSeatIds": [ 1 ], "msgId": 1, "connectResp": { "status": "ConnectionStatus_Success", "protoVer": "ProtoVersion_PersistentAnnotations", "settings": { "stops": [ { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" } ], "autoPassOption": "AutoPassOption_ResolveMyStackEffects", "graveyardOrder": "OrderingType_OrderArbitraryAlways", "manaSelectionType": "ManaSelectionType_Auto", "defaultAutoPassOption": "AutoPassOption_ResolveMyStackEffects", "smartStopsSetting": "SmartStopsSetting_Enable", "autoTapStopsSetting": "AutoTapStopsSetting_Enable", "autoOptionalPaymentCancellationSetting": "Setting_Enable", "transientStops": [ { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" } ], "stackAutoPassOption": "AutoPassOption_Clear" }, "deckMessage": { "deckCards": [ 75521, 75521, 75526, 75526, 75523, 75523, 75511, 75511, 75512, 75512, 75512, 75512, 75528, 75528, 75528, 75514, 75514, 75520, 75520, 75520, 75520, 75519, 75519, 75525, 75525, 75525, 75527, 75527, 75509, 75509, 75517, 75517, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75513, 75516, 75529 ] }, "grpVersion": { "majorVersion": 2025, "minorVersion": 53, "buildVersion": 8 }, "greVersion": { "majorVersion": 2025, "minorVersion": 53, "buildVersion": 3 }, "grpChangelist": 1211427, "greChangelist": 1211511 } } ] } }
+2025-11-30 20:53:48,536 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:53:49,107 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:53:49,107 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:53:49,823 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:53:47 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: MatchGameRoomStateChangedEvent
+2025-11-30 20:53:49,823 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:53:50,313 [DEBUG] Unparsed log line (in match/queue): { "transactionId": "1030dc48-7793-46b7-a018-434c13a6d2e2", "requestId": 2, "timestamp": "1764532427441", "matchGameRoomStateChangedEvent": { "gameRoomInfo": { "gameRoomConfig": { "reservedPlayers": [ { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4", "playerName":"AccountThree", "systemSeatId": 1, "teamId": 1, "courseId": "Avatar_Basic_AjaniGoldmane", "sessionId": "93eceba7-cf93-4ac0-86ad-fbf49ed1c5ad", "platformId": "SteamWindows", "eventId": "AIBotMatch_Rebalanced" }, { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4_Familiar", "playerName":"Sparky", "systemSeatId": 2, "teamId": 2, "courseId": "Avatar_Basic_Sparky", "isBotPlayer": true, "eventId": "AIBotMatch_Rebalanced" } ], "matchId": "f11481d8-b021-4d46-9c16-a9e047dce0a8" }, "stateType": "MatchGameRoomStateType_Playing", "players": [ { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4", "playerName": "AccountThree", "systemSeatId": 1, "teamId": 1 }, { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4_Familiar", "playerName": "Sparky", "systemSeatId": 2, "teamId": 2 } ] } } }
+2025-11-30 20:53:50,314 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:53:50,865 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:53:50,865 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:53:50,866 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:53:50,866 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:53:50,866 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:53:50,866 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:53:51,617 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:53:52,367 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:53:52,367 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:53:56,368 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:53:56,394 [DEBUG] Clicked keep_hand at (1881.5, 1161.0)
+2025-11-30 20:53:56,471 [DEBUG] Clicked keep_hand at (1891.5, 1161.0)
+2025-11-30 20:53:56,548 [DEBUG] Clicked keep_hand at (1871.5, 1161.0)
+2025-11-30 20:53:56,625 [DEBUG] Clicked keep_hand at (1881.5, 1171.0)
+2025-11-30 20:53:56,702 [DEBUG] Clicked keep_hand at (1881.5, 1151.0)
+2025-11-30 20:53:57,220 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:54:02,807 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:54:02,807 [DEBUG] Fallback: assuming turn=1 after keep (delay 11.9s since keep_hand); TURN_START not seen
+2025-11-30 20:54:02,808 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:53:47 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: GreToClientEvent
+2025-11-30 20:54:02,808 [INFO] Action: ActionType.PLAY_LAND (Play a land early (no hand info))
+2025-11-30 20:54:02,808 [DEBUG] play_land drag from (1187.0, 1399.3) -> (1596.0, 843.2) rel_x=0.298 region=(440, 0, 2560, 1440)
+2025-11-30 20:54:03,039 [DEBUG] Clicked play_land at (1596.0, 843.2)
+2025-11-30 20:54:03,160 [DEBUG] play_land drag from (1747.5, 1399.3) -> (1575.0, 843.2) rel_x=0.501 region=(440, 0, 2560, 1440)
+2025-11-30 20:54:03,389 [DEBUG] Clicked play_land at (1575.0, 843.2)
+2025-11-30 20:54:03,510 [DEBUG] play_land drag from (1366.6, 1399.3) -> (1629.0, 843.2) rel_x=0.369 region=(440, 0, 2560, 1440)
+2025-11-30 20:54:03,739 [DEBUG] Clicked play_land at (1629.0, 843.2)
+2025-11-30 20:54:03,859 [DEBUG] play_land drag from (2194.9, 1399.3) -> (1641.0, 843.2) rel_x=0.692 region=(440, 0, 2560, 1440)
+2025-11-30 20:54:04,089 [DEBUG] Clicked play_land at (1641.0, 843.2)
+2025-11-30 20:54:04,209 [DEBUG] play_land drag from (1878.5, 1399.3) -> (1543.0, 843.2) rel_x=0.563 region=(440, 0, 2560, 1440)
+2025-11-30 20:54:04,439 [DEBUG] Clicked play_land at (1543.0, 843.2)
+2025-11-30 20:54:05,288 [DEBUG] Unparsed log line (in match/queue): { "transactionId": "1030dc48-7793-46b7-a018-434c13a6d2e2", "requestId": 2, "timestamp": "1764532427465", "greToClientEvent": { "greToClientMessages": [ { "type": "GREMessageType_DieRollResultsResp", "systemSeatIds": [ 1, 2 ], "msgId": 3, "dieRollResultsResp": { "playerDieRolls": [ { "systemSeatId": 1, "rollValue": 2 }, { "systemSeatId": 2, "rollValue": 11 } ] } }, { "type": "GREMessageType_GameStateMessage", "systemSeatIds": [ 1 ], "msgId": 4, "gameStateId": 1, "gameStateMessage": { "type": "GameStateType_Full", "gameStateId": 1, "gameInfo": { "matchID": "f11481d8-b021-4d46-9c16-a9e047dce0a8", "gameNumber": 1, "stage": "GameStage_Start", "type": "GameType_Duel", "variant": "GameVariant_Normal", "matchState": "MatchState_GameInProgress", "matchWinCondition": "MatchWinCondition_SingleElimination", "superFormat": "SuperFormat_Constructed", "mulliganType": "MulliganType_London", "deckConstraintInfo": { "minDeckSize": 60, "maxDeckSize": 250, "maxSideboardSize": 15 } }, "teams": [ { "id": 1, "playerIds": [ 1 ], "status": "TeamStatus_InGame" }, { "id": 2, "playerIds": [ 2 ], "status": "TeamStatus_InGame" } ], "players": [ { "lifeTotal": 20, "systemSeatNumber": 1, "status": "PlayerStatus_InGame", "maxHandSize": 7, "teamId": 1, "timerIds": [ 1 ], "controllerSeatId": 1, "controllerType": "ControllerType_Player", "startingLifeTotal": 20 }, { "lifeTotal": 20, "systemSeatNumber": 2, "status": "PlayerStatus_InGame", "maxHandSize": 7, "teamId": 2, "timerIds": [ 2 ], "controllerSeatId": 2, "controllerType": "ControllerType_Player", "pendingMessageType": "ClientMessageType_ChooseStartingPlayerResp", "startingLifeTotal": 20 } ], "turnInfo": { "decisionPlayer": 2 }, "zones": [ { "zoneId": 18, "type": "ZoneType_Revealed", "visibility": "Visibility_Public", "ownerSeatId": 1 }, { "zoneId": 19, "type": "ZoneType_Revealed", "visibility": "Visibility_Public", "ownerSeatId": 2 }, { "zoneId": 24, "type": "ZoneType_Suppressed", "visibility": "Visibility_Public" }, { "zoneId": 25, "type": "ZoneType_Pending", "visibility": "Visibility_Public" }, { "zoneId": 26, "type": "ZoneType_Command", "visibility": "Visibility_Public" }, { "zoneId": 27, "type": "ZoneType_Stack", "visibility": "Visibility_Public" }, { "zoneId": 28, "type": "ZoneType_Battlefield", "visibility": "Visibility_Public" }, { "zoneId": 29, "type": "ZoneType_Exile", "visibility": "Visibility_Public" }, { "zoneId": 30, "type": "ZoneType_Limbo", "visibility": "Visibility_Public" }, { "zoneId": 31, "type": "ZoneType_Hand", "visibility": "Visibility_Private", "ownerSeatId": 1, "viewers": [ 1 ] }, { "zoneId": 32, "type": "ZoneType_Library", "visibility": "Visibility_Hidden", "ownerSeatId": 1, "objectInstanceIds": [ 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218 ] }, { "zoneId": 33, "type": "ZoneType_Graveyard", "visibility": "Visibility_Public", "ownerSeatId": 1 }, { "zoneId": 34, "type": "ZoneType_Sideboard", "visibility": "Visibility_Private", "ownerSeatId": 1, "viewers": [ 1 ] }, { "zoneId": 35, "type": "ZoneType_Hand", "visibility": "Visibility_Private", "ownerSeatId": 2, "viewers": [ 2 ] }, { "zoneId": 36, "type": "ZoneType_Library", "visibility": "Visibility_Hidden", "ownerSeatId": 2, "objectInstanceIds": [ 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278 ] }, { "zoneId": 37, "type": "ZoneType_Graveyard", "visibility": "Visibility_Public", "ownerSeatId": 2 }, { "zoneId": 38, "type": "ZoneType_Sideboard", "visibility": "Visibility_Private", "ownerSeatId": 2, "viewers": [ 2 ] } ], "diffDeletedInstanceIds": [ 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158 ], "timers": [ { "timerId": 1, "type": "TimerType_Inactivity", "durationSec": 1020, "behavior": "TimerBehavior_Timeout", "warningThresholdSec": 990 }, { "timerId": 2, "type": "TimerType_Inactivity", "durationSec": 1020, "running": true, "behavior": "TimerBehavior_Timeout", "warningThresholdSec": 990, "elapsedMs": 3 } ], "update": "GameStateUpdate_SendAndRecord" } } ] } }
+2025-11-30 20:54:05,289 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:05,289 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:54:09,805 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:54:09,805 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:10,461 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_tdm'})
+2025-11-30 20:54:10,462 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:10,875 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:54:10,875 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:11,516 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:54:11,516 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:12,266 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:53:47 PM: UD6ANSI3WBAWHBGWFFOBHXWOA4 to Match: ClientToGremessage
+2025-11-30 20:54:12,266 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:12,670 [DEBUG] Unparsed log line (in match/queue): {
+2025-11-30 20:54:12,671 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:13,392 [DEBUG] Unparsed log line (in match/queue): "requestId": 3,
+2025-11-30 20:54:13,392 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:14,010 [DEBUG] Unparsed log line (in match/queue): "clientToMatchServiceMessageType": "ClientToMatchServiceMessageType_ClientToGREMessage",
+2025-11-30 20:54:14,010 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:14,436 [DEBUG] Unparsed log line (in match/queue): "timestamp": "639001292277904004",
+2025-11-30 20:54:14,437 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:54:14,437 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:58:23,178 [INFO] Starting MTGA bot with config at config.json
+2025-11-30 20:58:23,178 [INFO] Using configured log path: /home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log
+2025-11-30 20:58:23,221 [INFO] Loaded card database from cards.json
+2025-11-30 20:58:23,346 [INFO] Auto-guessed click_region for ultrawide: x=440 y=0 w=2560 h=1440 (disable via MTGA_BOT_AUTOGUESS_REGION=0)
+2025-11-30 20:58:23,346 [DEBUG] UIController init: screen=3440x1440 click_region=full-screen image_dir=images use_image_search=False ydotool=True
+2025-11-30 20:58:24,347 [DEBUG] Unparsed log line (idle): Could not find BladeQueueInfo for QueueType: Ranked
+2025-11-30 20:58:24,347 [DEBUG] Unparsed log line (idle): Can't find pet for deck Goblins Everywhere! (4792e924-c693-4b06-b4e7-31bfeedd610d)
+2025-11-30 20:58:25,347 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]==> DeckUpsertDeckV2 {"id":"f3679c1e-785c-4a55-86c1-4a9b7fa8f8b8","request":"{\"Summary\":{\"DeckId\":\"4792e924-c693-4b06-b4e7-31bfeedd610d\",\"Mana\":\"\",\"Name\":\"Goblins Everywhere!\",\"Attributes\":[{\"name\":\"Version\",\"value\":\"11\"},{\"name\":\"TileID\",\"value\":\"75521\"},{\"name\":\"LastPlayed\",\"value\":\"\\\"2025-11-30T20:58:24.7283097+01:00\\\"\"},{\"name\":\"LastUpdated\",\"value\":\"\\\"0001-01-01T00:00:00\\\"\"},{\"name\":\"IsFavorite\",\"value\":\"false\"},{\"name\":\"Format\",\"value\":\"Alchemy\"}],\"Description\":\"Decks/Precon/CC_ANB_R_Desc\",\"DeckTileId\":75521,\"DeckArtId\":0,\"IsCompanionValid\":false,\"FormatLegalities\":{},\"PreferredCosmetics\":{\"Avatar\":\"\",\"Sleeve\":\"\",\"Pet\":\"\",\"Title\":\"\",\"Emotes\":[]},\"DeckValidationSummaries\":[],\"UnownedCards\":{},\"NetDeckFolderId\":null,\"IsNetDeck\":false,\"checkInbox\":false},\"Deck\":{\"MainDeck\":[{\"cardId\":75521,\"quantity\":2},{\"cardId\":75526,\"quantity\":2},{\"cardId\":75523,\"quantity\":2},{\"cardId\":75511,\"quantity\":2},{\"cardId\":75512,\"quantity\":4},{\"cardId\":75528,\"quantity\":3},{\"cardId\":75514,\"quantity\":2},{\"cardId\":75520,\"quantity\":4},{\"cardId\":75519,\"quantity\":2},{\"cardId\":75525,\"quantity\":3},{\"cardId\":75527,\"quantity\":2},{\"cardId\":75509,\"quantity\":2},{\"cardId\":75517,\"quantity\":2},{\"cardId\":75555,\"quantity\":25},{\"cardId\":75513,\"quantity\":1},{\"cardId\":75516,\"quantity\":1},{\"cardId\":75529,\"quantity\":1}],\"ReducedSideboard\":[],\"Sideboard\":[],\"CommandZone\":[],\"Companions\":[],\"CardSkins\":[],\"DoPreferReducedSideboard\":false},\"ActionType\":\"Updated\"}"}
+2025-11-30 20:58:25,347 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]==> EventAiBotMatch {"id":"957ee9d4-e905-4517-b749-86c5e4a12a4e","request":"{\"deckId\":\"4792e924-c693-4b06-b4e7-31bfeedd610d\",\"botDeckId\":\"aaf940db-17ff-48f7-8679-5264b8e53742\",\"botMatchType\":1}"}
+2025-11-30 20:58:25,347 [DEBUG] Unparsed log line (idle): [UnityCrossThreadLogger]11/30/2025 8:58:25 PM
+2025-11-30 20:58:27,349 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectingToGRE'})
+2025-11-30 20:58:27,349 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:58:27,976 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:27 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: GreToClientEvent
+2025-11-30 20:58:27,977 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:58:28,427 [DEBUG] Unparsed log line (in match/queue): { "transactionId": "9765bf59-1b87-4959-87ef-b8b566e61084", "requestId": 2, "timestamp": "1764532707101", "greToClientEvent": { "greToClientMessages": [ { "type": "GREMessageType_ConnectResp", "systemSeatIds": [ 1 ], "msgId": 1, "connectResp": { "status": "ConnectionStatus_Success", "protoVer": "ProtoVersion_PersistentAnnotations", "settings": { "stops": [ { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" } ], "autoPassOption": "AutoPassOption_ResolveMyStackEffects", "graveyardOrder": "OrderingType_OrderArbitraryAlways", "manaSelectionType": "ManaSelectionType_Auto", "defaultAutoPassOption": "AutoPassOption_ResolveMyStackEffects", "smartStopsSetting": "SmartStopsSetting_Enable", "autoTapStopsSetting": "AutoTapStopsSetting_Enable", "autoOptionalPaymentCancellationSetting": "Setting_Enable", "transientStops": [ { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" } ], "stackAutoPassOption": "AutoPassOption_Clear" }, "deckMessage": { "deckCards": [ 75521, 75521, 75526, 75526, 75523, 75523, 75511, 75511, 75512, 75512, 75512, 75512, 75528, 75528, 75528, 75514, 75514, 75520, 75520, 75520, 75520, 75519, 75519, 75525, 75525, 75525, 75527, 75527, 75509, 75509, 75517, 75517, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75555, 75513, 75516, 75529 ] }, "grpVersion": { "majorVersion": 2025, "minorVersion": 53, "buildVersion": 8 }, "greVersion": { "majorVersion": 2025, "minorVersion": 53, "buildVersion": 3 }, "grpChangelist": 1211427, "greChangelist": 1211511 } } ] } }
+2025-11-30 20:58:28,427 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:58:29,124 [DEBUG] Event: LogEvent(event_type=<EventType.QUEUE_ENTERED: 6>, payload={'state': 'ConnectedToMatchDoor_ConnectedToGRE_Waiting'})
+2025-11-30 20:58:29,124 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:58:29,540 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:27 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: MatchGameRoomStateChangedEvent
+2025-11-30 20:58:29,540 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:58:30,013 [DEBUG] Unparsed log line (in match/queue): { "transactionId": "9bb69f2b-cc5c-47a9-b8a8-017cdac8fbae", "requestId": 2, "timestamp": "1764532707304", "matchGameRoomStateChangedEvent": { "gameRoomInfo": { "gameRoomConfig": { "reservedPlayers": [ { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4", "playerName":"AccountThree", "systemSeatId": 1, "teamId": 1, "courseId": "Avatar_Basic_AjaniGoldmane", "sessionId": "93eceba7-cf93-4ac0-86ad-fbf49ed1c5ad", "platformId": "SteamWindows", "eventId": "AIBotMatch_Rebalanced" }, { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4_Familiar", "playerName":"Sparky", "systemSeatId": 2, "teamId": 2, "courseId": "Avatar_Basic_Sparky", "isBotPlayer": true, "eventId": "AIBotMatch_Rebalanced" } ], "matchId": "f0470210-f94e-4266-bcab-c30525fa43b8" }, "stateType": "MatchGameRoomStateType_Playing", "players": [ { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4", "playerName": "AccountThree", "systemSeatId": 1, "teamId": 1 }, { "userId": "UD6ANSI3WBAWHBGWFFOBHXWOA4_Familiar", "playerName": "Sparky", "systemSeatId": 2, "teamId": 2 } ] } } }
+2025-11-30 20:58:30,013 [INFO] Action: ActionType.WAIT (Waiting for opponent)
+2025-11-30 20:58:30,725 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'state': 'Playing'})
+2025-11-30 20:58:30,725 [DEBUG] GameState: MATCH_START -> reset hand_kept (match_id=None)
+2025-11-30 20:58:30,726 [DEBUG] QuestAI: KEEP_HAND requested (phase=MatchPhase.IN_MATCH turn=0 hand_kept=False match_id=None)
+2025-11-30 20:58:30,726 [INFO] Action: ActionType.KEEP_HAND (Keep opening hand once per match)
+2025-11-30 20:58:30,726 [DEBUG] Marking hand_kept=True before perform (phase=MatchPhase.IN_MATCH turn=0 match_id=None)
+2025-11-30 20:58:30,726 [DEBUG] confirm_keep_hand: start attempts=1 override=True
+2025-11-30 20:58:31,477 [DEBUG] ydotoold start attempted via ydotoold
+2025-11-30 20:58:32,068 [DEBUG] Keep-hand attempt 1/1
+2025-11-30 20:58:32,068 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:58:36,069 [DEBUG] Using configured target for keep_hand at rel (0.5630813953488372, 0.80625) with cluster_px=10
+2025-11-30 20:58:36,096 [DEBUG] Clicked keep_hand at (1881.5, 1161.0)
+2025-11-30 20:58:36,172 [DEBUG] Clicked keep_hand at (1891.5, 1161.0)
+2025-11-30 20:58:36,249 [DEBUG] Clicked keep_hand at (1871.5, 1161.0)
+2025-11-30 20:58:36,326 [DEBUG] Clicked keep_hand at (1881.5, 1171.0)
+2025-11-30 20:58:36,404 [DEBUG] Clicked keep_hand at (1881.5, 1151.0)
+2025-11-30 20:58:37,023 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:58:42,838 [DEBUG] confirm_keep_hand: finished attempts=1
+2025-11-30 20:58:42,838 [DEBUG] Fallback: assuming turn=1 after keep (delay 12.1s since keep_hand); TURN_START not seen
+2025-11-30 20:58:42,839 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:27 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: GreToClientEvent
+2025-11-30 20:58:42,839 [INFO] Action: ActionType.PLAY_LAND (Play a land early (no hand info))
+2025-11-30 20:58:42,839 [DEBUG] play_land drag from (1390.6, 1386.3) -> (1640.0, 846.2) rel_x=0.369 region=(440, 0, 2560, 1440)
+2025-11-30 20:58:43,070 [DEBUG] Clicked play_land at (1640.0, 846.2)
+2025-11-30 20:58:43,191 [DEBUG] play_land drag from (2052.4, 1386.3) -> (1594.0, 846.2) rel_x=0.628 region=(440, 0, 2560, 1440)
+2025-11-30 20:58:43,420 [DEBUG] Clicked play_land at (1594.0, 846.2)
+2025-11-30 20:58:43,540 [DEBUG] play_land drag from (1210.0, 1386.3) -> (1584.0, 846.2) rel_x=0.298 region=(440, 0, 2560, 1440)
+2025-11-30 20:58:43,769 [DEBUG] Clicked play_land at (1584.0, 846.2)
+2025-11-30 20:58:43,889 [DEBUG] play_land drag from (1748.5, 1386.3) -> (1599.0, 846.2) rel_x=0.501 region=(440, 0, 2560, 1440)
+2025-11-30 20:58:44,118 [DEBUG] Clicked play_land at (1599.0, 846.2)
+2025-11-30 20:58:44,239 [DEBUG] play_land drag from (1867.5, 1386.3) -> (1562.0, 846.2) rel_x=0.563 region=(440, 0, 2560, 1440)
+2025-11-30 20:58:44,468 [DEBUG] Clicked play_land at (1562.0, 846.2)
+2025-11-30 20:58:45,262 [DEBUG] Unparsed log line (in match/queue): { "transactionId": "9bb69f2b-cc5c-47a9-b8a8-017cdac8fbae", "requestId": 2, "timestamp": "1764532707319", "greToClientEvent": { "greToClientMessages": [ { "type": "GREMessageType_DieRollResultsResp", "systemSeatIds": [ 1, 2 ], "msgId": 3, "dieRollResultsResp": { "playerDieRolls": [ { "systemSeatId": 1, "rollValue": 17 }, { "systemSeatId": 2, "rollValue": 4 } ] } }, { "type": "GREMessageType_GameStateMessage", "systemSeatIds": [ 1 ], "msgId": 4, "gameStateId": 1, "gameStateMessage": { "type": "GameStateType_Full", "gameStateId": 1, "gameInfo": { "matchID": "f0470210-f94e-4266-bcab-c30525fa43b8", "gameNumber": 1, "stage": "GameStage_Start", "type": "GameType_Duel", "variant": "GameVariant_Normal", "matchState": "MatchState_GameInProgress", "matchWinCondition": "MatchWinCondition_SingleElimination", "superFormat": "SuperFormat_Constructed", "mulliganType": "MulliganType_London", "deckConstraintInfo": { "minDeckSize": 60, "maxDeckSize": 250, "maxSideboardSize": 15 } }, "teams": [ { "id": 1, "playerIds": [ 1 ], "status": "TeamStatus_InGame" }, { "id": 2, "playerIds": [ 2 ], "status": "TeamStatus_InGame" } ], "players": [ { "lifeTotal": 20, "systemSeatNumber": 1, "status": "PlayerStatus_InGame", "maxHandSize": 7, "teamId": 1, "timerIds": [ 1 ], "controllerSeatId": 1, "controllerType": "ControllerType_Player", "pendingMessageType": "ClientMessageType_ChooseStartingPlayerResp", "startingLifeTotal": 20 }, { "lifeTotal": 20, "systemSeatNumber": 2, "status": "PlayerStatus_InGame", "maxHandSize": 7, "teamId": 2, "timerIds": [ 2 ], "controllerSeatId": 2, "controllerType": "ControllerType_Player", "startingLifeTotal": 20 } ], "turnInfo": { "decisionPlayer": 1 }, "zones": [ { "zoneId": 18, "type": "ZoneType_Revealed", "visibility": "Visibility_Public", "ownerSeatId": 1 }, { "zoneId": 19, "type": "ZoneType_Revealed", "visibility": "Visibility_Public", "ownerSeatId": 2 }, { "zoneId": 24, "type": "ZoneType_Suppressed", "visibility": "Visibility_Public" }, { "zoneId": 25, "type": "ZoneType_Pending", "visibility": "Visibility_Public" }, { "zoneId": 26, "type": "ZoneType_Command", "visibility": "Visibility_Public" }, { "zoneId": 27, "type": "ZoneType_Stack", "visibility": "Visibility_Public" }, { "zoneId": 28, "type": "ZoneType_Battlefield", "visibility": "Visibility_Public" }, { "zoneId": 29, "type": "ZoneType_Exile", "visibility": "Visibility_Public" }, { "zoneId": 30, "type": "ZoneType_Limbo", "visibility": "Visibility_Public" }, { "zoneId": 31, "type": "ZoneType_Hand", "visibility": "Visibility_Private", "ownerSeatId": 1, "viewers": [ 1 ] }, { "zoneId": 32, "type": "ZoneType_Library", "visibility": "Visibility_Hidden", "ownerSeatId": 1, "objectInstanceIds": [ 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218 ] }, { "zoneId": 33, "type": "ZoneType_Graveyard", "visibility": "Visibility_Public", "ownerSeatId": 1 }, { "zoneId": 34, "type": "ZoneType_Sideboard", "visibility": "Visibility_Private", "ownerSeatId": 1, "viewers": [ 1 ] }, { "zoneId": 35, "type": "ZoneType_Hand", "visibility": "Visibility_Private", "ownerSeatId": 2, "viewers": [ 2 ] }, { "zoneId": 36, "type": "ZoneType_Library", "visibility": "Visibility_Hidden", "ownerSeatId": 2, "objectInstanceIds": [ 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278 ] }, { "zoneId": 37, "type": "ZoneType_Graveyard", "visibility": "Visibility_Public", "ownerSeatId": 2 }, { "zoneId": 38, "type": "ZoneType_Sideboard", "visibility": "Visibility_Private", "ownerSeatId": 2, "viewers": [ 2 ] } ], "diffDeletedInstanceIds": [ 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158 ], "pendingMessageCount": 1, "timers": [ { "timerId": 1, "type": "TimerType_Inactivity", "durationSec": 1020, "running": true, "behavior": "TimerBehavior_Timeout", "warningThresholdSec": 990, "elapsedMs": 1 }, { "timerId": 2, "type": "TimerType_Inactivity", "durationSec": 1020, "behavior": "TimerBehavior_Timeout", "warningThresholdSec": 990 } ], "update": "GameStateUpdate_SendAndRecord" } }, { "type": "GREMessageType_ChooseStartingPlayerReq", "systemSeatIds": [ 1 ], "msgId": 5, "gameStateId": 1, "chooseStartingPlayerReq": { "teamType": "TeamType_Individual", "systemSeatIds": [ 1, 2 ] } } ] } }
+2025-11-30 20:58:45,262 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:45,262 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:58:49,729 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:58:49,729 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:50,202 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'battlefield_tla'})
+2025-11-30 20:58:50,202 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:50,827 [DEBUG] Unparsed log line (in match/queue): [Info   :MTGA Resolution additions] Patching QualitySettingsHelpers.ForceAllowableResolution: Preventing execution.
+2025-11-30 20:58:50,827 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:51,264 [DEBUG] Event: LogEvent(event_type=<EventType.MATCH_START: 4>, payload={'scene': 'duelscene'})
+2025-11-30 20:58:51,264 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:51,990 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:27 PM: UD6ANSI3WBAWHBGWFFOBHXWOA4 to Match: ClientToGremessage
+2025-11-30 20:58:51,990 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:52,755 [DEBUG] Unparsed log line (in match/queue): {
+2025-11-30 20:58:52,755 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:53,238 [DEBUG] Unparsed log line (in match/queue): "requestId": 3,
+2025-11-30 20:58:53,238 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:53,841 [DEBUG] Unparsed log line (in match/queue): "clientToMatchServiceMessageType": "ClientToMatchServiceMessageType_ClientToGREMessage",
+2025-11-30 20:58:53,841 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:54,311 [DEBUG] Unparsed log line (in match/queue): "timestamp": "639001295076480306",
+2025-11-30 20:58:54,311 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:54,691 [DEBUG] Unparsed log line (in match/queue): "transactionId": "1b93fc5a-3241-44b0-ad37-909a74b6b559",
+2025-11-30 20:58:54,691 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:55,185 [DEBUG] Unparsed log line (in match/queue): "payload": {
+2025-11-30 20:58:55,186 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:55,778 [DEBUG] Unparsed log line (in match/queue): "type": "ClientMessageType_SetSettingsReq",
+2025-11-30 20:58:55,778 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:56,522 [DEBUG] Unparsed log line (in match/queue): "setSettingsReq": {
+2025-11-30 20:58:56,522 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:57,261 [DEBUG] Unparsed log line (in match/queue): "settings": {
+2025-11-30 20:58:57,262 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:57,773 [DEBUG] Unparsed log line (in match/queue): "autoPassOption": "AutoPassOption_ResolveMyStackEffects",
+2025-11-30 20:58:57,773 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:58,543 [DEBUG] Unparsed log line (in match/queue): "manaSelectionType": "ManaSelectionType_Auto",
+2025-11-30 20:58:58,543 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:58,958 [DEBUG] Unparsed log line (in match/queue): "defaultAutoPassOption": "AutoPassOption_ResolveMyStackEffects",
+2025-11-30 20:58:58,958 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:58:59,690 [DEBUG] Unparsed log line (in match/queue): "autoSelectReplacementSetting": "Setting_Enable"
+2025-11-30 20:58:59,690 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:00,082 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:00,082 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:00,689 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:00,689 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:01,123 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:01,123 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:01,586 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:01,586 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:02,001 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:27 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: GreToClientEvent
+2025-11-30 20:59:02,001 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:02,484 [DEBUG] Unparsed log line (in match/queue): { "transactionId": "1b93fc5a-3241-44b0-ad37-909a74b6b559", "requestId": 3, "timestamp": "1764532707738", "greToClientEvent": { "greToClientMessages": [ { "type": "GREMessageType_SetSettingsResp", "systemSeatIds": [ 1 ], "msgId": 6, "gameStateId": 1, "setSettingsResp": { "settings": { "stops": [ { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Set" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Set" } ], "autoPassOption": "AutoPassOption_ResolveMyStackEffects", "graveyardOrder": "OrderingType_OrderArbitraryAlways", "manaSelectionType": "ManaSelectionType_Auto", "defaultAutoPassOption": "AutoPassOption_ResolveMyStackEffects", "smartStopsSetting": "SmartStopsSetting_Enable", "autoTapStopsSetting": "AutoTapStopsSetting_Enable", "autoOptionalPaymentCancellationSetting": "Setting_Enable", "transientStops": [ { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_UpkeepStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DrawStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PrecombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_BeginCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareAttackersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_DeclareBlockersStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_CombatDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndCombatStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_PostcombatMainPhase", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_EndStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Team", "status": "SettingStatus_Clear" }, { "stopType": "StopType_FirstStrikeDamageStep", "appliesTo": "SettingScope_Opponents", "status": "SettingStatus_Clear" } ], "autoSelectReplacementSetting": "Setting_Enable", "stackAutoPassOption": "AutoPassOption_Clear" } } } ] } }
+2025-11-30 20:59:02,484 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:03,068 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:28 PM: UD6ANSI3WBAWHBGWFFOBHXWOA4 to Match: ClientToGremessage
+2025-11-30 20:59:03,068 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:03,575 [DEBUG] Unparsed log line (in match/queue): {
+2025-11-30 20:59:03,575 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:04,115 [DEBUG] Unparsed log line (in match/queue): "requestId": 4,
+2025-11-30 20:59:04,115 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:04,804 [DEBUG] Unparsed log line (in match/queue): "clientToMatchServiceMessageType": "ClientToMatchServiceMessageType_ClientToGREMessage",
+2025-11-30 20:59:04,804 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:05,314 [DEBUG] Unparsed log line (in match/queue): "timestamp": "639001295081067669",
+2025-11-30 20:59:05,314 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:05,994 [DEBUG] Unparsed log line (in match/queue): "transactionId": "5675d924-f878-4c23-be85-4e57ebda312b",
+2025-11-30 20:59:05,995 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:06,676 [DEBUG] Unparsed log line (in match/queue): "payload": {
+2025-11-30 20:59:06,676 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:07,091 [DEBUG] Unparsed log line (in match/queue): "type": "ClientMessageType_ChooseStartingPlayerResp",
+2025-11-30 20:59:07,091 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:07,764 [DEBUG] Unparsed log line (in match/queue): "gameStateId": 1,
+2025-11-30 20:59:07,765 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:08,207 [DEBUG] Unparsed log line (in match/queue): "respId": 5,
+2025-11-30 20:59:08,207 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:08,873 [DEBUG] Unparsed log line (in match/queue): "chooseStartingPlayerResp": {
+2025-11-30 20:59:08,873 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:09,575 [DEBUG] Unparsed log line (in match/queue): "teamType": "TeamType_Individual",
+2025-11-30 20:59:09,575 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:10,251 [DEBUG] Unparsed log line (in match/queue): "systemSeatId": 1,
+2025-11-30 20:59:10,251 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:10,643 [DEBUG] Unparsed log line (in match/queue): "teamId": 1
+2025-11-30 20:59:10,643 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:11,252 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:11,252 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:11,792 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:11,792 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:12,510 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:12,510 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:12,905 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:28 PM: Match to UD6ANSI3WBAWHBGWFFOBHXWOA4: GreToClientEvent
+2025-11-30 20:59:12,906 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:13,594 [DEBUG] Event: LogEvent(event_type=<EventType.PRIORITY_UPDATE: 10>, payload={'active_player': 1})
+2025-11-30 20:59:13,594 [DEBUG] Priority update: active=1 priority=None turn=1 (mine=1)
+2025-11-30 20:59:13,594 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:14,218 [DEBUG] Unparsed log line (in match/queue): OnSceneUnloaded for PreGameScene
+2025-11-30 20:59:14,218 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:14,927 [DEBUG] Unparsed log line (in match/queue): [UnityCrossThreadLogger]11/30/2025 8:58:41 PM: UD6ANSI3WBAWHBGWFFOBHXWOA4 to Match: ClientToGremessage
+2025-11-30 20:59:14,927 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:15,680 [DEBUG] Unparsed log line (in match/queue): {
+2025-11-30 20:59:15,680 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:16,168 [DEBUG] Unparsed log line (in match/queue): "requestId": 5,
+2025-11-30 20:59:16,168 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:16,676 [DEBUG] Unparsed log line (in match/queue): "clientToMatchServiceMessageType": "ClientToMatchServiceMessageType_ClientToGREMessage",
+2025-11-30 20:59:16,676 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:17,066 [DEBUG] Unparsed log line (in match/queue): "timestamp": "639001295210431621",
+2025-11-30 20:59:17,066 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:17,589 [DEBUG] Unparsed log line (in match/queue): "transactionId": "27b0eacb-c48f-4a88-8d04-c0656059850b",
+2025-11-30 20:59:17,589 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:18,299 [DEBUG] Unparsed log line (in match/queue): "payload": {
+2025-11-30 20:59:18,299 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:18,691 [DEBUG] Unparsed log line (in match/queue): "type": "ClientMessageType_MulliganResp",
+2025-11-30 20:59:18,692 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:19,235 [DEBUG] Unparsed log line (in match/queue): "gameStateId": 2,
+2025-11-30 20:59:19,236 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:19,801 [DEBUG] Unparsed log line (in match/queue): "respId": 8,
+2025-11-30 20:59:19,801 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:20,567 [DEBUG] Unparsed log line (in match/queue): "mulliganResp": {
+2025-11-30 20:59:20,568 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:21,281 [DEBUG] Unparsed log line (in match/queue): "decision": "MulliganOption_AcceptHand"
+2025-11-30 20:59:21,281 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:21,665 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:21,665 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:22,394 [DEBUG] Unparsed log line (in match/queue): }
+2025-11-30 20:59:22,394 [INFO] Action: ActionType.ATTACK_ALL (Progress quest by attacking with all)
+2025-11-30 20:59:22,394 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:59:26,394 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-11-30 20:59:30,395 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
