@@ -25,11 +25,15 @@ class UIController:
         dry_run: bool = True,
         confidence: float = 0.9,
         pause_range: tuple[float, float] = (0.35, 0.75),
+        click_region: Optional[tuple[int, int, int, int]] = None,
     ) -> None:
         self.image_dir = Path(image_dir) if image_dir else None
         self.dry_run = dry_run
         self.confidence = confidence
         self.pause_range = pause_range
+        # click_region allows anchoring relative clicks to a windowed client:
+        # (x, y, width, height) in absolute screen pixels.
+        self.click_region = click_region
         self._pyautogui = None
         self._ydotool = shutil.which("ydotool") if shutil.which("ydotool") else None
         self._use_ydotool = self._ydotool is not None
@@ -39,7 +43,7 @@ class UIController:
         if action.action_type == ActionType.QUEUE_FOR_MATCH:
             self.click_named_target("queue_button")
         elif action.action_type == ActionType.KEEP_HAND:
-            self.click_named_target("keep_hand")
+            self.confirm_keep_hand()
         elif action.action_type == ActionType.ATTACK_ALL:
             self.press_key("a")  # MTGA default "attack with all"
         elif action.action_type == ActionType.CAST_SPELL:
@@ -53,6 +57,45 @@ class UIController:
             logger.info("Exit action received; stopping UI actions.")
         else:
             self.sleep_briefly()
+
+    def confirm_keep_hand(self) -> None:
+        """
+        Keep-hand confirmation is timing sensitive. Try a click and also send a key
+        to increase the chance of hitting the dialog.
+        """
+        max_attempts = 10
+
+        if self.dry_run:
+            logger.info("[dry-run] Would keep starting hand (looping %s attempts)", max_attempts)
+            self.sleep_briefly()
+            return
+
+        # Give the mulligan dialog a moment to appear, then focus the window.
+        time.sleep(0.6)
+        self._ensure_pyautogui()
+        # Focus roughly center-top where the dialog sits.
+        self._click_relative(0.5, 0.2)
+
+        # Calibrated keep/mulligan positions from UI.png (1920x1080). We scale by click_region/screen.
+        rel_keep = (0.65, 0.86)
+        rel_keep_alt = (0.58, 0.83)
+
+        for attempt in range(max_attempts):
+            logger.debug("Keep-hand attempt %s/%s", attempt + 1, max_attempts)
+
+            # First attempt: known target / image if present.
+            self.click_named_target("keep_hand")
+
+            # Calibrated fallbacks near the Keep 7 button (bottom-right-ish but higher than before).
+            self._click_relative(*rel_keep)
+            self._click_relative(*rel_keep_alt)
+
+            # Extra safety: space/enter often work in MTGA dialogs.
+            self.press_key("space")
+            self.press_key("enter")
+
+            # Small delay; MTGA often needs a moment to register mulligan choices.
+            time.sleep(0.4)
 
     def click_named_target(self, target_name: str) -> None:
         """
@@ -147,12 +190,25 @@ class UIController:
 
     def _click_relative(self, rel_x: float, rel_y: float) -> None:
         """Click at a relative screen position (0..1 in both axes) with slight jitter."""
-        screen_size = self._pyautogui.size()
+        if self.click_region:
+            origin_x, origin_y, width, height = self.click_region
+        else:
+            screen_size = self._pyautogui.size()
+            origin_x, origin_y, width, height = 0, 0, screen_size.width, screen_size.height
+
         jitter_x = random.randint(-10, 10)
         jitter_y = random.randint(-10, 10)
-        x = screen_size.width * rel_x + jitter_x
-        y = screen_size.height * rel_y + jitter_y
+        x = origin_x + width * rel_x + jitter_x
+        y = origin_y + height * rel_y + jitter_y
         self._click_absolute(x, y)
+        # Extra down/up to ensure click is registered in windowed mode
+        if not self.dry_run and not self._use_ydotool:
+            try:
+                self._pyautogui.mouseDown(x, y)
+                time.sleep(0.05)
+                self._pyautogui.mouseUp(x, y)
+            except Exception:
+                pass
         self.sleep_briefly()
 
     def _click_absolute(self, x: float, y: float) -> None:
@@ -177,7 +233,11 @@ class UIController:
                 logger.debug("ydotool click failed at (%s,%s): %s", x, y, exc)
 
         self._ensure_pyautogui()
-        self._pyautogui.click(x, y)
+        # Use a down/up sequence; .click can be ignored in some windowed/overlay scenarios.
+        self._pyautogui.moveTo(x, y, duration=0)
+        self._pyautogui.mouseDown()
+        time.sleep(0.03)
+        self._pyautogui.mouseUp()
 
     def _press_key_with_ydotool(self, key: str) -> bool:
         """
@@ -191,6 +251,7 @@ class UIController:
             "a": 30,  # KEY_A
             "space": 57,  # KEY_SPACE
             "esc": 1,  # KEY_ESC
+            "enter": 28,  # KEY_ENTER
         }
         code = keymap.get(key.lower())
         if code is None:

@@ -43,6 +43,7 @@ class GameState:
     quests: Dict[str, QuestProgress] = field(default_factory=dict)
     turn: int = 0
     match_id: Optional[str] = None
+    hand_kept: bool = False
 
     def apply_event(self, event: LogEvent) -> None:
         """Update internal state based on a parsed log event."""
@@ -57,17 +58,26 @@ class GameState:
         elif event.event_type == EventType.QUEUE_EXITED:
             self.phase = MatchPhase.IDLE
         elif event.event_type == EventType.MATCH_START:
+            incoming_match_id = event.payload.get("match_id")
+            is_new_match = self.phase != MatchPhase.IN_MATCH or (
+                incoming_match_id and self.match_id and incoming_match_id != self.match_id
+            )
             self.phase = MatchPhase.IN_MATCH
-            self.match_id = event.payload.get("match_id")
-            self.turn = 0
+            if is_new_match:
+                self.turn = 0
+                self.hand_kept = False
+            if incoming_match_id:
+                self.match_id = incoming_match_id
         elif event.event_type == EventType.TURN_START:
             self.turn = int(event.payload.get("turn", 0))
-            if self.phase == MatchPhase.QUEUED:
+            if self.phase in (MatchPhase.QUEUED, MatchPhase.IDLE):
                 self.phase = MatchPhase.IN_MATCH
+                self.hand_kept = False
         elif event.event_type == EventType.MATCH_END:
             self.phase = MatchPhase.IDLE
             self.turn = 0
             self.match_id = None
+            self.hand_kept = False
 
     def _apply_quest_update(self, event: LogEvent) -> None:
         quest_id = str(event.payload.get("quest_id"))

@@ -106,6 +106,9 @@ class QuestAI:
         self._strategies[name] = strategy
 
     def get_action(self, state: GameState) -> Optional[Action]:
+        if state.phase == MatchPhase.IN_MATCH and not state.hand_kept:
+            return Action(ActionType.KEEP_HAND, reason="Keep opening hand once per match")
+
         quest = self._select_quest(state)
         strategy = self._select_strategy(quest)
         return strategy.get_action(state, quest)
