@@ -1,0 +1,11 @@
+# Ignore generated card data
+cards.json
+cards_metadata.json
+
+# Build artifacts
+build/
+dist/
+
+# Local environment
+.venv/
+*.log
