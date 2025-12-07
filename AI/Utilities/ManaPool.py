@@ -51,46 +51,82 @@ class ManaPool:
             raw_mana_cost_dict: mana to be taken away from available mana
         """
         stand_mana_cost_dict = self.__convert_raw_mana_cost_arr_to_standard(raw_mana_cost_dict)
+        
+        # 1. Pay specific colored costs
         for key in stand_mana_cost_dict.keys():
             if key != 'generic':
                 self.__avail_mana[key] -= stand_mana_cost_dict[key]
-        if self.__avail_mana['generic'] <= stand_mana_cost_dict['generic']:
-            stand_mana_cost_dict['generic'] -= self.__avail_mana['generic']
-            self.__avail_mana['generic'] = 0
-            for key in stand_mana_cost_dict.keys():
-                if self.__avail_mana[key] <= stand_mana_cost_dict['generic']:
-                    stand_mana_cost_dict['generic'] -= self.__avail_mana[key]
-                    self.__avail_mana[key] = 0
-                else:
-                    self.__avail_mana[key] -= stand_mana_cost_dict['generic']
-                    stand_mana_cost_dict['generic'] = 0
-                if stand_mana_cost_dict['generic'] == 0:
-                    break
-        else:
-            self.__avail_mana['generic'] -= stand_mana_cost_dict['generic']
+
+        # 2. Pay generic cost
+        if 'generic' in stand_mana_cost_dict:
+            generic_cost = stand_mana_cost_dict['generic']
+            
+            # First try to pay with actual generic mana
+            if self.__avail_mana['generic'] >= generic_cost:
+                self.__avail_mana['generic'] -= generic_cost
+                generic_cost = 0
+            else:
+                generic_cost -= self.__avail_mana['generic']
+                self.__avail_mana['generic'] = 0
+            
+            # If still need to pay generic cost, use other colors
+            if generic_cost > 0:
+                for key in self.__avail_mana:
+                    if key == 'generic': 
+                        continue
+                    if self.__avail_mana[key] >= generic_cost:
+                        self.__avail_mana[key] -= generic_cost
+                        generic_cost = 0
+                        break
+                    else:
+                        generic_cost -= self.__avail_mana[key]
+                        self.__avail_mana[key] = 0
 
     def has_mana(self, mana_cost_arr):
         """
         Requires:
             mana_cost_dict must be of raw form
         """
-        has_mana = True
-        total_generic_count = 0
         reformatted_mana_cost_dict = self.__convert_raw_mana_cost_arr_to_standard(mana_cost_arr)
-        for color in reformatted_mana_cost_dict.keys():
-            total_generic_count += self.__avail_mana[color]
-            if color != 'generic':
-                if reformatted_mana_cost_dict[color] > self.__avail_mana[color]:
-                    # total_generic_count -= self.__avail_mana[color]
-                    has_mana = False
-                else:
-                    total_generic_count -= reformatted_mana_cost_dict[color]
-
-        if 'generic' in reformatted_mana_cost_dict.keys():
-            if total_generic_count < reformatted_mana_cost_dict['generic']:
-                has_mana = False
-        return has_mana
+        
+        # Create a temporary copy to simulate spending
+        temp_avail = self.__avail_mana.copy()
+        
+        # 1. Check/Pay specific colored costs
+        for color, cost in reformatted_mana_cost_dict.items():
+            if color == 'generic':
+                continue
+            if temp_avail.get(color, 0) < cost:
+                return False
+            temp_avail[color] -= cost
+            
+        # 2. Check/Pay generic cost with remaining mana
+        if 'generic' in reformatted_mana_cost_dict:
+            generic_cost = reformatted_mana_cost_dict['generic']
+            
+            # Use generic mana first
+            if temp_avail['generic'] >= generic_cost:
+                return True
+            else:
+                generic_cost -= temp_avail['generic']
+                # temp_avail['generic'] = 0 # Not needed for calculation
+                
+            # Sum up all remaining colored mana
+            remaining_colored = sum(val for key, val in temp_avail.items() if key != 'generic')
+            
+            if remaining_colored < generic_cost:
+                return False
+                
+        return True
 
     def add_mana(self, color, amount):
         self.__total_mana[color] += amount
         self.__avail_mana[color] += amount
+
+    def get_available_mana(self):
+        """Returns a copy of the available mana dict for debugging"""
+        return self.__avail_mana.copy()
+
+    def get_total_mana(self):
+        """Returns a copy of the total mana dict for debugging"""
+        return self.__total_mana.copy()

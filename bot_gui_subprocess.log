@@ -6211,3 +6211,8 @@ TypeError: 'LogEvent' object is not iterable
 2025-12-01 22:58:26,841 [INFO] Action: ActionType.CAST_SPELL (GRE action: cast/play card)
 2025-12-01 22:58:26,842 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
 2025-12-01 22:58:30,842 [INFO] User mouse movement detected; pausing UI actions for 4.0 seconds
+2025-12-07 00:32:23,034 [INFO] Starting MTGA bot with config at config.json
+2025-12-07 00:32:23,035 [INFO] Using configured log path: \home\barrylim\.local\share\Steam\steamapps\compatdata\2141910\pfx\drive_c\users\steamuser\AppData\LocalLow\Wizards Of The Coast\MTGA\Player.log
+2025-12-07 00:32:23,035 [WARNING] Log file does not exist yet: \home\barrylim\.local\share\Steam\steamapps\compatdata\2141910\pfx\drive_c\users\steamuser\AppData\LocalLow\Wizards Of The Coast\MTGA\Player.log (will wait for MTGA to create it)
+2025-12-07 00:32:23,081 [INFO] Loaded card database from cards.json
+2025-12-07 00:32:24,127 [DEBUG] UIController init: screen=3440x1440 click_region=(764, 197, 1901, 1056) image_dir=images use_image_search=False ydotool=False
