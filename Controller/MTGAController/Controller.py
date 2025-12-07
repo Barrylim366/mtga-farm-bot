@@ -16,6 +16,7 @@ class Controller(ControllerSecondary):
     def __init__(self, log_path, screen_bounds=((0, 0), (1600, 900)), click_targets=None):
         self.__decision_callback = None
         self.__mulligan_decision_callback = None
+        self.__action_success_callback = None
         self.__current_execution_thread = None
         self.__has_mulled_keep = False
         self.__intro_delay = 15
@@ -80,6 +81,9 @@ class Controller(ControllerSecondary):
 
     def set_mulligan_decision_callback(self, method) -> None:
         self.__mulligan_decision_callback = method
+
+    def set_action_success_callback(self, method) -> None:
+        self.__action_success_callback = method
 
     def end_game(self) -> None:
         self.log_reader.stop_log_monitor()
@@ -202,10 +206,30 @@ class Controller(ControllerSecondary):
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict)
         self.updated_game_state.update(game_state)
         print(self.updated_game_state)
+
+        # Check for successful actions in the log update
+        if self.__action_success_callback:
+            try:
+                temp_dict = raw_dict.get('greToClientEvent', {})
+                temp_arr = temp_dict.get('greToClientMessages', [])
+                for message in temp_arr:
+                    if message.get('type') == "GREMessageType_GameStateMessage":
+                        msg_body = message.get('gameStateMessage', {})
+                        actions = msg_body.get('actions', [])
+                        for action_item in actions:
+                            # seatId 1 is usually the bot/local player
+                            if action_item.get('seatId') == 1:
+                                self.__action_success_callback(action_item.get('action', {}))
+            except Exception as e:
+                print(f"Error checking for action success: {e}")
+
         turn_info_dict = self.updated_game_state.get_turn_info()
         if self.updated_game_state.is_complete():
             self.__update_inst_id__grp_id_dict(self.updated_game_state.get_game_objects())
             if turn_info_dict['decisionPlayer'] == 1 and self.__has_mulled_keep:
+                # Cancel any existing timer before starting a new one
+                if self.__current_execution_thread is not None:
+                    self.__current_execution_thread.cancel()
                 self.__current_execution_thread = threading.Timer(self.__decision_delay,
                                                                   lambda:
                                                                   self.__decision_callback(self.updated_game_state))
@@ -232,4 +256,13 @@ class Controller(ControllerSecondary):
                         game_state_dict[key] = raw_game_state_dict[key]
                 generated_game_state = GameState(game_state_dict)
                 return_game_state.update(generated_game_state)
+            # Also parse ActionsAvailableReq for available actions
+            elif message['type'] == "GREMessageType_ActionsAvailableReq":
+                req = message.get('actionsAvailableReq', {})
+                active_actions = req.get('actions', [])
+                # Wrap each action in the expected format with seatId
+                wrapped_actions = [{'seatId': 1, 'action': action} for action in active_actions]
+                if wrapped_actions:
+                    actions_state = GameState({'actions': wrapped_actions})
+                    return_game_state.update(actions_state)
         return return_game_state
