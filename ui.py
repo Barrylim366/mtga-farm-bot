@@ -267,8 +267,10 @@ class ConfigManager:
                 "concede": {"x": 1714, "y": 814},
                 "attack_all": {"x": 2529, "y": 1131},
                 "opponent_avatar": {"x": 1720, "y": 295},
-                "hand_scan_p1": {"x": 994, "y": 1255},
-                "hand_scan_p2": {"x": 2421, "y": 1253}
+                "hand_scan_points": {
+                    "p1": {"x": 994, "y": 1255},
+                    "p2": {"x": 2421, "y": 1253}
+                }
             }
         }
 
