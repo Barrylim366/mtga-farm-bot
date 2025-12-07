@@ -209,22 +209,24 @@ class Controller(ControllerSecondary):
 
         # Check for successful actions in the log update
         if self.__action_success_callback:
-            try:
-                temp_dict = raw_dict.get('greToClientEvent', {})
-                temp_arr = temp_dict.get('greToClientMessages', [])
-                for message in temp_arr:
-                    if message.get('type') == "GREMessageType_GameStateMessage":
-                        msg_body = message.get('gameStateMessage', {})
-                        actions = msg_body.get('actions', [])
-                        for action_item in actions:
-                            # seatId 1 is usually the bot/local player
-                            if action_item.get('seatId') == 1:
-                                self.__action_success_callback(action_item.get('action', {}))
-            except Exception as e:
-                print(f"Error checking for action success: {e}")
+            # Pass to avoid log spam, as requested by user.
+            # The original implementation here was checking GameStateMessage actions
+            # which caused false positives for every action in the list.
+            pass
 
         turn_info_dict = self.updated_game_state.get_turn_info()
-        if self.updated_game_state.is_complete():
+        is_complete = self.updated_game_state.is_complete()
+
+        # Debug logging - write to bot.log (Added by me in previous turns, keeping it useful)
+        try:
+            with open("bot.log", "a") as f:
+                from datetime import datetime
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [CTRL] is_complete={is_complete}, decisionPlayer={turn_info_dict.get('decisionPlayer') if turn_info_dict else None}, has_mulled_keep={self.__has_mulled_keep}\n")
+        except Exception:
+            pass
+
+        if is_complete:
             self.__update_inst_id__grp_id_dict(self.updated_game_state.get_game_objects())
             if turn_info_dict['decisionPlayer'] == 1 and self.__has_mulled_keep:
                 # Cancel any existing timer before starting a new one

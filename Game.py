@@ -3,6 +3,7 @@ from AI.AIInterface import AIKernel
 from Controller.Utilities.GameState import GameState
 import AI.Utilities.CardInfo as CardInfo
 from datetime import datetime
+import traceback
 
 
 class Game:
@@ -10,113 +11,202 @@ class Game:
     def __init__(self, controller: ControllerSecondary, ai: AIKernel):
         self.ai = ai
         self.controller = controller
-        self.log_file = "bot.log"
-        self.last_turn_num = -1
-        self.last_active_player = -1
-        self.logged_actions = set() # To prevent duplicate logging of the same action ID
-        # Clear log file on start
-        with open(self.log_file, 'w') as f:
-            f.write("")
+        self.human_log_file = "human.log"
+        self.bot_log_file = "bot.log"
+        self.last_logged_turn = -1
+        self.game_started = False
+        self.starting_hand_logged = False
+
+        # Clear log files on start
+        with open(self.human_log_file, 'w') as f:
+            f.write("=== MTGA Bot Session Started ===\n")
+            f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 35 + "\n\n")
+        with open(self.bot_log_file, 'w') as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Bot session started\n")
 
     def start(self):
+        self._debug("Game.start() called")
         self.controller.start_game()
         self.controller.set_mulligan_decision_callback(self.mulligan_decision_method)
         self.controller.set_decision_callback(self.decision_method)
         self.controller.set_action_success_callback(self.on_action_success)
+        self._debug("All callbacks registered")
 
     def mulligan_decision_method(self, card_list):
+        self._debug(f"Mulligan decision called with {len(card_list)} cards")
+        self._human_log("Keeping hand")
+        self.game_started = True  # Mark game as started after mulligan
         keep = self.ai.generate_keep(card_list)
         self.controller.keep(keep)
 
-    def _log(self, message):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(self.log_file, 'a') as f:
+    def _human_log(self, message):
+        """Human-readable log - clean, simple messages"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        with open(self.human_log_file, 'a') as f:
             f.write(f"[{timestamp}] {message}\n")
 
+    def _debug(self, message):
+        """Debug log - detailed technical information"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        with open(self.bot_log_file, 'a') as f:
+            f.write(f"[{timestamp}] {message}\n")
+
+    def _get_card_id_str(self, instance_id):
+        """Get card ID string (instanceId, grpId) for logging"""
+        try:
+            grp_id = self.controller.get_inst_id_grp_id_dict().get(instance_id)
+            if grp_id:
+                return f"(inst={instance_id}, grp={grp_id})"
+        except Exception:
+            pass
+        return f"(inst={instance_id})"
+
     def on_action_success(self, action_dict):
-        """
-        Callback from Controller when an action is confirmed in the log.
-        """
-        action_type = action_dict.get('actionType', 'Unknown')
-        instance_id = action_dict.get('instanceId')
-        
-        # Unique key for this action: (ActionType, InstanceID)
-        # Using instance_id is generally safe for deduplication within a game.
-        action_key = (action_type, instance_id)
-        
-        if action_key in self.logged_actions:
-            return
-            
-        self.logged_actions.add(action_key)
-        
-        if action_type == 'ActionType_Cast':
-             action_desc = "spell"
-             if instance_id:
-                 grp_id = self.controller.get_inst_id_grp_id_dict().get(instance_id)
-                 card_info = CardInfo.get_card_info(grp_id)
-                 if card_info:
-                     types = card_info.get('types', [])
-                     if 'Creature' in types:
-                         action_desc = "creature"
-                     elif 'Instant' in types or 'Sorcery' in types:
-                         action_desc = "spell"
-                     elif 'Enchantment' in types:
-                         action_desc = "enchantment"
-                     elif 'Artifact' in types:
-                         action_desc = "artifact"
-                     elif 'Planeswalker' in types:
-                         action_desc = "planeswalker"
-             self._log(f"Casted {action_desc} successfully")
-             
-        elif action_type == 'ActionType_Play':
-             self._log("Played Land successfully")
+        """Callback from Controller - only debug logging"""
+        try:
+            action_type = action_dict.get('actionType', 'Unknown')
+            instance_id = action_dict.get('instanceId')
+            self._debug(f"on_action_success: type={action_type}, instanceId={instance_id}")
+        except Exception as e:
+            self._debug(f"ERROR in on_action_success: {e}")
 
     def decision_method(self, current_game_state: GameState):
-        # Logging Turn Info
-        turn_info = current_game_state.get_turn_info()
-        turn_num = turn_info['turnNumber']
-        active_player = turn_info['activePlayer']
+        # Don't do anything before game has started
+        if not self.game_started:
+            self._debug("decision_method called but game not started yet, ignoring")
+            return
 
-        if (turn_num != self.last_turn_num or active_player != self.last_active_player) and active_player == 1:
-            self.last_turn_num = turn_num
-            self.last_active_player = active_player
-            self._log(f"Turn {turn_num} (my turn):")
+        try:
+            self._debug("=" * 50)
+            self._debug("decision_method called")
 
-        move = self.ai.generate_move(current_game_state, self.controller.get_inst_id_grp_id_dict())
-        print(move)
-        move_name = list(move.keys())[0]
+            turn_info = current_game_state.get_turn_info()
+            if not turn_info:
+                self._debug("ERROR: turn_info is None!")
+                return
 
-        # Log Action
-        if move_name == 'cast':
-            inst_id = int(move[move_name][0])
-            # Logging is now handled by on_action_success for successful casts
-            self.controller.cast(inst_id)
-        elif move_name == 'attack':
-            self._log("Attacking...")
-            self.controller.attack(move[move_name][0])
-        elif move_name == 'all_attack':
-            self._log("Attacking all...")
-            self.controller.all_attack()
-        elif move_name == 'block':
-            self._log("Blocking...")
-            self.controller.block(move[move_name][0], move[move_name][1])
-        elif move_name == 'all_block':
-             self._log("Blocking all...")
-             self.controller.all_block()
-        elif move_name == 'select_target':
-            self._log("Selecting target...")
-            self.controller.select_target(move[move_name][0])
-        elif move_name == 'activate_ability':
-            self._log("Activating ability...")
-            self.controller.activate_ability(move[move_name][0], move[move_name][1])
-        elif move_name == 'resolve':
-            self.controller.resolve()
-            # self._log("Resolved priority") # Optional to reduce spam
-        elif move_name == 'auto_pass':
-            self.controller.auto_pass()
-            self._log("Auto passed")
-        elif move_name == 'unconditional_auto_pass':
-            self.controller.unconditional_auto_pass()
-            self._log("Unconditionally auto passed")
-        else:
-            print("Move that was generated was not valid... This should never be reached")
+            turn_num = turn_info.get('turnNumber', -1)
+            active_player = turn_info.get('activePlayer', -1)
+            phase = turn_info.get('phase', 'Unknown')
+            step = turn_info.get('step', 'Unknown')
+            decision_player = turn_info.get('decisionPlayer', -1)
+            priority_player = turn_info.get('priorityPlayer', -1)
+
+            self._debug(f"Turn info: turn={turn_num}, active={active_player}, phase={phase}, step={step}")
+            self._debug(f"Decision player={decision_player}, priority={priority_player}")
+
+            # Log new turn in human log (only once per turn, only for MY turns)
+            if turn_num != self.last_logged_turn and active_player == 1:
+                self.last_logged_turn = turn_num
+
+                # Log starting hand on first turn (when dict is populated)
+                if not self.starting_hand_logged:
+                    self.starting_hand_logged = True
+                    self._human_log("Starting hand:")
+                    try:
+                        inst_id_grp_id_dict = self.controller.get_inst_id_grp_id_dict()
+                        self._debug(f"Logging starting hand: {len(inst_id_grp_id_dict)} cards")
+                        for inst_id, grp_id in inst_id_grp_id_dict.items():
+                            card_info = CardInfo.get_card_info(grp_id)
+                            if card_info:
+                                types = card_info.get('types', [])
+                                type_str = '/'.join(types) if types else 'Unknown'
+                                self._human_log(f"  - {type_str} (inst={inst_id}, grp={grp_id})")
+                            else:
+                                self._human_log(f"  - Unknown (inst={inst_id}, grp={grp_id})")
+                    except Exception as e:
+                        self._debug(f"Error logging starting hand: {e}")
+
+                self._human_log(f"\n--- Turn {turn_num} (ME) ---")
+
+                # Get mana info from AI - only show if > 0 and turn > 1
+                if turn_num > 1:
+                    try:
+                        if hasattr(self.ai, 'get_mana_pool'):
+                            mana_pool = self.ai.get_mana_pool()
+                            mana_info = mana_pool.get_available_mana()
+                            total_mana = sum(mana_info.values())
+                            if total_mana > 0:
+                                self._human_log(f"Available Mana: {total_mana}")
+                    except Exception as e:
+                        self._debug(f"Could not get mana info: {e}")
+
+            # Get actions
+            try:
+                action_list = current_game_state.get_actions()
+                self._debug(f"Available actions: {len(action_list) if action_list else 0}")
+                if action_list:
+                    for i, action_wrapper in enumerate(action_list[:5]):
+                        action = action_wrapper.get('action', {})
+                        self._debug(f"  Action {i}: type={action.get('actionType')}, instanceId={action.get('instanceId')}")
+            except Exception as e:
+                self._debug(f"ERROR getting actions: {e}")
+                action_list = []
+
+            # Generate move
+            self._debug("Calling AI.generate_move()")
+            move = self.ai.generate_move(current_game_state, self.controller.get_inst_id_grp_id_dict())
+            self._debug(f"AI returned move: {move}")
+
+            if not move:
+                self._debug("ERROR: AI returned empty move!")
+                return
+
+            move_name = list(move.keys())[0]
+            self._debug(f"Executing move: {move_name}")
+
+            # Execute move
+            if move_name == 'cast':
+                inst_id = int(move[move_name][0])
+                card_id_str = self._get_card_id_str(inst_id)
+                self._debug(f"Casting card with instanceId={inst_id}")
+                grp_id = self.controller.get_inst_id_grp_id_dict().get(inst_id)
+                card_info = CardInfo.get_card_info(grp_id) if grp_id else None
+                if card_info:
+                    types = card_info.get('types', [])
+                    if 'Land' in types:
+                        self._human_log(f"  -> Play Land {card_id_str}")
+                    elif 'Creature' in types:
+                        self._human_log(f"  -> Cast Creature {card_id_str}")
+                    else:
+                        self._human_log(f"  -> Cast {card_id_str}")
+                else:
+                    self._human_log(f"  -> Cast {card_id_str}")
+                self.controller.cast(inst_id)
+            elif move_name == 'attack':
+                self._debug(f"Attacking with {move[move_name][0]}")
+                self.controller.attack(move[move_name][0])
+            elif move_name == 'all_attack':
+                self._human_log("  -> Attack All")
+                self._debug("Executing all_attack")
+                self.controller.all_attack()
+            elif move_name == 'block':
+                self._debug(f"Blocking: {move[move_name]}")
+                self.controller.block(move[move_name][0], move[move_name][1])
+            elif move_name == 'all_block':
+                self._human_log("  -> Block All")
+                self._debug("Executing all_block")
+                self.controller.all_block()
+            elif move_name == 'select_target':
+                self._debug(f"Selecting target: {move[move_name][0]}")
+                self.controller.select_target(move[move_name][0])
+            elif move_name == 'activate_ability':
+                self._debug(f"Activating ability: {move[move_name]}")
+                self.controller.activate_ability(move[move_name][0], move[move_name][1])
+            elif move_name == 'resolve':
+                self._debug("Resolving priority")
+                self.controller.resolve()
+            elif move_name == 'auto_pass':
+                self._debug("Auto passing")
+                self.controller.auto_pass()
+            elif move_name == 'unconditional_auto_pass':
+                self._debug("Unconditional auto pass")
+                self.controller.unconditional_auto_pass()
+            else:
+                self._debug(f"WARNING: Unknown move type: {move_name}")
+
+        except Exception as e:
+            self._debug(f"CRITICAL ERROR in decision_method: {e}")
+            self._debug(traceback.format_exc())
+            self._human_log(f"  [ERROR] Bot encountered an error: {e}")
