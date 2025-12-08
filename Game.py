@@ -4,6 +4,7 @@ from Controller.Utilities.GameState import GameState
 import AI.Utilities.CardInfo as CardInfo
 from datetime import datetime
 import traceback
+import bot_logger
 
 
 class Game:
@@ -22,8 +23,8 @@ class Game:
             f.write("=== MTGA Bot Session Started ===\n")
             f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("=" * 35 + "\n\n")
-        with open(self.bot_log_file, 'w') as f:
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Bot session started\n")
+        # Initialize bot.log with centralized logger
+        bot_logger.init_bot_log()
 
     def start(self):
         self._debug("Game.start() called")
@@ -38,6 +39,7 @@ class Game:
         self._human_log("Keeping hand")
         self.game_started = True  # Mark game as started after mulligan
         keep = self.ai.generate_keep(card_list)
+        bot_logger.log_mulligan_decision(keep, len(card_list))
         self.controller.keep(keep)
 
     def _human_log(self, message):
@@ -48,9 +50,7 @@ class Game:
 
     def _debug(self, message):
         """Debug log - detailed technical information"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        with open(self.bot_log_file, 'a') as f:
-            f.write(f"[{timestamp}] {message}\n")
+        bot_logger.log_info(message)
 
     def _get_card_id_str(self, instance_id):
         """Get card ID string (instanceId, grpId) for logging"""
@@ -154,6 +154,7 @@ class Game:
                 return
 
             move_name = list(move.keys())[0]
+            bot_logger.log_decision(move_name, move.get(move_name))
             self._debug(f"Executing move: {move_name}")
 
             # Execute move

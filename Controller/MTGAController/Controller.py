@@ -9,6 +9,7 @@ from Controller.MTGAController.LogReader import LogReader
 from pynput import mouse
 from pynput import keyboard
 from Controller.Utilities.GameState import GameState
+import bot_logger
 
 
 class Controller(ControllerSecondary):
@@ -126,6 +127,7 @@ class Controller(ControllerSecondary):
             if self.log_reader.has_new_line(self.patterns['hover_id']):
                 current_hovered_id = self.__parse_object_id_line(self.log_reader.get_latest_line_containing_pattern(
                     self.patterns['hover_id']))
+                bot_logger.log_hover(current_hovered_id)
                 print(str(current_hovered_id) + '|' + str(card_id))
             else:
                  # Break outer loop if we hit bounds without finding new log line
@@ -207,6 +209,9 @@ class Controller(ControllerSecondary):
         self.updated_game_state.update(game_state)
         print(self.updated_game_state)
 
+        # Log all parsed game state data to bot.log
+        bot_logger.log_game_state_update(self.updated_game_state.get_full_state())
+
         # Check for successful actions in the log update
         if self.__action_success_callback:
             # Pass to avoid log spam, as requested by user.
@@ -217,14 +222,11 @@ class Controller(ControllerSecondary):
         turn_info_dict = self.updated_game_state.get_turn_info()
         is_complete = self.updated_game_state.is_complete()
 
-        # Debug logging - write to bot.log (Added by me in previous turns, keeping it useful)
-        try:
-            with open("bot.log", "a") as f:
-                from datetime import datetime
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [CTRL] is_complete={is_complete}, decisionPlayer={turn_info_dict.get('decisionPlayer') if turn_info_dict else None}, has_mulled_keep={self.__has_mulled_keep}\n")
-        except Exception:
-            pass
+        # Log controller state
+        bot_logger.log_controller_event(
+            f"is_complete={is_complete}",
+            f"decisionPlayer={turn_info_dict.get('decisionPlayer') if turn_info_dict else None}, has_mulled_keep={self.__has_mulled_keep}"
+        )
 
         if is_complete:
             self.__update_inst_id__grp_id_dict(self.updated_game_state.get_game_objects())
@@ -262,6 +264,7 @@ class Controller(ControllerSecondary):
             elif message['type'] == "GREMessageType_ActionsAvailableReq":
                 req = message.get('actionsAvailableReq', {})
                 active_actions = req.get('actions', [])
+                bot_logger.log_actions_available(active_actions)
                 # Wrap each action in the expected format with seatId
                 wrapped_actions = [{'seatId': 1, 'action': action} for action in active_actions]
                 if wrapped_actions:

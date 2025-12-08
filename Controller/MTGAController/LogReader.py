@@ -1,5 +1,6 @@
 import threading
 import time
+import bot_logger
 
 
 class LogReader:
@@ -42,6 +43,7 @@ class LogReader:
                 if pattern in line:
                     self.__has_new_line[pattern] = True
                     self.__lines_containing_pattern[pattern] = line
+                    bot_logger.log_raw_line(pattern, line)
                     self.__callback(pattern, self.__lines_containing_pattern[pattern])
 
     def start_log_monitor(self):
@@ -73,6 +75,7 @@ class LogReader:
                     if pattern in line:
                         self.__has_new_line[pattern] = True
                         self.__lines_containing_pattern[pattern] = line
+                        bot_logger.log_raw_line(pattern, line)
                         self.__callback(pattern, self.__lines_containing_pattern[pattern])
                 line = log_file.readline()
         else:
