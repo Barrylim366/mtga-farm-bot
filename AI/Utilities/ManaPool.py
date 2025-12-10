@@ -130,3 +130,23 @@ class ManaPool:
     def get_total_mana(self):
         """Returns a copy of the total mana dict for debugging"""
         return self.__total_mana.copy()
+
+    def spend_mana(self, amount):
+        """
+        Spend a generic amount of mana (simplified CMC-based spending).
+        Deducts from available mana pool, prioritizing colored mana.
+        """
+        remaining = amount
+        # Spend colored mana first (in order: red, green, blue, black, white)
+        for color in ['red', 'green', 'blue', 'black', 'white']:
+            if remaining <= 0:
+                break
+            if self.__avail_mana[color] >= remaining:
+                self.__avail_mana[color] -= remaining
+                remaining = 0
+            else:
+                remaining -= self.__avail_mana[color]
+                self.__avail_mana[color] = 0
+        # Then spend generic if any left
+        if remaining > 0 and self.__avail_mana['generic'] >= remaining:
+            self.__avail_mana['generic'] -= remaining

@@ -140,6 +140,9 @@ class DummyAI(AIKernel):
                             if 'Creature' in card_types:
                                 if cmc <= total_avail:
                                     self._debug(f"CASTING: {card_name} (instanceId={instance_id})")
+                                    # Deduct mana spent on this creature
+                                    self.__mana_pool.spend_mana(cmc)
+                                    self._debug(f"Spent {cmc} mana, pool now: {self.__mana_pool.get_available_mana()}")
                                     move = {'cast': [instance_id]}
                                     return move
                                 else:
