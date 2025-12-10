@@ -66,6 +66,16 @@ class Game:
         self.controller.start_game_from_home_screen()
         self._debug("New game queued")
 
+        # Schedule retry queue click after 30 seconds if game hasn't started
+        threading.Timer(30.0, self._retry_queue_if_needed).start()
+
+    def _retry_queue_if_needed(self):
+        """Retry clicking queue button if game hasn't started yet"""
+        if not self.game_started:
+            self._debug("Game not started after 30s - retrying queue button")
+            self._human_log("Retrying queue...")
+            self.controller.start_game_from_home_screen()
+
     def mulligan_decision_method(self, card_list):
         self._debug(f"Mulligan decision called with {len(card_list)} cards")
         self._human_log("Keeping hand")
