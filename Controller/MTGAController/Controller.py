@@ -18,7 +18,8 @@ class Controller(ControllerSecondary):
         self.__decision_callback = None
         self.__mulligan_decision_callback = None
         self.__action_success_callback = None
-        self.__current_execution_thread = None
+        self.__decision_execution_thread = None
+        self.__mulligan_execution_thread = None
         self.__has_mulled_keep = False
         self.__intro_delay = 15
         self.__decision_delay = 4
@@ -248,9 +249,12 @@ class Controller(ControllerSecondary):
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         # Cancel any pending decision timers
-        if self.__current_execution_thread is not None:
-            self.__current_execution_thread.cancel()
-            self.__current_execution_thread = None
+        if self.__decision_execution_thread is not None:
+            self.__decision_execution_thread.cancel()
+            self.__decision_execution_thread = None
+        if self.__mulligan_execution_thread is not None:
+            self.__mulligan_execution_thread.cancel()
+            self.__mulligan_execution_thread = None
         # Reset all cached log data for fresh start
         self.log_reader.reset_all_patterns()
         bot_logger.log_info("Controller state reset complete")
@@ -274,7 +278,7 @@ class Controller(ControllerSecondary):
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
             # Wait a moment for end screen to fully appear, then dismiss it
-            threading.Timer(3.0, self.dismiss_end_screen).start()
+            threading.Timer(6.0, self.dismiss_end_screen).start()
         elif pattern == self.patterns["assign_damage"]:
             # Wait a small delay to ensure UI is ready
             threading.Timer(1.0, self.click_assign_damage_done).start()
@@ -312,20 +316,22 @@ class Controller(ControllerSecondary):
             self.__update_inst_id__grp_id_dict(self.updated_game_state.get_game_objects())
             if turn_info_dict['decisionPlayer'] == 1 and self.__has_mulled_keep:
                 # Cancel any existing timer before starting a new one
-                if self.__current_execution_thread is not None:
-                    self.__current_execution_thread.cancel()
-                self.__current_execution_thread = threading.Timer(self.__decision_delay,
+                if self.__decision_execution_thread is not None:
+                    self.__decision_execution_thread.cancel()
+                self.__decision_execution_thread = threading.Timer(self.__decision_delay,
                                                                   lambda:
                                                                   self.__decision_callback(self.updated_game_state))
-                self.__current_execution_thread.start()
+                self.__decision_execution_thread.start()
 
         # Start mulligan timer if we haven't made a mulligan decision yet
         # This needs to trigger regardless of is_complete to handle game restarts
         if not self.__has_mulled_keep and turn_info_dict and turn_info_dict.get('decisionPlayer') == 1:
-            self.__current_execution_thread = threading.Timer(self.__intro_delay,
+            if self.__mulligan_execution_thread is not None:
+                self.__mulligan_execution_thread.cancel()
+            self.__mulligan_execution_thread = threading.Timer(self.__intro_delay,
                                                               lambda:
                                                               self.__mulligan_decision_callback([]))
-            self.__current_execution_thread.start()
+            self.__mulligan_execution_thread.start()
             self.__has_mulled_keep = True
             print('making mull decision')
 
