@@ -61,6 +61,7 @@ class Controller(ControllerSecondary):
         self.__inst_id_grp_id_dict = {}
 
     def start_game_from_home_screen(self):
+        bot_logger.log_click(self.home_play_button_coors[0], self.home_play_button_coors[1], "QUEUE_BUTTON")
         self.mouse_controller.position = self.home_play_button_coors
         self.mouse_controller.press(Button.left)
         time.sleep(0.2)
@@ -90,40 +91,48 @@ class Controller(ControllerSecondary):
         self.log_reader.stop_log_monitor()
 
     def cast(self, card_id: int) -> None:
+        # Clear any stale hover events from previous scans
+        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+
         # Move above start point first to reset any hover states
-        self.mouse_controller.position = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+        reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+        bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_SCAN (target card_id={card_id})")
+        self.mouse_controller.position = reset_pos
         time.sleep(0.5)
+
         # Move to start of hand scan
+        bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SCAN")
         self.mouse_controller.position = self.hand_scan_p1
-        
+
         current_hovered_id = None
         start_x = self.hand_scan_p1[0]
         end_x = self.hand_scan_p2[0]
-        
+
         # Ensure we are scanning in the correct direction (left to right usually)
         direction = 1 if end_x > start_x else -1
-        
+
         while current_hovered_id != card_id:
             # Check if we have exceeded the scan area
             current_x = self.mouse_controller.position[0]
             if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                bot_logger.log_error(f"SCAN_FAILED: Card {card_id} not found. Scanned from x={start_x} to x={end_x}, ended at x={current_x}")
                 print(f"Scanned entire hand area but did not find card_id: {card_id}")
                 break
 
             # Move slightly to find next card
             # We move until we get a log update, or until we move a certain distance?
             # Original code waited for log update. We should do the same but with bounds check.
-            
+
             # Inner loop: move until log updates or bounds hit
             while not self.log_reader.has_new_line(self.patterns['hover_id']):
                 self.mouse_controller.move(self.cast_card_dist * direction, 0)
                 time.sleep(self.cast_speed)
-                
+
                 # Check bounds inside inner loop too
                 current_x = self.mouse_controller.position[0]
                 if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
                     break
-            
+
             if self.log_reader.has_new_line(self.patterns['hover_id']):
                 current_hovered_id = self.__parse_object_id_line(self.log_reader.get_latest_line_containing_pattern(
                     self.patterns['hover_id']))
@@ -134,16 +143,21 @@ class Controller(ControllerSecondary):
                  break
 
         if current_hovered_id == card_id:
+            click_pos = self.mouse_controller.position
+            bot_logger.log_click(click_pos[0], click_pos[1], f"CAST_CARD (id={card_id})")
             time.sleep(0.5)
             self.mouse_controller.click(Button.left, 1)
             time.sleep(0.1)
             self.mouse_controller.click(Button.left, 1)
             time.sleep(0.7)
-            
+
         # Reset position
-        self.mouse_controller.position = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+        reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+        bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
+        self.mouse_controller.position = reset_pos
 
     def all_attack(self) -> None:
+        bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "ATTACK_ALL")
         self.mouse_controller.position = self.main_br_button_coordinates
         self.mouse_controller.click(Button.left, 1)
         time.sleep(1)
@@ -152,12 +166,14 @@ class Controller(ControllerSecondary):
     def resolve(self) -> None:
         if self.updated_game_state.get_turn_info()['step'] != 'Step_DeclareAttack' \
                 or self.updated_game_state.get_turn_info()['activePlayer'] == 2:
-            self.mouse_controller.position = self.main_br_button_coordinates
+            pos = self.main_br_button_coordinates
         else:
-            self.mouse_controller.position = (
+            pos = (
                 self.main_br_button_coordinates[0],
                 self.main_br_button_coordinates[1] - 50,
             )
+        bot_logger.log_click(pos[0], pos[1], "RESOLVE")
+        self.mouse_controller.position = pos
         self.mouse_controller.click(Button.left, 1)
 
     def auto_pass(self) -> None:
@@ -177,8 +193,10 @@ class Controller(ControllerSecondary):
 
     def keep(self, keep: bool):
         if keep:
+            bot_logger.log_click(self.mulligan_keep_coors[0], self.mulligan_keep_coors[1], "KEEP_HAND")
             self.mouse_controller.position = self.mulligan_keep_coors
         else:
+            bot_logger.log_click(self.mulligan_mull_coors[0], self.mulligan_mull_coors[1], "MULLIGAN")
             self.mouse_controller.position = self.mulligan_mull_coors
         self.mouse_controller.click(Button.left)
 

@@ -151,3 +151,17 @@ def log_error(message: str):
     with _log_lock:
         with open(BOT_LOG_FILE, 'a') as f:
             f.write(f"[{_timestamp()}] [ERROR] {message}\n")
+
+
+def log_click(x: int, y: int, purpose: str):
+    """Log mouse click with absolute coordinates and purpose"""
+    with _log_lock:
+        with open(BOT_LOG_FILE, 'a') as f:
+            f.write(f"[{_timestamp()}] [CLICK] ({x}, {y}) - {purpose}\n")
+
+
+def log_move(x: int, y: int, purpose: str):
+    """Log mouse move with absolute coordinates and purpose"""
+    with _log_lock:
+        with open(BOT_LOG_FILE, 'a') as f:
+            f.write(f"[{_timestamp()}] [MOVE] ({x}, {y}) - {purpose}\n")

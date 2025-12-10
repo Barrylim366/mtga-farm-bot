@@ -65,6 +65,10 @@ class LogReader:
     def has_new_line(self, pattern):
         return self.__has_new_line[pattern]
 
+    def clear_new_line_flag(self, pattern):
+        """Clear the new line flag for a pattern - use before starting a new scan"""
+        self.__has_new_line[pattern] = False
+
     def full_log_read(self):
         """ Full read of the log so far """
         if not self.is_monitoring():
