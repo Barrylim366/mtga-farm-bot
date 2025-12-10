@@ -1,0 +1,53 @@
+{
+    "log_path": "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+    "screen_bounds": [
+        [
+            0,
+            0
+        ],
+        [
+            2560,
+            1440
+        ]
+    ],
+    "click_targets": {
+        "keep_hand": {
+            "x": 1876,
+            "y": 1060
+        },
+        "queue_button": {
+            "x": 2485,
+            "y": 1194
+        },
+        "next": {
+            "x": 2546,
+            "y": 1137
+        },
+        "concede": {
+            "x": 1714,
+            "y": 814
+        },
+        "attack_all": {
+            "x": 2529,
+            "y": 1131
+        },
+        "opponent_avatar": {
+            "x": 1720,
+            "y": 295
+        },
+        "assign_damage_done": {
+            "x": 1721,
+            "y": 1064
+        },
+        "hand_scan_points": {
+            "p1": {
+                "x": 994,
+                "y": 1255
+            },
+            "p2": {
+                "x": 2421,
+                "y": 1253
+            }
+        }
+    }
+}

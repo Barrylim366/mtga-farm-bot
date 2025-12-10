@@ -54,7 +54,8 @@ class CalibrationWindow(tk.Toplevel):
             "attack_all",
             "opponent_avatar",
             "hand_scan_p1",
-            "hand_scan_p2"
+            "hand_scan_p2",
+            "assign_damage_done"
         ]
 
         self.selected_button = tk.StringVar(value=self.button_options[0])
@@ -267,6 +268,7 @@ class ConfigManager:
                 "concede": {"x": 1714, "y": 814},
                 "attack_all": {"x": 2529, "y": 1131},
                 "opponent_avatar": {"x": 1720, "y": 295},
+                "assign_damage_done": {"x": 1280, "y": 720},
                 "hand_scan_points": {
                     "p1": {"x": 994, "y": 1255},
                     "p2": {"x": 2421, "y": 1253}

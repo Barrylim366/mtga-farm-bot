@@ -26,7 +26,8 @@ class Controller(ControllerSecondary):
         self.patterns = {
             'game_state': '"type": "GREMessageType_GameStateMessage"',
             'hover_id': 'objectId',
-            'match_completed': 'MatchGameRoomStateType_MatchCompleted'
+            'match_completed': 'MatchGameRoomStateType_MatchCompleted',
+            'assign_damage': '"type": "GREMessageType_AssignDamageReq"'
         }
         self.log_reader = LogReader(self.patterns.values(), log_path=log_path, callback=self.__log_callback)
         self.keyboard_controller = keyboard.Controller()
@@ -40,6 +41,7 @@ class Controller(ControllerSecondary):
         self.mulligan_mull_coors = (801, 870)
         self.player_button_coors = (1699, 996)
         self.home_play_button_coors = (1699, 996)
+        self.assign_damage_done_coors = (1280, 720)
         self.cast_card_dist = 10
         self.main_br_button_coordinates = (
             self.screen_bounds[1][0] - self.main_br_button_offset[0],
@@ -57,6 +59,8 @@ class Controller(ControllerSecondary):
                 self.player_button_coors = (click_targets["queue_button"]["x"], click_targets["queue_button"]["y"])
             if "next" in click_targets:
                 self.main_br_button_coordinates = (click_targets["next"]["x"], click_targets["next"]["y"])
+            if "assign_damage_done" in click_targets:
+                self.assign_damage_done_coors = (click_targets["assign_damage_done"]["x"], click_targets["assign_damage_done"]["y"])
             if "hand_scan_points" in click_targets:
                 self.hand_scan_p1 = (click_targets["hand_scan_points"]["p1"]["x"], click_targets["hand_scan_points"]["p1"]["y"])
                 self.hand_scan_p2 = (click_targets["hand_scan_points"]["p2"]["x"], click_targets["hand_scan_points"]["p2"]["y"])
@@ -208,6 +212,17 @@ class Controller(ControllerSecondary):
             self.mouse_controller.position = self.mulligan_mull_coors
         self.mouse_controller.click(Button.left)
 
+    def click_assign_damage_done(self):
+        """Click the Done button during damage assignment"""
+        bot_logger.log_click(self.assign_damage_done_coors[0], self.assign_damage_done_coors[1], "ASSIGN_DAMAGE_DONE")
+        self.mouse_controller.position = self.assign_damage_done_coors
+        time.sleep(0.5)
+        self.mouse_controller.click(Button.left)
+        time.sleep(0.2)
+        # Maybe click twice to be sure? The user said "click", usually one is enough but delays help.
+        # Just one click for now as per other methods.
+        bot_logger.log_info("Clicked Assign Damage Done button")
+
     def dismiss_end_screen(self):
         """Click to dismiss match end screen and return to main menu"""
         # Click in center of screen to dismiss end screen
@@ -260,6 +275,9 @@ class Controller(ControllerSecondary):
             bot_logger.log_info("Detected match completed event")
             # Wait a moment for end screen to fully appear, then dismiss it
             threading.Timer(3.0, self.dismiss_end_screen).start()
+        elif pattern == self.patterns["assign_damage"]:
+            # Wait a small delay to ensure UI is ready
+            threading.Timer(1.0, self.click_assign_damage_done).start()
 
     def __update_inst_id__grp_id_dict(self, object_dict_arr):
         for object_dict in object_dict_arr:
