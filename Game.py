@@ -4,6 +4,7 @@ from Controller.Utilities.GameState import GameState
 import AI.Utilities.CardInfo as CardInfo
 from datetime import datetime
 import traceback
+import threading
 import bot_logger
 
 
@@ -32,7 +33,38 @@ class Game:
         self.controller.set_mulligan_decision_callback(self.mulligan_decision_method)
         self.controller.set_decision_callback(self.decision_method)
         self.controller.set_action_success_callback(self.on_action_success)
+        self.controller.set_match_end_callback(self.on_match_end)
         self._debug("All callbacks registered")
+
+    def on_match_end(self):
+        """Called when a match ends - wait 20 seconds then start a new game"""
+        self._debug("Match ended - scheduling restart in 20 seconds")
+        self._human_log("\n=== MATCH ENDED ===")
+        self._human_log("Restarting in 20 seconds...\n")
+        threading.Timer(20.0, self._restart_game).start()
+
+    def _restart_game(self):
+        """Reset state and start a new game"""
+        self._debug("Restarting game...")
+        self._human_log("=== STARTING NEW GAME ===\n")
+
+        # Reset Game state
+        self.last_logged_turn = -1
+        self.game_started = False
+        self.starting_hand_logged = False
+
+        # Reset AI state
+        if hasattr(self.ai, 'reset'):
+            self.ai.reset()
+
+        # Reset Controller state
+        if hasattr(self.controller, 'reset_for_new_game'):
+            self.controller.reset_for_new_game()
+
+        # Start new game from home screen
+        self._debug("Clicking queue button to start new game")
+        self.controller.start_game_from_home_screen()
+        self._debug("New game queued")
 
     def mulligan_decision_method(self, card_list):
         self._debug(f"Mulligan decision called with {len(card_list)} cards")

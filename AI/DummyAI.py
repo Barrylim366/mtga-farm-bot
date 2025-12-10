@@ -14,6 +14,14 @@ class DummyAI(AIKernel):
         self.__mana_pool = ManaPool()
         self.__bot_log_file = "bot.log"
 
+    def reset(self):
+        """Reset AI state for a new game"""
+        self._debug("Resetting AI state for new game")
+        self.__current_turn_num = 0
+        self.__has_land_been_played_this_turn = False
+        self.__mana_pool = ManaPool()
+        self._debug("AI state reset complete")
+
     def _debug(self, message):
         """Debug log for AI decisions"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]

@@ -23,7 +23,11 @@ class Controller(ControllerSecondary):
         self.__intro_delay = 15
         self.__decision_delay = 4
         self.screen_bounds = screen_bounds
-        self.patterns = {'game_state': '"type": "GREMessageType_GameStateMessage"', 'hover_id': 'objectId'}
+        self.patterns = {
+            'game_state': '"type": "GREMessageType_GameStateMessage"',
+            'hover_id': 'objectId',
+            'match_completed': 'MatchGameRoomStateType_MatchCompleted'
+        }
         self.log_reader = LogReader(self.patterns.values(), log_path=log_path, callback=self.__log_callback)
         self.keyboard_controller = keyboard.Controller()
         self.mouse_controller = mouse.Controller()
@@ -59,6 +63,7 @@ class Controller(ControllerSecondary):
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
+        self.__match_end_callback = None
 
     def start_game_from_home_screen(self):
         bot_logger.log_click(self.home_play_button_coors[0], self.home_play_button_coors[1], "QUEUE_BUTTON")
@@ -86,6 +91,9 @@ class Controller(ControllerSecondary):
 
     def set_action_success_callback(self, method) -> None:
         self.__action_success_callback = method
+
+    def set_match_end_callback(self, method) -> None:
+        self.__match_end_callback = method
 
     def end_game(self) -> None:
         self.log_reader.stop_log_monitor()
@@ -200,6 +208,38 @@ class Controller(ControllerSecondary):
             self.mouse_controller.position = self.mulligan_mull_coors
         self.mouse_controller.click(Button.left)
 
+    def dismiss_end_screen(self):
+        """Click to dismiss match end screen and return to main menu"""
+        # Click in center of screen to dismiss end screen
+        center_x = (self.screen_bounds[0][0] + self.screen_bounds[1][0]) // 2
+        center_y = (self.screen_bounds[0][1] + self.screen_bounds[1][1]) // 2
+        bot_logger.log_click(center_x, center_y, "DISMISS_END_SCREEN")
+        self.mouse_controller.position = (center_x, center_y)
+        time.sleep(0.5)
+        self.mouse_controller.click(Button.left)
+        time.sleep(1)
+        # Click again in case first click wasn't enough
+        self.mouse_controller.click(Button.left)
+        bot_logger.log_info("Match completed - dismissed end screen")
+
+        # Call match end callback to trigger restart
+        if self.__match_end_callback:
+            self.__match_end_callback()
+
+    def reset_for_new_game(self):
+        """Reset controller state for a new game - complete fresh start"""
+        bot_logger.log_info("Resetting controller state for new game")
+        self.__has_mulled_keep = False
+        self.updated_game_state = GameState()
+        self.__inst_id_grp_id_dict = {}
+        # Cancel any pending decision timers
+        if self.__current_execution_thread is not None:
+            self.__current_execution_thread.cancel()
+            self.__current_execution_thread = None
+        # Reset all cached log data for fresh start
+        self.log_reader.reset_all_patterns()
+        bot_logger.log_info("Controller state reset complete")
+
     def get_inst_id_grp_id_dict(self):
         return self.__inst_id_grp_id_dict
 
@@ -216,6 +256,10 @@ class Controller(ControllerSecondary):
     def __log_callback(self, pattern: str, line_containing_pattern: str):
         if pattern == self.patterns["game_state"]:
             self.__update_game_state(json.loads(line_containing_pattern))
+        elif pattern == self.patterns["match_completed"]:
+            bot_logger.log_info("Detected match completed event")
+            # Wait a moment for end screen to fully appear, then dismiss it
+            threading.Timer(3.0, self.dismiss_end_screen).start()
 
     def __update_inst_id__grp_id_dict(self, object_dict_arr):
         for object_dict in object_dict_arr:
@@ -256,7 +300,10 @@ class Controller(ControllerSecondary):
                                                                   lambda:
                                                                   self.__decision_callback(self.updated_game_state))
                 self.__current_execution_thread.start()
-        elif not self.__has_mulled_keep:
+
+        # Start mulligan timer if we haven't made a mulligan decision yet
+        # This needs to trigger regardless of is_complete to handle game restarts
+        if not self.__has_mulled_keep and turn_info_dict and turn_info_dict.get('decisionPlayer') == 1:
             self.__current_execution_thread = threading.Timer(self.__intro_delay,
                                                               lambda:
                                                               self.__mulligan_decision_callback([]))
