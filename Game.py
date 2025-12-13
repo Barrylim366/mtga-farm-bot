@@ -41,6 +41,9 @@ class Game:
         self._debug("Match ended - scheduling restart in 20 seconds")
         self._human_log("\n=== MATCH ENDED ===")
         self._human_log("Restarting in 20 seconds...\n")
+        # Stop inactivity timer since match ended
+        if hasattr(self.controller, 'stop_inactivity_timer'):
+            self.controller.stop_inactivity_timer()
         threading.Timer(20.0, self._restart_game).start()
 
     def _restart_game(self):
@@ -121,6 +124,10 @@ class Game:
             self._debug("decision_method called but game not started yet, ignoring")
             return
 
+        # Reset inactivity timer since we're making a decision
+        if hasattr(self.controller, 'reset_inactivity_timer'):
+            self.controller.reset_inactivity_timer()
+
         try:
             self._debug("=" * 50)
             self._debug("decision_method called")
@@ -164,15 +171,20 @@ class Game:
 
                 self._human_log(f"\n--- Turn {turn_num} (ME) ---")
 
-                # Get mana info from AI - only show if > 0 and turn > 1
+                # Count available mana from ActionType_Activate_Mana actions (unique lands)
                 if turn_num > 1:
                     try:
-                        if hasattr(self.ai, 'get_mana_pool'):
-                            mana_pool = self.ai.get_mana_pool()
-                            mana_info = mana_pool.get_available_mana()
-                            total_mana = sum(mana_info.values())
-                            if total_mana > 0:
-                                self._human_log(f"Available Mana: {total_mana}")
+                        action_list = current_game_state.get_actions()
+                        if action_list:
+                            mana_sources = set()
+                            for aw in action_list:
+                                action = aw.get('action', {})
+                                if action.get('actionType') == 'ActionType_Activate_Mana':
+                                    inst_id = action.get('instanceId')
+                                    if inst_id:
+                                        mana_sources.add(inst_id)
+                            if len(mana_sources) > 0:
+                                self._human_log(f"Available Mana: {len(mana_sources)}")
                     except Exception as e:
                         self._debug(f"Could not get mana info: {e}")
 

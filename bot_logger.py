@@ -101,13 +101,18 @@ def log_actions_available(actions: list):
         with open(BOT_LOG_FILE, 'a') as f:
             ts = _timestamp()
             f.write(f"[{ts}] [ACTIONS_REQ] {len(actions)} actions available\n")
-            for i, action in enumerate(actions[:5]):
+            for i, action in enumerate(actions[:10]):
                 action_type = action.get('actionType', '?')
                 inst_id = action.get('instanceId', '?')
                 mana_cost = action.get('manaCost', [])
-                f.write(f"[{ts}] [ACTIONS_REQ] {i}: type={action_type}, instId={inst_id}, manaCost={mana_cost}\n")
-            if len(actions) > 5:
-                f.write(f"[{ts}] [ACTIONS_REQ] ... and {len(actions) - 5} more\n")
+                ability_grp_id = action.get('abilityGrpId', '?')
+                # Log abilityGrpId for mana actions to help verify the mapping
+                if action_type == 'ActionType_Activate_Mana':
+                    f.write(f"[{ts}] [ACTIONS_REQ] {i}: type={action_type}, instId={inst_id}, abilityGrpId={ability_grp_id}\n")
+                else:
+                    f.write(f"[{ts}] [ACTIONS_REQ] {i}: type={action_type}, instId={inst_id}, manaCost={mana_cost}\n")
+            if len(actions) > 10:
+                f.write(f"[{ts}] [ACTIONS_REQ] ... and {len(actions) - 10} more\n")
 
 
 def log_mulligan_decision(keep: bool, card_count: int):

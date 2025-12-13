@@ -1,7 +1,90 @@
 import json
+import urllib.request
+import urllib.error
 
 CARD_DATA_PATH = "cards.json"
+SCRYFALL_CACHE_PATH = "scryfall_cache.json"
 _card_data = []
+_scryfall_cache = {}
+
+# Load scryfall cache if it exists
+try:
+    with open(SCRYFALL_CACHE_PATH, 'r', encoding='utf-8') as f:
+        _scryfall_cache = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    _scryfall_cache = {}
+
+
+def _save_scryfall_cache():
+    """Save the scryfall cache to disk"""
+    try:
+        with open(SCRYFALL_CACHE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(_scryfall_cache, f)
+    except Exception:
+        pass
+
+
+def get_produced_mana_from_scryfall(arena_id: int):
+    """
+    Fetch the produced_mana colors for a card from Scryfall API.
+    Results are cached to avoid repeated API calls.
+
+    Parameters:
+        arena_id: The MTGA arena ID (grpId)
+    Returns:
+        List of color codes like ['B', 'G'] or None if not found
+    """
+    cache_key = str(arena_id)
+
+    # Check cache first
+    if cache_key in _scryfall_cache:
+        return _scryfall_cache[cache_key]
+
+    # Fetch from Scryfall
+    try:
+        url = f"https://api.scryfall.com/cards/arena/{arena_id}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'MTGABot/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            produced_mana = data.get('produced_mana', [])
+
+            # Cache the result
+            _scryfall_cache[cache_key] = produced_mana
+            _save_scryfall_cache()
+
+            return produced_mana
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, Exception):
+        # Cache None to avoid repeated failed requests
+        _scryfall_cache[cache_key] = None
+        _save_scryfall_cache()
+        return None
+
+
+def get_land_produced_colors(arena_id: int):
+    """
+    Get the mana colors a land can produce.
+
+    Parameters:
+        arena_id: The MTGA arena ID (grpId)
+    Returns:
+        Set of color strings like {'black', 'green'} or empty set if unknown
+    """
+    color_map = {'W': 'white', 'U': 'blue', 'B': 'black', 'R': 'red', 'G': 'green'}
+
+    # First, try to get from local card data using titleId for basic lands
+    card_info = get_card_info(arena_id)
+    if card_info:
+        title_id = card_info.get('titleId')
+        if title_id in BASIC_LAND_MANA_MAP:
+            return {BASIC_LAND_MANA_MAP[title_id]}
+
+    # For non-basic lands, try Scryfall
+    produced_mana = get_produced_mana_from_scryfall(arena_id)
+    if produced_mana:
+        return {color_map.get(c, c) for c in produced_mana if c in color_map}
+
+    return set()
+
 
 # Basic Land titleId to mana color mapping
 # All verified from player.log mana activation data
@@ -12,6 +95,29 @@ BASIC_LAND_MANA_MAP = {
     653: "black",    # Swamp (verified)
     1250: "red",     # Mountain (verified)
 }
+
+# abilityGrpId to mana color mapping for ActionType_Activate_Mana
+# These are the standard tap-for-mana ability IDs in MTGA
+# Verified from bot.log correlations:
+#   grpId=58449 (Mountain, titleId=1250) -> abilityGrpId=1004 = RED
+#   grpId=58453 (Forest, titleId=647) -> abilityGrpId=1005 = GREEN (was labeled as Swamp/Black)
+MANA_ABILITY_MAP = {
+    # TODO: Need to verify all these mappings from actual game data
+    # For now, leaving empty - we'll use Scryfall for all lands
+}
+
+
+def get_mana_color_from_ability(ability_grp_id: int):
+    """
+    Returns the mana color for a given abilityGrpId from ActionType_Activate_Mana.
+
+    Parameters:
+        ability_grp_id: The abilityGrpId from the action
+    Returns:
+        The mana color as a string ('white', 'blue', 'black', 'red', 'green')
+        or None if not a recognized mana ability
+    """
+    return MANA_ABILITY_MAP.get(ability_grp_id)
 
 try:
     with open(CARD_DATA_PATH, 'r', encoding='utf-8') as f:

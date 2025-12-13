@@ -20,6 +20,8 @@ class Controller(ControllerSecondary):
         self.__action_success_callback = None
         self.__decision_execution_thread = None
         self.__mulligan_execution_thread = None
+        self.__inactivity_timer = None
+        self.__inactivity_timeout = 180  # 3 minutes in seconds
         self.__has_mulled_keep = False
         self.__intro_delay = 15
         self.__decision_delay = 4
@@ -224,6 +226,36 @@ class Controller(ControllerSecondary):
         # Just one click for now as per other methods.
         bot_logger.log_info("Clicked Assign Damage Done button")
 
+    def __handle_inactivity_timeout(self):
+        """Handle timeout when no activity for 3 minutes - click next button repeatedly"""
+        bot_logger.log_info("TIMEOUT: No activity for 3 minutes - clicking next button")
+        self.resolve()  # Click the "next" button
+        # Reschedule timer to keep clicking until turn ends
+        self.__inactivity_timer = threading.Timer(
+            5.0,  # Click every 5 seconds until something happens
+            self.__handle_inactivity_timeout
+        )
+        self.__inactivity_timer.start()
+
+    def reset_inactivity_timer(self):
+        """Reset the inactivity timer - called when a decision is made"""
+        if self.__inactivity_timer is not None:
+            self.__inactivity_timer.cancel()
+            self.__inactivity_timer = None
+        # Start fresh 3-minute timer
+        self.__inactivity_timer = threading.Timer(
+            self.__inactivity_timeout,
+            self.__handle_inactivity_timeout
+        )
+        self.__inactivity_timer.start()
+        bot_logger.log_info("Inactivity timer reset (3 minutes)")
+
+    def stop_inactivity_timer(self):
+        """Stop the inactivity timer completely"""
+        if self.__inactivity_timer is not None:
+            self.__inactivity_timer.cancel()
+            self.__inactivity_timer = None
+
     def dismiss_end_screen(self):
         """Click to dismiss match end screen and return to main menu"""
         # Click in center of screen to dismiss end screen
@@ -255,6 +287,8 @@ class Controller(ControllerSecondary):
         if self.__mulligan_execution_thread is not None:
             self.__mulligan_execution_thread.cancel()
             self.__mulligan_execution_thread = None
+        # Cancel inactivity timer
+        self.stop_inactivity_timer()
         # Reset all cached log data for fresh start
         self.log_reader.reset_all_patterns()
         bot_logger.log_info("Controller state reset complete")
