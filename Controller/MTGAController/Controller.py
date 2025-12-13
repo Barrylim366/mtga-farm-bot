@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 
@@ -74,6 +75,7 @@ class Controller(ControllerSecondary):
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         self.__match_end_callback = None
+        self.__last_match_won: bool | None = None
         # MTGA system seat id for the local player (can be 1 or 2)
         self.__system_seat_id = None
 
@@ -273,13 +275,18 @@ class Controller(ControllerSecondary):
 
         # Call match end callback to trigger restart
         if self.__match_end_callback:
-            self.__match_end_callback()
+            try:
+                self.__match_end_callback(self.__last_match_won)
+            except TypeError:
+                # Backwards compatible: callback may not accept args
+                self.__match_end_callback()
 
     def reset_for_new_game(self):
         """Reset controller state for a new game - complete fresh start"""
         bot_logger.log_info("Resetting controller state for new game")
         self.__has_mulled_keep = False
         self.__system_seat_id = None
+        self.__last_match_won = None
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         # Cancel any pending decision timers
@@ -313,11 +320,52 @@ class Controller(ControllerSecondary):
             self.__update_game_state(json.loads(line_containing_pattern))
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
+            self.__last_match_won = self.__infer_match_won(line_containing_pattern)
             # Wait a moment for end screen to fully appear, then dismiss it
             threading.Timer(6.0, self.dismiss_end_screen).start()
         elif pattern == self.patterns["assign_damage"]:
             # Wait a small delay to ensure UI is ready
             threading.Timer(1.0, self.click_assign_damage_done).start()
+
+    @staticmethod
+    def __infer_match_won(line: str) -> bool | None:
+        """
+        Best-effort inference from a single log line. Returns True/False/None if unknown.
+        MTGA log formats vary by version; we try JSON parsing and fallback to keyword matching.
+        """
+        try:
+            start = line.find("{")
+            if start != -1:
+                payload = json.loads(line[start:])
+                stack = [payload]
+                strings: list[str] = []
+                while stack:
+                    cur = stack.pop()
+                    if isinstance(cur, dict):
+                        stack.extend(cur.values())
+                    elif isinstance(cur, list):
+                        stack.extend(cur)
+                    elif isinstance(cur, str):
+                        strings.append(cur)
+
+                joined = " ".join(strings).lower()
+                if re.search(r"\b(victory|win|won)\b", joined):
+                    if re.search(r"\b(defeat|loss|lose|lost)\b", joined):
+                        return None
+                    return True
+                if re.search(r"\b(defeat|loss|lose|lost)\b", joined):
+                    return False
+        except Exception:
+            pass
+
+        lower = line.lower()
+        has_win = re.search(r"\b(victory|win|won)\b", lower) is not None
+        has_loss = re.search(r"\b(defeat|loss|lose|lost)\b", lower) is not None
+        if has_win and not has_loss:
+            return True
+        if has_loss and not has_win:
+            return False
+        return None
 
     def __update_inst_id__grp_id_dict(self, object_dict_arr):
         for object_dict in object_dict_arr:

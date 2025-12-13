@@ -36,10 +36,14 @@ class Game:
         self.controller.set_match_end_callback(self.on_match_end)
         self._debug("All callbacks registered")
 
-    def on_match_end(self):
+    def on_match_end(self, won: bool | None = None):
         """Called when a match ends - wait 20 seconds then start a new game"""
         self._debug("Match ended - scheduling restart in 20 seconds")
         self._human_log("\n=== MATCH ENDED ===")
+        if won is True:
+            self._human_log("Result: WIN")
+        elif won is False:
+            self._human_log("Result: LOSS")
         self._human_log("Restarting in 20 seconds...\n")
         # Stop inactivity timer since match ended
         if hasattr(self.controller, 'stop_inactivity_timer'):

@@ -499,6 +499,9 @@ class MTGBotUI(tk.Tk):
         self.bot_running = False
         self.game = None
         self.bot_thread = None
+        self.session_games = 0
+        self.session_wins = 0
+        self.session_info_window = None
 
         self._setup_ui()
 
@@ -580,6 +583,14 @@ class MTGBotUI(tk.Tk):
                                        cursor="hand2")
         self.calibrate_btn.pack(pady=btn_pady)
 
+        # Session Info Button
+        self.session_btn = tk.Button(buttons_frame, text="Session info", command=self._open_session_info,
+                                     bg="#2d4f8a", fg="white", font=btn_font,
+                                     activebackground="#3a63aa", activeforeground="white",
+                                     relief=tk.FLAT, width=btn_width, height=btn_height,
+                                     cursor="hand2")
+        self.session_btn.pack(pady=btn_pady)
+
         # Status section
         status_frame = tk.Frame(main_frame, bg="#1e1e1e")
         status_frame.pack(fill=tk.X, pady=(30, 0))
@@ -615,6 +626,19 @@ class MTGBotUI(tk.Tk):
             self.game = Game(controller, ai)
             self.game.start()
 
+            # Wrap match end callback so we can update session stats and still restart games.
+            def _on_match_end(won=None):
+                self.session_games += 1
+                if won is True:
+                    self.session_wins += 1
+                self.after(0, self._update_session_info_window)
+                try:
+                    self.game.on_match_end(won)
+                except TypeError:
+                    self.game.on_match_end()
+
+            controller.set_match_end_callback(_on_match_end)
+
             # Keep running while bot is active
             while self.bot_running:
                 import time
@@ -644,6 +668,49 @@ class MTGBotUI(tk.Tk):
 
     def _open_calibration(self):
         CalibrationWindow(self, self.config_manager)
+
+    def _open_session_info(self):
+        if self.session_info_window and self.session_info_window.winfo_exists():
+            self.session_info_window.lift()
+            self.session_info_window.focus_force()
+            return
+        self.session_info_window = SessionInfoWindow(self, self.session_games, self.session_wins)
+
+    def _update_session_info_window(self):
+        if self.session_info_window and self.session_info_window.winfo_exists():
+            self.session_info_window.update_stats(self.session_games, self.session_wins)
+
+
+class SessionInfoWindow(tk.Toplevel):
+    def __init__(self, parent, games: int, wins: int):
+        super().__init__(parent)
+        self.title("Session info")
+        self.geometry("320x160")
+        self.resizable(False, False)
+        self.configure(bg="#2b2b2b")
+
+        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        title = tk.Label(frame, text="Current session", bg="#2b2b2b", fg="white",
+                         font=("Segoe UI", 12, "bold"))
+        title.pack(pady=(0, 12))
+
+        self.games_label = tk.Label(frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
+        self.games_label.pack(pady=4)
+
+        self.wins_label = tk.Label(frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
+        self.wins_label.pack(pady=4)
+
+        hint = tk.Label(frame, text="Resets when ui.py restarts", bg="#2b2b2b", fg="#aaaaaa",
+                        font=("Segoe UI", 9))
+        hint.pack(pady=(10, 0))
+
+        self.update_stats(games, wins)
+
+    def update_stats(self, games: int, wins: int):
+        self.games_label.config(text=f"Games played: {games}")
+        self.wins_label.config(text=f"Win: {wins}")
 
 
 def main():
