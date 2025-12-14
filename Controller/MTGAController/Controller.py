@@ -132,6 +132,9 @@ class Controller(ControllerSecondary):
 
         # Ensure we are scanning in the correct direction (left to right usually)
         direction = 1 if end_x > start_x else -1
+        total_dx = (end_x - start_x) if end_x != start_x else 1
+        start_y = self.hand_scan_p1[1]
+        end_y = self.hand_scan_p2[1]
 
         while current_hovered_id != card_id:
             # Check if we have exceeded the scan area
@@ -147,7 +150,18 @@ class Controller(ControllerSecondary):
 
             # Inner loop: move until log updates or bounds hit
             while not self.log_reader.has_new_line(self.patterns['hover_id']):
-                self.input.move_rel(self.cast_card_dist * direction, 0)
+                step_dx = self.cast_card_dist * direction
+                pos = self.input.position()
+                next_x = pos.x + step_dx
+                # Follow a (potentially sloped) scan line from p1 -> p2 to better match fanned hands.
+                t = (next_x - start_x) / total_dx
+                if t < 0:
+                    t = 0
+                elif t > 1:
+                    t = 1
+                desired_y = int(round(start_y + t * (end_y - start_y)))
+                dy = desired_y - pos.y
+                self.input.move_rel(step_dx, dy)
                 time.sleep(self.cast_speed)
 
                 # Check bounds inside inner loop too
@@ -156,12 +170,19 @@ class Controller(ControllerSecondary):
                     break
 
             if self.log_reader.has_new_line(self.patterns['hover_id']):
-                current_hovered_id = self.__parse_object_id_line(self.log_reader.get_latest_line_containing_pattern(
-                    self.patterns['hover_id']))
+                parsed = self.__parse_object_id_line(
+                    self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                )
+                if parsed is None:
+                    continue
+                current_hovered_id = parsed
                 bot_logger.log_hover(current_hovered_id)
                 print(str(current_hovered_id) + '|' + str(card_id))
             else:
                  # Break outer loop if we hit bounds without finding new log line
+                 bot_logger.log_error(
+                     f"SCAN_STOPPED: No hover update before bounds (target={card_id}, start=({start_x},{start_y}), end=({end_x},{end_y}))"
+                 )
                  break
 
         if current_hovered_id == card_id:
@@ -307,13 +328,32 @@ class Controller(ControllerSecondary):
 
     @staticmethod
     def __parse_object_id_line(line):
-        number_string = ""
-        i = 0
-        while i < len(line):
-            if line[i].isnumeric():
-                number_string = number_string + line[i]
-            i = i + 1
-        return int(number_string)
+        """
+        Extracts `objectId` from log lines.
+        MTGA logs sometimes emit full JSON lines, sometimes fragments like `"objectId": 123`.
+        """
+        if not line:
+            return None
+        m = re.search(r'"objectId"\s*:\s*(\d+)', line)
+        if m:
+            return int(m.group(1))
+        try:
+            start = line.find("{")
+            if start != -1:
+                payload = json.loads(line[start:])
+                # Look for the first objectId key in nested dicts
+                stack = [payload]
+                while stack:
+                    cur = stack.pop()
+                    if isinstance(cur, dict):
+                        if "objectId" in cur and isinstance(cur["objectId"], int):
+                            return cur["objectId"]
+                        stack.extend(cur.values())
+                    elif isinstance(cur, list):
+                        stack.extend(cur)
+        except Exception:
+            return None
+        return None
 
     def __log_callback(self, pattern: str, line_containing_pattern: str):
         if pattern == self.patterns["game_state"]:
