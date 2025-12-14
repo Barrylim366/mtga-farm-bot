@@ -502,7 +502,7 @@ class MTGBotUI(tk.Tk):
         self.bot_thread = None
         self.session_games = 0
         self.session_wins = 0
-        self.session_info_window = None
+        self.settings_window = None
 
         self._setup_ui()
 
@@ -588,8 +588,8 @@ class MTGBotUI(tk.Tk):
                                        cursor="hand2")
         self.calibrate_btn.pack(pady=btn_pady)
 
-        # Session Info Button
-        self.session_btn = tk.Button(buttons_frame, text="Session info", command=self._open_session_info,
+        # Settings Button
+        self.session_btn = tk.Button(buttons_frame, text="Settings", command=self._open_settings,
                                      bg="#2d4f8a", fg="white", font=btn_font,
                                      activebackground="#3a63aa", activeforeground="white",
                                      relief=tk.FLAT, width=btn_width, height=btn_height,
@@ -636,7 +636,7 @@ class MTGBotUI(tk.Tk):
                 self.session_games += 1
                 if won is True:
                     self.session_wins += 1
-                self.after(0, self._update_session_info_window)
+                self.after(0, self._update_settings_window)
                 try:
                     self.game.on_match_end(won)
                 except TypeError:
@@ -674,25 +674,26 @@ class MTGBotUI(tk.Tk):
     def _open_calibration(self):
         CalibrationWindow(self, self.config_manager)
 
-    def _open_session_info(self):
-        if self.session_info_window and self.session_info_window.winfo_exists():
-            self.session_info_window.lift()
-            self.session_info_window.focus_force()
+    def _open_settings(self):
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            self.settings_window.focus_force()
             return
-        self.session_info_window = SessionInfoWindow(self, self.session_games, self.session_wins)
+        self.settings_window = SettingsWindow(self, self.session_games, self.session_wins)
 
-    def _update_session_info_window(self):
-        if self.session_info_window and self.session_info_window.winfo_exists():
-            self.session_info_window.update_stats(self.session_games, self.session_wins)
+    def _update_settings_window(self):
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.update_stats(self.session_games, self.session_wins)
 
 
-class SessionInfoWindow(tk.Toplevel):
+class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, games: int, wins: int):
         super().__init__(parent)
-        self.title("Session info")
-        self.geometry("320x160")
+        self.title("Settings")
+        self.geometry("360x260")
         self.resizable(False, False)
         self.configure(bg="#2b2b2b")
+        self._log_window = None
 
         frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -709,7 +710,29 @@ class SessionInfoWindow(tk.Toplevel):
 
         hint = tk.Label(frame, text="Resets when ui.py restarts", bg="#2b2b2b", fg="#aaaaaa",
                         font=("Segoe UI", 9))
-        hint.pack(pady=(10, 0))
+        hint.pack(pady=(10, 12))
+
+        sep = tk.Frame(frame, bg="#4a4a4a", height=1)
+        sep.pack(fill=tk.X, pady=(0, 12))
+
+        log_row = tk.Frame(frame, bg="#2b2b2b")
+        log_row.pack(fill=tk.X)
+
+        log_label = tk.Label(log_row, text="Show Log", bg="#2b2b2b", fg="white", font=("Segoe UI", 10))
+        log_label.pack(side=tk.LEFT)
+
+        self.show_log_var = tk.BooleanVar(value=False)
+        show_log_cb = tk.Checkbutton(
+            log_row,
+            variable=self.show_log_var,
+            command=self._toggle_log_window,
+            bg="#2b2b2b",
+            fg="white",
+            activebackground="#2b2b2b",
+            activeforeground="white",
+            selectcolor="#2b2b2b",
+        )
+        show_log_cb.pack(side=tk.LEFT, padx=(10, 0))
 
         self.update_stats(games, wins)
 
@@ -717,6 +740,74 @@ class SessionInfoWindow(tk.Toplevel):
         self.games_label.config(text=f"Games played: {games}")
         self.wins_label.config(text=f"Win: {wins}")
 
+    def _toggle_log_window(self):
+        if self.show_log_var.get():
+            if self._log_window and self._log_window.winfo_exists():
+                self._log_window.lift()
+                return
+            self._log_window = LogWindow(self, "human.log")
+        else:
+            if self._log_window and self._log_window.winfo_exists():
+                self._log_window.destroy()
+            self._log_window = None
+
+    def destroy(self):
+        try:
+            if self._log_window and self._log_window.winfo_exists():
+                self._log_window.destroy()
+        finally:
+            super().destroy()
+
+
+class LogWindow(tk.Toplevel):
+    def __init__(self, parent, log_path: str):
+        super().__init__(parent)
+        self.title(log_path)
+        self.geometry("800x500")
+        self.resizable(True, True)
+        self.configure(bg="#1e1e1e")
+        self._log_path = log_path
+        self._stopped = False
+
+        frame = tk.Frame(self, bg="#1e1e1e", padx=12, pady=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        self.text = tk.Text(frame, wrap=tk.NONE, bg="#111111", fg="#dddddd", insertbackground="#dddddd")
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        self.text.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        self.text.config(state=tk.DISABLED)
+        self._refresh()
+
+    def _refresh(self):
+        if self._stopped:
+            return
+        try:
+            with open(self._log_path, "r") as f:
+                content = f.read()
+        except Exception as e:
+            content = f"(unable to read {self._log_path}: {e})"
+
+        at_bottom = self.text.yview()[1] >= 0.999
+        self.text.config(state=tk.NORMAL)
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", content)
+        self.text.config(state=tk.DISABLED)
+        if at_bottom:
+            self.text.see(tk.END)
+
+        self.after(1000, self._refresh)
+
+    def destroy(self):
+        self._stopped = True
+        super().destroy()
 
 def main():
     app = MTGBotUI()
