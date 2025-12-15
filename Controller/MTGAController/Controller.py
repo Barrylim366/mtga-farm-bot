@@ -207,17 +207,24 @@ class Controller(ControllerSecondary):
         self.input.left_click(1)
 
     def resolve(self) -> None:
-        if self.updated_game_state.get_turn_info()['step'] != 'Step_DeclareAttack' \
-                or self.updated_game_state.get_turn_info()['activePlayer'] == 2:
-            pos = self.main_br_button_coordinates
-        else:
-            pos = (
-                self.main_br_button_coordinates[0],
-                self.main_br_button_coordinates[1] - 50,
-            )
-        bot_logger.log_click(pos[0], pos[1], "RESOLVE")
-        self.input.move_abs(pos[0], pos[1])
-        self.input.left_click(1)
+        turn_info = self.updated_game_state.get_turn_info() or {}
+        my_seat = self.__system_seat_id or turn_info.get('decisionPlayer') or 1
+
+        # MTGA's bottom-right "pass/next/resolve/no-blocks" button sometimes shifts vertically during
+        # opponent DeclareAttack. Historically we clicked slightly above to compensate, but that can
+        # miss depending on UI scale/layout. Use the calibrated button position first, then a small
+        # upward fallback only for that specific case.
+        positions = [self.main_br_button_coordinates]
+        if turn_info.get('step') == 'Step_DeclareAttack' and turn_info.get('activePlayer') != my_seat:
+            fallback_y = self.main_br_button_coordinates[1] - 50
+            min_y = self.screen_bounds[0][1]
+            positions.append((self.main_br_button_coordinates[0], max(min_y, fallback_y)))
+
+        for pos in positions:
+            bot_logger.log_click(pos[0], pos[1], "RESOLVE")
+            self.input.move_abs(pos[0], pos[1])
+            self.input.left_click(1)
+            time.sleep(0.05)
 
     def auto_pass(self) -> None:
         self.input.tap_enter()
