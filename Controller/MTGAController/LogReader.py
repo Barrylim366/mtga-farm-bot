@@ -53,7 +53,12 @@ class LogReader:
 
     def stop_log_monitor(self):
         self.__stop_monitor = True
-        self.__log_monitor_thread.join()
+        if self.__log_monitor_thread is None:
+            return
+        if threading.current_thread() is self.__log_monitor_thread:
+            return
+        if self.__log_monitor_thread.is_alive():
+            self.__log_monitor_thread.join(timeout=5)
 
     def is_monitoring(self):
         return self.__log_monitor_thread is not None and self.__log_monitor_thread.is_alive()

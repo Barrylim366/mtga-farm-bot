@@ -50,7 +50,7 @@ class DummyAI(AIKernel):
                         mana_sources[instance_id] = set()
 
                     # Use Scryfall to get produced mana colors for ALL lands
-                    grp_id = inst_id_grp_id_dict.get(instance_id)
+                    grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
                     if grp_id:
                         produced_colors = CardInfo.get_land_produced_colors(grp_id)
                         if produced_colors:
@@ -208,7 +208,7 @@ class DummyAI(AIKernel):
                         if action.get('actionType') == 'ActionType_Cast':
                             instance_id = action.get('instanceId')
                             action_mana_cost = action.get('manaCost', [])
-                            grp_id = inst_id_grp_id_dict.get(instance_id)
+                            grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
                             card_info = CardInfo.get_card_info(grp_id)
 
                             if not card_info:

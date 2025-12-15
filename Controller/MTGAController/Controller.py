@@ -110,7 +110,35 @@ class Controller(ControllerSecondary):
         self.__match_end_callback = method
 
     def end_game(self) -> None:
-        self.log_reader.stop_log_monitor()
+        # Prevent any future decisions / restarts from firing after a UI stop.
+        if self.__decision_execution_thread is not None:
+            try:
+                self.__decision_execution_thread.cancel()
+            except Exception:
+                pass
+            self.__decision_execution_thread = None
+        if self.__mulligan_execution_thread is not None:
+            try:
+                self.__mulligan_execution_thread.cancel()
+            except Exception:
+                pass
+            self.__mulligan_execution_thread = None
+
+        try:
+            self.stop_inactivity_timer()
+        except Exception:
+            pass
+
+        self.__decision_callback = None
+        self.__mulligan_decision_callback = None
+        self.__action_success_callback = None
+
+        try:
+            if hasattr(self.log_reader, "is_monitoring") and self.log_reader.is_monitoring():
+                self.log_reader.stop_log_monitor()
+        except Exception:
+            # UI stop should never crash; at worst the monitor thread will exit on process end.
+            pass
 
     def cast(self, card_id: int) -> None:
         # Clear any stale hover events from previous scans

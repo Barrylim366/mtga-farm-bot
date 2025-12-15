@@ -661,7 +661,7 @@ class MTGBotUI(tk.Tk):
 
         if self.game:
             try:
-                self.game.controller.end_game()
+                self.game.stop()
             except:
                 pass
             self.game = None
