@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import threading
 import time
@@ -30,6 +31,7 @@ class Controller(ControllerSecondary):
             'match_completed': 'MatchGameRoomStateType_MatchCompleted',
             'assign_damage': '"type": "GREMessageType_AssignDamageReq"',
             'declare_attackers': '"type": "GREMessageType_DeclareAttackersReq"',
+            'select_n': '"type": "GREMessageType_SelectNReq"',
         }
         self.log_reader = LogReader(self.patterns.values(), log_path=log_path, callback=self.__log_callback)
         try:
@@ -255,6 +257,84 @@ class Controller(ControllerSecondary):
         time.sleep(0.2)
         self.input.left_click(1)
         self.__attack_target_required = False
+    
+    def select_hand_card(self, card_id: int, clicks: int = 1) -> bool:
+        """Select a card in hand by hovering until objectId matches, then click."""
+        # Clear any stale hover events from previous scans
+        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+
+        # Move above start point first to reset any hover states
+        reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+        bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_HAND_SELECT (target card_id={card_id})")
+        self.input.move_abs(reset_pos[0], reset_pos[1])
+        time.sleep(0.3)
+
+        # Move to start of hand scan
+        bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SELECT_SCAN")
+        self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
+
+        current_hovered_id = None
+        start_x = self.hand_scan_p1[0]
+        end_x = self.hand_scan_p2[0]
+
+        # Ensure we are scanning in the correct direction (left to right usually)
+        direction = 1 if end_x > start_x else -1
+        total_dx = (end_x - start_x) if end_x != start_x else 1
+        start_y = self.hand_scan_p1[1]
+        end_y = self.hand_scan_p2[1]
+
+        while current_hovered_id != card_id:
+            current_x = self.input.position().x
+            if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                bot_logger.log_error(
+                    f"HAND_SELECT_FAILED: Card {card_id} not found. Scanned x={start_x}..{end_x}, end={current_x}"
+                )
+                return False
+
+            while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                step_dx = self.cast_card_dist * direction
+                pos = self.input.position()
+                next_x = pos.x + step_dx
+                t = (next_x - start_x) / total_dx
+                if t < 0:
+                    t = 0
+                elif t > 1:
+                    t = 1
+                desired_y = int(round(start_y + t * (end_y - start_y)))
+                dy = desired_y - pos.y
+                self.input.move_rel(step_dx, dy)
+                time.sleep(self.cast_speed)
+
+                current_x = self.input.position().x
+                if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                    break
+
+            if self.log_reader.has_new_line(self.patterns['hover_id']):
+                parsed = self.__parse_object_id_line(
+                    self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                )
+                if parsed is None:
+                    continue
+                current_hovered_id = parsed
+                bot_logger.log_hover(current_hovered_id)
+            else:
+                bot_logger.log_error(
+                    f"HAND_SELECT_STOPPED: No hover update before bounds (target={card_id})"
+                )
+                return False
+
+        click_pos = self.input.position()
+        bot_logger.log_click(click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})")
+        for _ in range(max(1, int(clicks))):
+            self.input.left_click(1)
+            time.sleep(0.1)
+        return True
+
+    def submit_selection(self) -> None:
+        bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "SUBMIT_SELECTION")
+        self.input.move_abs(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1])
+        time.sleep(0.1)
+        self.input.left_click(1)
 
     def resolve(self) -> None:
         turn_info = self.updated_game_state.get_turn_info() or {}
@@ -428,6 +508,44 @@ class Controller(ControllerSecondary):
             threading.Timer(1.0, self.click_assign_damage_done).start()
         elif pattern == self.patterns["declare_attackers"]:
             self.__handle_declare_attackers_req(line_containing_pattern)
+        elif pattern == self.patterns["select_n"]:
+            self.__handle_select_n_req(line_containing_pattern)
+
+    def __handle_select_n_req(self, line: str) -> None:
+        try:
+            start = line.find("{")
+            if start == -1:
+                return
+            payload = json.loads(line[start:])
+            messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+            for message in messages:
+                if message.get("type") != "GREMessageType_SelectNReq":
+                    continue
+                seat_ids = message.get("systemSeatIds") or []
+                if self.__system_seat_id is not None and self.__system_seat_id not in seat_ids:
+                    continue
+                req = message.get("selectNReq", {})
+                ids = list(req.get("ids", []) or [])
+                if not ids:
+                    continue
+                min_sel = int(req.get("minSel", 1))
+                if min_sel < 1:
+                    min_sel = 1
+                random.shuffle(ids)
+
+                def _do_selection():
+                    selected = 0
+                    for card_id in ids:
+                        if selected >= min_sel:
+                            break
+                        if self.select_hand_card(card_id, clicks=1):
+                            selected += 1
+                            time.sleep(0.2)
+                    self.submit_selection()
+
+                threading.Timer(0.5, _do_selection).start()
+        except Exception as e:
+            bot_logger.log_error(f"Failed to handle SelectNReq: {e}")
 
     def __handle_declare_attackers_req(self, line: str) -> None:
         try:
