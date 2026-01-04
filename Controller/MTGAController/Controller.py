@@ -28,7 +28,8 @@ class Controller(ControllerSecondary):
             'game_state': '"type": "GREMessageType_GameStateMessage"',
             'hover_id': 'objectId',
             'match_completed': 'MatchGameRoomStateType_MatchCompleted',
-            'assign_damage': '"type": "GREMessageType_AssignDamageReq"'
+            'assign_damage': '"type": "GREMessageType_AssignDamageReq"',
+            'declare_attackers': '"type": "GREMessageType_DeclareAttackersReq"',
         }
         self.log_reader = LogReader(self.patterns.values(), log_path=log_path, callback=self.__log_callback)
         try:
@@ -49,6 +50,10 @@ class Controller(ControllerSecondary):
         self.player_button_coors = (1699, 996)
         self.home_play_button_coors = (1699, 996)
         self.assign_damage_done_coors = (1280, 720)
+        self.opponent_avatar_coors = (
+            int(self.screen_bounds[1][0] * 0.67),
+            int(self.screen_bounds[1][1] * 0.2),
+        )
         self.cast_card_dist = 10
         self.main_br_button_coordinates = (
             self.screen_bounds[1][0] - self.main_br_button_offset[0],
@@ -68,6 +73,8 @@ class Controller(ControllerSecondary):
                 self.main_br_button_coordinates = (click_targets["next"]["x"], click_targets["next"]["y"])
             if "assign_damage_done" in click_targets:
                 self.assign_damage_done_coors = (click_targets["assign_damage_done"]["x"], click_targets["assign_damage_done"]["y"])
+            if "opponent_avatar" in click_targets:
+                self.opponent_avatar_coors = (click_targets["opponent_avatar"]["x"], click_targets["opponent_avatar"]["y"])
             if "hand_scan_points" in click_targets:
                 self.hand_scan_p1 = (click_targets["hand_scan_points"]["p1"]["x"], click_targets["hand_scan_points"]["p1"]["y"])
                 self.hand_scan_p2 = (click_targets["hand_scan_points"]["p2"]["x"], click_targets["hand_scan_points"]["p2"]["y"])
@@ -76,6 +83,7 @@ class Controller(ControllerSecondary):
         self.__inst_id_grp_id_dict = {}
         self.__match_end_callback = None
         self.__last_match_won: bool | None = None
+        self.__attack_target_required = False
         # MTGA system seat id for the local player (can be 1 or 2)
         self.__system_seat_id = None
 
@@ -233,6 +241,20 @@ class Controller(ControllerSecondary):
         self.input.left_click(1)
         time.sleep(1)
         self.input.left_click(1)
+        if self.__attack_target_required:
+            time.sleep(0.3)
+            self.select_target(-1)
+
+    def select_target(self, target_id: int) -> None:
+        bot_logger.log_click(
+            self.opponent_avatar_coors[0],
+            self.opponent_avatar_coors[1],
+            f"SELECT_OPPONENT_AVATAR (target_id={target_id})",
+        )
+        self.input.move_abs(self.opponent_avatar_coors[0], self.opponent_avatar_coors[1])
+        time.sleep(0.2)
+        self.input.left_click(1)
+        self.__attack_target_required = False
 
     def resolve(self) -> None:
         turn_info = self.updated_game_state.get_turn_info() or {}
@@ -343,6 +365,7 @@ class Controller(ControllerSecondary):
         self.__has_mulled_keep = False
         self.__system_seat_id = None
         self.__last_match_won = None
+        self.__attack_target_required = False
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         # Cancel any pending decision timers
@@ -395,12 +418,38 @@ class Controller(ControllerSecondary):
             self.__update_game_state(json.loads(line_containing_pattern))
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
-            self.__last_match_won = self.__infer_match_won(line_containing_pattern)
+            outcome = self.__infer_match_won(line_containing_pattern)
+            if outcome is not None:
+                self.__last_match_won = outcome
             # Wait a moment for end screen to fully appear, then dismiss it
             threading.Timer(6.0, self.dismiss_end_screen).start()
         elif pattern == self.patterns["assign_damage"]:
             # Wait a small delay to ensure UI is ready
             threading.Timer(1.0, self.click_assign_damage_done).start()
+        elif pattern == self.patterns["declare_attackers"]:
+            self.__handle_declare_attackers_req(line_containing_pattern)
+
+    def __handle_declare_attackers_req(self, line: str) -> None:
+        try:
+            start = line.find("{")
+            if start == -1:
+                return
+            payload = json.loads(line[start:])
+            messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+            for message in messages:
+                if message.get("type") != "GREMessageType_DeclareAttackersReq":
+                    continue
+                req = message.get("declareAttackersReq", {})
+                attackers = req.get("attackers", []) or req.get("qualifiedAttackers", [])
+                for attacker in attackers:
+                    recipients = attacker.get("legalDamageRecipients", []) or []
+                    for rec in recipients:
+                        if rec.get("type") == "DamageRecType_PlanesWalker":
+                            self.__attack_target_required = True
+                            bot_logger.log_info("DeclareAttackersReq: planeswalker target present")
+                            return
+        except Exception as e:
+            bot_logger.log_error(f"Failed to parse DeclareAttackersReq: {e}")
 
     @staticmethod
     def __infer_match_won(line: str) -> bool | None:
@@ -408,6 +457,21 @@ class Controller(ControllerSecondary):
         Best-effort inference from a single log line. Returns True/False/None if unknown.
         MTGA log formats vary by version; we try JSON parsing and fallback to keyword matching.
         """
+        def _has_token(text: str, token: str) -> bool:
+            return re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", text) is not None
+
+        def _scan_text(text: str) -> bool | None:
+            lowered = text.lower()
+            win_tokens = ("victory", "win", "won")
+            loss_tokens = ("defeat", "loss", "lose", "lost")
+            has_win = any(_has_token(lowered, t) for t in win_tokens)
+            has_loss = any(_has_token(lowered, t) for t in loss_tokens)
+            if has_win and not has_loss:
+                return True
+            if has_loss and not has_win:
+                return False
+            return None
+
         try:
             start = line.find("{")
             if start != -1:
@@ -423,23 +487,53 @@ class Controller(ControllerSecondary):
                     elif isinstance(cur, str):
                         strings.append(cur)
 
-                joined = " ".join(strings).lower()
-                if re.search(r"\b(victory|win|won)\b", joined):
-                    if re.search(r"\b(defeat|loss|lose|lost)\b", joined):
-                        return None
-                    return True
-                if re.search(r"\b(defeat|loss|lose|lost)\b", joined):
-                    return False
+                joined = " ".join(strings)
+                outcome = _scan_text(joined)
+                if outcome is not None:
+                    return outcome
         except Exception:
             pass
 
-        lower = line.lower()
-        has_win = re.search(r"\b(victory|win|won)\b", lower) is not None
-        has_loss = re.search(r"\b(defeat|loss|lose|lost)\b", lower) is not None
-        if has_win and not has_loss:
-            return True
-        if has_loss and not has_win:
-            return False
+        return _scan_text(line)
+
+    def __infer_match_won_from_raw_dict(self, raw_dict: dict) -> bool | None:
+        try:
+            messages = raw_dict.get("greToClientEvent", {}).get("greToClientMessages", [])
+            for message in messages:
+                if message.get("type") != "GREMessageType_GameStateMessage":
+                    continue
+                game_state_msg = message.get("gameStateMessage", {})
+                game_info = game_state_msg.get("gameInfo", {})
+                results = game_info.get("results", [])
+                if not results:
+                    continue
+                winning_team_id = None
+                for result in results:
+                    if result.get("result") == "ResultType_WinLoss" and "winningTeamId" in result:
+                        winning_team_id = result.get("winningTeamId")
+                        break
+                if winning_team_id is None:
+                    continue
+
+                players = game_state_msg.get("players", [])
+                my_team_id = None
+                if self.__system_seat_id is not None:
+                    for player in players:
+                        if player.get("systemSeatNumber") == self.__system_seat_id:
+                            my_team_id = player.get("teamId")
+                            break
+                if my_team_id is None:
+                    seat_ids = message.get("systemSeatIds") or []
+                    for player in players:
+                        if player.get("systemSeatNumber") in seat_ids:
+                            my_team_id = player.get("teamId")
+                            break
+                if my_team_id is None:
+                    return None
+
+                return winning_team_id == my_team_id
+        except Exception as e:
+            bot_logger.log_error(f"Failed to infer match result from game state: {e}")
         return None
 
     def __update_inst_id__grp_id_dict(self, object_dict_arr):
@@ -453,6 +547,10 @@ class Controller(ControllerSecondary):
         if system_seat_id is not None and system_seat_id != self.__system_seat_id:
             self.__system_seat_id = system_seat_id
             bot_logger.log_info(f"Detected local systemSeatId={self.__system_seat_id}")
+
+        outcome = self.__infer_match_won_from_raw_dict(raw_dict)
+        if outcome is not None:
+            self.__last_match_won = outcome
 
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict, fallback_seat_id=self.__system_seat_id or 1)
         self.updated_game_state.update(game_state)

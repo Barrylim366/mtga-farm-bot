@@ -110,6 +110,19 @@ class DummyAI(AIKernel):
         # Check total mana
         return total_mana >= total_needed
 
+    def _needs_attack_target_selection(self, action_list):
+        """Detect attack target selection actions (e.g., planeswalker present)."""
+        for action_wrapper in action_list:
+            action = action_wrapper.get('action', {})
+            action_type = action.get('actionType', '')
+            if not action_type:
+                continue
+            if "AttackTarget" in action_type or "SelectAttackTarget" in action_type:
+                return True
+            if "Target" in action_type and ("Attack" in action_type or "Combat" in action_type):
+                return True
+        return False
+
     def generate_keep(self, card_list) -> bool:
         self._debug("generate_keep called - keeping hand")
         return True
@@ -179,6 +192,10 @@ class DummyAI(AIKernel):
 
                 # Combat phase - attack
                 if phase == 'Phase_Combat' and step == 'Step_DeclareAttack':
+                    if self._needs_attack_target_selection(action_list):
+                        self._debug("Attack target selection required - targeting opponent player")
+                        move = {'select_target': [-1]}
+                        return move
                     self._debug("Combat phase - declaring all attackers")
                     move = {'all_attack': []}
                     return move
