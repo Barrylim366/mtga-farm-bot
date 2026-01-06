@@ -107,6 +107,9 @@ class Controller(ControllerSecondary):
         self.start_monitor()
         self.start_game_from_home_screen()
 
+    def dismiss_remote_request(self) -> None:
+        return
+
     def set_decision_callback(self, method) -> None:
         self.__decision_callback = method
 
@@ -208,7 +211,7 @@ class Controller(ControllerSecondary):
                     break
 
             if self.log_reader.has_new_line(self.patterns['hover_id']):
-                parsed = self.__parse_object_id_line(
+                parsed = self.__parse_hover_id_line(
                     self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
                 )
                 if parsed is None:
@@ -310,7 +313,7 @@ class Controller(ControllerSecondary):
                     break
 
             if self.log_reader.has_new_line(self.patterns['hover_id']):
-                parsed = self.__parse_object_id_line(
+                parsed = self.__parse_hover_id_line(
                     self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
                 )
                 if parsed is None:
@@ -464,22 +467,31 @@ class Controller(ControllerSecondary):
     def get_inst_id_grp_id_dict(self):
         return self.__inst_id_grp_id_dict
 
-    @staticmethod
-    def __parse_object_id_line(line):
+    def __parse_hover_id_line(self, line):
         """
-        Extracts `objectId` from log lines.
+        Extracts `objectId` from hover log lines, filtering to our seat if possible.
         MTGA logs sometimes emit full JSON lines, sometimes fragments like `"objectId": 123`.
         """
         if not line:
             return None
-        m = re.search(r'"objectId"\s*:\s*(\d+)', line)
-        if m:
-            return int(m.group(1))
         try:
             start = line.find("{")
             if start != -1:
                 payload = json.loads(line[start:])
-                # Look for the first objectId key in nested dicts
+                # Prefer UI hover messages with seatIds filtering.
+                messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+                for msg in messages:
+                    ui_msg = msg.get("uiMessage") if isinstance(msg, dict) else None
+                    if not ui_msg:
+                        continue
+                    seat_ids = ui_msg.get("seatIds", [])
+                    if isinstance(seat_ids, list) and self.__system_seat_id is not None:
+                        if self.__system_seat_id not in seat_ids:
+                            continue
+                    hover = ui_msg.get("onHover", {})
+                    if isinstance(hover, dict) and isinstance(hover.get("objectId"), int):
+                        return hover["objectId"]
+                # Fallback: Look for the first objectId key in nested dicts.
                 stack = [payload]
                 while stack:
                     cur = stack.pop()
@@ -490,7 +502,10 @@ class Controller(ControllerSecondary):
                     elif isinstance(cur, list):
                         stack.extend(cur)
         except Exception:
-            return None
+            pass
+        m = re.search(r'"objectId"\s*:\s*(\d+)', line)
+        if m:
+            return int(m.group(1))
         return None
 
     def __log_callback(self, pattern: str, line_containing_pattern: str):

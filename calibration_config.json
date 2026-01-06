@@ -10,7 +10,7 @@
             1440
         ]
     ],
-    "input_backend": "auto",
+    "input_backend": "pynput",
     "click_targets": {
         "keep_hand": {
             "x": 1876,
@@ -49,6 +49,10 @@
                 "x": 2443,
                 "y": 1255
             }
+        },
+        "enable_remote": {
+            "x": 1542,
+            "y": 719
         }
     }
 }
