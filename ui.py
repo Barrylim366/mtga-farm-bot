@@ -638,9 +638,11 @@ class MTGBotUI(tk.Tk):
                     self.session_wins += 1
                 self.after(0, self._update_settings_window)
                 try:
-                    self.game.on_match_end(won)
+                    if self.game:
+                        self.game.on_match_end(won)
                 except TypeError:
-                    self.game.on_match_end()
+                    if self.game:
+                        self.game.on_match_end()
 
             controller.set_match_end_callback(_on_match_end)
 
