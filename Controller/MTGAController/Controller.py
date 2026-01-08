@@ -1,20 +1,19 @@
 import json
+import random
+import re
 import threading
 import time
 
-from pynput.mouse import Button
-
 from Controller.ControllerInterface import ControllerSecondary
 from Controller.MTGAController.LogReader import LogReader
-from pynput import mouse
-from pynput import keyboard
 from Controller.Utilities.GameState import GameState
+from Controller.Utilities.input_controller import InputControllerError, create_input_controller
 import bot_logger
 
 
 class Controller(ControllerSecondary):
 
-    def __init__(self, log_path, screen_bounds=((0, 0), (1600, 900)), click_targets=None):
+    def __init__(self, log_path, screen_bounds=((0, 0), (1600, 900)), click_targets=None, input_backend: str | None = None):
         self.__decision_callback = None
         self.__mulligan_decision_callback = None
         self.__action_success_callback = None
@@ -30,11 +29,19 @@ class Controller(ControllerSecondary):
             'game_state': '"type": "GREMessageType_GameStateMessage"',
             'hover_id': 'objectId',
             'match_completed': 'MatchGameRoomStateType_MatchCompleted',
-            'assign_damage': '"type": "GREMessageType_AssignDamageReq"'
+            'assign_damage': '"type": "GREMessageType_AssignDamageReq"',
+            'declare_attackers': '"type": "GREMessageType_DeclareAttackersReq"',
+            'select_n': '"type": "GREMessageType_SelectNReq"',
         }
         self.log_reader = LogReader(self.patterns.values(), log_path=log_path, callback=self.__log_callback)
-        self.keyboard_controller = keyboard.Controller()
-        self.mouse_controller = mouse.Controller()
+        try:
+            self.input = create_input_controller(input_backend)
+        except InputControllerError as e:
+            raise RuntimeError(f"Failed to initialize input backend {input_backend!r}: {e}") from e
+        try:
+            self.input.configure_screen_bounds(self.screen_bounds)
+        except Exception as e:
+            raise RuntimeError(f"Failed to configure input backend with screen bounds: {e}") from e
         self.cast_speed = 0.01
         # Height of the mouse when cards are scanned for casting
         self.cast_height = 30
@@ -45,6 +52,10 @@ class Controller(ControllerSecondary):
         self.player_button_coors = (1699, 996)
         self.home_play_button_coors = (1699, 996)
         self.assign_damage_done_coors = (1280, 720)
+        self.opponent_avatar_coors = (
+            int(self.screen_bounds[1][0] * 0.67),
+            int(self.screen_bounds[1][1] * 0.2),
+        )
         self.cast_card_dist = 10
         self.main_br_button_coordinates = (
             self.screen_bounds[1][0] - self.main_br_button_offset[0],
@@ -64,6 +75,8 @@ class Controller(ControllerSecondary):
                 self.main_br_button_coordinates = (click_targets["next"]["x"], click_targets["next"]["y"])
             if "assign_damage_done" in click_targets:
                 self.assign_damage_done_coors = (click_targets["assign_damage_done"]["x"], click_targets["assign_damage_done"]["y"])
+            if "opponent_avatar" in click_targets:
+                self.opponent_avatar_coors = (click_targets["opponent_avatar"]["x"], click_targets["opponent_avatar"]["y"])
             if "hand_scan_points" in click_targets:
                 self.hand_scan_p1 = (click_targets["hand_scan_points"]["p1"]["x"], click_targets["hand_scan_points"]["p1"]["y"])
                 self.hand_scan_p2 = (click_targets["hand_scan_points"]["p2"]["x"], click_targets["hand_scan_points"]["p2"]["y"])
@@ -71,19 +84,21 @@ class Controller(ControllerSecondary):
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         self.__match_end_callback = None
+        self.__last_match_won: bool | None = None
+        self.__attack_target_required = False
         # MTGA system seat id for the local player (can be 1 or 2)
         self.__system_seat_id = None
 
     def start_game_from_home_screen(self):
         bot_logger.log_click(self.home_play_button_coors[0], self.home_play_button_coors[1], "QUEUE_BUTTON")
-        self.mouse_controller.position = self.home_play_button_coors
-        self.mouse_controller.press(Button.left)
+        self.input.move_abs(self.home_play_button_coors[0], self.home_play_button_coors[1])
+        self.input.left_down()
         time.sleep(0.2)
-        self.mouse_controller.release(Button.left)
+        self.input.left_up()
         time.sleep(1)
-        self.mouse_controller.press(Button.left)
+        self.input.left_down()
         time.sleep(0.2)
-        self.mouse_controller.release(Button.left)
+        self.input.left_up()
 
     def start_monitor(self) -> None:
         self.log_reader.start_log_monitor()
@@ -91,6 +106,9 @@ class Controller(ControllerSecondary):
     def start_game(self) -> None:
         self.start_monitor()
         self.start_game_from_home_screen()
+
+    def dismiss_remote_request(self) -> None:
+        return
 
     def set_decision_callback(self, method) -> None:
         self.__decision_callback = method
@@ -105,7 +123,35 @@ class Controller(ControllerSecondary):
         self.__match_end_callback = method
 
     def end_game(self) -> None:
-        self.log_reader.stop_log_monitor()
+        # Prevent any future decisions / restarts from firing after a UI stop.
+        if self.__decision_execution_thread is not None:
+            try:
+                self.__decision_execution_thread.cancel()
+            except Exception:
+                pass
+            self.__decision_execution_thread = None
+        if self.__mulligan_execution_thread is not None:
+            try:
+                self.__mulligan_execution_thread.cancel()
+            except Exception:
+                pass
+            self.__mulligan_execution_thread = None
+
+        try:
+            self.stop_inactivity_timer()
+        except Exception:
+            pass
+
+        self.__decision_callback = None
+        self.__mulligan_decision_callback = None
+        self.__action_success_callback = None
+
+        try:
+            if hasattr(self.log_reader, "is_monitoring") and self.log_reader.is_monitoring():
+                self.log_reader.stop_log_monitor()
+        except Exception:
+            # UI stop should never crash; at worst the monitor thread will exit on process end.
+            pass
 
     def cast(self, card_id: int) -> None:
         # Clear any stale hover events from previous scans
@@ -114,12 +160,12 @@ class Controller(ControllerSecondary):
         # Move above start point first to reset any hover states
         reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
         bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_SCAN (target card_id={card_id})")
-        self.mouse_controller.position = reset_pos
+        self.input.move_abs(reset_pos[0], reset_pos[1])
         time.sleep(0.5)
 
         # Move to start of hand scan
         bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SCAN")
-        self.mouse_controller.position = self.hand_scan_p1
+        self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
 
         current_hovered_id = None
         start_x = self.hand_scan_p1[0]
@@ -127,10 +173,13 @@ class Controller(ControllerSecondary):
 
         # Ensure we are scanning in the correct direction (left to right usually)
         direction = 1 if end_x > start_x else -1
+        total_dx = (end_x - start_x) if end_x != start_x else 1
+        start_y = self.hand_scan_p1[1]
+        end_y = self.hand_scan_p2[1]
 
         while current_hovered_id != card_id:
             # Check if we have exceeded the scan area
-            current_x = self.mouse_controller.position[0]
+            current_x = self.input.position().x
             if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
                 bot_logger.log_error(f"SCAN_FAILED: Card {card_id} not found. Scanned from x={start_x} to x={end_x}, ended at x={current_x}")
                 print(f"Scanned entire hand area but did not find card_id: {card_id}")
@@ -142,68 +191,181 @@ class Controller(ControllerSecondary):
 
             # Inner loop: move until log updates or bounds hit
             while not self.log_reader.has_new_line(self.patterns['hover_id']):
-                self.mouse_controller.move(self.cast_card_dist * direction, 0)
+                step_dx = self.cast_card_dist * direction
+                pos = self.input.position()
+                next_x = pos.x + step_dx
+                # Follow a (potentially sloped) scan line from p1 -> p2 to better match fanned hands.
+                t = (next_x - start_x) / total_dx
+                if t < 0:
+                    t = 0
+                elif t > 1:
+                    t = 1
+                desired_y = int(round(start_y + t * (end_y - start_y)))
+                dy = desired_y - pos.y
+                self.input.move_rel(step_dx, dy)
                 time.sleep(self.cast_speed)
 
                 # Check bounds inside inner loop too
-                current_x = self.mouse_controller.position[0]
+                current_x = self.input.position().x
                 if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
                     break
 
             if self.log_reader.has_new_line(self.patterns['hover_id']):
-                current_hovered_id = self.__parse_object_id_line(self.log_reader.get_latest_line_containing_pattern(
-                    self.patterns['hover_id']))
+                parsed = self.__parse_hover_id_line(
+                    self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                )
+                if parsed is None:
+                    continue
+                current_hovered_id = parsed
                 bot_logger.log_hover(current_hovered_id)
                 print(str(current_hovered_id) + '|' + str(card_id))
             else:
                  # Break outer loop if we hit bounds without finding new log line
+                 bot_logger.log_error(
+                     f"SCAN_STOPPED: No hover update before bounds (target={card_id}, start=({start_x},{start_y}), end=({end_x},{end_y}))"
+                 )
                  break
 
         if current_hovered_id == card_id:
-            click_pos = self.mouse_controller.position
-            bot_logger.log_click(click_pos[0], click_pos[1], f"CAST_CARD (id={card_id})")
+            click_pos = self.input.position()
+            bot_logger.log_click(click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})")
             time.sleep(0.5)
-            self.mouse_controller.click(Button.left, 1)
+            self.input.left_click(1)
             time.sleep(0.1)
-            self.mouse_controller.click(Button.left, 1)
+            self.input.left_click(1)
             time.sleep(0.7)
 
         # Reset position
         reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
         bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
-        self.mouse_controller.position = reset_pos
+        self.input.move_abs(reset_pos[0], reset_pos[1])
 
     def all_attack(self) -> None:
         bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "ATTACK_ALL")
-        self.mouse_controller.position = self.main_br_button_coordinates
-        self.mouse_controller.click(Button.left, 1)
+        self.input.move_abs(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1])
+        self.input.left_click(1)
         time.sleep(1)
-        self.mouse_controller.click(Button.left, 1)
+        self.input.left_click(1)
+        if self.__attack_target_required:
+            time.sleep(0.3)
+            self.select_target(-1)
+
+    def select_target(self, target_id: int) -> None:
+        bot_logger.log_click(
+            self.opponent_avatar_coors[0],
+            self.opponent_avatar_coors[1],
+            f"SELECT_OPPONENT_AVATAR (target_id={target_id})",
+        )
+        self.input.move_abs(self.opponent_avatar_coors[0], self.opponent_avatar_coors[1])
+        time.sleep(0.2)
+        self.input.left_click(1)
+        self.__attack_target_required = False
+    
+    def select_hand_card(self, card_id: int, clicks: int = 1) -> bool:
+        """Select a card in hand by hovering until objectId matches, then click."""
+        # Clear any stale hover events from previous scans
+        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+
+        # Move above start point first to reset any hover states
+        reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+        bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_HAND_SELECT (target card_id={card_id})")
+        self.input.move_abs(reset_pos[0], reset_pos[1])
+        time.sleep(0.3)
+
+        # Move to start of hand scan
+        bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SELECT_SCAN")
+        self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
+
+        current_hovered_id = None
+        start_x = self.hand_scan_p1[0]
+        end_x = self.hand_scan_p2[0]
+
+        # Ensure we are scanning in the correct direction (left to right usually)
+        direction = 1 if end_x > start_x else -1
+        total_dx = (end_x - start_x) if end_x != start_x else 1
+        start_y = self.hand_scan_p1[1]
+        end_y = self.hand_scan_p2[1]
+
+        while current_hovered_id != card_id:
+            current_x = self.input.position().x
+            if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                bot_logger.log_error(
+                    f"HAND_SELECT_FAILED: Card {card_id} not found. Scanned x={start_x}..{end_x}, end={current_x}"
+                )
+                return False
+
+            while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                step_dx = self.cast_card_dist * direction
+                pos = self.input.position()
+                next_x = pos.x + step_dx
+                t = (next_x - start_x) / total_dx
+                if t < 0:
+                    t = 0
+                elif t > 1:
+                    t = 1
+                desired_y = int(round(start_y + t * (end_y - start_y)))
+                dy = desired_y - pos.y
+                self.input.move_rel(step_dx, dy)
+                time.sleep(self.cast_speed)
+
+                current_x = self.input.position().x
+                if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                    break
+
+            if self.log_reader.has_new_line(self.patterns['hover_id']):
+                parsed = self.__parse_hover_id_line(
+                    self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                )
+                if parsed is None:
+                    continue
+                current_hovered_id = parsed
+                bot_logger.log_hover(current_hovered_id)
+            else:
+                bot_logger.log_error(
+                    f"HAND_SELECT_STOPPED: No hover update before bounds (target={card_id})"
+                )
+                return False
+
+        click_pos = self.input.position()
+        bot_logger.log_click(click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})")
+        for _ in range(max(1, int(clicks))):
+            self.input.left_click(1)
+            time.sleep(0.1)
+        return True
+
+    def submit_selection(self) -> None:
+        bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "SUBMIT_SELECTION")
+        self.input.move_abs(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1])
+        time.sleep(0.1)
+        self.input.left_click(1)
 
     def resolve(self) -> None:
-        if self.updated_game_state.get_turn_info()['step'] != 'Step_DeclareAttack' \
-                or self.updated_game_state.get_turn_info()['activePlayer'] == 2:
-            pos = self.main_br_button_coordinates
-        else:
-            pos = (
-                self.main_br_button_coordinates[0],
-                self.main_br_button_coordinates[1] - 50,
-            )
-        bot_logger.log_click(pos[0], pos[1], "RESOLVE")
-        self.mouse_controller.position = pos
-        self.mouse_controller.click(Button.left, 1)
+        turn_info = self.updated_game_state.get_turn_info() or {}
+        my_seat = self.__system_seat_id or turn_info.get('decisionPlayer') or 1
+
+        # MTGA's bottom-right "pass/next/resolve/no-blocks" button sometimes shifts vertically during
+        # opponent DeclareAttack. Historically we clicked slightly above to compensate, but that can
+        # miss depending on UI scale/layout. Use the calibrated button position first, then a small
+        # upward fallback only for that specific case.
+        positions = [self.main_br_button_coordinates]
+        if turn_info.get('step') == 'Step_DeclareAttack' and turn_info.get('activePlayer') != my_seat:
+            fallback_y = self.main_br_button_coordinates[1] - 50
+            min_y = self.screen_bounds[0][1]
+            positions.append((self.main_br_button_coordinates[0], max(min_y, fallback_y)))
+
+        for pos in positions:
+            bot_logger.log_click(pos[0], pos[1], "RESOLVE")
+            self.input.move_abs(pos[0], pos[1])
+            self.input.left_click(1)
+            time.sleep(0.05)
 
     def auto_pass(self) -> None:
-        self.keyboard_controller.press(keyboard.Key.enter)
+        self.input.tap_enter()
         time.sleep(0.4)
-        self.keyboard_controller.release(keyboard.Key.enter)
 
     def unconditional_auto_pass(self) -> None:
-        self.keyboard_controller.press(keyboard.Key.shift)
-        self.keyboard_controller.press(keyboard.Key.enter)
+        self.input.tap_shift_enter()
         time.sleep(0.4)
-        self.keyboard_controller.release(keyboard.Key.shift)
-        self.keyboard_controller.release(keyboard.Key.enter)
 
     def get_game_state(self) -> 'GameStateSecondary':
         return self.updated_game_state
@@ -211,18 +373,18 @@ class Controller(ControllerSecondary):
     def keep(self, keep: bool):
         if keep:
             bot_logger.log_click(self.mulligan_keep_coors[0], self.mulligan_keep_coors[1], "KEEP_HAND")
-            self.mouse_controller.position = self.mulligan_keep_coors
+            self.input.move_abs(self.mulligan_keep_coors[0], self.mulligan_keep_coors[1])
         else:
             bot_logger.log_click(self.mulligan_mull_coors[0], self.mulligan_mull_coors[1], "MULLIGAN")
-            self.mouse_controller.position = self.mulligan_mull_coors
-        self.mouse_controller.click(Button.left)
+            self.input.move_abs(self.mulligan_mull_coors[0], self.mulligan_mull_coors[1])
+        self.input.left_click(1)
 
     def click_assign_damage_done(self):
         """Click the Done button during damage assignment"""
         bot_logger.log_click(self.assign_damage_done_coors[0], self.assign_damage_done_coors[1], "ASSIGN_DAMAGE_DONE")
-        self.mouse_controller.position = self.assign_damage_done_coors
+        self.input.move_abs(self.assign_damage_done_coors[0], self.assign_damage_done_coors[1])
         time.sleep(0.5)
-        self.mouse_controller.click(Button.left)
+        self.input.left_click(1)
         time.sleep(0.2)
         # Maybe click twice to be sure? The user said "click", usually one is enough but delays help.
         # Just one click for now as per other methods.
@@ -264,23 +426,29 @@ class Controller(ControllerSecondary):
         center_x = (self.screen_bounds[0][0] + self.screen_bounds[1][0]) // 2
         center_y = (self.screen_bounds[0][1] + self.screen_bounds[1][1]) // 2
         bot_logger.log_click(center_x, center_y, "DISMISS_END_SCREEN")
-        self.mouse_controller.position = (center_x, center_y)
+        self.input.move_abs(center_x, center_y)
         time.sleep(0.5)
-        self.mouse_controller.click(Button.left)
+        self.input.left_click(1)
         time.sleep(1)
         # Click again in case first click wasn't enough
-        self.mouse_controller.click(Button.left)
+        self.input.left_click(1)
         bot_logger.log_info("Match completed - dismissed end screen")
 
         # Call match end callback to trigger restart
         if self.__match_end_callback:
-            self.__match_end_callback()
+            try:
+                self.__match_end_callback(self.__last_match_won)
+            except TypeError:
+                # Backwards compatible: callback may not accept args
+                self.__match_end_callback()
 
     def reset_for_new_game(self):
         """Reset controller state for a new game - complete fresh start"""
         bot_logger.log_info("Resetting controller state for new game")
         self.__has_mulled_keep = False
         self.__system_seat_id = None
+        self.__last_match_won = None
+        self.__attack_target_required = False
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         # Cancel any pending decision timers
@@ -299,26 +467,207 @@ class Controller(ControllerSecondary):
     def get_inst_id_grp_id_dict(self):
         return self.__inst_id_grp_id_dict
 
-    @staticmethod
-    def __parse_object_id_line(line):
-        number_string = ""
-        i = 0
-        while i < len(line):
-            if line[i].isnumeric():
-                number_string = number_string + line[i]
-            i = i + 1
-        return int(number_string)
+    def __parse_hover_id_line(self, line):
+        """
+        Extracts `objectId` from hover log lines, filtering to our seat if possible.
+        MTGA logs sometimes emit full JSON lines, sometimes fragments like `"objectId": 123`.
+        """
+        if not line:
+            return None
+        try:
+            start = line.find("{")
+            if start != -1:
+                payload = json.loads(line[start:])
+                # Prefer UI hover messages with seatIds filtering.
+                messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+                for msg in messages:
+                    ui_msg = msg.get("uiMessage") if isinstance(msg, dict) else None
+                    if not ui_msg:
+                        continue
+                    seat_ids = ui_msg.get("seatIds", [])
+                    if isinstance(seat_ids, list) and self.__system_seat_id is not None:
+                        if self.__system_seat_id not in seat_ids:
+                            continue
+                    hover = ui_msg.get("onHover", {})
+                    if isinstance(hover, dict) and isinstance(hover.get("objectId"), int):
+                        return hover["objectId"]
+                # Fallback: Look for the first objectId key in nested dicts.
+                stack = [payload]
+                while stack:
+                    cur = stack.pop()
+                    if isinstance(cur, dict):
+                        if "objectId" in cur and isinstance(cur["objectId"], int):
+                            return cur["objectId"]
+                        stack.extend(cur.values())
+                    elif isinstance(cur, list):
+                        stack.extend(cur)
+        except Exception:
+            pass
+        m = re.search(r'"objectId"\s*:\s*(\d+)', line)
+        if m:
+            return int(m.group(1))
+        return None
 
     def __log_callback(self, pattern: str, line_containing_pattern: str):
         if pattern == self.patterns["game_state"]:
             self.__update_game_state(json.loads(line_containing_pattern))
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
+            outcome = self.__infer_match_won(line_containing_pattern)
+            if outcome is not None:
+                self.__last_match_won = outcome
             # Wait a moment for end screen to fully appear, then dismiss it
             threading.Timer(6.0, self.dismiss_end_screen).start()
         elif pattern == self.patterns["assign_damage"]:
             # Wait a small delay to ensure UI is ready
             threading.Timer(1.0, self.click_assign_damage_done).start()
+        elif pattern == self.patterns["declare_attackers"]:
+            self.__handle_declare_attackers_req(line_containing_pattern)
+        elif pattern == self.patterns["select_n"]:
+            self.__handle_select_n_req(line_containing_pattern)
+
+    def __handle_select_n_req(self, line: str) -> None:
+        try:
+            start = line.find("{")
+            if start == -1:
+                return
+            payload = json.loads(line[start:])
+            messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+            for message in messages:
+                if message.get("type") != "GREMessageType_SelectNReq":
+                    continue
+                seat_ids = message.get("systemSeatIds") or []
+                if self.__system_seat_id is not None and self.__system_seat_id not in seat_ids:
+                    continue
+                req = message.get("selectNReq", {})
+                ids = list(req.get("ids", []) or [])
+                if not ids:
+                    continue
+                min_sel = int(req.get("minSel", 1))
+                if min_sel < 1:
+                    min_sel = 1
+                random.shuffle(ids)
+
+                def _do_selection():
+                    selected = 0
+                    for card_id in ids:
+                        if selected >= min_sel:
+                            break
+                        if self.select_hand_card(card_id, clicks=1):
+                            selected += 1
+                            time.sleep(0.2)
+                    self.submit_selection()
+
+                threading.Timer(0.5, _do_selection).start()
+        except Exception as e:
+            bot_logger.log_error(f"Failed to handle SelectNReq: {e}")
+
+    def __handle_declare_attackers_req(self, line: str) -> None:
+        try:
+            start = line.find("{")
+            if start == -1:
+                return
+            payload = json.loads(line[start:])
+            messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+            for message in messages:
+                if message.get("type") != "GREMessageType_DeclareAttackersReq":
+                    continue
+                req = message.get("declareAttackersReq", {})
+                attackers = req.get("attackers", []) or req.get("qualifiedAttackers", [])
+                for attacker in attackers:
+                    recipients = attacker.get("legalDamageRecipients", []) or []
+                    for rec in recipients:
+                        if rec.get("type") == "DamageRecType_PlanesWalker":
+                            self.__attack_target_required = True
+                            bot_logger.log_info("DeclareAttackersReq: planeswalker target present")
+                            return
+        except Exception as e:
+            bot_logger.log_error(f"Failed to parse DeclareAttackersReq: {e}")
+
+    @staticmethod
+    def __infer_match_won(line: str) -> bool | None:
+        """
+        Best-effort inference from a single log line. Returns True/False/None if unknown.
+        MTGA log formats vary by version; we try JSON parsing and fallback to keyword matching.
+        """
+        def _has_token(text: str, token: str) -> bool:
+            return re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", text) is not None
+
+        def _scan_text(text: str) -> bool | None:
+            lowered = text.lower()
+            win_tokens = ("victory", "win", "won")
+            loss_tokens = ("defeat", "loss", "lose", "lost")
+            has_win = any(_has_token(lowered, t) for t in win_tokens)
+            has_loss = any(_has_token(lowered, t) for t in loss_tokens)
+            if has_win and not has_loss:
+                return True
+            if has_loss and not has_win:
+                return False
+            return None
+
+        try:
+            start = line.find("{")
+            if start != -1:
+                payload = json.loads(line[start:])
+                stack = [payload]
+                strings: list[str] = []
+                while stack:
+                    cur = stack.pop()
+                    if isinstance(cur, dict):
+                        stack.extend(cur.values())
+                    elif isinstance(cur, list):
+                        stack.extend(cur)
+                    elif isinstance(cur, str):
+                        strings.append(cur)
+
+                joined = " ".join(strings)
+                outcome = _scan_text(joined)
+                if outcome is not None:
+                    return outcome
+        except Exception:
+            pass
+
+        return _scan_text(line)
+
+    def __infer_match_won_from_raw_dict(self, raw_dict: dict) -> bool | None:
+        try:
+            messages = raw_dict.get("greToClientEvent", {}).get("greToClientMessages", [])
+            for message in messages:
+                if message.get("type") != "GREMessageType_GameStateMessage":
+                    continue
+                game_state_msg = message.get("gameStateMessage", {})
+                game_info = game_state_msg.get("gameInfo", {})
+                results = game_info.get("results", [])
+                if not results:
+                    continue
+                winning_team_id = None
+                for result in results:
+                    if result.get("result") == "ResultType_WinLoss" and "winningTeamId" in result:
+                        winning_team_id = result.get("winningTeamId")
+                        break
+                if winning_team_id is None:
+                    continue
+
+                players = game_state_msg.get("players", [])
+                my_team_id = None
+                if self.__system_seat_id is not None:
+                    for player in players:
+                        if player.get("systemSeatNumber") == self.__system_seat_id:
+                            my_team_id = player.get("teamId")
+                            break
+                if my_team_id is None:
+                    seat_ids = message.get("systemSeatIds") or []
+                    for player in players:
+                        if player.get("systemSeatNumber") in seat_ids:
+                            my_team_id = player.get("teamId")
+                            break
+                if my_team_id is None:
+                    return None
+
+                return winning_team_id == my_team_id
+        except Exception as e:
+            bot_logger.log_error(f"Failed to infer match result from game state: {e}")
+        return None
 
     def __update_inst_id__grp_id_dict(self, object_dict_arr):
         for object_dict in object_dict_arr:
@@ -331,6 +680,10 @@ class Controller(ControllerSecondary):
         if system_seat_id is not None and system_seat_id != self.__system_seat_id:
             self.__system_seat_id = system_seat_id
             bot_logger.log_info(f"Detected local systemSeatId={self.__system_seat_id}")
+
+        outcome = self.__infer_match_won_from_raw_dict(raw_dict)
+        if outcome is not None:
+            self.__last_match_won = outcome
 
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict, fallback_seat_id=self.__system_seat_id or 1)
         self.updated_game_state.update(game_state)

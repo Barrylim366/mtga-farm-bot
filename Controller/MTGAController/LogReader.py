@@ -1,5 +1,6 @@
 import threading
 import time
+from collections import deque
 import bot_logger
 
 
@@ -13,9 +14,11 @@ class LogReader:
         self.__log_path = log_path
         self.__lines_containing_pattern = {}
         self.__has_new_line = {}
+        self.__lines_queue = {}
         for pattern in patterns:
             self.__lines_containing_pattern[pattern] = ""
             self.__has_new_line[pattern] = False
+            self.__lines_queue[pattern] = deque()
 
         self.__log_monitor_thread = None
         self.__stop_monitor = False
@@ -41,8 +44,9 @@ class LogReader:
                 return
             for pattern in self.__lines_containing_pattern:
                 if pattern in line:
-                    self.__has_new_line[pattern] = True
                     self.__lines_containing_pattern[pattern] = line
+                    self.__lines_queue[pattern].append(line)
+                    self.__has_new_line[pattern] = True
                     bot_logger.log_raw_line(pattern, line)
                     self.__callback(pattern, self.__lines_containing_pattern[pattern])
 
@@ -53,27 +57,38 @@ class LogReader:
 
     def stop_log_monitor(self):
         self.__stop_monitor = True
-        self.__log_monitor_thread.join()
+        if self.__log_monitor_thread is None:
+            return
+        if threading.current_thread() is self.__log_monitor_thread:
+            return
+        if self.__log_monitor_thread.is_alive():
+            self.__log_monitor_thread.join(timeout=5)
 
     def is_monitoring(self):
         return self.__log_monitor_thread is not None and self.__log_monitor_thread.is_alive()
 
     def get_latest_line_containing_pattern(self, pattern):
-        self.__has_new_line[pattern] = False
-        return self.__lines_containing_pattern[pattern]
+        if self.__lines_queue[pattern]:
+            line = self.__lines_queue[pattern].popleft()
+        else:
+            line = self.__lines_containing_pattern[pattern]
+        self.__has_new_line[pattern] = bool(self.__lines_queue[pattern])
+        return line
 
     def has_new_line(self, pattern):
-        return self.__has_new_line[pattern]
+        return bool(self.__lines_queue[pattern])
 
     def clear_new_line_flag(self, pattern):
         """Clear the new line flag for a pattern - use before starting a new scan"""
         self.__has_new_line[pattern] = False
+        self.__lines_queue[pattern].clear()
 
     def reset_all_patterns(self):
         """Reset all cached pattern data for a fresh start"""
         for pattern in self.__lines_containing_pattern:
             self.__lines_containing_pattern[pattern] = ""
             self.__has_new_line[pattern] = False
+            self.__lines_queue[pattern].clear()
 
     def full_log_read(self):
         """ Full read of the log so far """
