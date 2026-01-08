@@ -18,6 +18,8 @@ class Game:
         self.last_logged_turn = -1
         self.game_started = False
         self.starting_hand_logged = False
+        self._stop_requested = False
+        self._timers: list[threading.Timer] = []
 
         # Clear log files on start
         with open(self.human_log_file, 'w') as f:
@@ -29,6 +31,7 @@ class Game:
 
     def start(self):
         self._debug("Game.start() called")
+        self._stop_requested = False
         self.controller.start_game()
         self.controller.set_mulligan_decision_callback(self.mulligan_decision_method)
         self.controller.set_decision_callback(self.decision_method)
@@ -36,18 +39,30 @@ class Game:
         self.controller.set_match_end_callback(self.on_match_end)
         self._debug("All callbacks registered")
 
-    def on_match_end(self):
+    def on_match_end(self, won: bool | None = None):
         """Called when a match ends - wait 20 seconds then start a new game"""
+        if self._stop_requested:
+            self._debug("Match ended but stop requested - not restarting")
+            return
         self._debug("Match ended - scheduling restart in 20 seconds")
         self._human_log("\n=== MATCH ENDED ===")
+        if won is True:
+            self._human_log("Result: WIN")
+        elif won is False:
+            self._human_log("Result: LOSS")
         self._human_log("Restarting in 20 seconds...\n")
         # Stop inactivity timer since match ended
         if hasattr(self.controller, 'stop_inactivity_timer'):
             self.controller.stop_inactivity_timer()
-        threading.Timer(20.0, self._restart_game).start()
+        restart_timer = threading.Timer(20.0, self._restart_game)
+        self._timers.append(restart_timer)
+        restart_timer.start()
 
     def _restart_game(self):
         """Reset state and start a new game"""
+        if self._stop_requested:
+            self._debug("Stop requested - skipping restart")
+            return
         self._debug("Restarting game...")
         self._human_log("=== STARTING NEW GAME ===\n")
 
@@ -70,16 +85,46 @@ class Game:
         self._debug("New game queued")
 
         # Schedule retry queue click after 30 seconds if game hasn't started
-        threading.Timer(30.0, self._retry_queue_if_needed).start()
+        retry_timer = threading.Timer(30.0, self._retry_queue_if_needed)
+        self._timers.append(retry_timer)
+        retry_timer.start()
 
     def _retry_queue_if_needed(self):
         """Retry clicking queue button if game hasn't started yet"""
+        if self._stop_requested:
+            self._debug("Stop requested - skipping retry queue")
+            return
         if not self.game_started:
             self._debug("Game not started after 30s - retrying queue button")
             self._human_log("Retrying queue...")
             self.controller.start_game_from_home_screen()
             # Schedule next retry
-            threading.Timer(30.0, self._retry_queue_if_needed).start()
+            retry_timer = threading.Timer(30.0, self._retry_queue_if_needed)
+            self._timers.append(retry_timer)
+            retry_timer.start()
+
+    def stop(self):
+        """Stop the game cleanly (cancel timers, stop log monitor, prevent restarts)."""
+        self._stop_requested = True
+        self.game_started = False
+
+        for timer in list(self._timers):
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._timers.clear()
+
+        if hasattr(self.controller, 'stop_inactivity_timer'):
+            try:
+                self.controller.stop_inactivity_timer()
+            except Exception:
+                pass
+        if hasattr(self.controller, 'end_game'):
+            try:
+                self.controller.end_game()
+            except Exception:
+                pass
 
     def mulligan_decision_method(self, card_list):
         self._debug(f"Mulligan decision called with {len(card_list)} cards")

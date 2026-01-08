@@ -2,12 +2,36 @@ from Controller.MTGAController.Controller import Controller
 from AI.DummyAI import DummyAI
 from Game import Game
 import time
+import os
+import pathlib
 
 def main():
     print("Starting MTG AI Bot...")
 
     # User configuration
-    log_path = "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log"
+    log_path = os.environ.get("MTGA_BOT_LOG_PATH", "")
+    if not log_path:
+        home = pathlib.Path.home()
+        steam_bases = [
+            home / ".local/share/Steam",
+            home / ".steam/steam",
+            home / ".steam/root",
+            home / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        ]
+        found: list[pathlib.Path] = []
+        for base in steam_bases:
+            compat = base / "steamapps/compatdata"
+            if not compat.is_dir():
+                continue
+            for p in compat.rglob("Player.log"):
+                s = str(p)
+                if "Wizards Of The Coast/MTGA/Player.log" in s:
+                    found.append(p)
+        if found:
+            found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            log_path = str(found[0])
+        else:
+            log_path = "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log"
     
     click_targets = {
         "keep_hand": {
@@ -53,7 +77,13 @@ def main():
     try:
         # Initialize components
         print(f"Initializing Controller with log path: {log_path}")
-        controller = Controller(log_path=log_path, screen_bounds=screen_bounds, click_targets=click_targets)
+        input_backend = os.environ.get("MTGA_BOT_INPUT_BACKEND")  # "ydotool" / "pynput" / "auto"
+        controller = Controller(
+            log_path=log_path,
+            screen_bounds=screen_bounds,
+            click_targets=click_targets,
+            input_backend=input_backend,
+        )
         
         print("Initializing AI...")
         ai = DummyAI()

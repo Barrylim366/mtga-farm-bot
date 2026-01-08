@@ -3,8 +3,11 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 import json
 import os
+import re
+import shutil
+import subprocess
 import threading
-from pynput import mouse, keyboard
+from Controller.Utilities.input_controller import InputControllerError, create_input_controller
 
 # Import bot components
 from Controller.MTGAController.Controller import Controller
@@ -20,17 +23,20 @@ class CalibrationWindow(tk.Toplevel):
         self.parent = parent
         self.config_manager = config_manager
         self.title("Calibration")
-        self.geometry("400x300")
-        self.resizable(False, False)
+        # Increased height to fit calibration + test controls
+        self.geometry("500x420")
+        self.resizable(True, False)
         self.configure(bg="#2b2b2b")
 
         self.is_calibrating = False
         self.mouse_listener = None
         self.keyboard_listener = None
+        self._pynput = None
         self.current_x = 0
         self.current_y = 0
 
         self._setup_ui()
+        self._update_calibration_capabilities()
 
     def _setup_ui(self):
         # Main frame with padding
@@ -69,6 +75,13 @@ class CalibrationWindow(tk.Toplevel):
                                         activebackground="#5a5a5a", activeforeground="white",
                                         relief=tk.FLAT, padx=15, pady=5)
         self.calibrate_btn.pack(side=tk.LEFT)
+
+        # Wayland-friendly capture (slurp)
+        self.slurp_btn = tk.Button(row1, text="Capture (slurp)", command=self._capture_with_slurp,
+                                   bg="#4a4a4a", fg="white", font=("Segoe UI", 10),
+                                   activebackground="#5a5a5a", activeforeground="white",
+                                   relief=tk.FLAT, padx=15, pady=5)
+        self.slurp_btn.pack(side=tk.LEFT, padx=(10, 0))
 
         # Row 2: Coordinate display
         coord_frame = tk.Frame(main_frame, bg="#3b3b3b", padx=15, pady=15)
@@ -110,6 +123,68 @@ class CalibrationWindow(tk.Toplevel):
                                    relief=tk.FLAT, padx=15, pady=5)
         self.saved_btn.pack()
 
+        # Row 5: Test saved coordinate click
+        test_frame = tk.Frame(main_frame, bg="#2b2b2b")
+        test_frame.pack(fill=tk.X, pady=(20, 0))
+
+        test_label = tk.Label(test_frame, text="Test Button:", bg="#2b2b2b", fg="white", font=("Segoe UI", 10))
+        test_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.test_button_var = tk.StringVar(value=self.button_options[0])
+        self.test_dropdown = ttk.Combobox(
+            test_frame, textvariable=self.test_button_var, values=self.button_options, state="readonly", width=20
+        )
+        self.test_dropdown.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.test_btn = tk.Button(
+            test_frame,
+            text="Test Click",
+            command=self._test_saved_click,
+            bg="#4a4a4a",
+            fg="white",
+            font=("Segoe UI", 10),
+            activebackground="#5a5a5a",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=15,
+            pady=5,
+        )
+        self.test_btn.pack(side=tk.LEFT)
+
+    def _update_calibration_capabilities(self):
+        # Under Wayland, pynput global capture is often unavailable; also it may not be installed.
+        has_slurp = shutil.which("slurp") is not None
+        self.slurp_btn.config(state=(tk.NORMAL if has_slurp else tk.DISABLED))
+
+        can_use_pynput = True
+        try:
+            import pynput  # noqa: F401
+        except Exception:
+            can_use_pynput = False
+
+        if not can_use_pynput:
+            self.calibrate_btn.config(state=tk.DISABLED)
+            if has_slurp:
+                self.instruction_label.config(
+                    text="Wayland: nutze 'Capture (slurp)' (kein Live-Tracking ohne pynput).",
+                    fg="#aaaaaa",
+                )
+            else:
+                self.instruction_label.config(
+                    text="Installiere 'slurp' f++r Wayland-Kalibrierung.",
+                    fg="#ff6666",
+                )
+
+        # Enable test click only when the configured backend can be initialized.
+        try:
+            backend = self.config_manager.get_input_backend()
+            screen_bounds = self.config_manager.get_screen_bounds()
+            input_controller = create_input_controller(backend)
+            input_controller.configure_screen_bounds(screen_bounds)
+            self.test_btn.config(state=tk.NORMAL)
+        except Exception:
+            self.test_btn.config(state=tk.DISABLED)
+
     def _start_calibration(self):
         if self.is_calibrating:
             self._stop_calibration()
@@ -119,13 +194,23 @@ class CalibrationWindow(tk.Toplevel):
         self.calibrate_btn.config(text="Stop", bg="#aa4444")
         self.instruction_label.config(text="Move mouse to target. Press ENTER to save.", fg="#ffff00")
 
-        # Start mouse listener
-        self.mouse_listener = mouse.Listener(on_move=self._on_mouse_move)
-        self.mouse_listener.start()
+        try:
+            if self._pynput is None:
+                from pynput import mouse, keyboard
+                self._pynput = (mouse, keyboard)
 
-        # Start keyboard listener
-        self.keyboard_listener = keyboard.Listener(on_press=self._on_key_press)
-        self.keyboard_listener.start()
+            mouse, keyboard = self._pynput
+            self.mouse_listener = mouse.Listener(on_move=self._on_mouse_move)
+            self.mouse_listener.start()
+            self.keyboard_listener = keyboard.Listener(on_press=self._on_key_press)
+            self.keyboard_listener.start()
+        except Exception as e:
+            self._stop_calibration()
+            # No modal error on Wayland; guide user to slurp-based capture instead.
+            self.instruction_label.config(
+                text="Kalibrierung per Live-Tracking nicht verf++gbar. Nutze 'Capture (slurp)'.",
+                fg="#ffcc66",
+            )
 
     def _stop_calibration(self):
         self.is_calibrating = False
@@ -150,6 +235,9 @@ class CalibrationWindow(tk.Toplevel):
         self.y_value.config(text=str(self.current_y))
 
     def _on_key_press(self, key):
+        if self._pynput is None:
+            return
+        _, keyboard = self._pynput
         if key == keyboard.Key.enter and self.is_calibrating:
             self._save_coordinates()
 
@@ -158,6 +246,51 @@ class CalibrationWindow(tk.Toplevel):
         self.config_manager.save_coordinate(button_name, self.current_x, self.current_y)
         self._stop_calibration()
         self.instruction_label.config(text=f"Saved {button_name}: ({self.current_x}, {self.current_y})", fg="#00ff00")
+
+    def _capture_with_slurp(self):
+        if shutil.which("slurp") is None:
+            self.instruction_label.config(text="`slurp` nicht gefunden. Installiere es zuerst.", fg="#ff6666")
+            return
+
+        def _worker():
+            try:
+                # Most slurp builds support point selection with `-p`.
+                # We parse the first two integers we see to be resilient across formats.
+                out = subprocess.check_output(["slurp", "-p"], text=True).strip()
+                nums = [int(n) for n in re.findall(r"-?\\d+", out)]
+                if len(nums) < 2:
+                    raise ValueError(f"Unexpected slurp output: {out!r}")
+                x, y = nums[0], nums[1]
+                self.current_x, self.current_y = x, y
+                self.after(0, self._update_coordinates)
+                self.after(0, self._save_coordinates)
+            except Exception as e:
+                self.after(0, lambda: self.instruction_label.config(text=f"slurp fehlgeschlagen: {e}", fg="#ff6666"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _test_saved_click(self):
+        button_name = self.test_button_var.get()
+        coords = self.config_manager.get_all_coordinates()
+        coord = coords.get(button_name)
+        if not isinstance(coord, dict) or "x" not in coord or "y" not in coord:
+            self.instruction_label.config(text=f"Kein gespeicherter Punkt f++r '{button_name}'.", fg="#ffcc66")
+            return
+
+        x, y = int(coord["x"]), int(coord["y"])
+
+        try:
+            backend = self.config_manager.get_input_backend()
+            screen_bounds = self.config_manager.get_screen_bounds()
+            input_controller = create_input_controller(backend)
+            input_controller.configure_screen_bounds(screen_bounds)
+            input_controller.move_abs(x, y)
+            input_controller.left_click(1)
+            self.instruction_label.config(text=f"Test-Klick: {button_name} ({x}, {y})", fg="#00ff00")
+        except InputControllerError as e:
+            self.instruction_label.config(text=f"Test fehlgeschlagen: {e}", fg="#ff6666")
+        except Exception as e:
+            self.instruction_label.config(text=f"Test fehlgeschlagen: {e}", fg="#ff6666")
 
     def _show_saved_buttons(self):
         SavedButtonsWindow(self, self.config_manager)
@@ -248,6 +381,34 @@ class ConfigManager:
         self.config_path = config_path
         self.config = self._load_config()
 
+    def _detect_player_log_path(self) -> str:
+        candidates: list[str] = []
+        home = os.path.expanduser("~")
+
+        steam_bases = [
+            os.path.join(home, ".local", "share", "Steam"),
+            os.path.join(home, ".steam", "steam"),
+            os.path.join(home, ".steam", "root"),
+            os.path.join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam"),
+        ]
+
+        for base in steam_bases:
+            compat = os.path.join(base, "steamapps", "compatdata")
+            if not os.path.isdir(compat):
+                continue
+            for root, _dirs, files in os.walk(compat):
+                if "Player.log" not in files:
+                    continue
+                full = os.path.join(root, "Player.log")
+                if "Wizards Of The Coast/MTGA" in full:
+                    candidates.append(full)
+
+        if not candidates:
+            return ""
+
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return candidates[0]
+
     def _load_config(self):
         if os.path.exists(self.config_path):
             try:
@@ -258,9 +419,11 @@ class ConfigManager:
         return self._default_config()
 
     def _default_config(self):
+        detected_log = self._detect_player_log_path()
         return {
-            "log_path": "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+            "log_path": detected_log or "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
             "screen_bounds": [[0, 0], [2560, 1440]],
+            "input_backend": "auto",
             "click_targets": {
                 "keep_hand": {"x": 1876, "y": 1060},
                 "queue_button": {"x": 2485, "y": 1194},
@@ -313,6 +476,13 @@ class ConfigManager:
         bounds = self.config.get("screen_bounds", [[0, 0], [2560, 1440]])
         return tuple(tuple(b) for b in bounds)
 
+    def get_input_backend(self):
+        return self.config.get("input_backend", "auto")
+
+    def set_input_backend(self, backend: str):
+        self.config["input_backend"] = backend
+        self._save_config()
+
 
 class MTGBotUI(tk.Tk):
     """Main application window"""
@@ -321,14 +491,18 @@ class MTGBotUI(tk.Tk):
         super().__init__()
 
         self.title("MTGA Bot")
-        self.geometry("400x600")
-        self.resizable(False, False)
+        # Slightly taller window so all controls fit on typical font/DPI setups
+        self.geometry("400x680")
+        self.resizable(False, True)
         self.configure(bg="#1e1e1e")
 
         self.config_manager = ConfigManager()
         self.bot_running = False
         self.game = None
         self.bot_thread = None
+        self.session_games = 0
+        self.session_wins = 0
+        self.settings_window = None
 
         self._setup_ui()
 
@@ -347,20 +521,24 @@ class MTGBotUI(tk.Tk):
             logo_image = Image.open(logo_path)
             logo_image = logo_image.resize((120, 120), Image.Resampling.LANCZOS)
 
-            # Convert to RGBA and replace white/light background with UI background color
+            # Convert to RGBA and mask everything outside the circle to the UI background.
+            # This removes the checkerboard/square border in the source image while keeping the round gray badge.
             logo_image = logo_image.convert("RGBA")
-            pixels = logo_image.load()
             bg_color = (30, 30, 30, 255)  # #1e1e1e in RGBA
-
-            for y in range(logo_image.height):
-                for x in range(logo_image.width):
-                    r, g, b, a = pixels[x, y]
-                    # Replace light gray/white pixels (the background circle area)
-                    if r > 180 and g > 180 and b > 180:
-                        pixels[x, y] = bg_color
-                    # Also handle the checkered/transparent areas
-                    elif r > 150 and g > 150 and b > 150:
-                        pixels[x, y] = bg_color
+            bg_image = Image.new("RGBA", logo_image.size, bg_color)
+            # Build an anti-aliased circular mask by drawing at higher res and downsampling.
+            from PIL import ImageDraw
+            aa = 4
+            pad = 6
+            mask_big = Image.new("L", (logo_image.width * aa, logo_image.height * aa), 0)
+            draw = ImageDraw.Draw(mask_big)
+            pad_big = pad * aa
+            draw.ellipse(
+                (pad_big, pad_big, logo_image.width * aa - pad_big - 1, logo_image.height * aa - pad_big - 1),
+                fill=255,
+            )
+            mask = mask_big.resize(logo_image.size, Image.Resampling.LANCZOS)
+            logo_image = Image.composite(logo_image, bg_image, mask)
 
             self.logo_photo = ImageTk.PhotoImage(logo_image)
             logo_label = tk.Label(logo_frame, image=self.logo_photo, bg="#1e1e1e")
@@ -410,6 +588,14 @@ class MTGBotUI(tk.Tk):
                                        cursor="hand2")
         self.calibrate_btn.pack(pady=btn_pady)
 
+        # Settings Button
+        self.session_btn = tk.Button(buttons_frame, text="Settings", command=self._open_settings,
+                                     bg="#2d4f8a", fg="white", font=btn_font,
+                                     activebackground="#3a63aa", activeforeground="white",
+                                     relief=tk.FLAT, width=btn_width, height=btn_height,
+                                     cursor="hand2")
+        self.session_btn.pack(pady=btn_pady)
+
         # Status section
         status_frame = tk.Frame(main_frame, bg="#1e1e1e")
         status_frame.pack(fill=tk.X, pady=(30, 0))
@@ -437,12 +623,28 @@ class MTGBotUI(tk.Tk):
             log_path = self.config_manager.get_log_path()
             click_targets = self.config_manager.get_click_targets()
             screen_bounds = self.config_manager.get_screen_bounds()
+            input_backend = self.config_manager.get_input_backend()
 
             controller = Controller(log_path=log_path, screen_bounds=screen_bounds,
-                                   click_targets=click_targets)
+                                   click_targets=click_targets, input_backend=input_backend)
             ai = DummyAI()
             self.game = Game(controller, ai)
             self.game.start()
+
+            # Wrap match end callback so we can update session stats and still restart games.
+            def _on_match_end(won=None):
+                self.session_games += 1
+                if won is True:
+                    self.session_wins += 1
+                self.after(0, self._update_settings_window)
+                try:
+                    if self.game:
+                        self.game.on_match_end(won)
+                except TypeError:
+                    if self.game:
+                        self.game.on_match_end()
+
+            controller.set_match_end_callback(_on_match_end)
 
             # Keep running while bot is active
             while self.bot_running:
@@ -461,7 +663,7 @@ class MTGBotUI(tk.Tk):
 
         if self.game:
             try:
-                self.game.controller.end_game()
+                self.game.stop()
             except:
                 pass
             self.game = None
@@ -474,6 +676,140 @@ class MTGBotUI(tk.Tk):
     def _open_calibration(self):
         CalibrationWindow(self, self.config_manager)
 
+    def _open_settings(self):
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            self.settings_window.focus_force()
+            return
+        self.settings_window = SettingsWindow(self, self.session_games, self.session_wins)
+
+    def _update_settings_window(self):
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.update_stats(self.session_games, self.session_wins)
+
+
+class SettingsWindow(tk.Toplevel):
+    def __init__(self, parent, games: int, wins: int):
+        super().__init__(parent)
+        self.title("Settings")
+        self.geometry("360x260")
+        self.resizable(False, False)
+        self.configure(bg="#2b2b2b")
+        self._log_window = None
+
+        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        title = tk.Label(frame, text="Current session", bg="#2b2b2b", fg="white",
+                         font=("Segoe UI", 12, "bold"))
+        title.pack(pady=(0, 12))
+
+        self.games_label = tk.Label(frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
+        self.games_label.pack(pady=4)
+
+        self.wins_label = tk.Label(frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
+        self.wins_label.pack(pady=4)
+
+        hint = tk.Label(frame, text="Resets when ui.py restarts", bg="#2b2b2b", fg="#aaaaaa",
+                        font=("Segoe UI", 9))
+        hint.pack(pady=(10, 12))
+
+        sep = tk.Frame(frame, bg="#4a4a4a", height=1)
+        sep.pack(fill=tk.X, pady=(0, 12))
+
+        log_row = tk.Frame(frame, bg="#2b2b2b")
+        log_row.pack(fill=tk.X)
+
+        log_label = tk.Label(log_row, text="Show Log", bg="#2b2b2b", fg="white", font=("Segoe UI", 10))
+        log_label.pack(side=tk.LEFT)
+
+        self.show_log_var = tk.BooleanVar(value=False)
+        show_log_cb = tk.Checkbutton(
+            log_row,
+            variable=self.show_log_var,
+            command=self._toggle_log_window,
+            bg="#2b2b2b",
+            fg="white",
+            activebackground="#2b2b2b",
+            activeforeground="white",
+            selectcolor="#2b2b2b",
+        )
+        show_log_cb.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.update_stats(games, wins)
+
+    def update_stats(self, games: int, wins: int):
+        self.games_label.config(text=f"Games played: {games}")
+        self.wins_label.config(text=f"Win: {wins}")
+
+    def _toggle_log_window(self):
+        if self.show_log_var.get():
+            if self._log_window and self._log_window.winfo_exists():
+                self._log_window.lift()
+                return
+            self._log_window = LogWindow(self, "human.log")
+        else:
+            if self._log_window and self._log_window.winfo_exists():
+                self._log_window.destroy()
+            self._log_window = None
+
+    def destroy(self):
+        try:
+            if self._log_window and self._log_window.winfo_exists():
+                self._log_window.destroy()
+        finally:
+            super().destroy()
+
+
+class LogWindow(tk.Toplevel):
+    def __init__(self, parent, log_path: str):
+        super().__init__(parent)
+        self.title(log_path)
+        self.geometry("800x500")
+        self.resizable(True, True)
+        self.configure(bg="#1e1e1e")
+        self._log_path = log_path
+        self._stopped = False
+
+        frame = tk.Frame(self, bg="#1e1e1e", padx=12, pady=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        self.text = tk.Text(frame, wrap=tk.NONE, bg="#111111", fg="#dddddd", insertbackground="#dddddd")
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        self.text.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        self.text.config(state=tk.DISABLED)
+        self._refresh()
+
+    def _refresh(self):
+        if self._stopped:
+            return
+        try:
+            with open(self._log_path, "r") as f:
+                content = f.read()
+        except Exception as e:
+            content = f"(unable to read {self._log_path}: {e})"
+
+        at_bottom = self.text.yview()[1] >= 0.999
+        self.text.config(state=tk.NORMAL)
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", content)
+        self.text.config(state=tk.DISABLED)
+        if at_bottom:
+            self.text.see(tk.END)
+
+        self.after(1000, self._refresh)
+
+    def destroy(self):
+        self._stopped = True
+        super().destroy()
 
 def main():
     app = MTGBotUI()

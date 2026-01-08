@@ -34,6 +34,7 @@ class DummyAI(AIKernel):
         Returns:
             - mana_colors: set of available colors (e.g., {'black', 'green', 'blue'})
             - total_sources: number of unique mana sources (for CMC check)
+            - sources: list of sets of colors per mana source
 
         Note: For dual lands, we count them as providing BOTH colors but only 1 source.
         Uses Scryfall to get the produced mana colors for all lands."""
@@ -50,7 +51,7 @@ class DummyAI(AIKernel):
                         mana_sources[instance_id] = set()
 
                     # Use Scryfall to get produced mana colors for ALL lands
-                    grp_id = inst_id_grp_id_dict.get(instance_id)
+                    grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
                     if grp_id:
                         produced_colors = CardInfo.get_land_produced_colors(grp_id)
                         if produced_colors:
@@ -63,16 +64,18 @@ class DummyAI(AIKernel):
                         self._debug(f"No grpId for mana source: instId={instance_id}")
 
         total_sources = len(mana_sources)
+        sources = [set(colors) for colors in mana_sources.values() if colors]
         self._debug(f"Mana sources: {total_sources}, colors available: {mana_colors}")
-        return mana_colors, total_sources
+        return mana_colors, total_sources, sources
 
-    def _can_cast_with_mana_cost(self, action_mana_cost, available_colors, total_mana):
+    def _can_cast_with_mana_cost(self, action_mana_cost, available_colors, total_mana, sources):
         """Check if we can pay a mana cost from the action's manaCost field.
 
         Parameters:
             action_mana_cost: List like [{'color': ['ManaColor_Red'], 'count': 1}, ...]
             available_colors: Set of available color strings
             total_mana: Total number of mana sources
+            sources: List of sets of colors per mana source
         Returns:
             True if we can pay the cost
         """
@@ -89,6 +92,7 @@ class DummyAI(AIKernel):
         }
 
         total_needed = 0
+        colored_requirements = []
         for cost_entry in action_mana_cost:
             colors = cost_entry.get('color', [])
             count = cost_entry.get('count', 0)
@@ -97,18 +101,125 @@ class DummyAI(AIKernel):
             if not colors:
                 continue
 
-            mana_color = color_map.get(colors[0], 'generic')
-
-            # Generic mana can be paid by any source
-            if mana_color == 'generic':
+            color_options = {color_map.get(c, 'generic') for c in colors}
+            if 'generic' in color_options:
                 continue
+            for _ in range(count):
+                colored_requirements.append(color_options)
 
-            # Check if we have this color available
-            if mana_color not in available_colors:
+        if total_mana < total_needed:
+            return False
+
+        # Fast fail if a required color isn't available at all.
+        for req in colored_requirements:
+            if not (req & available_colors):
                 return False
 
-        # Check total mana
-        return total_mana >= total_needed
+        if not colored_requirements:
+            return True
+
+        sources_list = [set(s) for s in sources]
+        if len(colored_requirements) > len(sources_list):
+            return False
+
+        # Precompute candidates for each requirement.
+        reqs = list(colored_requirements)
+        candidates = [set(i for i, s in enumerate(sources_list) if s & req) for req in reqs]
+
+        def _search(remaining_reqs, remaining_sources, cand_lists):
+            if not remaining_reqs:
+                return True
+            min_idx = min(range(len(remaining_reqs)), key=lambda i: len(cand_lists[i]))
+            if not cand_lists[min_idx]:
+                return False
+            for src_idx in list(cand_lists[min_idx]):
+                if src_idx not in remaining_sources:
+                    continue
+                new_sources = set(remaining_sources)
+                new_sources.remove(src_idx)
+                new_reqs = [r for i, r in enumerate(remaining_reqs) if i != min_idx]
+                new_cands = []
+                for i, _r in enumerate(remaining_reqs):
+                    if i == min_idx:
+                        continue
+                    new_cands.append({s for s in cand_lists[i] if s != src_idx})
+                if _search(new_reqs, new_sources, new_cands):
+                    return True
+            return False
+
+        colored_ok = _search(reqs, set(range(len(sources_list))), candidates)
+        if not colored_ok:
+            return False
+
+        colored_needed = len(colored_requirements)
+        remaining_sources = total_mana - colored_needed
+        generic_needed = total_needed - colored_needed
+        return remaining_sources >= generic_needed
+
+    def _choose_land_to_play(self, action_list, inst_id_grp_id_dict, available_colors, total_mana, sources):
+        """Choose a land that maximizes post-land castability for creatures."""
+        land_actions = []
+        for action_wrapper in action_list:
+            action = action_wrapper.get('action', {})
+            if action.get('actionType') == 'ActionType_Play':
+                land_actions.append(action)
+
+        if not land_actions:
+            return None
+
+        creature_actions = []
+        for action_wrapper in action_list:
+            action = action_wrapper.get('action', {})
+            if action.get('actionType') != 'ActionType_Cast':
+                continue
+            instance_id = action.get('instanceId')
+            grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
+            card_info = CardInfo.get_card_info(grp_id)
+            if not card_info:
+                continue
+            if 'Creature' not in card_info.get('types', []):
+                continue
+            creature_actions.append((instance_id, action.get('manaCost', []), card_info))
+
+        def _score_land(action):
+            instance_id = action.get('instanceId')
+            grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
+            produced_colors = CardInfo.get_land_produced_colors(grp_id) or set()
+
+            sim_colors = set(available_colors)
+            sim_colors.update(produced_colors)
+            sim_total_mana = total_mana + 1
+            sim_sources = list(sources) + [set(produced_colors)] if produced_colors else list(sources)
+
+            castable = []
+            for _, mana_cost, card_info in creature_actions:
+                if self._can_cast_with_mana_cost(mana_cost, sim_colors, sim_total_mana, sim_sources):
+                    mana_cost_str = card_info.get('manaCost', '')
+                    cmc = CardInfo.calculate_cmc(mana_cost_str)
+                    castable.append((cmc, card_info.get('name', '')))
+
+            castable_count = len(castable)
+            best_cmc = min((cmc for cmc, _ in castable), default=999)
+            new_colors = len(set(produced_colors) - set(available_colors))
+
+            # Prefer enabling any casts, then more options, then lower CMC, then new colors.
+            return (1 if castable_count > 0 else 0, castable_count, -best_cmc, new_colors)
+
+        best_action = max(land_actions, key=_score_land)
+        return best_action.get('instanceId')
+
+    def _needs_attack_target_selection(self, action_list):
+        """Detect attack target selection actions (e.g., planeswalker present)."""
+        for action_wrapper in action_list:
+            action = action_wrapper.get('action', {})
+            action_type = action.get('actionType', '')
+            if not action_type:
+                continue
+            if "AttackTarget" in action_type or "SelectAttackTarget" in action_type:
+                return True
+            if "Target" in action_type and ("Attack" in action_type or "Combat" in action_type):
+                return True
+        return False
 
     def generate_keep(self, card_list) -> bool:
         self._debug("generate_keep called - keeping hand")
@@ -153,7 +264,7 @@ class DummyAI(AIKernel):
                 return move
 
             # Get available mana colors and total sources
-            available_colors, total_mana = self._get_available_mana_colors(action_list, inst_id_grp_id_dict)
+            available_colors, total_mana, sources = self._get_available_mana_colors(action_list, inst_id_grp_id_dict)
             self._debug(f"Actions available: {len(action_list)}")
 
             active_player = turn_info.get('activePlayer', 0)
@@ -179,6 +290,10 @@ class DummyAI(AIKernel):
 
                 # Combat phase - attack
                 if phase == 'Phase_Combat' and step == 'Step_DeclareAttack':
+                    if self._needs_attack_target_selection(action_list):
+                        self._debug("Attack target selection required - targeting opponent player")
+                        move = {'select_target': [-1]}
+                        return move
                     self._debug("Combat phase - declaring all attackers")
                     move = {'all_attack': []}
                     return move
@@ -188,17 +303,15 @@ class DummyAI(AIKernel):
 
                     # First: try to play a land
                     if not self.__has_land_been_played_this_turn:
-                        for action_wrapper in action_list:
-                            action = action_wrapper.get('action', {})
-                            if action.get('actionType') == 'ActionType_Play':
-                                instance_id = action.get('instanceId')
-                                land_grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
-
-                                self._debug(f"Playing land: instanceId={instance_id}, grpId={land_grp_id}")
-
-                                move = {'cast': [instance_id]}
-                                self.__has_land_been_played_this_turn = True
-                                return move
+                        land_instance_id = self._choose_land_to_play(
+                            action_list, inst_id_grp_id_dict, available_colors, total_mana, sources
+                        )
+                        if land_instance_id is not None:
+                            land_grp_id = inst_id_grp_id_dict.get(land_instance_id)
+                            self._debug(f"Playing land: instanceId={land_instance_id}, grpId={land_grp_id}")
+                            move = {'cast': [land_instance_id]}
+                            self.__has_land_been_played_this_turn = True
+                            return move
 
                     # Second: try to cast a creature
                     # Use the manaCost from the action to check color requirements
@@ -208,7 +321,7 @@ class DummyAI(AIKernel):
                         if action.get('actionType') == 'ActionType_Cast':
                             instance_id = action.get('instanceId')
                             action_mana_cost = action.get('manaCost', [])
-                            grp_id = inst_id_grp_id_dict.get(instance_id)
+                            grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
                             card_info = CardInfo.get_card_info(grp_id)
 
                             if not card_info:
@@ -224,7 +337,7 @@ class DummyAI(AIKernel):
                             cmc = CardInfo.calculate_cmc(mana_cost_str)
 
                             # Check if we can pay the mana cost (color + total)
-                            if self._can_cast_with_mana_cost(action_mana_cost, available_colors, total_mana):
+                            if self._can_cast_with_mana_cost(action_mana_cost, available_colors, total_mana, sources):
                                 cast_actions.append((cmc, instance_id, card_name, mana_cost_str))
                                 self._debug(f"Can cast: {card_name} (cost={mana_cost_str}, cmc={cmc})")
                             else:
