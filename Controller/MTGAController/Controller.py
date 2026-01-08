@@ -548,17 +548,45 @@ class Controller(ControllerSecondary):
                     min_sel = 1
                 random.shuffle(ids)
 
-                def _do_selection():
-                    selected = 0
-                    for card_id in ids:
-                        if selected >= min_sel:
-                            break
-                        if self.select_hand_card(card_id, clicks=1):
-                            selected += 1
-                            time.sleep(0.2)
-                    self.submit_selection()
+                def _verify_selection(selected_ids: list[int], attempt: int) -> None:
+                    try:
+                        if self.__system_seat_id is None:
+                            return
+                        hand_zone = self.updated_game_state.get_zone("ZoneType_Hand", self.__system_seat_id)
+                        if not hand_zone:
+                            return
+                        hand_ids = set(hand_zone.get("objectInstanceIds", []) or [])
+                        still_in_hand = [cid for cid in selected_ids if cid in hand_ids]
+                        if still_in_hand and attempt < 2:
+                            bot_logger.log_info(
+                                f"SelectN verify: ids still in hand {still_in_hand}, retrying (attempt {attempt + 1})"
+                            )
+                            _attempt_selection(attempt + 1, delay=0.8)
+                    except Exception as e:
+                        bot_logger.log_error(f"SelectN verify failed: {e}")
 
-                threading.Timer(0.5, _do_selection).start()
+                def _attempt_selection(attempt: int, delay: float) -> None:
+                    def _do_selection():
+                        selected = 0
+                        selected_ids: list[int] = []
+                        clicks = 1 if attempt == 1 else 2
+                        for card_id in ids:
+                            if selected >= min_sel:
+                                break
+                            if self.select_hand_card(card_id, clicks=clicks):
+                                selected += 1
+                                selected_ids.append(card_id)
+                                time.sleep(0.3)
+                        if not selected_ids:
+                            bot_logger.log_error("SelectN failed to select any cards")
+                            return
+                        time.sleep(0.4)
+                        self.submit_selection()
+                        threading.Timer(1.2, _verify_selection, args=(selected_ids, attempt)).start()
+
+                    threading.Timer(delay, _do_selection).start()
+
+                _attempt_selection(1, delay=0.6)
         except Exception as e:
             bot_logger.log_error(f"Failed to handle SelectNReq: {e}")
 
