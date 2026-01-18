@@ -828,14 +828,9 @@ class Controller(ControllerSecondary):
     def __update_game_state(self, raw_dict: [str, str or int]):
         # Derive the local player's systemSeatId from incoming messages (if present)
         system_seat_id = Controller.__get_system_seat_id_from_raw_dict(raw_dict)
-        if system_seat_id is not None:
-            if self.__system_seat_id is None:
-                self.__system_seat_id = system_seat_id
-                bot_logger.log_info(f"Detected local systemSeatId={self.__system_seat_id}")
-            elif system_seat_id != self.__system_seat_id:
-                bot_logger.log_info(
-                    f"Ignoring systemSeatId flip (current={self.__system_seat_id}, seen={system_seat_id})"
-                )
+        if system_seat_id is not None and system_seat_id != self.__system_seat_id:
+            self.__system_seat_id = system_seat_id
+            bot_logger.log_info(f"Detected local systemSeatId={self.__system_seat_id}")
 
         outcome = self.__infer_match_won_from_raw_dict(raw_dict)
         if outcome is not None:
@@ -936,11 +931,11 @@ class Controller(ControllerSecondary):
                 if message.get('type') not in preferred_types:
                     continue
                 seat_ids = message.get('systemSeatIds')
-                if isinstance(seat_ids, list) and len(seat_ids) > 0 and isinstance(seat_ids[0], int):
+                if isinstance(seat_ids, list) and len(seat_ids) == 1 and isinstance(seat_ids[0], int):
                     return seat_ids[0]
             for message in messages:
                 seat_ids = message.get('systemSeatIds')
-                if isinstance(seat_ids, list) and len(seat_ids) > 0 and isinstance(seat_ids[0], int):
+                if isinstance(seat_ids, list) and len(seat_ids) == 1 and isinstance(seat_ids[0], int):
                     return seat_ids[0]
         except Exception:
             return None
