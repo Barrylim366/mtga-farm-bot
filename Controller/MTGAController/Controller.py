@@ -93,6 +93,7 @@ class Controller(ControllerSecondary):
         self.__last_target_select_ts = 0.0
         self.__pending_target_select = None
         self.__last_submit_targets_ts = 0.0
+        self.__pending_select_n = None
 
     def start_game_from_home_screen(self):
         bot_logger.log_click(self.home_play_button_coors[0], self.home_play_button_coors[1], "QUEUE_BUTTON")
@@ -552,10 +553,20 @@ class Controller(ControllerSecondary):
                 ids = list(req.get("ids", []) or [])
                 if not ids:
                     continue
+                self.__pending_select_n = {"ids": ids, "ts": time.time()}
                 min_sel = int(req.get("minSel", 1))
                 if min_sel < 1:
                     min_sel = 1
                 random.shuffle(ids)
+                hand_zone = self.updated_game_state.get_zone("ZoneType_Hand", self.__system_seat_id)
+                hand_ids = set(hand_zone.get("objectInstanceIds", []) or []) if hand_zone else set()
+                ids_in_hand = [cid for cid in ids if cid in hand_ids]
+                if not ids_in_hand:
+                    bot_logger.log_info(
+                        f"SelectN ids not in hand; deferring selection. ids={ids}"
+                    )
+                    return
+                ids = ids_in_hand
 
                 def _verify_selection(selected_ids: list[int], attempt: int) -> None:
                     try:
@@ -588,9 +599,11 @@ class Controller(ControllerSecondary):
                                 time.sleep(0.3)
                         if not selected_ids:
                             bot_logger.log_error("SelectN failed to select any cards")
+                            self.__pending_select_n = None
                             return
                         time.sleep(0.4)
                         self.submit_selection()
+                        self.__pending_select_n = None
                         threading.Timer(1.2, _verify_selection, args=(selected_ids, attempt)).start()
 
                     threading.Timer(delay, _do_selection).start()
@@ -658,6 +671,25 @@ class Controller(ControllerSecondary):
         except Exception:
             return False
         return False
+
+    def __should_pause_for_select_n(self) -> bool:
+        if not self.__pending_select_n:
+            return False
+        ts = self.__pending_select_n.get("ts", 0.0)
+        ids = set(self.__pending_select_n.get("ids", []) or [])
+        pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
+        pending_ids = set(pending_zone.get("objectInstanceIds", []) or []) if pending_zone else set()
+        if pending_ids and ids.intersection(pending_ids):
+            return True
+        if time.time() - ts < 3.0:
+            return True
+        self.__pending_select_n = None
+        return False
+
+    def __should_pause_for_targets(self) -> bool:
+        return self.__should_pause_for_select_n() or (
+            self.__pending_target_select is not None and self.__is_selecting_targets()
+        )
 
     def __handle_target_selection_from_raw_dict(self, raw_dict: dict) -> None:
         try:
@@ -861,6 +893,14 @@ class Controller(ControllerSecondary):
             f"decisionPlayer={turn_info_dict.get('decisionPlayer') if turn_info_dict else None}, has_mulled_keep={self.__has_mulled_keep}"
         )
 
+        if self.__should_pause_for_targets():
+            if self.__decision_execution_thread is not None:
+                self.__decision_execution_thread.cancel()
+                self.__decision_execution_thread = None
+            bot_logger.log_info("Pausing decision while target selection is pending")
+            # Let target selection resolve before scheduling new decisions.
+            return
+
         if is_complete:
             self.__update_inst_id__grp_id_dict(self.updated_game_state.get_game_objects())
             my_seat = self.__system_seat_id
@@ -874,6 +914,11 @@ class Controller(ControllerSecondary):
                 def _decision_if_still_my_priority():
                     try:
                         ti = self.updated_game_state.get_turn_info() or {}
+                        if self.__should_pause_for_targets():
+                            bot_logger.log_info("Deferring decision; target selection still pending")
+                            self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
+                            self.__decision_execution_thread.start()
+                            return
                         still_my_priority = (ti.get('decisionPlayer') == my_seat)
                         if still_my_priority and self.__decision_callback and self.__has_mulled_keep:
                             self.__decision_callback(self.updated_game_state)
