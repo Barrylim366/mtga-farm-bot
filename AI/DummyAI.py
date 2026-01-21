@@ -232,6 +232,41 @@ class DummyAI(AIKernel):
                 return True
         return False
 
+    def _find_phoenix_chick_activation(self, action_list, inst_id_grp_id_dict, available_colors, total_mana, sources):
+        """Find a Phoenix Chick activation action we can pay for."""
+        for action_wrapper in action_list:
+            action = action_wrapper.get('action', {})
+            action_type = action.get('actionType', '')
+            if not action_type:
+                continue
+            if not action_type.startswith('ActionType_Activate'):
+                continue
+            if action_type == 'ActionType_Activate_Mana':
+                continue
+
+            instance_id = action.get('instanceId')
+            if instance_id is None:
+                continue
+            grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
+            card_info = CardInfo.get_card_info(grp_id) if grp_id else None
+            if not card_info or card_info.get('name') != 'Phoenix Chick':
+                continue
+
+            action_mana_cost = action.get('manaCost', [])
+            if action_mana_cost:
+                if not self._can_cast_with_mana_cost(action_mana_cost, available_colors, total_mana, sources):
+                    self._debug("Phoenix Chick activation available but mana cost not payable")
+                    continue
+            else:
+                rr_cost = [{'color': ['ManaColor_Red'], 'count': 2}]
+                if not self._can_cast_with_mana_cost(rr_cost, available_colors, total_mana, sources):
+                    self._debug("Phoenix Chick activation available but RR not payable")
+                    continue
+
+            ability_grp_id = action.get('abilityGrpId', 0)
+            return instance_id, ability_grp_id
+        return None
+
     def generate_keep(self, card_list) -> bool:
         self._debug("generate_keep called - keeping hand")
         return True
@@ -298,6 +333,14 @@ class DummyAI(AIKernel):
 
             # Only do proactive actions (play land / cast / attack) on our active turn.
             if active_player == my_seat and decision_player == my_seat:
+                phoenix_activation = self._find_phoenix_chick_activation(
+                    action_list, inst_id_grp_id_dict, available_colors, total_mana, sources
+                )
+                if phoenix_activation:
+                    inst_id, ability_grp_id = phoenix_activation
+                    self._debug(f"Phoenix Chick activation: instanceId={inst_id}, abilityGrpId={ability_grp_id}")
+                    return {'activate_ability': [inst_id, ability_grp_id]}
+
                 # If a spell/ability target is required, always target opponent avatar.
                 if self._needs_spell_target_selection(action_list):
                     self._debug("Spell target selection required - targeting opponent player")

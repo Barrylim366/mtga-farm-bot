@@ -10,6 +10,8 @@ from Controller.Utilities.GameState import GameState
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
 import bot_logger
 
+_TARGET_FIELD_UNSET = object()
+
 
 class Controller(ControllerSecondary):
 
@@ -94,6 +96,7 @@ class Controller(ControllerSecondary):
         self.__pending_target_select = None
         self.__last_submit_targets_ts = 0.0
         self.__pending_select_n = None
+        self.__target_submit_cooldown_sec = 1.0
 
     def start_game_from_home_screen(self):
         bot_logger.log_click(self.home_play_button_coors[0], self.home_play_button_coors[1], "QUEUE_BUTTON")
@@ -265,7 +268,14 @@ class Controller(ControllerSecondary):
         self.input.move_abs(self.opponent_avatar_coors[0], self.opponent_avatar_coors[1])
         time.sleep(0.2)
         self.input.left_click(1)
+        time.sleep(0.2)
         self.__attack_target_required = False
+
+    def activate_ability(self, card_id: int, ability_id: int) -> None:
+        bot_logger.log_info(f"Activating ability: card_id={card_id}, ability_id={ability_id}")
+        # Most optional triggers are confirmed via the bottom-right prompt button.
+        time.sleep(0.2)
+        self.submit_selection()
     
     def select_hand_card(self, card_id: int, clicks: int = 1) -> bool:
         """Select a card in hand by hovering until objectId matches, then click."""
@@ -628,9 +638,85 @@ class Controller(ControllerSecondary):
                 if self.__system_seat_id not in seat_ids:
                     continue
                 source_id = message.get("selectTargetsReq", {}).get("sourceId")
+                self.__update_pending_target_select(source_id)
                 self.__schedule_target_selection(source_id, reason="SelectTargetsReq")
         except Exception as e:
             bot_logger.log_error(f"Failed to handle SelectTargetsReq: {e}")
+
+    def __get_delay_timer_remaining(self) -> float:
+        try:
+            timers = self.updated_game_state.get_full_state().get("timers", []) or []
+            for timer in timers:
+                if timer.get("type") != "TimerType_Delay":
+                    continue
+                if not timer.get("running", False):
+                    continue
+                duration = float(timer.get("durationSec", 0) or 0)
+                if "elapsedSec" in timer:
+                    elapsed = float(timer.get("elapsedSec", 0) or 0)
+                else:
+                    elapsed = float(timer.get("elapsedMs", 0) or 0) / 1000.0
+                remaining = duration - elapsed
+                return max(0.0, remaining)
+        except Exception:
+            return 0.0
+        return 0.0
+
+    def __update_pending_target_select(
+        self,
+        source_id: int | None,
+        *,
+        min_t=_TARGET_FIELD_UNSET,
+        max_t=_TARGET_FIELD_UNSET,
+        selected=_TARGET_FIELD_UNSET,
+    ) -> None:
+        if source_id is None:
+            source_id = -1
+        pending = self.__pending_target_select or {}
+        if pending.get("source_id") != source_id:
+            pending = {"source_id": source_id}
+        pending["ts"] = time.time()
+        if min_t is not _TARGET_FIELD_UNSET:
+            pending["min"] = min_t
+        if max_t is not _TARGET_FIELD_UNSET:
+            pending["max"] = max_t
+        if selected is not _TARGET_FIELD_UNSET:
+            pending["selected"] = selected
+        self.__pending_target_select = pending
+
+    def __pending_target_ready_to_submit(self) -> bool:
+        pending = self.__pending_target_select or {}
+        selected = pending.get("selected")
+        min_t = pending.get("min", 1)
+        try:
+            selected_count = int(selected)
+        except Exception:
+            return False
+        try:
+            min_req = int(min_t) if min_t is not None else 1
+        except Exception:
+            min_req = 1
+        return selected_count >= min_req
+
+    def __get_target_click_offsets(self) -> list[tuple[int, int]]:
+        # Try a small fan of offsets so we don't accidentally click the library.
+        return [
+            (0, 0),
+            (-80, 0),
+            (-120, 10),
+            (-60, 25),
+            (0, 35),
+            (-90, 45),
+        ]
+
+    def __click_opponent_avatar_with_offset(self, offset: tuple[int, int], tag: str) -> None:
+        x = self.opponent_avatar_coors[0] + offset[0]
+        y = self.opponent_avatar_coors[1] + offset[1]
+        bot_logger.log_click(x, y, tag)
+        self.input.move_abs(x, y)
+        time.sleep(0.2)
+        self.input.left_click(1)
+        time.sleep(0.2)
 
     def __schedule_target_selection(self, source_id: int | None, reason: str) -> None:
         now = time.time()
@@ -640,21 +726,51 @@ class Controller(ControllerSecondary):
             return
         self.__last_target_select_source_id = source_id
         self.__last_target_select_ts = now
-        self.__pending_target_select = {"source_id": source_id, "ts": now}
+        self.__update_pending_target_select(source_id)
         bot_logger.log_info(f"{reason}: targeting opponent avatar")
+
+        def _attempt_submit():
+            if self.__pending_target_ready_to_submit():
+                self.__last_submit_targets_ts = time.time()
+                threading.Timer(0.3, self.submit_selection).start()
+                return True
+            return False
 
         def _retry_if_needed():
             if self.__pending_target_select and self.__is_selecting_targets():
+                delay_remaining = self.__get_delay_timer_remaining()
+                if delay_remaining > 0.05:
+                    threading.Timer(delay_remaining + 0.2, _retry_if_needed).start()
+                    return
+                if _attempt_submit():
+                    return
                 age = time.time() - self.__last_target_select_ts
-                if age < 3.0 and (time.time() - self.__last_submit_targets_ts) > 0.5:
-                    bot_logger.log_info("Target still pending, retrying opponent avatar")
-                    self.select_target(-1)
+                pending = self.__pending_target_select or {}
+                attempts = int(pending.get("attempts", 0))
+                offsets = self.__get_target_click_offsets()
+                if age < 5.0 and attempts < len(offsets):
+                    offset = offsets[attempts]
+                    pending["attempts"] = attempts + 1
+                    self.__pending_target_select = pending
+                    bot_logger.log_info(f"Target still pending, retrying opponent avatar (attempt {attempts + 1})")
+                    self.__click_opponent_avatar_with_offset(offset, f"SELECT_OPPONENT_AVATAR_RETRY_{attempts + 1}")
+                    threading.Timer(0.8, _attempt_submit).start()
 
         def _do_click():
-            self.select_target(-1)
-            threading.Timer(0.8, _retry_if_needed).start()
+            if _attempt_submit():
+                return
+            pending = self.__pending_target_select or {}
+            pending["attempts"] = 1
+            self.__pending_target_select = pending
+            self.__click_opponent_avatar_with_offset((0, 0), "SELECT_OPPONENT_AVATAR")
+            threading.Timer(0.8, _attempt_submit).start()
+            threading.Timer(1.2, _retry_if_needed).start()
 
-        threading.Timer(0.5, _do_click).start()
+        delay_remaining = self.__get_delay_timer_remaining()
+        start_delay = 0.4
+        if delay_remaining > 0.05:
+            start_delay = delay_remaining + 0.2
+        threading.Timer(start_delay, _do_click).start()
 
     def __is_selecting_targets(self) -> bool:
         try:
@@ -687,9 +803,13 @@ class Controller(ControllerSecondary):
         return False
 
     def __should_pause_for_targets(self) -> bool:
-        return self.__should_pause_for_select_n() or (
-            self.__pending_target_select is not None and self.__is_selecting_targets()
-        )
+        if self.__should_pause_for_select_n():
+            return True
+        if self.__pending_target_select is not None:
+            if self.__last_submit_targets_ts and time.time() - self.__last_submit_targets_ts < self.__target_submit_cooldown_sec:
+                return True
+            return self.__is_selecting_targets()
+        return self.__is_selecting_targets()
 
     def __handle_target_selection_from_raw_dict(self, raw_dict: dict) -> None:
         try:
@@ -712,6 +832,14 @@ class Controller(ControllerSecondary):
                     bot_logger.log_info(
                         f"SelectTargetsReq details: sourceId={req.get('sourceId')}, min={min_t}, max={max_t}, selected={selected}, targetCount={len(t0.get('targets', []) or [])}"
                     )
+                    self.__update_pending_target_select(
+                        req.get("sourceId"),
+                        min_t=min_t,
+                        max_t=max_t,
+                        selected=selected,
+                    )
+                    if self.__pending_target_ready_to_submit():
+                        threading.Timer(0.2, self.submit_selection).start()
                 source_id = message.get("selectTargetsReq", {}).get("sourceId")
                 self.__schedule_target_selection(source_id, reason="SelectTargetsReq (from game state)")
                 return
