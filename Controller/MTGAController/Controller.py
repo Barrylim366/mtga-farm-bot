@@ -67,6 +67,24 @@ class Controller(ControllerSecondary):
         
         self.hand_scan_p1 = (self.screen_bounds[0][0], self.screen_bounds[1][1] - 30)
         self.hand_scan_p2 = (self.screen_bounds[1][0], self.screen_bounds[1][1] - 30)
+        self.stack_scan_p1 = (
+            int(self.screen_bounds[1][0] * 0.65),
+            int(self.screen_bounds[1][1] * 0.25),
+        )
+        self.stack_scan_p2 = (
+            int(self.screen_bounds[1][0] * 0.95),
+            int(self.screen_bounds[1][1] * 0.6),
+        )
+        self.stack_scan_step = 80
+        self.stack_scan_fallback_p1 = (
+            int(self.screen_bounds[1][0] * 0.35),
+            int(self.screen_bounds[1][1] * 0.2),
+        )
+        self.stack_scan_fallback_p2 = (
+            int(self.screen_bounds[1][0] * 0.8),
+            int(self.screen_bounds[1][1] * 0.75),
+        )
+        self.stack_scan_fallback_step = 50
         
         if click_targets:
             if "keep_hand" in click_targets:
@@ -83,6 +101,28 @@ class Controller(ControllerSecondary):
             if "hand_scan_points" in click_targets:
                 self.hand_scan_p1 = (click_targets["hand_scan_points"]["p1"]["x"], click_targets["hand_scan_points"]["p1"]["y"])
                 self.hand_scan_p2 = (click_targets["hand_scan_points"]["p2"]["x"], click_targets["hand_scan_points"]["p2"]["y"])
+            if "stack_scan_points" in click_targets:
+                self.stack_scan_p1 = (click_targets["stack_scan_points"]["p1"]["x"], click_targets["stack_scan_points"]["p1"]["y"])
+                self.stack_scan_p2 = (click_targets["stack_scan_points"]["p2"]["x"], click_targets["stack_scan_points"]["p2"]["y"])
+            if "stack_scan_step" in click_targets:
+                try:
+                    self.stack_scan_step = int(click_targets["stack_scan_step"])
+                except (TypeError, ValueError):
+                    pass
+            if "stack_scan_fallback_points" in click_targets:
+                self.stack_scan_fallback_p1 = (
+                    click_targets["stack_scan_fallback_points"]["p1"]["x"],
+                    click_targets["stack_scan_fallback_points"]["p1"]["y"],
+                )
+                self.stack_scan_fallback_p2 = (
+                    click_targets["stack_scan_fallback_points"]["p2"]["x"],
+                    click_targets["stack_scan_fallback_points"]["p2"]["y"],
+                )
+            if "stack_scan_fallback_step" in click_targets:
+                try:
+                    self.stack_scan_fallback_step = int(click_targets["stack_scan_fallback_step"])
+                except (TypeError, ValueError):
+                    pass
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
@@ -349,6 +389,27 @@ class Controller(ControllerSecondary):
             time.sleep(0.1)
         return True
 
+    def select_stack_item(self, card_id: int, clicks: int = 1) -> bool:
+        """Select a stack/prompt item by scanning a grid for matching hover objectId."""
+        if self.__select_object_in_region(
+            card_id=card_id,
+            p1=self.stack_scan_p1,
+            p2=self.stack_scan_p2,
+            step=self.stack_scan_step,
+            clicks=clicks,
+            label="STACK_ITEM",
+        ):
+            return True
+        bot_logger.log_info("Stack scan fallback to center region")
+        return self.__select_object_in_region(
+            card_id=card_id,
+            p1=self.stack_scan_fallback_p1,
+            p2=self.stack_scan_fallback_p2,
+            step=self.stack_scan_fallback_step,
+            clicks=clicks,
+            label="STACK_ITEM_FALLBACK",
+        )
+
     def submit_selection(self) -> None:
         bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "SUBMIT_SELECTION")
         self.input.move_abs(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1])
@@ -378,6 +439,52 @@ class Controller(ControllerSecondary):
     def auto_pass(self) -> None:
         self.input.tap_enter()
         time.sleep(0.4)
+
+    def __select_object_in_region(
+        self,
+        card_id: int,
+        p1: tuple[int, int],
+        p2: tuple[int, int],
+        step: int,
+        clicks: int,
+        label: str,
+    ) -> bool:
+        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+        x1, y1 = p1
+        x2, y2 = p2
+        x_min, x_max = (x1, x2) if x1 <= x2 else (x2, x1)
+        y_min, y_max = (y1, y2) if y1 <= y2 else (y2, y1)
+        step = max(10, int(step))
+
+        reset_x = x_min
+        reset_y = max(self.screen_bounds[0][1], y_min - 80)
+        bot_logger.log_move(reset_x, reset_y, f"RESET_BEFORE_{label} (target card_id={card_id})")
+        self.input.move_abs(reset_x, reset_y)
+        time.sleep(0.1)
+
+        for y in range(y_min, y_max + 1, step):
+            for x in range(x_min, x_max + 1, step):
+                self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+                self.input.move_abs(x, y)
+                time.sleep(0.05)
+                if not self.log_reader.has_new_line(self.patterns['hover_id']):
+                    continue
+                parsed = self.__parse_hover_id_line(
+                    self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                )
+                if parsed is None:
+                    continue
+                bot_logger.log_hover(parsed)
+                if parsed != card_id:
+                    continue
+                bot_logger.log_click(x, y, f"SELECT_{label} (id={card_id})")
+                for _ in range(max(1, int(clicks))):
+                    self.input.left_click(1)
+                    time.sleep(0.1)
+                return True
+
+        bot_logger.log_error(f"{label}_FAILED: Card {card_id} not found in scan region")
+        return False
 
     def unconditional_auto_pass(self) -> None:
         self.input.tap_shift_enter()
@@ -568,15 +675,26 @@ class Controller(ControllerSecondary):
                 if min_sel < 1:
                     min_sel = 1
                 random.shuffle(ids)
+                context = req.get("context")
+                option_context = req.get("optionContext")
+                use_stack_selection = (
+                    context == "SelectionContext_TriggeredAbility"
+                    or option_context == "OptionContext_Stacking"
+                )
                 hand_zone = self.updated_game_state.get_zone("ZoneType_Hand", self.__system_seat_id)
                 hand_ids = set(hand_zone.get("objectInstanceIds", []) or []) if hand_zone else set()
                 ids_in_hand = [cid for cid in ids if cid in hand_ids]
+                use_hand_selection = bool(ids_in_hand) or not use_stack_selection
                 if not ids_in_hand:
+                    # Hand zone can be missing in this update (e.g., discard prompts from opponent effects).
+                    # Fall back to the provided ids and retry selection after a brief delay.
                     bot_logger.log_info(
-                        f"SelectN ids not in hand; deferring selection. ids={ids}"
+                        f"SelectN ids not in hand; attempting selection from prompt list. ids={ids}"
                     )
-                    return
-                ids = ids_in_hand
+                    if use_stack_selection:
+                        bot_logger.log_info("SelectN using stack scan for triggered ability selection")
+                else:
+                    ids = ids_in_hand
 
                 def _verify_selection(selected_ids: list[int], attempt: int) -> None:
                     try:
@@ -603,7 +721,11 @@ class Controller(ControllerSecondary):
                         for card_id in ids:
                             if selected >= min_sel:
                                 break
-                            if self.select_hand_card(card_id, clicks=clicks):
+                            if use_hand_selection:
+                                selected_ok = self.select_hand_card(card_id, clicks=clicks)
+                            else:
+                                selected_ok = self.select_stack_item(card_id, clicks=clicks)
+                            if selected_ok:
                                 selected += 1
                                 selected_ids.append(card_id)
                                 time.sleep(0.3)
@@ -618,7 +740,10 @@ class Controller(ControllerSecondary):
 
                     threading.Timer(delay, _do_selection).start()
 
-                _attempt_selection(1, delay=0.6)
+                delay = 0.6
+                if not ids_in_hand:
+                    delay = 1.0
+                _attempt_selection(1, delay=delay)
         except Exception as e:
             bot_logger.log_error(f"Failed to handle SelectNReq: {e}")
 
