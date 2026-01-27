@@ -1,7 +1,8 @@
 # Ignore generated card data
 cards.json
 cards_metadata.json
-
+#ignore credentials
+credentials.txt
 # Build artifacts
 build/
 dist/
