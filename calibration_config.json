@@ -12,8 +12,8 @@
     ],
     "click_targets": {
         "keep_hand": {
-            "x": 1876,
-            "y": 1060
+            "x": 1719,
+            "y": 852
         },
         "queue_button": {
             "x": 2485,
@@ -48,6 +48,26 @@
                 "x": 2421,
                 "y": 1253
             }
+        },
+        "log_in_btn": {
+            "x": 1718,
+            "y": 1068
+        },
+        "log_out_btn": {
+            "x": 1727,
+            "y": 854
+        },
+        "logout_ok_btn": {
+            "x": 1878,
+            "y": 809
+        },
+        "log_out_ok_btn": {
+            "x": 1874,
+            "y": 811
         }
-    }
+    },
+    "input_backend": "auto",
+    "account_switch_minutes": 1,
+    "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
+    "account_cycle_index": 0
 }

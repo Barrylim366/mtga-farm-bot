@@ -1,8 +1,10 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox, ttk
+from datetime import datetime
+import os
+import time
 from PIL import Image, ImageTk
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -61,7 +63,10 @@ class CalibrationWindow(tk.Toplevel):
             "opponent_avatar",
             "hand_scan_p1",
             "hand_scan_p2",
-            "assign_damage_done"
+            "assign_damage_done",
+            "log_out_btn",
+            "log_out_ok_btn",
+            "log_in_btn"
         ]
 
         self.selected_button = tk.StringVar(value=self.button_options[0])
@@ -413,7 +418,8 @@ class ConfigManager:
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r") as f:
-                    return json.load(f)
+                    loaded = json.load(f)
+                return self._ensure_defaults(loaded)
             except (json.JSONDecodeError, IOError):
                 return self._default_config()
         return self._default_config()
@@ -424,6 +430,9 @@ class ConfigManager:
             "log_path": detected_log or "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
             "screen_bounds": [[0, 0], [2560, 1440]],
             "input_backend": "auto",
+            "account_switch_minutes": 0,
+            "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
+            "account_cycle_index": 0,
             "click_targets": {
                 "keep_hand": {"x": 1876, "y": 1060},
                 "queue_button": {"x": 2485, "y": 1194},
@@ -438,6 +447,26 @@ class ConfigManager:
                 }
             }
         }
+
+    def _ensure_defaults(self, config):
+        defaults = self._default_config()
+
+        def _merge(target, source):
+            for key, value in source.items():
+                if key not in target:
+                    target[key] = value
+                elif isinstance(value, dict) and isinstance(target.get(key), dict):
+                    _merge(target[key], value)
+
+        _merge(config, defaults)
+        # Remove deprecated click targets if present
+        try:
+            click_targets = config.get("click_targets", {})
+            if isinstance(click_targets, dict) and "options_btn" in click_targets:
+                click_targets.pop("options_btn", None)
+        except Exception:
+            pass
+        return config
 
     def _save_config(self):
         with open(self.config_path, "w") as f:
@@ -481,6 +510,45 @@ class ConfigManager:
 
     def set_input_backend(self, backend: str):
         self.config["input_backend"] = backend
+        self._save_config()
+
+    def get_account_switch_minutes(self) -> int:
+        try:
+            return int(self.config.get("account_switch_minutes", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_account_switch_minutes(self, minutes: int) -> None:
+        try:
+            minutes_i = int(minutes)
+        except (TypeError, ValueError):
+            return
+        if minutes_i < 0:
+            minutes_i = 0
+        self.config["account_switch_minutes"] = minutes_i
+        self._save_config()
+
+    def get_credentials_path(self) -> str:
+        return self.config.get("credentials_path", "")
+
+    def set_credentials_path(self, path: str) -> None:
+        self.config["credentials_path"] = path or ""
+        self._save_config()
+
+    def get_account_cycle_index(self) -> int:
+        try:
+            return int(self.config.get("account_cycle_index", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_account_cycle_index(self, index: int) -> None:
+        try:
+            index_i = int(index)
+        except (TypeError, ValueError):
+            return
+        if index_i < 0:
+            index_i = 0
+        self.config["account_cycle_index"] = index_i
         self._save_config()
 
 
@@ -624,9 +692,15 @@ class MTGBotUI(tk.Tk):
             click_targets = self.config_manager.get_click_targets()
             screen_bounds = self.config_manager.get_screen_bounds()
             input_backend = self.config_manager.get_input_backend()
+            account_switch_minutes = self.config_manager.get_account_switch_minutes()
+            credentials_path = self.config_manager.get_credentials_path()
+            account_cycle_index = self.config_manager.get_account_cycle_index()
 
             controller = Controller(log_path=log_path, screen_bounds=screen_bounds,
-                                   click_targets=click_targets, input_backend=input_backend)
+                                   click_targets=click_targets, input_backend=input_backend,
+                                   account_switch_minutes=account_switch_minutes,
+                                   credentials_path=credentials_path,
+                                   account_cycle_index=account_cycle_index)
             ai = DummyAI()
             self.game = Game(controller, ai)
             self.game.start()
@@ -681,7 +755,7 @@ class MTGBotUI(tk.Tk):
             self.settings_window.lift()
             self.settings_window.focus_force()
             return
-        self.settings_window = SettingsWindow(self, self.session_games, self.session_wins)
+        self.settings_window = SettingsWindow(self, self.config_manager, self.session_games, self.session_wins)
 
     def _update_settings_window(self):
         if self.settings_window and self.settings_window.winfo_exists():
@@ -689,13 +763,21 @@ class MTGBotUI(tk.Tk):
 
 
 class SettingsWindow(tk.Toplevel):
-    def __init__(self, parent, games: int, wins: int):
+    def __init__(self, parent, config_manager: ConfigManager, games: int, wins: int):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("360x260")
+        self.geometry("360x320")
         self.resizable(False, False)
         self.configure(bg="#2b2b2b")
         self._log_window = None
+        self._config_manager = config_manager
+        self._recording = False
+        self._record_ignore_first = False
+        self._mouse_listener = None
+        self._keyboard_listener = None
+        self._playback_thread = None
+        self._playback_keyboard_listener = None
+        self._playback_stop_event = threading.Event()
 
         frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -736,6 +818,80 @@ class SettingsWindow(tk.Toplevel):
         )
         show_log_cb.pack(side=tk.LEFT, padx=(10, 0))
 
+        switch_row = tk.Frame(frame, bg="#2b2b2b")
+        switch_row.pack(fill=tk.X, pady=(12, 0))
+
+        switch_label = tk.Label(
+            switch_row,
+            text="Switch account (min)",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        switch_label.pack(side=tk.LEFT)
+
+        self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
+        switch_entry = tk.Entry(
+            switch_row,
+            textvariable=self.switch_minutes_var,
+            width=6,
+            bg="#1e1e1e",
+            fg="white",
+            insertbackground="white",
+            relief=tk.FLAT,
+        )
+        switch_entry.pack(side=tk.LEFT, padx=(10, 0))
+        switch_entry.bind("<Return>", lambda _e: self._save_switch_minutes())
+        switch_entry.bind("<FocusOut>", lambda _e: self._save_switch_minutes())
+
+        switch_hint = tk.Label(
+            frame,
+            text="0 = disabled",
+            bg="#2b2b2b",
+            fg="#aaaaaa",
+            font=("Segoe UI", 8),
+        )
+        switch_hint.pack(anchor="w", pady=(4, 0))
+
+        record_row = tk.Frame(frame, bg="#2b2b2b")
+        record_row.pack(fill=tk.X, pady=(12, 0))
+
+        record_label = tk.Label(
+            record_row,
+            text="Switch account",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        record_label.pack(side=tk.LEFT)
+
+        self.record_btn = tk.Button(
+            record_row,
+            text="Record",
+            command=self._record_actions_prompt,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=10,
+            pady=2,
+        )
+        self.record_btn.pack(side=tk.LEFT, padx=(10, 0))
+        self.test_action_btn = tk.Button(
+            record_row,
+            text="Test Action",
+            command=self._play_recorded_actions,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=10,
+            pady=2,
+        )
+        self.test_action_btn.pack(side=tk.LEFT, padx=(8, 0))
+
         self.update_stats(games, wins)
 
     def update_stats(self, games: int, wins: int):
@@ -753,10 +909,261 @@ class SettingsWindow(tk.Toplevel):
                 self._log_window.destroy()
             self._log_window = None
 
+    def _save_switch_minutes(self):
+        raw = (self.switch_minutes_var.get() or "").strip()
+        if raw == "":
+            return
+        try:
+            minutes = int(raw)
+        except ValueError:
+            return
+        if minutes < 0:
+            minutes = 0
+        self.switch_minutes_var.set(str(minutes))
+        self._config_manager.set_account_switch_minutes(minutes)
+
+    def _record_actions_prompt(self):
+        if self._recording:
+            self._stop_recording()
+            return
+        prompt = tk.Toplevel(self)
+        prompt.title("Record")
+        prompt.geometry("280x80")
+        prompt.resizable(False, False)
+        prompt.configure(bg="#2b2b2b")
+        label = tk.Label(
+            prompt,
+            text="record action press enter",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        label.pack(expand=True)
+
+        def _start_and_close(_event=None):
+            try:
+                prompt.destroy()
+            finally:
+                self._start_recording()
+
+        prompt.bind("<Return>", _start_and_close)
+        prompt.focus_force()
+
+    def _start_recording(self):
+        if self._recording:
+            return
+        try:
+            from pynput import mouse, keyboard
+        except Exception as e:
+            messagebox.showerror("Record", f"pynput not available: {e}")
+            return
+        self._recording = True
+        self._record_ignore_first = True
+        self.record_btn.config(text="Stop")
+        self.test_action_btn.config(state=tk.DISABLED)
+
+        def _write_line(line: str) -> None:
+            path = os.path.join(os.path.dirname(__file__), "recorded_actions.txt")
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except Exception:
+                pass
+
+        def _on_click(x, y, button, pressed):
+            if not pressed or not self._recording:
+                return
+            if self._record_ignore_first:
+                self._record_ignore_first = False
+                return
+            ts = datetime.now().isoformat(sep=" ", timespec="milliseconds")
+            btn_name = str(button).split(".")[-1]
+            line = f"[{ts}] click x={int(x)} y={int(y)} button={btn_name}\n"
+            _write_line(line)
+
+        def _on_key_press(key):
+            if not self._recording:
+                return False
+            if key == keyboard.Key.f8:
+                self.after(0, self._stop_recording)
+                return False
+            try:
+                key_name = key.char
+            except AttributeError:
+                key_name = key.name if hasattr(key, "name") else str(key)
+            ts = datetime.now().isoformat(sep=" ", timespec="milliseconds")
+            _write_line(f"[{ts}] key={key_name} action=press\n")
+
+        self._mouse_listener = mouse.Listener(on_click=_on_click)
+        self._mouse_listener.daemon = True
+        self._mouse_listener.start()
+        self._keyboard_listener = keyboard.Listener(on_press=_on_key_press)
+        self._keyboard_listener.daemon = True
+        self._keyboard_listener.start()
+
+    def _stop_recording(self):
+        if not self._recording:
+            return
+        self._recording = False
+        self.record_btn.config(text="Record")
+        self.test_action_btn.config(state=tk.NORMAL)
+        if self._mouse_listener:
+            try:
+                self._mouse_listener.stop()
+            except Exception:
+                pass
+        self._mouse_listener = None
+        if self._keyboard_listener:
+            try:
+                self._keyboard_listener.stop()
+            except Exception:
+                pass
+        self._keyboard_listener = None
+
+    def _play_recorded_actions(self):
+        if self._recording:
+            return
+        if self._playback_thread and self._playback_thread.is_alive():
+            return
+        path = os.path.join(os.path.dirname(__file__), "recorded_actions.txt")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+        except Exception as e:
+            messagebox.showerror("Test Action", f"Unable to read recorded_actions.txt: {e}")
+            return
+        if not lines:
+            messagebox.showinfo("Test Action", "recorded_actions.txt is empty.")
+            return
+
+        try:
+            from pynput import mouse, keyboard
+        except Exception as e:
+            messagebox.showerror("Test Action", f"pynput not available: {e}")
+            return
+
+        def _parse_line(line: str):
+            if not line.startswith("["):
+                return None
+            try:
+                ts_end = line.index("]")
+            except ValueError:
+                return None
+            ts_raw = line[1:ts_end]
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+            except Exception:
+                return None
+            rest = line[ts_end + 1 :].strip()
+            if rest.startswith("click"):
+                parts = rest.split()
+                data = {"type": "click", "ts": ts}
+                for part in parts[1:]:
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        data[k] = v
+                return data
+            if rest.startswith("key="):
+                data = {"type": "key", "ts": ts}
+                for part in rest.split():
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        data[k] = v
+                return data
+            return None
+
+        events = []
+        for line in lines:
+            parsed = _parse_line(line)
+            if parsed:
+                events.append(parsed)
+        if not events:
+            messagebox.showinfo("Test Action", "No valid actions found to play.")
+            return
+
+        events.sort(key=lambda e: e["ts"])
+        center_x = self.winfo_screenwidth() // 2
+        center_y = self.winfo_screenheight() // 2
+        self.test_action_btn.config(state=tk.DISABLED)
+        self._playback_stop_event.clear()
+
+        def _on_playback_key(key):
+            if key == keyboard.Key.f8:
+                self._playback_stop_event.set()
+                return False
+            return True
+
+        self._playback_keyboard_listener = keyboard.Listener(on_press=_on_playback_key)
+        self._playback_keyboard_listener.daemon = True
+        self._playback_keyboard_listener.start()
+
+        def _run():
+            m = mouse.Controller()
+            k = keyboard.Controller()
+            m.position = (center_x, center_y)
+            m.click(mouse.Button.left, 1)
+            prev_ts = events[0]["ts"]
+            for ev in events:
+                if self._playback_stop_event.is_set():
+                    break
+                delay = (ev["ts"] - prev_ts).total_seconds()
+                if delay > 0:
+                    end_time = time.time() + delay
+                    while time.time() < end_time:
+                        if self._playback_stop_event.is_set():
+                            break
+                        time.sleep(0.05)
+                    if self._playback_stop_event.is_set():
+                        break
+                if ev["type"] == "click":
+                    try:
+                        x = int(float(ev.get("x", 0)))
+                        y = int(float(ev.get("y", 0)))
+                    except Exception:
+                        x, y = 0, 0
+                    btn_raw = (ev.get("button") or "").split(".")[-1]
+                    btn = mouse.Button.left
+                    if btn_raw == "right":
+                        btn = mouse.Button.right
+                    elif btn_raw == "middle":
+                        btn = mouse.Button.middle
+                    m.position = (x, y)
+                    time.sleep(0.05)
+                    m.press(btn)
+                    time.sleep(0.05)
+                    m.release(btn)
+                elif ev["type"] == "key":
+                    key_name = ev.get("key", "")
+                    key_obj = None
+                    if len(key_name) == 1:
+                        key_obj = key_name
+                    else:
+                        if hasattr(keyboard.Key, key_name):
+                            key_obj = getattr(keyboard.Key, key_name)
+                    if key_obj is not None:
+                        k.press(key_obj)
+                        k.release(key_obj)
+                prev_ts = ev["ts"]
+            self.after(0, self._finish_playback)
+
+        self._playback_thread = threading.Thread(target=_run, daemon=True)
+        self._playback_thread.start()
+
+    def _finish_playback(self):
+        if self._playback_keyboard_listener:
+            try:
+                self._playback_keyboard_listener.stop()
+            except Exception:
+                pass
+        self._playback_keyboard_listener = None
+        self.test_action_btn.config(state=tk.NORMAL)
+
     def destroy(self):
         try:
             if self._log_window and self._log_window.winfo_exists():
                 self._log_window.destroy()
+            if self._recording:
+                self._stop_recording()
         finally:
             super().destroy()
 

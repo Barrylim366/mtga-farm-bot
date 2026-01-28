@@ -15,7 +15,16 @@ _TARGET_FIELD_UNSET = object()
 
 class Controller(ControllerSecondary):
 
-    def __init__(self, log_path, screen_bounds=((0, 0), (1600, 900)), click_targets=None, input_backend: str | None = None):
+    def __init__(
+        self,
+        log_path,
+        screen_bounds=((0, 0), (1600, 900)),
+        click_targets=None,
+        input_backend: str | None = None,
+        account_switch_minutes: int | None = None,
+        credentials_path: str | None = None,
+        account_cycle_index: int | None = None,
+    ):
         self.__decision_callback = None
         self.__mulligan_decision_callback = None
         self.__action_success_callback = None
@@ -35,6 +44,8 @@ class Controller(ControllerSecondary):
             'declare_attackers': '"type": "GREMessageType_DeclareAttackersReq"',
             'select_n': '"type": "GREMessageType_SelectNReq"',
             'select_targets': '"type": "GREMessageType_SelectTargetsReq"',
+            'main_nav_loaded': 'MainNav load in',
+            'queue_ready_marker': 'Unloading 1 Unused Serialized files (Serialized files now loaded:',
         }
         self.log_reader = LogReader(self.patterns.values(), log_path=log_path, callback=self.__log_callback)
         try:
@@ -64,6 +75,10 @@ class Controller(ControllerSecondary):
             self.screen_bounds[1][0] - self.main_br_button_offset[0],
             self.screen_bounds[1][1] - self.main_br_button_offset[1],
         )
+
+        self.log_out_btn_coors = None
+        self.log_out_ok_btn_coors = None
+        self.log_in_btn_coors = None
         
         self.hand_scan_p1 = (self.screen_bounds[0][0], self.screen_bounds[1][1] - 30)
         self.hand_scan_p2 = (self.screen_bounds[1][0], self.screen_bounds[1][1] - 30)
@@ -123,6 +138,14 @@ class Controller(ControllerSecondary):
                     self.stack_scan_fallback_step = int(click_targets["stack_scan_fallback_step"])
                 except (TypeError, ValueError):
                     pass
+            if "log_out_btn" in click_targets:
+                self.log_out_btn_coors = (click_targets["log_out_btn"]["x"], click_targets["log_out_btn"]["y"])
+            if "log_out_ok_btn" in click_targets:
+                self.log_out_ok_btn_coors = (click_targets["log_out_ok_btn"]["x"], click_targets["log_out_ok_btn"]["y"])
+            elif "logout_ok_btn" in click_targets:
+                self.log_out_ok_btn_coors = (click_targets["logout_ok_btn"]["x"], click_targets["logout_ok_btn"]["y"])
+            if "log_in_btn" in click_targets:
+                self.log_in_btn_coors = (click_targets["log_in_btn"]["x"], click_targets["log_in_btn"]["y"])
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
@@ -137,8 +160,26 @@ class Controller(ControllerSecondary):
         self.__last_submit_targets_ts = 0.0
         self.__pending_select_n = None
         self.__target_submit_cooldown_sec = 1.0
+        self._account_switch_interval = max(0, int(account_switch_minutes or 0)) * 60
+        self._credentials_path = credentials_path or ""
+        self._account_cycle_index = int(account_cycle_index or 0)
+        self._last_account_switch_ts = time.time()
+        self._account_switch_pending = False
+        self._account_switch_in_progress = False
+        self._queue_after_login = False
+        self._queue_spam_thread = None
+        self._stop_queue_spam = False
+        self._queue_ready = False
+        self._match_end_dismissed = False
+        self._post_match_ready_ts = None
+        self._post_match_delay_sec = 30
 
     def start_game_from_home_screen(self):
+        if self._account_switch_in_progress or self._account_switch_due():
+            self._account_switch_pending = True
+            bot_logger.log_info("Account switch pending; skipping queue click.")
+            return
+        bot_logger.log_info("Queue attempt: clicking queue button.")
         bot_logger.log_click(self.home_play_button_coors[0], self.home_play_button_coors[1], "QUEUE_BUTTON")
         self.input.move_abs(self.home_play_button_coors[0], self.home_play_button_coors[1])
         self.input.left_down()
@@ -154,7 +195,7 @@ class Controller(ControllerSecondary):
 
     def start_game(self) -> None:
         self.start_monitor()
-        self.start_game_from_home_screen()
+        self.start_queueing()
 
     def dismiss_remote_request(self) -> None:
         return
@@ -556,6 +597,11 @@ class Controller(ControllerSecondary):
         # Click again in case first click wasn't enough
         self.input.left_click(1)
         bot_logger.log_info("Match completed - dismissed end screen")
+        self._match_end_dismissed = True
+        self._post_match_ready_ts = time.time()
+        threading.Timer(self._post_match_delay_sec, self._maybe_post_match_action).start()
+        if self._queue_ready:
+            self._maybe_post_match_action()
 
         # Call match end callback to trigger restart
         if self.__match_end_callback:
@@ -634,13 +680,25 @@ class Controller(ControllerSecondary):
     def __log_callback(self, pattern: str, line_containing_pattern: str):
         if pattern == self.patterns["game_state"]:
             self.__update_game_state(json.loads(line_containing_pattern))
+            if self._queue_spam_thread and self._queue_spam_thread.is_alive():
+                self._stop_queue_spam = True
+            if self._queue_spam_thread and self._queue_spam_thread.is_alive():
+                self._stop_queue_spam = True
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
             outcome = self.__infer_match_won(line_containing_pattern)
             if outcome is not None:
                 self.__last_match_won = outcome
+            self._match_end_dismissed = False
+            self._post_match_ready_ts = None
             # Wait a moment for end screen to fully appear, then dismiss it
             threading.Timer(6.0, self.dismiss_end_screen).start()
+            if self._account_switch_due():
+                self._account_switch_pending = True
+        elif pattern == self.patterns["queue_ready_marker"]:
+            self._handle_queue_ready()
+        elif pattern == self.patterns["main_nav_loaded"]:
+            self._handle_main_nav_loaded()
         elif pattern == self.patterns["assign_damage"]:
             # Wait a small delay to ensure UI is ready
             threading.Timer(1.0, self.click_assign_damage_done).start()
@@ -650,6 +708,193 @@ class Controller(ControllerSecondary):
             self.__handle_select_n_req(line_containing_pattern)
         elif pattern == self.patterns["select_targets"]:
             self.__handle_select_targets_req(line_containing_pattern)
+
+    def _account_switch_due(self) -> bool:
+        if self._account_switch_interval <= 0:
+            return False
+        return (time.time() - self._last_account_switch_ts) >= self._account_switch_interval
+
+    def _handle_queue_ready(self) -> None:
+        if not self._queue_ready:
+            self._queue_ready = True
+            bot_logger.log_info("Queue-ready marker detected.")
+            self._stop_queue_spam = True
+        if self._account_switch_in_progress:
+            bot_logger.log_info("Queue-ready marker ignored: account switch in progress.")
+            return
+        if self._match_end_dismissed:
+            self._maybe_post_match_action()
+
+    def _handle_main_nav_loaded(self) -> None:
+        bot_logger.log_info("MainNav loaded.")
+        if not self._queue_ready:
+            return
+        time.sleep(1.5)
+        if self._account_switch_in_progress:
+            return
+        if self._match_end_dismissed:
+            self._maybe_post_match_action()
+
+    def _maybe_post_match_action(self) -> None:
+        if self._account_switch_in_progress:
+            return
+        if self._post_match_ready_ts is None:
+            return
+        elapsed = time.time() - self._post_match_ready_ts
+        if elapsed < self._post_match_delay_sec:
+            remaining = self._post_match_delay_sec - elapsed
+            bot_logger.log_info(f"Post-match delay active ({remaining:.1f}s remaining).")
+            return
+        if self._account_switch_pending or self._account_switch_due():
+            bot_logger.log_info("Post-match UI ready; starting account switch.")
+            threading.Thread(target=self._perform_account_switch, daemon=True).start()
+            return
+        if self._queue_after_login:
+            self._queue_after_login = False
+            bot_logger.log_info("Post-match UI ready after login; resuming queue spam.")
+            self.start_queueing()
+            return
+        bot_logger.log_info("Post-match UI ready; resuming queue spam.")
+        self.start_queueing()
+
+    def should_defer_post_match_actions(self) -> bool:
+        if self._account_switch_in_progress:
+            return True
+        if self._account_switch_pending or self._account_switch_due():
+            return True
+        if self._post_match_ready_ts is None:
+            return False
+        return (time.time() - self._post_match_ready_ts) < self._post_match_delay_sec
+
+    def start_queueing(self) -> None:
+        if self._account_switch_in_progress:
+            bot_logger.log_info("Queue start requested but account switch in progress; ignoring.")
+            return
+        if self._queue_spam_thread and self._queue_spam_thread.is_alive():
+            bot_logger.log_info("Queue spam already running.")
+            return
+        self._stop_queue_spam = False
+        self._queue_ready = False
+        bot_logger.log_info("Starting queue spam loop.")
+        self._queue_spam_thread = threading.Thread(target=self._queue_spam_loop, daemon=True)
+        self._queue_spam_thread.start()
+
+    def _queue_spam_loop(self) -> None:
+        while not self._stop_queue_spam:
+            if self._account_switch_in_progress:
+                bot_logger.log_info("Queue spam stopping: account switch in progress.")
+                return
+            if self._account_switch_due():
+                self._account_switch_pending = True
+                bot_logger.log_info("Account switch due; stopping queue spam and waiting for queue-ready marker.")
+                return
+            self.start_game_from_home_screen()
+            time.sleep(3.0)
+
+    def _perform_account_switch(self) -> None:
+        if self._account_switch_in_progress:
+            return
+        self._account_switch_in_progress = True
+        try:
+            bot_logger.log_info("Account switch: starting logout/login flow.")
+            if not self.log_out_btn_coors or not self.log_out_ok_btn_coors or not self.log_in_btn_coors:
+                bot_logger.log_error("Account switch failed: missing calibrated button(s).")
+                self._account_switch_pending = False
+                return
+
+            accounts = self._load_accounts_from_credentials(self._credentials_path)
+            if not accounts:
+                bot_logger.log_error("Account switch failed: no accounts found in credentials file.")
+                self._account_switch_pending = False
+                return
+
+            next_index = (self._account_cycle_index + 1) % len(accounts)
+            account = accounts[next_index]
+
+            bot_logger.log_info(f"Switching account to Acc_{next_index + 1}")
+            bot_logger.log_info("Account switch: pressing ESC to open options menu.")
+            self.input.tap_escape()
+            time.sleep(0.6)
+            center_x = (self.screen_bounds[0][0] + self.screen_bounds[1][0]) // 2
+            center_y = (self.screen_bounds[0][1] + self.screen_bounds[1][1]) // 2
+            bot_logger.log_info(f"Account switch: focus click at center ({center_x}, {center_y}).")
+            self.input.move_abs(center_x, center_y)
+            time.sleep(0.1)
+            self.input.left_click(1)
+            time.sleep(2.5)
+            bot_logger.log_info(
+                f"Account switch: clicking LOG_OUT_BTN at ({self.log_out_btn_coors[0]}, {self.log_out_btn_coors[1]})."
+            )
+            # Move, pause, then click twice with a slightly longer press to improve reliability.
+            self.input.move_abs(self.log_out_btn_coors[0], self.log_out_btn_coors[1])
+            time.sleep(0.4)
+            self.input.left_down()
+            time.sleep(0.2)
+            self.input.left_up()
+            time.sleep(0.2)
+            self._click(self.log_out_btn_coors, "LOG_OUT_BTN")
+            time.sleep(0.2)
+            self.input.left_click(1)
+            time.sleep(0.8)
+            bot_logger.log_info(
+                f"Account switch: clicking LOG_OUT_OK_BTN at ({self.log_out_ok_btn_coors[0]}, {self.log_out_ok_btn_coors[1]})."
+            )
+            self._click(self.log_out_ok_btn_coors, "LOG_OUT_OK_BTN")
+            time.sleep(2.0)
+
+            bot_logger.log_info("Account switch: entering credentials.")
+            self.input.tap_delete()
+            time.sleep(0.2)
+            self.input.type_text(account.get("email", ""))
+            time.sleep(0.2)
+            self.input.tap_tab()
+            time.sleep(0.2)
+            self.input.type_text(account.get("pw", ""))
+            time.sleep(0.2)
+            bot_logger.log_info(
+                f"Account switch: clicking LOG_IN_BTN at ({self.log_in_btn_coors[0]}, {self.log_in_btn_coors[1]})."
+            )
+            self._click(self.log_in_btn_coors, "LOG_IN_BTN")
+            bot_logger.log_info("Account switch: login submitted.")
+
+            self._account_cycle_index = next_index
+            self._last_account_switch_ts = time.time()
+            self._account_switch_pending = False
+            self._queue_after_login = True
+        except Exception as e:
+            bot_logger.log_error(f"Account switch failed: {e}")
+        finally:
+            self._account_switch_in_progress = False
+
+    def _load_accounts_from_credentials(self, path: str) -> list[dict]:
+        if not path:
+            return []
+        try:
+            with open(path, "r") as f:
+                content = f.read()
+        except Exception as e:
+            bot_logger.log_error(f"Failed to read credentials file: {e}")
+            return []
+
+        accounts = []
+        for match in re.finditer(r"Acc_(\d+)\s*=\s*{([^}]*)}", content, re.DOTALL | re.IGNORECASE):
+            idx = int(match.group(1))
+            block = match.group(2)
+            email_m = re.search(r'["\']email["\']\s*:\s*["\']([^"\']+)["\']', block, re.IGNORECASE)
+            pw_m = re.search(r'["\']pw["\']\s*:\s*["\']([^"\']+)["\']', block, re.IGNORECASE)
+            if not email_m or not pw_m:
+                continue
+            accounts.append({"index": idx, "email": email_m.group(1), "pw": pw_m.group(1)})
+
+        accounts.sort(key=lambda a: a["index"])
+        return accounts
+
+    def _click(self, pos: tuple[int, int], tag: str) -> None:
+        x, y = pos
+        bot_logger.log_click(x, y, tag)
+        self.input.move_abs(x, y)
+        time.sleep(0.2)
+        self.input.left_click(1)
 
     def __handle_select_n_req(self, line: str) -> None:
         try:

@@ -79,29 +79,18 @@ class Game:
         if hasattr(self.controller, 'reset_for_new_game'):
             self.controller.reset_for_new_game()
 
-        # Start new game from home screen
-        self._debug("Clicking queue button to start new game")
-        self.controller.start_game_from_home_screen()
-        self._debug("New game queued")
+        # Defer queueing to controller if it's handling post-match delay or account switching.
+        try:
+            if hasattr(self.controller, "should_defer_post_match_actions") and self.controller.should_defer_post_match_actions():
+                self._debug("Controller requested post-match defer; skipping immediate queue spam")
+                return
+        except Exception:
+            pass
 
-        # Schedule retry queue click after 30 seconds if game hasn't started
-        retry_timer = threading.Timer(30.0, self._retry_queue_if_needed)
-        self._timers.append(retry_timer)
-        retry_timer.start()
-
-    def _retry_queue_if_needed(self):
-        """Retry clicking queue button if game hasn't started yet"""
-        if self._stop_requested:
-            self._debug("Stop requested - skipping retry queue")
-            return
-        if not self.game_started:
-            self._debug("Game not started after 30s - retrying queue button")
-            self._human_log("Retrying queue...")
-            self.controller.start_game_from_home_screen()
-            # Schedule next retry
-            retry_timer = threading.Timer(30.0, self._retry_queue_if_needed)
-            self._timers.append(retry_timer)
-            retry_timer.start()
+        # Start queueing loop (keeps clicking until queue is accepted)
+        self._debug("Starting queue spam to enter next match")
+        self.controller.start_queueing()
+        self._debug("Queue spam started")
 
     def stop(self):
         """Stop the game cleanly (cancel timers, stop log monitor, prevent restarts)."""

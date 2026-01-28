@@ -38,6 +38,24 @@ class InputController:
     def tap_shift_enter(self) -> None:
         raise NotImplementedError
 
+    def tap_tab(self) -> None:
+        raise NotImplementedError
+
+    def tap_delete(self) -> None:
+        raise NotImplementedError
+
+    def type_text(self, text: str) -> None:
+        raise NotImplementedError
+
+    def tap_escape(self) -> None:
+        raise NotImplementedError
+
+    def tap_printscreen(self) -> None:
+        raise NotImplementedError
+
+    def tap_win_printscreen(self) -> None:
+        raise NotImplementedError
+
     def position(self) -> Point:
         raise NotImplementedError
 
@@ -83,6 +101,31 @@ class PynputInputController(InputController):
         self._keyboard.release(self._Key.enter)
         self._keyboard.release(self._Key.shift)
 
+    def tap_tab(self) -> None:
+        self._keyboard.press(self._Key.tab)
+        self._keyboard.release(self._Key.tab)
+
+    def tap_delete(self) -> None:
+        self._keyboard.press(self._Key.delete)
+        self._keyboard.release(self._Key.delete)
+
+    def type_text(self, text: str) -> None:
+        self._keyboard.type(text or "")
+
+    def tap_escape(self) -> None:
+        self._keyboard.press(self._Key.esc)
+        self._keyboard.release(self._Key.esc)
+
+    def tap_printscreen(self) -> None:
+        self._keyboard.press(self._Key.print_screen)
+        self._keyboard.release(self._Key.print_screen)
+
+    def tap_win_printscreen(self) -> None:
+        self._keyboard.press(self._Key.cmd)
+        self._keyboard.press(self._Key.print_screen)
+        self._keyboard.release(self._Key.print_screen)
+        self._keyboard.release(self._Key.cmd)
+
     def position(self) -> Point:
         x, y = self._mouse.position
         return Point(int(x), int(y))
@@ -97,6 +140,11 @@ class YdotoolInputController(InputController):
 
     _KEY_ENTER = 28
     _KEY_LEFTSHIFT = 42
+    _KEY_TAB = 15
+    _KEY_DELETE = 111
+    _KEY_ESC = 1
+    _KEY_PRINTSCREEN = 99
+    _KEY_LEFTMETA = 125
 
     # ydotool click codes: 0xC0 = left click (down then up), 0x40 = left down, 0x80 = left up
     _BTN_LEFT_CLICK = "0xC0"
@@ -194,6 +242,33 @@ class YdotoolInputController(InputController):
         self._key(self._KEY_ENTER, True)
         self._key(self._KEY_ENTER, False)
         self._key(self._KEY_LEFTSHIFT, False)
+
+    def tap_tab(self) -> None:
+        self._key(self._KEY_TAB, True)
+        self._key(self._KEY_TAB, False)
+
+    def tap_delete(self) -> None:
+        self._key(self._KEY_DELETE, True)
+        self._key(self._KEY_DELETE, False)
+
+    def type_text(self, text: str) -> None:
+        if text is None:
+            return
+        self._run("type", str(text))
+
+    def tap_escape(self) -> None:
+        self._key(self._KEY_ESC, True)
+        self._key(self._KEY_ESC, False)
+
+    def tap_printscreen(self) -> None:
+        self._key(self._KEY_PRINTSCREEN, True)
+        self._key(self._KEY_PRINTSCREEN, False)
+
+    def tap_win_printscreen(self) -> None:
+        self._key(self._KEY_LEFTMETA, True)
+        self._key(self._KEY_PRINTSCREEN, True)
+        self._key(self._KEY_PRINTSCREEN, False)
+        self._key(self._KEY_LEFTMETA, False)
 
     def position(self) -> Point:
         return self._pos
