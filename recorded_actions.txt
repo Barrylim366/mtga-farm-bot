@@ -1,7 +1,49 @@
-[2026-01-28 12:32:34.968] click x=2541 y=227 button=left
-[2026-01-28 12:32:37.291] click x=1748 y=661 button=left
-[2026-01-28 12:32:39.775] key=esc action=press
-[2026-01-28 12:34:56.288] click x=2545 y=235 button=left
-[2026-01-28 12:34:58.322] click x=2546 y=235 button=left
-[2026-01-28 12:35:01.437] click x=1749 y=653 button=left
-[2026-01-28 12:35:03.684] key=esc action=press
+[2026-01-28 15:00:17.035] key=esc action=press
+[2026-01-28 15:00:19.109] click x=1716 y=851 button=left
+[2026-01-28 15:00:19.233] click x=1716 y=851 button=left
+[2026-01-28 15:00:20.906] click x=1875 y=809 button=left
+[2026-01-28 15:00:21.067] click x=1875 y=809 button=left
+[2026-01-28 15:00:26.185] key=delete action=press
+[2026-01-28 15:00:26.835] key=g action=press
+[2026-01-28 15:00:27.055] key=i action=press
+[2026-01-28 15:00:27.155] key=a action=press
+[2026-01-28 15:00:27.315] key=c action=press
+[2026-01-28 15:00:27.435] key=o action=press
+[2026-01-28 15:00:27.615] key=m action=press
+[2026-01-28 15:00:27.715] key=o action=press
+[2026-01-28 15:00:28.095] key=. action=press
+[2026-01-28 15:00:28.605] key=j action=press
+[2026-01-28 15:00:29.385] key=o action=press
+[2026-01-28 15:00:29.805] key=g action=press
+[2026-01-28 15:00:30.025] key=h action=press
+[2026-01-28 15:00:30.235] key=u action=press
+[2026-01-28 15:00:30.755] key=r action=press
+[2026-01-28 15:00:30.945] key=t action=press
+[2026-01-28 15:00:31.405] key=ctrl_l action=press
+[2026-01-28 15:00:31.406] key=alt_gr action=press
+[2026-01-28 15:00:31.725] key=@ action=press
+[2026-01-28 15:00:32.345] key=w action=press
+[2026-01-28 15:00:32.585] key=e action=press
+[2026-01-28 15:00:32.895] key=b action=press
+[2026-01-28 15:00:33.325] key=. action=press
+[2026-01-28 15:00:33.495] key=d action=press
+[2026-01-28 15:00:33.715] key=e action=press
+[2026-01-28 15:00:33.975] key=shift action=press
+[2026-01-28 15:00:35.065] key=tab action=press
+[2026-01-28 15:00:35.435] key=shift action=press
+[2026-01-28 15:00:35.895] key=U action=press
+[2026-01-28 15:00:36.125] key=n action=press
+[2026-01-28 15:00:36.295] key=i action=press
+[2026-01-28 15:00:36.495] key=v action=press
+[2026-01-28 15:00:36.685] key=e action=press
+[2026-01-28 15:00:36.915] key=r action=press
+[2026-01-28 15:00:37.205] key=s action=press
+[2026-01-28 15:00:37.465] key=a action=press
+[2026-01-28 15:00:37.785] key=l action=press
+[2026-01-28 15:00:38.145] key=1 action=press
+[2026-01-28 15:00:38.455] key=2 action=press
+[2026-01-28 15:00:38.805] key=3 action=press
+[2026-01-28 15:00:39.035] key=shift action=press
+[2026-01-28 15:00:39.195] key=* action=press
+[2026-01-28 15:00:42.495] key=enter action=press
+

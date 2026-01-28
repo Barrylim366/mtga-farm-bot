@@ -3,6 +3,8 @@ import random
 import re
 import threading
 import time
+import os
+from datetime import datetime
 
 from Controller.ControllerInterface import ControllerSecondary
 from Controller.MTGAController.LogReader import LogReader
@@ -78,7 +80,6 @@ class Controller(ControllerSecondary):
 
         self.log_out_btn_coors = None
         self.log_out_ok_btn_coors = None
-        self.log_in_btn_coors = None
         
         self.hand_scan_p1 = (self.screen_bounds[0][0], self.screen_bounds[1][1] - 30)
         self.hand_scan_p2 = (self.screen_bounds[1][0], self.screen_bounds[1][1] - 30)
@@ -144,8 +145,6 @@ class Controller(ControllerSecondary):
                 self.log_out_ok_btn_coors = (click_targets["log_out_ok_btn"]["x"], click_targets["log_out_ok_btn"]["y"])
             elif "logout_ok_btn" in click_targets:
                 self.log_out_ok_btn_coors = (click_targets["logout_ok_btn"]["x"], click_targets["logout_ok_btn"]["y"])
-            if "log_in_btn" in click_targets:
-                self.log_in_btn_coors = (click_targets["log_in_btn"]["x"], click_targets["log_in_btn"]["y"])
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
@@ -173,6 +172,12 @@ class Controller(ControllerSecondary):
         self._match_end_dismissed = False
         self._post_match_ready_ts = None
         self._post_match_delay_sec = 30
+        self._stop_requested = False
+        # Fixed timing for login phase
+        self._login_delete_delay_sec = 20.0
+        # Fallback coords if recorded playback isn't available
+        self.log_out_btn_coors = (1716, 851)
+        self.log_out_ok_btn_coors = (1875, 809)
 
     def start_game_from_home_screen(self):
         if self._account_switch_in_progress or self._account_switch_due():
@@ -194,6 +199,7 @@ class Controller(ControllerSecondary):
         self.log_reader.start_log_monitor()
 
     def start_game(self) -> None:
+        self._stop_requested = False
         self.start_monitor()
         self.start_queueing()
 
@@ -213,6 +219,7 @@ class Controller(ControllerSecondary):
         self.__match_end_callback = method
 
     def end_game(self) -> None:
+        self._stop_requested = True
         # Prevent any future decisions / restarts from firing after a UI stop.
         if self.__decision_execution_thread is not None:
             try:
@@ -231,6 +238,12 @@ class Controller(ControllerSecondary):
             self.stop_inactivity_timer()
         except Exception:
             pass
+
+        # Stop any background queue spam/account switch loops.
+        self._stop_queue_spam = True
+        self._account_switch_pending = False
+        self._account_switch_in_progress = False
+        self._queue_after_login = False
 
         self.__decision_callback = None
         self.__mulligan_decision_callback = None
@@ -714,6 +727,107 @@ class Controller(ControllerSecondary):
             return False
         return (time.time() - self._last_account_switch_ts) >= self._account_switch_interval
 
+    def _replay_recorded_logout(self) -> bool:
+        path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "recorded_actions.txt")
+        )
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+        except Exception:
+            return False
+
+        events = []
+        for line in lines:
+            if not line.startswith("[") or "]" not in line:
+                continue
+            ts_raw = line[1: line.index("]")]
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+            except Exception:
+                continue
+            rest = line[line.index("]") + 1 :].strip()
+            if rest.startswith("click"):
+                data = {"type": "click", "ts": ts}
+                for part in rest.split():
+                    if part.startswith("x="):
+                        data["x"] = part.split("=", 1)[1]
+                    elif part.startswith("y="):
+                        data["y"] = part.split("=", 1)[1]
+                events.append(data)
+            elif rest.startswith("key="):
+                key = None
+                for part in rest.split():
+                    if part.startswith("key="):
+                        key = part.split("=", 1)[1]
+                        break
+                events.append({"type": "key", "key": key, "ts": ts})
+
+        if not events:
+            return False
+
+        # Use last sequence starting with esc, then four clicks (logout x2, ok x2).
+        esc_idx = None
+        click_idxs = []
+        for i in range(len(events) - 1, -1, -1):
+            if events[i]["type"] == "key" and events[i].get("key") == "esc":
+                esc_idx = i
+                break
+        if esc_idx is None:
+            return False
+        for j in range(esc_idx + 1, len(events)):
+            if events[j]["type"] == "click":
+                click_idxs.append(j)
+            if len(click_idxs) >= 4:
+                break
+        if len(click_idxs) < 4:
+            return False
+
+        seq = [esc_idx] + click_idxs[:4]
+        seq_events = [events[i] for i in seq]
+        seq_events.sort(key=lambda e: e["ts"])
+
+        bot_logger.log_info("Replaying recorded logout actions (pynput playback).")
+        try:
+            from pynput import mouse, keyboard
+        except Exception as e:
+            bot_logger.log_error(f"Logout replay failed: pynput not available: {e}")
+            return False
+
+        m = mouse.Controller()
+        k = keyboard.Controller()
+        prev_ts = seq_events[0]["ts"]
+        for ev in seq_events:
+            if self._stop_requested:
+                bot_logger.log_info("Logout replay aborted: stop requested.")
+                return False
+            delay = (ev["ts"] - prev_ts).total_seconds()
+            if delay > 0:
+                time.sleep(delay)
+            if ev["type"] == "key" and ev.get("key") == "esc":
+                bot_logger.log_info("LOGOUT_REPLAY: press ESC")
+                k.press(keyboard.Key.esc)
+                k.release(keyboard.Key.esc)
+            elif ev["type"] == "click":
+                try:
+                    x = int(float(ev.get("x", 0)))
+                    y = int(float(ev.get("y", 0)))
+                except Exception:
+                    x, y = 0, 0
+                if x and y:
+                    bot_logger.log_click(x, y, "LOGOUT_REPLAY_CLICK")
+                    m.position = (x, y)
+                    time.sleep(0.05)
+                    m.press(mouse.Button.left)
+                    time.sleep(0.05)
+                    m.release(mouse.Button.left)
+            prev_ts = ev["ts"]
+        return True
+
+
+
     def _handle_queue_ready(self) -> None:
         if not self._queue_ready:
             self._queue_ready = True
@@ -796,8 +910,11 @@ class Controller(ControllerSecondary):
             return
         self._account_switch_in_progress = True
         try:
+            if self._stop_requested:
+                bot_logger.log_info("Account switch aborted: stop requested.")
+                return
             bot_logger.log_info("Account switch: starting logout/login flow.")
-            if not self.log_out_btn_coors or not self.log_out_ok_btn_coors or not self.log_in_btn_coors:
+            if not self.log_out_btn_coors or not self.log_out_ok_btn_coors:
                 bot_logger.log_error("Account switch failed: missing calibrated button(s).")
                 self._account_switch_pending = False
                 return
@@ -812,37 +929,38 @@ class Controller(ControllerSecondary):
             account = accounts[next_index]
 
             bot_logger.log_info(f"Switching account to Acc_{next_index + 1}")
-            bot_logger.log_info("Account switch: pressing ESC to open options menu.")
-            self.input.tap_escape()
-            time.sleep(0.6)
-            center_x = (self.screen_bounds[0][0] + self.screen_bounds[1][0]) // 2
-            center_y = (self.screen_bounds[0][1] + self.screen_bounds[1][1]) // 2
-            bot_logger.log_info(f"Account switch: focus click at center ({center_x}, {center_y}).")
-            self.input.move_abs(center_x, center_y)
-            time.sleep(0.1)
-            self.input.left_click(1)
-            time.sleep(2.5)
-            bot_logger.log_info(
-                f"Account switch: clicking LOG_OUT_BTN at ({self.log_out_btn_coors[0]}, {self.log_out_btn_coors[1]})."
-            )
-            # Move, pause, then click twice with a slightly longer press to improve reliability.
-            self.input.move_abs(self.log_out_btn_coors[0], self.log_out_btn_coors[1])
-            time.sleep(0.4)
-            self.input.left_down()
-            time.sleep(0.2)
-            self.input.left_up()
-            time.sleep(0.2)
-            self._click(self.log_out_btn_coors, "LOG_OUT_BTN")
-            time.sleep(0.2)
-            self.input.left_click(1)
-            time.sleep(0.8)
-            bot_logger.log_info(
-                f"Account switch: clicking LOG_OUT_OK_BTN at ({self.log_out_ok_btn_coors[0]}, {self.log_out_ok_btn_coors[1]})."
-            )
-            self._click(self.log_out_ok_btn_coors, "LOG_OUT_OK_BTN")
-            time.sleep(2.0)
+            if not self._replay_recorded_logout():
+                bot_logger.log_info("Recorded logout replay unavailable; falling back to fixed logout clicks.")
+                bot_logger.log_info("Account switch: pressing ESC to open options menu.")
+                self.input.tap_escape()
+                time.sleep(2.0)
+                bot_logger.log_info(
+                    f"Account switch: clicking LOG_OUT_BTN at ({self.log_out_btn_coors[0]}, {self.log_out_btn_coors[1]})."
+                )
+                self._click(self.log_out_btn_coors, "LOG_OUT_BTN")
+                time.sleep(0.15)
+                self._click(self.log_out_btn_coors, "LOG_OUT_BTN")
+                time.sleep(1.7)
+                bot_logger.log_info(
+                    f"Account switch: clicking LOG_OUT_OK_BTN at ({self.log_out_ok_btn_coors[0]}, {self.log_out_ok_btn_coors[1]})."
+                )
+                self._click(self.log_out_ok_btn_coors, "LOG_OUT_OK_BTN")
+                time.sleep(0.15)
+                self._click(self.log_out_ok_btn_coors, "LOG_OUT_OK_BTN")
+            if self._stop_requested:
+                bot_logger.log_info("Account switch aborted after logout: stop requested.")
+                return
+            bot_logger.log_info(f"Account switch: waiting {self._login_delete_delay_sec:.2f}s for login screen.")
+            for _ in range(int(self._login_delete_delay_sec * 10)):
+                if self._stop_requested:
+                    bot_logger.log_info("Account switch aborted while waiting for login screen.")
+                    return
+                time.sleep(0.1)
 
             bot_logger.log_info("Account switch: entering credentials.")
+            if self._stop_requested:
+                bot_logger.log_info("Account switch aborted before typing: stop requested.")
+                return
             self.input.tap_delete()
             time.sleep(0.2)
             self.input.type_text(account.get("email", ""))
@@ -851,10 +969,8 @@ class Controller(ControllerSecondary):
             time.sleep(0.2)
             self.input.type_text(account.get("pw", ""))
             time.sleep(0.2)
-            bot_logger.log_info(
-                f"Account switch: clicking LOG_IN_BTN at ({self.log_in_btn_coors[0]}, {self.log_in_btn_coors[1]})."
-            )
-            self._click(self.log_in_btn_coors, "LOG_IN_BTN")
+            bot_logger.log_info("Account switch: submitting login with Enter.")
+            self.input.tap_enter()
             bot_logger.log_info("Account switch: login submitted.")
 
             self._account_cycle_index = next_index

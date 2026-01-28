@@ -65,8 +65,7 @@ class CalibrationWindow(tk.Toplevel):
             "hand_scan_p2",
             "assign_damage_done",
             "log_out_btn",
-            "log_out_ok_btn",
-            "log_in_btn"
+            "log_out_ok_btn"
         ]
 
         self.selected_button = tk.StringVar(value=self.button_options[0])
@@ -312,7 +311,7 @@ class SavedButtonsWindow(tk.Toplevel):
         super().__init__(parent)
         self.config_manager = config_manager
         self.title("Saved Buttons")
-        self.geometry("350x400")
+        self.geometry("380x500")
         self.resizable(False, False)
         self.configure(bg="#2b2b2b")
 
@@ -353,7 +352,8 @@ class SavedButtonsWindow(tk.Toplevel):
                               bg="#3b3b3b", fg="#aaaaaa", font=("Segoe UI", 10))
             no_data.pack(pady=20)
         else:
-            for button_name, coord in coords.items():
+            for button_name in sorted(coords.keys()):
+                coord = coords[button_name]
                 item_frame = tk.Frame(scrollable_frame, bg="#3b3b3b", padx=10, pady=8)
                 item_frame.pack(fill=tk.X)
 
@@ -377,6 +377,11 @@ class SavedButtonsWindow(tk.Toplevel):
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
 
 class ConfigManager:
@@ -464,6 +469,8 @@ class ConfigManager:
             click_targets = config.get("click_targets", {})
             if isinstance(click_targets, dict) and "options_btn" in click_targets:
                 click_targets.pop("options_btn", None)
+            if isinstance(click_targets, dict) and "log_in_btn" in click_targets:
+                click_targets.pop("log_in_btn", None)
         except Exception:
             pass
         return config
