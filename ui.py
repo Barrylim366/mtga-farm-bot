@@ -127,6 +127,21 @@ class CalibrationWindow(tk.Toplevel):
                                    relief=tk.FLAT, padx=15, pady=5)
         self.saved_btn.pack()
 
+        back_btn = tk.Button(
+            main_frame,
+            text="Back",
+            command=self.destroy,
+            bg="#3a3a3a",
+            fg="white",
+            font=("Segoe UI", 10),
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        back_btn.pack(pady=(10, 0))
+
         # Row 5: Test saved coordinate click
         test_frame = tk.Frame(main_frame, bg="#2b2b2b")
         test_frame.pack(fill=tk.X, pady=(20, 0))
@@ -378,10 +393,40 @@ class SavedButtonsWindow(tk.Toplevel):
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        back_btn = tk.Button(
+            main_frame,
+            text="Back",
+            command=self.destroy,
+            bg="#3a3a3a",
+            fg="white",
+            font=("Segoe UI", 10),
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        back_btn.pack(pady=(10, 0))
+
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        back_btn = tk.Button(
+            main_frame,
+            text="Back",
+            command=self.destroy,
+            bg="#3a3a3a",
+            fg="white",
+            font=("Segoe UI", 10),
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        back_btn.pack(pady=(10, 0))
 
 
 class ConfigManager:
@@ -773,7 +818,7 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, config_manager: ConfigManager, games: int, wins: int):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("360x320")
+        self.geometry("360x340")
         self.resizable(False, False)
         self.configure(bg="#2b2b2b")
         self._log_window = None
@@ -785,6 +830,8 @@ class SettingsWindow(tk.Toplevel):
         self._playback_thread = None
         self._playback_keyboard_listener = None
         self._playback_stop_event = threading.Event()
+        self._current_record_events = []
+        self._records_path = os.path.join(os.path.dirname(__file__), "recorded_actions_records.json")
 
         frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -793,15 +840,14 @@ class SettingsWindow(tk.Toplevel):
                          font=("Segoe UI", 12, "bold"))
         title.pack(pady=(0, 12))
 
-        self.games_label = tk.Label(frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
-        self.games_label.pack(pady=4)
+        stats_frame = tk.Frame(frame, bg="#2b2b2b")
+        stats_frame.pack(fill=tk.X)
 
-        self.wins_label = tk.Label(frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
-        self.wins_label.pack(pady=4)
+        self.games_label = tk.Label(stats_frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
+        self.games_label.pack(anchor="w", pady=4)
 
-        hint = tk.Label(frame, text="Resets when ui.py restarts", bg="#2b2b2b", fg="#aaaaaa",
-                        font=("Segoe UI", 9))
-        hint.pack(pady=(10, 12))
+        self.wins_label = tk.Label(stats_frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
+        self.wins_label.pack(anchor="w", pady=4)
 
         sep = tk.Frame(frame, bg="#4a4a4a", height=1)
         sep.pack(fill=tk.X, pady=(0, 12))
@@ -830,16 +876,28 @@ class SettingsWindow(tk.Toplevel):
 
         switch_label = tk.Label(
             switch_row,
-            text="Switch account (min)",
+            text="Switch Account",
             bg="#2b2b2b",
             fg="white",
             font=("Segoe UI", 10),
         )
         switch_label.pack(side=tk.LEFT)
 
+        switch_inner = tk.Frame(switch_row, bg="#2b2b2b")
+        switch_inner.pack(side=tk.LEFT, padx=(10, 0))
+
+        switch_inner_label = tk.Label(
+            switch_inner,
+            text="Switch account (min)",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        switch_inner_label.pack(side=tk.LEFT)
+
         self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
         switch_entry = tk.Entry(
-            switch_row,
+            switch_inner,
             textvariable=self.switch_minutes_var,
             width=6,
             bg="#1e1e1e",
@@ -847,25 +905,25 @@ class SettingsWindow(tk.Toplevel):
             insertbackground="white",
             relief=tk.FLAT,
         )
-        switch_entry.pack(side=tk.LEFT, padx=(10, 0))
+        switch_entry.pack(side=tk.LEFT, padx=(10, 6))
         switch_entry.bind("<Return>", lambda _e: self._save_switch_minutes())
         switch_entry.bind("<FocusOut>", lambda _e: self._save_switch_minutes())
 
         switch_hint = tk.Label(
-            frame,
-            text="0 = disabled",
+            switch_inner,
+            text="0 = off",
             bg="#2b2b2b",
             fg="#aaaaaa",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
         )
-        switch_hint.pack(anchor="w", pady=(4, 0))
+        switch_hint.pack(side=tk.LEFT)
 
         record_row = tk.Frame(frame, bg="#2b2b2b")
         record_row.pack(fill=tk.X, pady=(12, 0))
 
         record_label = tk.Label(
             record_row,
-            text="Switch account",
+            text="Record Action",
             bg="#2b2b2b",
             fg="white",
             font=("Segoe UI", 10),
@@ -885,10 +943,10 @@ class SettingsWindow(tk.Toplevel):
             pady=2,
         )
         self.record_btn.pack(side=tk.LEFT, padx=(10, 0))
-        self.test_action_btn = tk.Button(
+        self.show_records_btn = tk.Button(
             record_row,
-            text="Test Action",
-            command=self._play_recorded_actions,
+            text="Show Records",
+            command=self._show_records,
             bg="#3a3a3a",
             fg="white",
             activebackground="#444444",
@@ -897,7 +955,22 @@ class SettingsWindow(tk.Toplevel):
             padx=10,
             pady=2,
         )
-        self.test_action_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.show_records_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        back_btn = tk.Button(
+            frame,
+            text="Back",
+            command=self.destroy,
+            bg="#3a3a3a",
+            fg="white",
+            font=("Segoe UI", 10),
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        back_btn.pack(anchor="w", pady=(12, 0))
 
         self.update_stats(games, wins)
 
@@ -967,15 +1040,11 @@ class SettingsWindow(tk.Toplevel):
         self._recording = True
         self._record_ignore_first = True
         self.record_btn.config(text="Stop")
-        self.test_action_btn.config(state=tk.DISABLED)
+        self.show_records_btn.config(state=tk.DISABLED)
+        self._current_record_events = []
 
-        def _write_line(line: str) -> None:
-            path = os.path.join(os.path.dirname(__file__), "recorded_actions.txt")
-            try:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(line)
-            except Exception:
-                pass
+        def _append_event(event: dict) -> None:
+            self._current_record_events.append(event)
 
         def _on_click(x, y, button, pressed):
             if not pressed or not self._recording:
@@ -983,10 +1052,13 @@ class SettingsWindow(tk.Toplevel):
             if self._record_ignore_first:
                 self._record_ignore_first = False
                 return
-            ts = datetime.now().isoformat(sep=" ", timespec="milliseconds")
-            btn_name = str(button).split(".")[-1]
-            line = f"[{ts}] click x={int(x)} y={int(y)} button={btn_name}\n"
-            _write_line(line)
+            _append_event({
+                "type": "click",
+                "ts": datetime.now(),
+                "x": int(x),
+                "y": int(y),
+                "button": str(button).split(".")[-1],
+            })
 
         def _on_key_press(key):
             if not self._recording:
@@ -998,8 +1070,11 @@ class SettingsWindow(tk.Toplevel):
                 key_name = key.char
             except AttributeError:
                 key_name = key.name if hasattr(key, "name") else str(key)
-            ts = datetime.now().isoformat(sep=" ", timespec="milliseconds")
-            _write_line(f"[{ts}] key={key_name} action=press\n")
+            _append_event({
+                "type": "key",
+                "ts": datetime.now(),
+                "key": key_name,
+            })
 
         self._mouse_listener = mouse.Listener(on_click=_on_click)
         self._mouse_listener.daemon = True
@@ -1013,7 +1088,7 @@ class SettingsWindow(tk.Toplevel):
             return
         self._recording = False
         self.record_btn.config(text="Record")
-        self.test_action_btn.config(state=tk.NORMAL)
+        self.show_records_btn.config(state=tk.NORMAL)
         if self._mouse_listener:
             try:
                 self._mouse_listener.stop()
@@ -1026,21 +1101,18 @@ class SettingsWindow(tk.Toplevel):
             except Exception:
                 pass
         self._keyboard_listener = None
+        self._prompt_record_name_and_save()
 
-    def _play_recorded_actions(self):
+    def _show_records(self):
+        RecordsWindow(self, self._records_path, self._play_record_actions)
+
+    def _play_record_actions(self, actions: list[dict]) -> None:
         if self._recording:
             return
         if self._playback_thread and self._playback_thread.is_alive():
             return
-        path = os.path.join(os.path.dirname(__file__), "recorded_actions.txt")
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f.readlines() if line.strip()]
-        except Exception as e:
-            messagebox.showerror("Test Action", f"Unable to read recorded_actions.txt: {e}")
-            return
-        if not lines:
-            messagebox.showinfo("Test Action", "recorded_actions.txt is empty.")
+        if not actions:
+            messagebox.showinfo("Test Action", "No actions to play.")
             return
 
         try:
@@ -1049,49 +1121,7 @@ class SettingsWindow(tk.Toplevel):
             messagebox.showerror("Test Action", f"pynput not available: {e}")
             return
 
-        def _parse_line(line: str):
-            if not line.startswith("["):
-                return None
-            try:
-                ts_end = line.index("]")
-            except ValueError:
-                return None
-            ts_raw = line[1:ts_end]
-            try:
-                ts = datetime.fromisoformat(ts_raw)
-            except Exception:
-                return None
-            rest = line[ts_end + 1 :].strip()
-            if rest.startswith("click"):
-                parts = rest.split()
-                data = {"type": "click", "ts": ts}
-                for part in parts[1:]:
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        data[k] = v
-                return data
-            if rest.startswith("key="):
-                data = {"type": "key", "ts": ts}
-                for part in rest.split():
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        data[k] = v
-                return data
-            return None
-
-        events = []
-        for line in lines:
-            parsed = _parse_line(line)
-            if parsed:
-                events.append(parsed)
-        if not events:
-            messagebox.showinfo("Test Action", "No valid actions found to play.")
-            return
-
-        events.sort(key=lambda e: e["ts"])
-        center_x = self.winfo_screenwidth() // 2
-        center_y = self.winfo_screenheight() // 2
-        self.test_action_btn.config(state=tk.DISABLED)
+        self.show_records_btn.config(state=tk.DISABLED)
         self._playback_stop_event.clear()
 
         def _on_playback_key(key):
@@ -1107,13 +1137,11 @@ class SettingsWindow(tk.Toplevel):
         def _run():
             m = mouse.Controller()
             k = keyboard.Controller()
-            m.position = (center_x, center_y)
-            m.click(mouse.Button.left, 1)
-            prev_ts = events[0]["ts"]
-            for ev in events:
+            prev_delay = 0.0
+            for ev in actions:
                 if self._playback_stop_event.is_set():
                     break
-                delay = (ev["ts"] - prev_ts).total_seconds()
+                delay = float(ev.get("delay", 0.0))
                 if delay > 0:
                     end_time = time.time() + delay
                     while time.time() < end_time:
@@ -1122,7 +1150,7 @@ class SettingsWindow(tk.Toplevel):
                         time.sleep(0.05)
                     if self._playback_stop_event.is_set():
                         break
-                if ev["type"] == "click":
+                if ev.get("type") == "click":
                     try:
                         x = int(float(ev.get("x", 0)))
                         y = int(float(ev.get("y", 0)))
@@ -1139,7 +1167,7 @@ class SettingsWindow(tk.Toplevel):
                     m.press(btn)
                     time.sleep(0.05)
                     m.release(btn)
-                elif ev["type"] == "key":
+                elif ev.get("type") == "key":
                     key_name = ev.get("key", "")
                     key_obj = None
                     if len(key_name) == 1:
@@ -1150,11 +1178,99 @@ class SettingsWindow(tk.Toplevel):
                     if key_obj is not None:
                         k.press(key_obj)
                         k.release(key_obj)
-                prev_ts = ev["ts"]
+                prev_delay = delay
             self.after(0, self._finish_playback)
 
         self._playback_thread = threading.Thread(target=_run, daemon=True)
         self._playback_thread.start()
+
+    def _prompt_record_name_and_save(self):
+        prompt = tk.Toplevel(self)
+        prompt.title("Save Record")
+        prompt.geometry("300x120")
+        prompt.resizable(False, False)
+        prompt.configure(bg="#2b2b2b")
+
+        label = tk.Label(
+            prompt,
+            text="Record name",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        label.pack(pady=(10, 4))
+
+        name_var = tk.StringVar(value="Account Switch")
+        entry = tk.Entry(
+            prompt,
+            textvariable=name_var,
+            bg="#1e1e1e",
+            fg="white",
+            insertbackground="white",
+            relief=tk.FLAT,
+        )
+        entry.pack(padx=10, fill=tk.X)
+        entry.focus_set()
+
+        def _save_and_close(_event=None):
+            name = (name_var.get() or "Account Switch").strip() or "Account Switch"
+            prompt.destroy()
+            self._save_record_snapshot(name)
+
+        ok_btn = tk.Button(
+            prompt,
+            text="Save",
+            command=_save_and_close,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=10,
+            pady=2,
+        )
+        ok_btn.pack(pady=10)
+        prompt.bind("<Return>", _save_and_close)
+
+    def _save_record_snapshot(self, name: str):
+        events = list(self._current_record_events)
+        if not events:
+            return
+        events.sort(key=lambda e: e["ts"])
+        actions = []
+        prev_ts = events[0]["ts"]
+        for ev in events:
+            delay = (ev["ts"] - prev_ts).total_seconds()
+            item = {"type": ev["type"], "delay": delay}
+            if ev["type"] == "click":
+                item["x"] = ev.get("x", 0)
+                item["y"] = ev.get("y", 0)
+                item["button"] = ev.get("button", "left")
+            elif ev["type"] == "key":
+                item["key"] = ev.get("key", "")
+            actions.append(item)
+            prev_ts = ev["ts"]
+
+        record = {
+            "name": name,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "actions": actions,
+        }
+
+        data = {"records": []}
+        try:
+            if os.path.exists(self._records_path):
+                with open(self._records_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+        except Exception:
+            data = {"records": []}
+
+        data.setdefault("records", []).append(record)
+        try:
+            with open(self._records_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     def _finish_playback(self):
         if self._playback_keyboard_listener:
@@ -1202,6 +1318,21 @@ class LogWindow(tk.Toplevel):
         self.text.config(state=tk.DISABLED)
         self._refresh()
 
+        back_btn = tk.Button(
+            frame,
+            text="Back",
+            command=self.destroy,
+            bg="#3a3a3a",
+            fg="white",
+            font=("Segoe UI", 10),
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        back_btn.grid(row=2, column=0, sticky="w", pady=(8, 0))
+
     def _refresh(self):
         if self._stopped:
             return
@@ -1224,6 +1355,226 @@ class LogWindow(tk.Toplevel):
     def destroy(self):
         self._stopped = True
         super().destroy()
+
+
+class RecordsWindow(tk.Toplevel):
+    def __init__(self, parent, records_path: str, play_callback):
+        super().__init__(parent)
+        self.title("Show Records")
+        self.geometry("560x420")
+        self.resizable(False, False)
+        self.configure(bg="#2b2b2b")
+        self._records_path = records_path
+        self._play_callback = play_callback
+        self._setup_ui()
+
+    def _setup_ui(self):
+        main_frame = tk.Frame(self, bg="#2b2b2b", padx=16, pady=16)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title = tk.Label(
+            main_frame,
+            text="Recorded Actions",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 12, "bold"),
+        )
+        title.pack(pady=(0, 10))
+
+        list_frame = tk.Frame(main_frame, bg="#3b3b3b")
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(list_frame, bg="#3b3b3b", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg="#3b3b3b")
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        records = self._load_records()
+        if not records:
+            if self._migrate_from_text():
+                records = self._load_records()
+
+        if not records:
+            no_data = tk.Label(
+                scrollable_frame,
+                text="No records saved yet",
+                bg="#3b3b3b",
+                fg="#aaaaaa",
+                font=("Segoe UI", 10),
+            )
+            no_data.pack(pady=20)
+        else:
+            for idx, rec in enumerate(records):
+                item = tk.Frame(scrollable_frame, bg="#3b3b3b", padx=10, pady=8)
+                item.pack(fill=tk.X)
+
+                name = rec.get("name", "Unnamed")
+                created = rec.get("created_at", "")
+                name_label = tk.Label(
+                    item,
+                    text=name,
+                    bg="#3b3b3b",
+                    fg="white",
+                    font=("Segoe UI", 10, "bold"),
+                    anchor="w",
+                    width=18,
+                )
+                name_label.pack(side=tk.LEFT)
+
+                ts_label = tk.Label(
+                    item,
+                    text=created,
+                    bg="#3b3b3b",
+                    fg="#aaaaaa",
+                    font=("Consolas", 9),
+                    anchor="w",
+                )
+                ts_label.pack(side=tk.LEFT, padx=(6, 0))
+
+                test_btn = tk.Button(
+                    item,
+                    text="Test Action",
+                    command=lambda a=rec.get("actions", []): self._play_callback(a),
+                    bg="#00ff00",
+                    fg="#1e1e1e",
+                    activebackground="#33ff33",
+                    activeforeground="#1e1e1e",
+                    relief=tk.FLAT,
+                    padx=8,
+                    pady=2,
+                )
+                test_btn.pack(side=tk.RIGHT)
+
+                del_btn = tk.Button(
+                    item,
+                    text="Delete",
+                    command=lambda i=idx: self._delete_record(i),
+                    bg="#5a2a2a",
+                    fg="white",
+                    activebackground="#6a3333",
+                    activeforeground="white",
+                    relief=tk.FLAT,
+                    padx=8,
+                    pady=2,
+                )
+                del_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+                sep = tk.Frame(scrollable_frame, bg="#4a4a4a", height=1)
+                sep.pack(fill=tk.X, padx=5)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _load_records(self) -> list[dict]:
+        try:
+            if os.path.exists(self._records_path):
+                with open(self._records_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("records", [])
+        except Exception:
+            return []
+        return []
+
+    def _migrate_from_text(self) -> bool:
+        record_path = os.path.join(os.path.dirname(__file__), "recorded_actions.txt")
+        if not os.path.exists(record_path):
+            return False
+        try:
+            with open(record_path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+        except Exception:
+            return False
+
+        if not lines:
+            return False
+
+        events = []
+        for line in lines:
+            if not line.startswith("[") or "]" not in line:
+                continue
+            ts_raw = line[1: line.index("]")]
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+            except Exception:
+                continue
+            rest = line[line.index("]") + 1 :].strip()
+            if rest.startswith("click"):
+                data = {"type": "click", "ts": ts}
+                for part in rest.split():
+                    if part.startswith("x="):
+                        data["x"] = part.split("=", 1)[1]
+                    elif part.startswith("y="):
+                        data["y"] = part.split("=", 1)[1]
+                    elif part.startswith("button="):
+                        data["button"] = part.split("=", 1)[1]
+                events.append(data)
+            elif rest.startswith("key="):
+                key = None
+                for part in rest.split():
+                    if part.startswith("key="):
+                        key = part.split("=", 1)[1]
+                        break
+                events.append({"type": "key", "key": key, "ts": ts})
+
+        if not events:
+            return False
+
+        events.sort(key=lambda e: e["ts"])
+        actions = []
+        prev_ts = events[0]["ts"]
+        for ev in events:
+            delay = (ev["ts"] - prev_ts).total_seconds()
+            item = {"type": ev["type"], "delay": delay}
+            if ev["type"] == "click":
+                item["x"] = ev.get("x", 0)
+                item["y"] = ev.get("y", 0)
+                item["button"] = ev.get("button", "left")
+            elif ev["type"] == "key":
+                item["key"] = ev.get("key", "")
+            actions.append(item)
+            prev_ts = ev["ts"]
+
+        record = {
+            "name": "Account Switch",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "actions": actions,
+        }
+
+        data = {"records": []}
+        try:
+            if os.path.exists(self._records_path):
+                with open(self._records_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+        except Exception:
+            data = {"records": []}
+        data.setdefault("records", []).append(record)
+        try:
+            with open(self._records_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            return False
+        return True
+
+    def _delete_record(self, index: int) -> None:
+        records = self._load_records()
+        if index < 0 or index >= len(records):
+            return
+        records.pop(index)
+        try:
+            with open(self._records_path, "w", encoding="utf-8") as f:
+                json.dump({"records": records}, f, indent=2)
+        except Exception:
+            pass
+        for widget in self.winfo_children():
+            widget.destroy()
+        self._setup_ui()
 
 def main():
     app = MTGBotUI()
