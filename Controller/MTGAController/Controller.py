@@ -885,6 +885,7 @@ class Controller(ControllerSecondary):
         if self._account_switch_in_progress:
             return
         self._account_switch_in_progress = True
+        queued_after_login = False
         try:
             if self._stop_requested:
                 bot_logger.log_info("Account switch aborted: stop requested.")
@@ -905,6 +906,7 @@ class Controller(ControllerSecondary):
             account = accounts[next_index]
 
             bot_logger.log_info(f"Switching account to Acc_{next_index + 1}")
+            bot_logger.log_info(f"Account cycle index: {self._account_cycle_index} -> {next_index}")
             self._post_login_action_done = False
             if not self._replay_recorded_logout():
                 bot_logger.log_info("Recorded logout replay unavailable; falling back to fixed logout clicks.")
@@ -961,11 +963,27 @@ class Controller(ControllerSecondary):
                     if self._replay_named_record(name, tag_prefix="POST_LOGIN"):
                         self._post_login_action_done = True
                         break
+            if not self._stop_requested and self._post_login_action_done:
+                bot_logger.log_info("Post-login action done; waiting 5s before queueing.")
+                for _ in range(50):
+                    if self._stop_requested:
+                        break
+                    time.sleep(0.1)
+                if not self._stop_requested:
+                    # Reset switch timer before queueing so we don't immediately mark as due.
+                    self._last_account_switch_ts = time.time()
+                    # Mark switch complete before queueing so start_queueing won't ignore.
+                    self._account_switch_in_progress = False
+                    self._queue_after_login = False
+                    self.start_queueing()
+                    queued_after_login = True
 
             self._account_cycle_index = next_index
             self._last_account_switch_ts = time.time()
             self._account_switch_pending = False
-            self._queue_after_login = True
+            if not queued_after_login:
+                self._queue_after_login = True
+            self._persist_account_cycle_index()
         except Exception as e:
             bot_logger.log_error(f"Account switch failed: {e}")
         finally:
@@ -993,6 +1011,21 @@ class Controller(ControllerSecondary):
 
         accounts.sort(key=lambda a: a["index"])
         return accounts
+
+    def _persist_account_cycle_index(self) -> None:
+        try:
+            config_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "calibration_config.json")
+            )
+            if not os.path.exists(config_path):
+                return
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["account_cycle_index"] = int(self._account_cycle_index)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            bot_logger.log_error(f"Failed to persist account cycle index: {e}")
 
     def _click(self, pos: tuple[int, int], tag: str) -> None:
         x, y = pos
@@ -1189,9 +1222,9 @@ class Controller(ControllerSecondary):
         y = self.opponent_avatar_coors[1] + offset[1]
         bot_logger.log_click(x, y, tag)
         self.input.move_abs(x, y)
-        time.sleep(0.2)
+        time.sleep(0.4)
         self.input.left_click(1)
-        time.sleep(0.2)
+        time.sleep(0.3)
 
     def __schedule_target_selection(self, source_id: int | None, reason: str) -> None:
         now = time.time()
@@ -1242,9 +1275,9 @@ class Controller(ControllerSecondary):
             threading.Timer(1.2, _retry_if_needed).start()
 
         delay_remaining = self.__get_delay_timer_remaining()
-        start_delay = 0.4
+        start_delay = 0.8
         if delay_remaining > 0.05:
-            start_delay = delay_remaining + 0.2
+            start_delay = delay_remaining + 0.4
         threading.Timer(start_delay, _do_click).start()
 
     def __is_selecting_targets(self) -> bool:
