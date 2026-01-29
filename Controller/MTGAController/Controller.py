@@ -4,7 +4,6 @@ import re
 import threading
 import time
 import os
-from datetime import datetime
 
 from Controller.ControllerInterface import ControllerSecondary
 from Controller.MTGAController.LogReader import LogReader
@@ -173,6 +172,7 @@ class Controller(ControllerSecondary):
         self._post_match_ready_ts = None
         self._post_match_delay_sec = 30
         self._stop_requested = False
+        self._post_login_action_done = False
         # Fixed timing for login phase
         self._login_delete_delay_sec = 20.0
         # Fallback coords if recorded playback isn't available
@@ -728,102 +728,78 @@ class Controller(ControllerSecondary):
         return (time.time() - self._last_account_switch_ts) >= self._account_switch_interval
 
     def _replay_recorded_logout(self) -> bool:
+        return self._replay_named_record("Account Switch", tag_prefix="LOGOUT")
+
+    def _replay_named_record(self, name: str, tag_prefix: str = "REPLAY") -> bool:
         path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "recorded_actions.txt")
+            os.path.join(os.path.dirname(__file__), "..", "..", "recorded_actions_records.json")
         )
         if not os.path.exists(path):
             return False
         try:
             with open(path, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f.readlines() if line.strip()]
+                data = json.load(f)
         except Exception:
             return False
 
-        events = []
-        for line in lines:
-            if not line.startswith("[") or "]" not in line:
-                continue
-            ts_raw = line[1: line.index("]")]
-            try:
-                ts = datetime.fromisoformat(ts_raw)
-            except Exception:
-                continue
-            rest = line[line.index("]") + 1 :].strip()
-            if rest.startswith("click"):
-                data = {"type": "click", "ts": ts}
-                for part in rest.split():
-                    if part.startswith("x="):
-                        data["x"] = part.split("=", 1)[1]
-                    elif part.startswith("y="):
-                        data["y"] = part.split("=", 1)[1]
-                events.append(data)
-            elif rest.startswith("key="):
-                key = None
-                for part in rest.split():
-                    if part.startswith("key="):
-                        key = part.split("=", 1)[1]
-                        break
-                events.append({"type": "key", "key": key, "ts": ts})
-
-        if not events:
+        records = data.get("records", [])
+        if not records:
             return False
 
-        # Use last sequence starting with esc, then four clicks (logout x2, ok x2).
-        esc_idx = None
-        click_idxs = []
-        for i in range(len(events) - 1, -1, -1):
-            if events[i]["type"] == "key" and events[i].get("key") == "esc":
-                esc_idx = i
+        record = None
+        for rec in reversed(records):
+            if rec.get("name") == name:
+                record = rec
                 break
-        if esc_idx is None:
-            return False
-        for j in range(esc_idx + 1, len(events)):
-            if events[j]["type"] == "click":
-                click_idxs.append(j)
-            if len(click_idxs) >= 4:
-                break
-        if len(click_idxs) < 4:
+        if record is None:
             return False
 
-        seq = [esc_idx] + click_idxs[:4]
-        seq_events = [events[i] for i in seq]
-        seq_events.sort(key=lambda e: e["ts"])
+        actions = record.get("actions", [])
+        if not actions:
+            return False
 
-        bot_logger.log_info("Replaying recorded logout actions (pynput playback).")
+        bot_logger.log_info(f"Replaying record '{name}' (pynput playback).")
         try:
             from pynput import mouse, keyboard
         except Exception as e:
-            bot_logger.log_error(f"Logout replay failed: pynput not available: {e}")
+            bot_logger.log_error(f"{tag_prefix}_REPLAY_FAILED: pynput not available: {e}")
             return False
 
         m = mouse.Controller()
         k = keyboard.Controller()
-        prev_ts = seq_events[0]["ts"]
-        for ev in seq_events:
+        for ev in actions:
             if self._stop_requested:
-                bot_logger.log_info("Logout replay aborted: stop requested.")
+                bot_logger.log_info(f"{tag_prefix}_REPLAY_ABORTED: stop requested.")
                 return False
-            delay = (ev["ts"] - prev_ts).total_seconds()
+            delay = float(ev.get("delay", 0.0))
             if delay > 0:
                 time.sleep(delay)
-            if ev["type"] == "key" and ev.get("key") == "esc":
-                bot_logger.log_info("LOGOUT_REPLAY: press ESC")
-                k.press(keyboard.Key.esc)
-                k.release(keyboard.Key.esc)
-            elif ev["type"] == "click":
+            if ev.get("type") == "key":
+                key_name = ev.get("key", "")
+                if key_name == "esc":
+                    k.press(keyboard.Key.esc)
+                    k.release(keyboard.Key.esc)
+                elif len(key_name) == 1:
+                    k.press(key_name)
+                    k.release(key_name)
+                else:
+                    if hasattr(keyboard.Key, key_name):
+                        key_obj = getattr(keyboard.Key, key_name)
+                        k.press(key_obj)
+                        k.release(key_obj)
+            elif ev.get("type") == "click":
                 try:
                     x = int(float(ev.get("x", 0)))
                     y = int(float(ev.get("y", 0)))
                 except Exception:
                     x, y = 0, 0
                 if x and y:
-                    bot_logger.log_click(x, y, "LOGOUT_REPLAY_CLICK")
+                    bot_logger.log_click(x, y, f"{tag_prefix}_REPLAY_CLICK")
                     m.position = (x, y)
                     time.sleep(0.05)
                     m.press(mouse.Button.left)
                     time.sleep(0.05)
                     m.release(mouse.Button.left)
-            prev_ts = ev["ts"]
         return True
 
 
@@ -929,6 +905,7 @@ class Controller(ControllerSecondary):
             account = accounts[next_index]
 
             bot_logger.log_info(f"Switching account to Acc_{next_index + 1}")
+            self._post_login_action_done = False
             if not self._replay_recorded_logout():
                 bot_logger.log_info("Recorded logout replay unavailable; falling back to fixed logout clicks.")
                 bot_logger.log_info("Account switch: pressing ESC to open options menu.")
@@ -972,6 +949,18 @@ class Controller(ControllerSecondary):
             bot_logger.log_info("Account switch: submitting login with Enter.")
             self.input.tap_enter()
             bot_logger.log_info("Account switch: login submitted.")
+
+            if not self._stop_requested:
+                bot_logger.log_info("Account switch: waiting 40s before post-login record.")
+                for _ in range(400):
+                    if self._stop_requested:
+                        break
+                    time.sleep(0.1)
+            if not self._stop_requested and not self._post_login_action_done:
+                for name in ("select game mode..", "select game mode and deck"):
+                    if self._replay_named_record(name, tag_prefix="POST_LOGIN"):
+                        self._post_login_action_done = True
+                        break
 
             self._account_cycle_index = next_index
             self._last_account_switch_ts = time.time()
