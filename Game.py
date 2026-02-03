@@ -3,6 +3,7 @@ from AI.AIInterface import AIKernel
 from Controller.Utilities.GameState import GameState
 import AI.Utilities.CardInfo as CardInfo
 from datetime import datetime
+import os
 import traceback
 import threading
 import bot_logger
@@ -32,6 +33,12 @@ class Game:
     def start(self):
         self._debug("Game.start() called")
         self._stop_requested = False
+        self._refresh_card_data()
+        try:
+            CardInfo.refresh_missing_cards()
+            self._debug("Card data refresh: missing cards resolved via Scryfall (if any).")
+        except Exception as e:
+            self._debug(f"Card data refresh failed: {e}")
         self.controller.start_game()
         self.controller.set_mulligan_decision_callback(self.mulligan_decision_method)
         self.controller.set_decision_callback(self.decision_method)
@@ -116,6 +123,8 @@ class Game:
                 pass
 
     def mulligan_decision_method(self, card_list):
+        if self._stop_requested:
+            return
         self._debug(f"Mulligan decision called with {len(card_list)} cards")
         self._human_log("Keeping hand")
         self.game_started = True  # Mark game as started after mulligan
@@ -133,6 +142,41 @@ class Game:
         """Debug log - detailed technical information"""
         bot_logger.log_info(message)
 
+    def _refresh_card_data(self):
+        """Refresh cards.json from local MTGA data (Windows path)."""
+        try:
+            import sys
+            import subprocess
+            base_candidates = [
+                r"C:\\Program Files (x86)\\Steam\\steamapps\\common\\MTGA\\MTGA_Data\\Downloads\\Raw",
+                r"C:\\Program Files\\Steam\\steamapps\\common\\MTGA\\MTGA_Data\\Downloads\\Raw",
+            ]
+            data_dir = next((p for p in base_candidates if os.path.isdir(p)), "")
+            if not data_dir:
+                self._debug("Card data refresh: MTGA data dir not found, skipping export.")
+                return
+            self._debug(f"Card data refresh: exporting from {data_dir}")
+            result = subprocess.run(
+                [sys.executable, "mtga_cards_export.py", "--data-dir", data_dir],
+                cwd=os.path.dirname(__file__),
+                timeout=30,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.stdout:
+                self._debug(f"Card data refresh: exporter stdout: {result.stdout.strip()}")
+            if result.stderr:
+                self._debug(f"Card data refresh: exporter stderr: {result.stderr.strip()}")
+            try:
+                CardInfo.reload_cards_from_disk()
+                self._debug("Card data refresh: cards.json reloaded into memory.")
+            except Exception as e:
+                self._debug(f"Card data refresh: reload failed: {e}")
+        except Exception as e:
+            self._debug(f"Card data refresh failed: {e}")
+
     def _get_card_id_str(self, instance_id):
         """Get card ID string (instanceId, grpId) for logging"""
         try:
@@ -145,6 +189,8 @@ class Game:
 
     def on_action_success(self, action_dict):
         """Callback from Controller - only debug logging"""
+        if self._stop_requested:
+            return
         try:
             action_type = action_dict.get('actionType', 'Unknown')
             instance_id = action_dict.get('instanceId')
@@ -153,6 +199,8 @@ class Game:
             self._debug(f"ERROR in on_action_success: {e}")
 
     def decision_method(self, current_game_state: GameState):
+        if self._stop_requested:
+            return
         # Don't do anything before game has started
         if not self.game_started:
             self._debug("decision_method called but game not started yet, ignoring")
