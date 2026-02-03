@@ -483,6 +483,7 @@ class ConfigManager:
             "account_switch_minutes": 0,
             "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
             "account_cycle_index": 0,
+            "account_play_order": [],
             "click_targets": {
                 "keep_hand": {"x": 1876, "y": 1060},
                 "queue_button": {"x": 2485, "y": 1194},
@@ -601,6 +602,19 @@ class ConfigManager:
         if index_i < 0:
             index_i = 0
         self.config["account_cycle_index"] = index_i
+        self._save_config()
+
+    def get_account_play_order(self) -> list[str]:
+        order = self.config.get("account_play_order", [])
+        if isinstance(order, list):
+            return [str(item) for item in order if item]
+        return []
+
+    def set_account_play_order(self, order: list[str]) -> None:
+        if not isinstance(order, list):
+            return
+        cleaned = [str(item) for item in order if item]
+        self.config["account_play_order"] = cleaned
         self._save_config()
 
 
@@ -747,12 +761,14 @@ class MTGBotUI(tk.Tk):
             account_switch_minutes = self.config_manager.get_account_switch_minutes()
             credentials_path = self.config_manager.get_credentials_path()
             account_cycle_index = self.config_manager.get_account_cycle_index()
+            account_play_order = self.config_manager.get_account_play_order()
 
             controller = Controller(log_path=log_path, screen_bounds=screen_bounds,
                                    click_targets=click_targets, input_backend=input_backend,
                                    account_switch_minutes=account_switch_minutes,
                                    credentials_path=credentials_path,
-                                   account_cycle_index=account_cycle_index)
+                                   account_cycle_index=account_cycle_index,
+                                   account_play_order=account_play_order)
             ai = DummyAI()
             self.game = Game(controller, ai)
             self.game.start()
@@ -818,7 +834,7 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, config_manager: ConfigManager, games: int, wins: int):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("360x340")
+        self.geometry("620x360")
         self.resizable(False, False)
         self.configure(bg="#2b2b2b")
         self._log_window = None
@@ -836,6 +852,28 @@ class SettingsWindow(tk.Toplevel):
 
         frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
+
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(
+            "Dark.TCombobox",
+            fieldbackground="#1e1e1e",
+            background="#3a3a3a",
+            foreground="white",
+            bordercolor="#2b2b2b",
+            lightcolor="#2b2b2b",
+            darkcolor="#2b2b2b",
+            arrowcolor="white",
+        )
+        style.map(
+            "Dark.TCombobox",
+            fieldbackground=[("readonly", "#1e1e1e")],
+            background=[("readonly", "#3a3a3a")],
+            foreground=[("readonly", "white")],
+        )
 
         title = tk.Label(frame, text="Current session", bg="#2b2b2b", fg="white",
                          font=("Segoe UI", 12, "bold"))
@@ -920,6 +958,52 @@ class SettingsWindow(tk.Toplevel):
         )
         switch_hint.pack(side=tk.LEFT)
 
+        order_row = tk.Frame(frame, bg="#2b2b2b")
+        order_row.pack(fill=tk.X, pady=(10, 0))
+
+        order_label = tk.Label(
+            order_row,
+            text="Account Play Order",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        order_label.pack(side=tk.LEFT)
+
+        order_inner = tk.Frame(order_row, bg="#2b2b2b")
+        order_inner.pack(side=tk.LEFT, padx=(10, 0))
+
+        order_choices = ["", "Acc_1", "Acc_2", "Acc_3"]
+        current_order = self._config_manager.get_account_play_order()
+        current_order = current_order[:3] + ["", "", ""]
+
+        self._order_vars = []
+        self._order_boxes = []
+        for idx in range(3):
+            num_label = tk.Label(
+                order_inner,
+                text=str(idx + 1),
+                bg="#2b2b2b",
+                fg="#aaaaaa",
+                font=("Segoe UI", 9),
+                width=2,
+            )
+            num_label.pack(side=tk.LEFT, padx=(0, 2))
+
+            var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
+            combo = ttk.Combobox(
+                order_inner,
+                textvariable=var,
+                values=order_choices,
+                state="readonly",
+                width=7,
+            )
+            combo.configure(style="Dark.TCombobox")
+            combo.pack(side=tk.LEFT, padx=(0, 6))
+            combo.bind("<<ComboboxSelected>>", lambda _e: self._save_account_play_order())
+            self._order_vars.append(var)
+            self._order_boxes.append(combo)
+
         record_row = tk.Frame(frame, bg="#2b2b2b")
         record_row.pack(fill=tk.X, pady=(12, 0))
 
@@ -1003,6 +1087,11 @@ class SettingsWindow(tk.Toplevel):
             minutes = 0
         self.switch_minutes_var.set(str(minutes))
         self._config_manager.set_account_switch_minutes(minutes)
+
+    def _save_account_play_order(self):
+        order = [var.get().strip() for var in getattr(self, "_order_vars", [])]
+        order = [item for item in order if item]
+        self._config_manager.set_account_play_order(order)
 
     def _debounced_save_switch_minutes(self, _event=None):
         if self._switch_save_job:

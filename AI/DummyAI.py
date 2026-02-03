@@ -358,6 +358,22 @@ class DummyAI(AIKernel):
 
                 # Main phases - play lands and cast spells
                 elif phase in ['Phase_Main1', 'Phase_Main2']:
+                    # Snapshot sorcery availability for debug, regardless of chosen priority.
+                    sorcery_in_actions = 0
+                    sorcery_names = []
+                    for action_wrapper in action_list:
+                        action = action_wrapper.get('action', {})
+                        if action.get('actionType') != 'ActionType_Cast':
+                            continue
+                        instance_id = action.get('instanceId')
+                        grp_id = action.get('grpId') or inst_id_grp_id_dict.get(instance_id)
+                        card_info = CardInfo.get_card_info(grp_id)
+                        if not card_info:
+                            continue
+                        card_types = card_info.get('types', [])
+                        if 'Sorcery' in card_types:
+                            sorcery_in_actions += 1
+                            sorcery_names.append(card_info.get('name', f'Card#{instance_id}'))
 
                     # First: try to play a land
                     if not self.__has_land_been_played_this_turn:
@@ -406,12 +422,21 @@ class DummyAI(AIKernel):
                         cast_actions.sort(key=lambda x: x[0])  # Sort by CMC
                         cmc, instance_id, card_name, mana_cost = cast_actions[0]
                         self._debug(f"CASTING: {card_name} (instanceId={instance_id}, cost={mana_cost})")
+                        if sorcery_in_actions:
+                            self._debug(
+                                f"Sorcery debug: found={sorcery_in_actions} in actions, "
+                                f"skipping due to creature priority. Examples={sorcery_names[:3]}"
+                            )
                         move = {'cast': [instance_id]}
                         return move
 
                     # Third: cast non-creature spells (Instant/Sorcery) face
                     spell_actions = []
                     allow_sorcery = phase in ['Phase_Main1', 'Phase_Main2']
+                    sorcery_found = 0
+                    sorcery_castable = 0
+                    sorcery_blocked_phase = 0
+                    sorcery_blocked_mana = 0
                     for action_wrapper in action_list:
                         action = action_wrapper.get('action', {})
                         if action.get('actionType') != 'ActionType_Cast':
@@ -430,6 +455,8 @@ class DummyAI(AIKernel):
                         if not is_instant and not is_sorcery:
                             continue
                         if is_sorcery and not allow_sorcery:
+                            sorcery_found += 1
+                            sorcery_blocked_phase += 1
                             continue
 
                         card_name = card_info.get('name', f'Card#{instance_id}')
@@ -438,13 +465,30 @@ class DummyAI(AIKernel):
                         if self._can_cast_with_mana_cost(action_mana_cost, available_colors, total_mana, sources):
                             spell_actions.append((cmc, instance_id, card_name, mana_cost_str))
                             self._debug(f"Can cast spell: {card_name} (cost={mana_cost_str}, cmc={cmc})")
+                            if is_sorcery:
+                                sorcery_found += 1
+                                sorcery_castable += 1
+                        else:
+                            if is_sorcery:
+                                sorcery_found += 1
+                                sorcery_blocked_mana += 1
 
                     if spell_actions:
                         spell_actions.sort(key=lambda x: x[0])
                         cmc, instance_id, card_name, mana_cost = spell_actions[0]
                         self._debug(f"CASTING SPELL: {card_name} (instanceId={instance_id}, cost={mana_cost})")
+                        if sorcery_found:
+                            self._debug(
+                                f"Sorcery debug: found={sorcery_found}, castable={sorcery_castable}, "
+                                f"blocked_phase={sorcery_blocked_phase}, blocked_mana={sorcery_blocked_mana}"
+                            )
                         move = {'cast': [instance_id]}
                         return move
+                    if sorcery_found:
+                        self._debug(
+                            f"Sorcery debug: no spell cast. found={sorcery_found}, castable={sorcery_castable}, "
+                            f"blocked_phase={sorcery_blocked_phase}, blocked_mana={sorcery_blocked_mana}"
+                        )
 
                     # Last: cast enchantments in main phase
                     if phase in ['Phase_Main1', 'Phase_Main2']:
@@ -474,6 +518,11 @@ class DummyAI(AIKernel):
                             enchant_actions.sort(key=lambda x: x[0])
                             cmc, instance_id, card_name, mana_cost = enchant_actions[0]
                             self._debug(f"CASTING ENCHANTMENT: {card_name} (instanceId={instance_id}, cost={mana_cost})")
+                            if sorcery_in_actions:
+                                self._debug(
+                                    f"Sorcery debug: found={sorcery_in_actions} in actions, "
+                                    f"skipping due to enchantment priority. Examples={sorcery_names[:3]}"
+                                )
                             move = {'cast': [instance_id]}
                             return move
 

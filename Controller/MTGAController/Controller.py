@@ -38,6 +38,7 @@ class Controller(ControllerSecondary):
         account_switch_minutes: int | None = None,
         credentials_path: str | None = None,
         account_cycle_index: int | None = None,
+        account_play_order: list[str] | None = None,
     ):
         self.__decision_callback = None
         self.__mulligan_decision_callback = None
@@ -175,6 +176,7 @@ class Controller(ControllerSecondary):
         self._account_switch_interval = max(0, int(account_switch_minutes or 0)) * 60
         self._credentials_path = credentials_path or ""
         self._account_cycle_index = int(account_cycle_index or 0)
+        self._account_play_order = account_play_order or []
         self._last_account_switch_ts = time.time()
         self._account_switch_pending = False
         self._account_switch_in_progress = False
@@ -336,14 +338,15 @@ class Controller(ControllerSecondary):
         best = None
         best_score = (-1, -999, 0, "")
         for name in images:
-            name_letters = {ch for ch in name.upper() if ch in _COLOR_LETTERS}
+            stem = os.path.splitext(name)[0]
+            name_letters = {ch for ch in stem.upper() if ch in _COLOR_LETTERS}
             score = len(name_letters & target_set)
             extra = len(name_letters - target_set)
             bot_logger.log_info(
                 f"Post-login: deck candidate={name} letters={''.join(sorted(name_letters))} "
                 f"score={score} extra={extra}."
             )
-            tie = (score, -extra, -len(name), name.lower())
+            tie = (score, -extra, -len(stem), name.lower())
             if tie > best_score:
                 best_score = tie
                 best = name
@@ -825,6 +828,9 @@ class Controller(ControllerSecondary):
 
     def dismiss_end_screen(self):
         """Click to dismiss match end screen and return to main menu"""
+        if self._stop_requested:
+            bot_logger.log_info("Dismiss end screen skipped: stop requested.")
+            return
         # Click in center of screen to dismiss end screen
         center_x = (self.screen_bounds[0][0] + self.screen_bounds[1][0]) // 2
         center_y = (self.screen_bounds[0][1] + self.screen_bounds[1][1]) // 2
@@ -1036,7 +1042,6 @@ class Controller(ControllerSecondary):
         if not self._queue_ready:
             self._queue_ready = True
             bot_logger.log_info("Queue-ready marker detected.")
-            self._stop_queue_spam = True
         if self._account_switch_in_progress:
             bot_logger.log_info("Queue-ready marker ignored: account switch in progress.")
             return
@@ -1054,6 +1059,8 @@ class Controller(ControllerSecondary):
             self._maybe_post_match_action()
 
     def _maybe_post_match_action(self) -> None:
+        if self._stop_requested:
+            return
         if self._account_switch_in_progress:
             return
         if self._post_match_ready_ts is None:
@@ -1137,16 +1144,39 @@ class Controller(ControllerSecondary):
                 )
             )
 
-            # Cycle order: Acc_2 -> Acc_3 -> Acc_1
-            if len(accounts) >= 3:
-                order = [1, 2, 0]
-                try:
-                    pos = order.index(self._account_cycle_index)
-                except ValueError:
-                    pos = 2  # default to Acc_1 position
-                next_index = order[(pos + 1) % len(order)]
+            custom_order = self._resolve_account_play_order(accounts)
+            if custom_order:
+                if len(custom_order) == 1:
+                    target_index = custom_order[0]
+                    if target_index == self._account_cycle_index:
+                        bot_logger.log_info("Account switch skipped: only one account in play order.")
+                        self._last_account_switch_ts = time.time()
+                        self._account_switch_pending = False
+                        self._account_switch_in_progress = False
+                        if not self._stop_requested:
+                            self.start_queueing()
+                        return
+                    next_index = target_index
+                else:
+                    try:
+                        pos = custom_order.index(self._account_cycle_index)
+                    except ValueError:
+                        pos = -1
+                    if pos == -1:
+                        next_index = custom_order[0]
+                    else:
+                        next_index = custom_order[(pos + 1) % len(custom_order)]
             else:
-                next_index = (self._account_cycle_index + 1) % len(accounts)
+                # Default cycle order: Acc_2 -> Acc_3 -> Acc_1
+                if len(accounts) >= 3:
+                    order = [1, 2, 0]
+                    try:
+                        pos = order.index(self._account_cycle_index)
+                    except ValueError:
+                        pos = 2  # default to Acc_1 position
+                    next_index = order[(pos + 1) % len(order)]
+                else:
+                    next_index = (self._account_cycle_index + 1) % len(accounts)
             account = accounts[next_index]
 
             bot_logger.log_info(f"Switching account to Acc_{next_index + 1}")
@@ -1230,6 +1260,37 @@ class Controller(ControllerSecondary):
             bot_logger.log_error(f"Account switch failed: {e}")
         finally:
             self._account_switch_in_progress = False
+
+    def _resolve_account_play_order(self, accounts: list[dict]) -> list[int]:
+        if not self._account_play_order:
+            return []
+        account_num_to_pos = {}
+        for pos, acc in enumerate(accounts):
+            try:
+                num = int(acc.get("index"))
+            except (TypeError, ValueError):
+                continue
+            account_num_to_pos[num] = pos
+
+        order = []
+        for raw in self._account_play_order:
+            name = str(raw).strip().lower().replace(" ", "")
+            if not name:
+                continue
+            num = None
+            m = re.search(r"acc[_-]?(\\d+)", name)
+            if m:
+                try:
+                    num = int(m.group(1))
+                except ValueError:
+                    num = None
+            if num is None:
+                continue
+            pos = account_num_to_pos.get(num)
+            if pos is None or pos in order:
+                continue
+            order.append(pos)
+        return order
 
     def _load_accounts_from_credentials(self, path: str) -> list[dict]:
         if not path:

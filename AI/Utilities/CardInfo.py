@@ -1,9 +1,11 @@
 import json
 import urllib.request
 import urllib.error
+import os
 
 CARD_DATA_PATH = "cards.json"
 SCRYFALL_CACHE_PATH = "scryfall_cache.json"
+MISSING_CARDS_PATH = "missing_cards.json"
 _card_data = []
 _scryfall_cache = {}
 
@@ -22,6 +24,75 @@ def _save_scryfall_cache():
             json.dump(_scryfall_cache, f)
     except Exception:
         pass
+
+
+def _load_missing_cards() -> list[int]:
+    if not os.path.exists(MISSING_CARDS_PATH):
+        return []
+    try:
+        with open(MISSING_CARDS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [int(x) for x in data if isinstance(x, int) or str(x).isdigit()]
+    except Exception:
+        return []
+    return []
+
+
+def _save_missing_cards(ids: list[int]) -> None:
+    try:
+        with open(MISSING_CARDS_PATH, "w", encoding="utf-8") as f:
+            json.dump(sorted(set(ids)), f, indent=2)
+    except Exception:
+        pass
+
+
+def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
+    try:
+        url = f"https://api.scryfall.com/cards/arena/{arena_id}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'MTGABot/1.0'})
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        # Normalize to the fields the bot uses from cards.json
+        card = {
+            "grpId": arena_id,
+            "titleId": data.get("oracle_id"),
+            "manaCost": data.get("mana_cost", ""),
+            "colors": data.get("colors", []),
+            "types": data.get("type_line", "").replace("—", "-").split(),
+            "setCode": data.get("set", "").upper(),
+            "rarity": data.get("rarity", ""),
+            "name": data.get("name", f"Card#{arena_id}"),
+        }
+        return card
+    except Exception:
+        return None
+
+
+def refresh_missing_cards() -> None:
+    """
+    Try to resolve any previously missing Arena IDs from Scryfall.
+    This keeps cards.json up to date across sessions without a full bulk download.
+    """
+    ids = _load_missing_cards()
+    if not ids:
+        return
+    updated = False
+    remaining = []
+    for arena_id in ids:
+        card = _fetch_card_info_from_scryfall(arena_id)
+        if card:
+            _card_data.append(card)
+            updated = True
+        else:
+            remaining.append(arena_id)
+    if updated:
+        try:
+            with open(CARD_DATA_PATH, "w", encoding="utf-8") as f:
+                json.dump(_card_data, f, indent=2)
+        except Exception:
+            pass
+    _save_missing_cards(remaining)
 
 
 def get_produced_mana_from_scryfall(arena_id: int):
@@ -128,6 +199,18 @@ except json.JSONDecodeError:
     print(f"Error: Could not decode JSON from {CARD_DATA_PATH}. Please check file integrity.")
 
 
+def reload_cards_from_disk() -> None:
+    """Reload cards.json into memory after an export/update."""
+    global _card_data
+    try:
+        with open(CARD_DATA_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            _card_data = data
+    except Exception:
+        pass
+
+
 def get_card_info(mtga_id: int):
     """
     Parameters
@@ -138,6 +221,21 @@ def get_card_info(mtga_id: int):
     for card in _card_data:
         if card.get("grpId") == mtga_id:
             return card
+    # Not found in local data: try Scryfall once and cache.
+    card = _fetch_card_info_from_scryfall(mtga_id)
+    if card:
+        _card_data.append(card)
+        try:
+            with open(CARD_DATA_PATH, "w", encoding="utf-8") as f:
+                json.dump(_card_data, f, indent=2)
+        except Exception:
+            pass
+        return card
+    # Track missing IDs for refresh on next start.
+    ids = _load_missing_cards()
+    if mtga_id not in ids:
+        ids.append(mtga_id)
+        _save_missing_cards(ids)
     return None # Return None if card not found
 
 
