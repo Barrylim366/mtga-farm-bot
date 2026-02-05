@@ -7,6 +7,7 @@ import threading
 
 _log_lock = threading.Lock()
 BOT_LOG_FILE = "bot.log"
+_hover_logging_enabled = False
 
 
 def init_bot_log():
@@ -141,9 +142,17 @@ def log_controller_event(event: str, details: str = ""):
 
 def log_hover(object_id: int):
     """Log hover detection"""
+    if not _hover_logging_enabled:
+        return
     with _log_lock:
         with open(BOT_LOG_FILE, 'a') as f:
             f.write(f"[{_timestamp()}] [HOVER] objectId={object_id}\n")
+
+
+def set_hover_logging(enabled: bool) -> None:
+    """Enable or disable hover logging to reduce noise."""
+    global _hover_logging_enabled
+    _hover_logging_enabled = bool(enabled)
 
 
 def log_info(message: str):
