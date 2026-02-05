@@ -5,10 +5,12 @@ import os
 
 CARD_DATA_PATH = "cards.json"
 SCRYFALL_CACHE_PATH = "scryfall_cache.json"
+SCRYFALL_ORACLE_CACHE_PATH = "scryfall_oracle_cache.json"
 MISSING_CARDS_PATH = "missing_cards.json"
 SCRYFALL_BULK_META_PATH = "scryfall_bulk_metadata.json"
 _card_data = []
 _scryfall_cache = {}
+_scryfall_oracle_cache = {}
 
 # Load scryfall cache if it exists
 try:
@@ -16,6 +18,22 @@ try:
         _scryfall_cache = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
     _scryfall_cache = {}
+
+# Load oracle text cache if it exists
+try:
+    with open(SCRYFALL_ORACLE_CACHE_PATH, 'r', encoding='utf-8') as f:
+        _scryfall_oracle_cache = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    _scryfall_oracle_cache = {}
+
+
+def _save_scryfall_oracle_cache():
+    """Save the oracle text cache to disk"""
+    try:
+        with open(SCRYFALL_ORACLE_CACHE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(_scryfall_oracle_cache, f)
+    except Exception:
+        pass
 
 
 def _save_scryfall_cache():
@@ -64,6 +82,8 @@ def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
             "setCode": data.get("set", "").upper(),
             "rarity": data.get("rarity", ""),
             "name": data.get("name", f"Card#{arena_id}"),
+            "oracleText": data.get("oracle_text", ""),
+            "keywords": data.get("keywords", []),
         }
         return card
     except Exception:
@@ -145,6 +165,8 @@ def refresh_cards_from_scryfall_bulk_if_needed() -> None:
             "setCode": card.get("set", "").upper(),
             "rarity": card.get("rarity", ""),
             "name": card.get("name", f"Card#{arena_id}"),
+            "oracleText": card.get("oracle_text", ""),
+            "keywords": card.get("keywords", []),
         }
         _card_data.append(entry)
         existing_ids.add(arena_id)
@@ -220,6 +242,29 @@ def get_produced_mana_from_scryfall(arena_id: int):
         _scryfall_cache[cache_key] = None
         _save_scryfall_cache()
         return None
+
+
+def get_oracle_text_from_scryfall(arena_id: int):
+    """
+    Fetch the oracle_text for a card from Scryfall API.
+    Results are cached to avoid repeated API calls.
+    """
+    cache_key = str(arena_id)
+    if cache_key in _scryfall_oracle_cache:
+        return _scryfall_oracle_cache[cache_key]
+    try:
+        url = f"https://api.scryfall.com/cards/arena/{arena_id}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'MTGABot/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            oracle_text = data.get('oracle_text', '') or ''
+            _scryfall_oracle_cache[cache_key] = oracle_text
+            _save_scryfall_oracle_cache()
+            return oracle_text
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, Exception):
+        _scryfall_oracle_cache[cache_key] = ""
+        _save_scryfall_oracle_cache()
+        return ""
 
 
 def get_land_produced_colors(arena_id: int):
@@ -330,6 +375,22 @@ def get_card_info(mtga_id: int):
         ids.append(mtga_id)
         _save_missing_cards(ids)
     return None # Return None if card not found
+
+
+def get_oracle_text(mtga_id: int) -> str:
+    card_info = get_card_info(mtga_id)
+    if card_info and card_info.get("oracleText"):
+        return str(card_info.get("oracleText") or "")
+    return str(get_oracle_text_from_scryfall(mtga_id) or "")
+
+
+def card_has_convoke(mtga_id: int) -> bool:
+    card_info = get_card_info(mtga_id) or {}
+    keywords = card_info.get("keywords", []) or []
+    if any(str(k).lower() == "convoke" for k in keywords):
+        return True
+    oracle_text = card_info.get("oracleText") or get_oracle_text(mtga_id)
+    return "convoke" in str(oracle_text).lower()
 
 
 def calculate_cmc(mana_cost: str) -> int:

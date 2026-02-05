@@ -26,6 +26,12 @@ class GameState(GameStateSecondary):
     def get_game_info(self) -> Dict[str, str or int]:
         return self.get_full_state()['gameInfo']
 
+    def get_pending_message_count(self) -> int:
+        try:
+            return int(self.get_full_state().get("pendingMessageCount", 0) or 0)
+        except Exception:
+            return 0
+
     def get_zone(self, zone_type: str, owner_seat_id: int = None) -> Dict[str, str or int]:
         zones = self.get_full_state()['zones']
         matching_zones = []
@@ -40,6 +46,16 @@ class GameState(GameStateSecondary):
         elif len(matching_zones) == 1:
             zone_to_return = matching_zones[0]
         return zone_to_return
+
+    def get_zone_object_count(self, zone_type: str, owner_seat_id: int = None) -> int:
+        try:
+            zone = self.get_zone(zone_type, owner_seat_id)
+            if not zone:
+                return 0
+            objects = zone.get("objectInstanceIds", []) or []
+            return len(objects)
+        except Exception:
+            return 0
 
     def get_annotations(self) -> List[Dict]:
         return self.get_full_state()['annotations']

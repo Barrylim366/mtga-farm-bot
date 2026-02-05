@@ -262,6 +262,35 @@ class DummyAI(AIKernel):
             return instance_id, ability_grp_id
         return None
 
+    def _get_convoke_sources(self, game_state: GameState, my_seat: int):
+        """Return convoke sources from untapped creatures we control."""
+        color_map = {
+            'W': 'white',
+            'U': 'blue',
+            'B': 'black',
+            'R': 'red',
+            'G': 'green'
+        }
+        sources = []
+        colors = set()
+        try:
+            for obj in game_state.get_game_objects():
+                if obj.get("controllerSeatId") != my_seat:
+                    continue
+                if "CardType_Creature" not in (obj.get("cardTypes") or []):
+                    continue
+                if obj.get("isTapped"):
+                    continue
+                grp_id = obj.get("grpId")
+                card_info = CardInfo.get_card_info(grp_id)
+                card_colors = card_info.get("colors", []) if card_info else []
+                source_colors = {color_map.get(c, c) for c in card_colors if c in color_map}
+                sources.append(set(source_colors))
+                colors.update(source_colors)
+        except Exception:
+            return set(), []
+        return colors, sources
+
     def _select_cast_action_max_mana(self, cast_actions, available_colors, total_mana, sources):
         """Select a cast action that maximizes mana usage this turn.
 
@@ -271,11 +300,11 @@ class DummyAI(AIKernel):
         3) If still tied, prefer plans containing higher CMC spells.
         """
         if not cast_actions:
-            return None
+            return None, None
 
         actions = [a for a in cast_actions if a[0] <= total_mana]
         if not actions:
-            return None
+            return None, None
 
         cmc_suffix = [0] * (len(actions) + 1)
         for i in range(len(actions) - 1, -1, -1):
@@ -309,7 +338,7 @@ class DummyAI(AIKernel):
             if idx >= len(actions):
                 return
 
-            cmc, _instance_id, _card_name, _mana_cost_str, action_mana_cost = actions[idx]
+            cmc, _instance_id, _card_name, _mana_cost_str, action_mana_cost, _uses_convoke = actions[idx]
             _dfs(
                 idx + 1,
                 spent + cmc,
@@ -323,7 +352,7 @@ class DummyAI(AIKernel):
         _dfs(0, 0, 0, 0, [], [])
 
         if not best:
-            return None
+            return None, None
 
         best_spent, plan_count, plan_max, plan_indices = best
         if plan_count == 1:
@@ -332,11 +361,12 @@ class DummyAI(AIKernel):
             chosen_index = max(plan_indices, key=lambda i: actions[i][0])
 
         chosen = actions[chosen_index]
+        score = (best_spent, -plan_count, plan_max)
         self._debug(
             f"Mana plan: total_mana={total_mana}, spent={best_spent}, "
             f"count={plan_count}, max_cmc={plan_max}, chosen={chosen[2]}"
         )
-        return chosen
+        return chosen, score
 
     def generate_keep(self, card_list) -> bool:
         self._debug("generate_keep called - keeping hand")
@@ -460,6 +490,7 @@ class DummyAI(AIKernel):
 
                     # Second: cast any spell to maximize mana usage (category-agnostic)
                     cast_actions = []
+                    convoke_colors, convoke_sources = self._get_convoke_sources(game_state, my_seat)
                     allow_sorcery = phase in ['Phase_Main1', 'Phase_Main2']
                     sorcery_found = 0
                     sorcery_castable = 0
@@ -490,10 +521,23 @@ class DummyAI(AIKernel):
                         mana_cost_str = card_info.get('manaCost', '')
                         cmc = CardInfo.calculate_cmc(mana_cost_str)
 
+                        uses_convoke = CardInfo.card_has_convoke(grp_id) if grp_id else False
+                        eff_colors = set(available_colors)
+                        eff_sources = list(sources)
+                        eff_total_mana = total_mana
+                        if uses_convoke:
+                            eff_colors.update(convoke_colors)
+                            eff_sources = list(sources) + list(convoke_sources)
+                            eff_total_mana = total_mana + len(convoke_sources)
+
                         # Check if we can pay the mana cost (color + total)
-                        if self._can_cast_with_mana_cost(action_mana_cost, available_colors, total_mana, sources):
-                            cast_actions.append((cmc, instance_id, card_name, mana_cost_str, action_mana_cost))
-                            self._debug(f"Can cast: {card_name} (cost={mana_cost_str}, cmc={cmc})")
+                        if self._can_cast_with_mana_costs(action_mana_cost, eff_colors, eff_total_mana, eff_sources):
+                            cast_actions.append(
+                                (cmc, instance_id, card_name, mana_cost_str, action_mana_cost, uses_convoke)
+                            )
+                            self._debug(
+                                f"Can cast: {card_name} (cost={mana_cost_str}, cmc={cmc}, convoke={uses_convoke})"
+                            )
                             if is_sorcery:
                                 sorcery_found += 1
                                 sorcery_castable += 1
@@ -507,11 +551,24 @@ class DummyAI(AIKernel):
                                 sorcery_blocked_mana += 1
 
                     if cast_actions:
-                        chosen = self._select_cast_action_max_mana(
-                            cast_actions, available_colors, total_mana, sources
-                        )
+                        non_convoke_actions = [a for a in cast_actions if not a[5]]
+                        convoke_actions = [a for a in cast_actions if a[5]]
+
+                        chosen = None
+                        chosen_score = None
+                        if non_convoke_actions:
+                            chosen, chosen_score = self._select_cast_action_max_mana(
+                                non_convoke_actions, available_colors, total_mana, sources
+                            )
+                        if convoke_actions:
+                            convoke_best = max(convoke_actions, key=lambda a: a[0])
+                            convoke_score = (convoke_best[0], -1, convoke_best[0])
+                            if chosen_score is None or convoke_score > chosen_score:
+                                chosen = convoke_best
+                                chosen_score = convoke_score
+
                         if chosen:
-                            cmc, instance_id, card_name, mana_cost, _action_mana_cost = chosen
+                            cmc, instance_id, card_name, mana_cost, _action_mana_cost, _uses_convoke = chosen
                             self._debug(f"CASTING: {card_name} (instanceId={instance_id}, cost={mana_cost})")
                             if sorcery_found:
                                 self._debug(

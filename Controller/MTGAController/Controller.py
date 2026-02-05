@@ -59,6 +59,7 @@ class Controller(ControllerSecondary):
             'declare_attackers': '"type": "GREMessageType_DeclareAttackersReq"',
             'select_n': '"type": "GREMessageType_SelectNReq"',
             'select_targets': '"type": "GREMessageType_SelectTargetsReq"',
+            'pay_costs': '"type": "GREMessageType_PayCostsReq"',
             'main_nav_loaded': 'MainNav load in',
             'queue_ready_marker': 'Unloading 1 Unused Serialized files (Serialized files now loaded:',
         }
@@ -173,6 +174,7 @@ class Controller(ControllerSecondary):
         self.__last_submit_targets_ts = 0.0
         self.__pending_select_n = None
         self.__target_submit_cooldown_sec = 1.0
+        self.__pending_pay_costs_ts = 0.0
         self._account_switch_interval = max(0, int(account_switch_minutes or 0)) * 60
         self._credentials_path = credentials_path or ""
         self._account_cycle_index = int(account_cycle_index or 0)
@@ -434,7 +436,7 @@ class Controller(ControllerSecondary):
         self._stop_requested = False
         if self._account_play_order:
             bot_logger.log_info(f"Account play order active: {self._account_play_order}")
-            bot_logger.log_info(f"Account play order start index: {self._account_cycle_index}")
+            bot_logger.log_info(f"Account play order next index: {self._account_cycle_index}")
         self.start_monitor()
         self.start_queueing()
 
@@ -997,6 +999,10 @@ class Controller(ControllerSecondary):
             self.__handle_select_n_req(line_containing_pattern)
         elif pattern == self.patterns["select_targets"]:
             self.__handle_select_targets_req(line_containing_pattern)
+        elif pattern == self.patterns["pay_costs"]:
+            self.__pending_pay_costs_ts = time.time()
+            bot_logger.log_info("PayCostsReq detected: attempting auto-pay.")
+            threading.Timer(0.6, self.submit_selection).start()
 
     def _account_switch_due(self) -> bool:
         if self._account_switch_interval <= 0:
@@ -1221,16 +1227,15 @@ class Controller(ControllerSecondary):
                     next_pos = 0
                     next_index = custom_order[0]
                 else:
-                    # Treat account_cycle_index as the LAST used position.
-                    # Next account should be the current position (if valid),
-                    # or the first in the list if unset.
+                    # Treat account_cycle_index as the NEXT position to use.
+                    # If unset/invalid, start at the first entry.
                     pos = self._account_cycle_index
                     if pos < 0 or pos >= order_len:
                         pos = 0
                     next_pos = pos
                     next_index = custom_order[next_pos]
                 bot_logger.log_info(f"Account play order (indices): {custom_order}")
-                bot_logger.log_info(f"Account play order pos: {self._account_cycle_index} -> {next_pos}")
+                bot_logger.log_info(f"Account play order pos (next): {self._account_cycle_index} -> {next_pos}")
             else:
                 # Default cycle order: Acc_2 -> Acc_3 -> Acc_1
                 if len(accounts) >= 3:
@@ -1711,6 +1716,12 @@ class Controller(ControllerSecondary):
             return self.__is_selecting_targets()
         return self.__is_selecting_targets()
 
+    def __should_pause_for_pay_costs(self) -> bool:
+        if not self.__pending_pay_costs_ts:
+            return False
+        # Treat PayCostsReq as blocking for a short window.
+        return (time.time() - self.__pending_pay_costs_ts) < 3.0
+
     def __handle_target_selection_from_raw_dict(self, raw_dict: dict) -> None:
         try:
             messages = raw_dict.get("greToClientEvent", {}).get("greToClientMessages", [])
@@ -1914,12 +1925,35 @@ class Controller(ControllerSecondary):
 
         turn_info_dict = self.updated_game_state.get_turn_info()
         is_complete = self.updated_game_state.is_complete()
+        pending_count = self.updated_game_state.get_pending_message_count()
+        stack_count = self.updated_game_state.get_zone_object_count("ZoneType_Stack")
 
         # Log controller state
         bot_logger.log_controller_event(
             f"is_complete={is_complete}",
             f"decisionPlayer={turn_info_dict.get('decisionPlayer') if turn_info_dict else None}, has_mulled_keep={self.__has_mulled_keep}"
         )
+
+        if stack_count > 0 and turn_info_dict and turn_info_dict.get("phase") in ("Phase_Main1", "Phase_Main2"):
+            if self.__decision_execution_thread is not None:
+                self.__decision_execution_thread.cancel()
+                self.__decision_execution_thread = None
+            bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
+            return
+
+        if pending_count > 0:
+            if self.__decision_execution_thread is not None:
+                self.__decision_execution_thread.cancel()
+                self.__decision_execution_thread = None
+            bot_logger.log_info(f"Deferring decision: pendingMessageCount={pending_count}")
+            return
+
+        if self.__should_pause_for_pay_costs():
+            if self.__decision_execution_thread is not None:
+                self.__decision_execution_thread.cancel()
+                self.__decision_execution_thread = None
+            bot_logger.log_info("Pausing decision while pay costs prompt is active")
+            return
 
         if self.__should_pause_for_targets():
             if self.__decision_execution_thread is not None:

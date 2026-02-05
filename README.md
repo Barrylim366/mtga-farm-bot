@@ -32,10 +32,9 @@ python ui.py
    - Logout flow uses: log_out_btn, log_out_ok_btn
 
 3) Settings:
-   - **Switch account (min)**: minutes until switch; 0 disables.
-   - **Account Play Order**: order of Acc_1/Acc_2/Acc_3. Empty entries are ignored.
-   - **Record Action**: record account switch flow (uses F8 to stop recording).
-   - **Show Records**: review/test/delete recorded actions.
+   - **Switch Account** opens a window for **Switch account (min)** and **Account Play Order** (use **Save Order**).
+     Saving shows a short confirmation.
+   - **Record Action** opens a window for **Record** (uses F8 to stop) and **Show Records**.
 
 4) Start Bot.
 
@@ -51,6 +50,7 @@ Stop bot any time with **Mouse Wheel Down**.
 - Order follows **Account Play Order** in Settings; the first entry is used as the next switch target.
   After each switch, the bot advances to the next entry in the list.
   Changing the order resets the cycle to the first entry.
+  The cycle index is treated as the next position to use (not the last used one).
 
 ## Quest-Based Deck Selection
 
@@ -70,6 +70,14 @@ In main phases the bot tries to use as much available mana as possible across al
 - If multiple options spend the same total, it prefers a single higher-cost spell
   over multiple cheaper spells.
 - Multi-spell plans are validated against color requirements, not just CMC.
+ - Convoke is supported using untapped creatures as colored mana sources.
+
+## Decision Safety
+
+The bot defers decisions while the game reports pending messages to avoid acting
+mid-resolution or while the UI is still busy.
+It also auto-confirms mana payment prompts when MTGA requests pay costs.
+In main phases, decisions are also deferred while the stack contains objects.
 
 ## Card Data Updates
 

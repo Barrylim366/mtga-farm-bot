@@ -885,7 +885,7 @@ class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, config_manager: ConfigManager, games: int, wins: int):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("620x360")
+        self.geometry("520x300")
         self.resizable(False, False)
         self.configure(bg="#2b2b2b")
         self._log_window = None
@@ -900,6 +900,8 @@ class SettingsWindow(tk.Toplevel):
         self._current_record_events = []
         self._records_path = os.path.join(os.path.dirname(__file__), "recorded_actions_records.json")
         self._switch_save_job = None
+        self.record_btn = None
+        self.show_records_btn = None
 
         frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -964,149 +966,36 @@ class SettingsWindow(tk.Toplevel):
         switch_row = tk.Frame(frame, bg="#2b2b2b")
         switch_row.pack(fill=tk.X, pady=(12, 0))
 
-        switch_label = tk.Label(
+        switch_btn = tk.Button(
             switch_row,
             text="Switch Account",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10),
-        )
-        switch_label.pack(side=tk.LEFT)
-
-        switch_inner = tk.Frame(switch_row, bg="#2b2b2b")
-        switch_inner.pack(side=tk.LEFT, padx=(10, 0))
-
-        switch_inner_label = tk.Label(
-            switch_inner,
-            text="Switch account (min)",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10),
-        )
-        switch_inner_label.pack(side=tk.LEFT)
-
-        self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
-        switch_entry = tk.Entry(
-            switch_inner,
-            textvariable=self.switch_minutes_var,
-            width=6,
-            bg="#1e1e1e",
-            fg="white",
-            insertbackground="white",
-            relief=tk.FLAT,
-        )
-        switch_entry.pack(side=tk.LEFT, padx=(10, 6))
-        switch_entry.bind("<Return>", lambda _e: self._save_switch_minutes())
-        switch_entry.bind("<FocusOut>", lambda _e: self._save_switch_minutes())
-        switch_entry.bind("<KeyRelease>", self._debounced_save_switch_minutes)
-
-        switch_hint = tk.Label(
-            switch_inner,
-            text="0 = off",
-            bg="#2b2b2b",
-            fg="#aaaaaa",
-            font=("Segoe UI", 9),
-        )
-        switch_hint.pack(side=tk.LEFT)
-
-        order_row = tk.Frame(frame, bg="#2b2b2b")
-        order_row.pack(fill=tk.X, pady=(10, 0))
-
-        order_label = tk.Label(
-            order_row,
-            text="Account Play Order",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10),
-        )
-        order_label.pack(side=tk.LEFT)
-
-        order_inner = tk.Frame(order_row, bg="#2b2b2b")
-        order_inner.pack(side=tk.LEFT, padx=(10, 0))
-
-        order_choices = ["", "Acc_1", "Acc_2", "Acc_3"]
-        current_order = self._config_manager.get_account_play_order()
-        current_order = current_order[:3] + ["", "", ""]
-
-        self._order_vars = []
-        self._order_boxes = []
-        for idx in range(3):
-            num_label = tk.Label(
-                order_inner,
-                text=str(idx + 1),
-                bg="#2b2b2b",
-                fg="#aaaaaa",
-                font=("Segoe UI", 9),
-                width=2,
-            )
-            num_label.pack(side=tk.LEFT, padx=(0, 2))
-
-            var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
-            combo = ttk.Combobox(
-                order_inner,
-                textvariable=var,
-                values=order_choices,
-                state="readonly",
-                width=7,
-            )
-            combo.configure(style="Dark.TCombobox")
-            combo.pack(side=tk.LEFT, padx=(0, 6))
-            combo.bind("<<ComboboxSelected>>", lambda _e: self._save_account_play_order())
-            self._order_vars.append(var)
-            self._order_boxes.append(combo)
-
-        reset_order_btn = tk.Button(
-            order_row,
-            text="Reset Order Index",
-            command=self._reset_account_play_order_index,
+            command=self._open_switch_account_window,
             bg="#3a3a3a",
             fg="white",
             activebackground="#444444",
             activeforeground="white",
             relief=tk.FLAT,
-            padx=8,
-            pady=2,
+            padx=12,
+            pady=4,
         )
-        reset_order_btn.pack(side=tk.RIGHT)
+        switch_btn.pack(side=tk.LEFT)
 
         record_row = tk.Frame(frame, bg="#2b2b2b")
         record_row.pack(fill=tk.X, pady=(12, 0))
 
-        record_label = tk.Label(
+        record_btn = tk.Button(
             record_row,
             text="Record Action",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10),
-        )
-        record_label.pack(side=tk.LEFT)
-
-        self.record_btn = tk.Button(
-            record_row,
-            text="Record",
-            command=self._record_actions_prompt,
+            command=self._open_record_actions_window,
             bg="#3a3a3a",
             fg="white",
             activebackground="#444444",
             activeforeground="white",
             relief=tk.FLAT,
-            padx=10,
-            pady=2,
+            padx=12,
+            pady=4,
         )
-        self.record_btn.pack(side=tk.LEFT, padx=(10, 0))
-        self.show_records_btn = tk.Button(
-            record_row,
-            text="Show Records",
-            command=self._show_records,
-            bg="#3a3a3a",
-            fg="white",
-            activebackground="#444444",
-            activeforeground="white",
-            relief=tk.FLAT,
-            padx=10,
-            pady=2,
-        )
-        self.show_records_btn.pack(side=tk.LEFT, padx=(8, 0))
+        record_btn.pack(side=tk.LEFT)
 
         back_btn = tk.Button(
             frame,
@@ -1139,55 +1028,6 @@ class SettingsWindow(tk.Toplevel):
             if self._log_window and self._log_window.winfo_exists():
                 self._log_window.destroy()
             self._log_window = None
-
-    def _save_switch_minutes(self):
-        raw = (self.switch_minutes_var.get() or "").strip()
-        if raw == "":
-            return
-        try:
-            minutes = int(raw)
-        except ValueError:
-            return
-        if minutes < 0:
-            minutes = 0
-        self.switch_minutes_var.set(str(minutes))
-        self._config_manager.set_account_switch_minutes(minutes)
-
-    def _save_account_play_order(self):
-        order = [var.get().strip() for var in getattr(self, "_order_vars", [])]
-        order = [item for item in order if item]
-        self._config_manager.set_account_play_order(order)
-        # When the order changes, start from the first entry next time.
-        self._config_manager.set_account_cycle_index(0)
-        parent = getattr(self, "master", None)
-        if parent and getattr(parent, "bot_running", False) and getattr(parent, "_controller", None):
-            try:
-                parent._controller.set_account_play_order(order)
-                parent._controller.set_account_cycle_index(0)
-            except Exception:
-                pass
-
-    def _reset_account_play_order_index(self):
-        self._config_manager.set_account_cycle_index(0)
-        # Clear dropdown selections as requested
-        for var in getattr(self, "_order_vars", []):
-            var.set("")
-        self._config_manager.set_account_play_order([])
-        parent = getattr(self, "master", None)
-        if parent and getattr(parent, "bot_running", False) and getattr(parent, "_controller", None):
-            try:
-                parent._controller.set_account_play_order([])
-                parent._controller.set_account_cycle_index(0)
-            except Exception:
-                pass
-
-    def _debounced_save_switch_minutes(self, _event=None):
-        if self._switch_save_job:
-            try:
-                self.after_cancel(self._switch_save_job)
-            except Exception:
-                pass
-        self._switch_save_job = self.after(500, self._save_switch_minutes)
 
     def _record_actions_prompt(self):
         if self._recording:
@@ -1226,8 +1066,10 @@ class SettingsWindow(tk.Toplevel):
             return
         self._recording = True
         self._record_ignore_first = True
-        self.record_btn.config(text="Stop")
-        self.show_records_btn.config(state=tk.DISABLED)
+        if self.record_btn:
+            self.record_btn.config(text="Stop")
+        if self.show_records_btn:
+            self.show_records_btn.config(state=tk.DISABLED)
         self._current_record_events = []
 
         def _append_event(event: dict) -> None:
@@ -1274,8 +1116,10 @@ class SettingsWindow(tk.Toplevel):
         if not self._recording:
             return
         self._recording = False
-        self.record_btn.config(text="Record")
-        self.show_records_btn.config(state=tk.NORMAL)
+        if self.record_btn:
+            self.record_btn.config(text="Record")
+        if self.show_records_btn:
+            self.show_records_btn.config(state=tk.NORMAL)
         if self._mouse_listener:
             try:
                 self._mouse_listener.stop()
@@ -1466,7 +1310,14 @@ class SettingsWindow(tk.Toplevel):
             except Exception:
                 pass
         self._playback_keyboard_listener = None
-        self.test_action_btn.config(state=tk.NORMAL)
+        if hasattr(self, "test_action_btn") and self.test_action_btn:
+            self.test_action_btn.config(state=tk.NORMAL)
+
+    def _open_switch_account_window(self):
+        SwitchAccountWindow(self, self._config_manager)
+
+    def _open_record_actions_window(self):
+        RecordActionsWindow(self)
 
     def destroy(self):
         try:
@@ -1476,6 +1327,255 @@ class SettingsWindow(tk.Toplevel):
                 self._stop_recording()
         finally:
             super().destroy()
+
+
+class SwitchAccountWindow(tk.Toplevel):
+    def __init__(self, parent: SettingsWindow, config_manager: ConfigManager):
+        super().__init__(parent)
+        self._parent = parent
+        self._config_manager = config_manager
+        self.title("Switch Account")
+        self.geometry("560x260")
+        self.resizable(False, False)
+        self.configure(bg="#2b2b2b")
+
+        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(
+            "Dark.TCombobox",
+            fieldbackground="#1e1e1e",
+            background="#3a3a3a",
+            foreground="white",
+            bordercolor="#2b2b2b",
+            lightcolor="#2b2b2b",
+            darkcolor="#2b2b2b",
+            arrowcolor="white",
+        )
+        style.map(
+            "Dark.TCombobox",
+            fieldbackground=[("readonly", "#1e1e1e")],
+            background=[("readonly", "#3a3a3a")],
+            foreground=[("readonly", "white")],
+        )
+
+        switch_row = tk.Frame(frame, bg="#2b2b2b")
+        switch_row.pack(fill=tk.X)
+
+        switch_label = tk.Label(
+            switch_row,
+            text="Switch account (min)",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        switch_label.pack(side=tk.LEFT)
+
+        self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
+        switch_entry = tk.Entry(
+            switch_row,
+            textvariable=self.switch_minutes_var,
+            width=6,
+            bg="#1e1e1e",
+            fg="white",
+            insertbackground="white",
+            relief=tk.FLAT,
+        )
+        switch_entry.pack(side=tk.LEFT, padx=(10, 6))
+        switch_entry.bind("<Return>", lambda _e: self._save_switch_minutes())
+
+        switch_hint = tk.Label(
+            switch_row,
+            text="0 = off",
+            bg="#2b2b2b",
+            fg="#aaaaaa",
+            font=("Segoe UI", 9),
+        )
+        switch_hint.pack(side=tk.LEFT, padx=(6, 0))
+
+        switch_save = tk.Button(
+            switch_row,
+            text="Save",
+            command=self._save_switch_minutes,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=10,
+            pady=2,
+        )
+        switch_save.pack(side=tk.RIGHT)
+
+        order_row = tk.Frame(frame, bg="#2b2b2b")
+        order_row.pack(fill=tk.X, pady=(16, 0))
+
+        order_label = tk.Label(
+            order_row,
+            text="Account Play Order",
+            bg="#2b2b2b",
+            fg="white",
+            font=("Segoe UI", 10),
+        )
+        order_label.pack(side=tk.LEFT)
+
+        order_inner = tk.Frame(order_row, bg="#2b2b2b")
+        order_inner.pack(side=tk.LEFT, padx=(10, 0))
+
+        order_choices = ["", "Acc_1", "Acc_2", "Acc_3"]
+        current_order = self._config_manager.get_account_play_order()
+        current_order = current_order[:3] + ["", "", ""]
+
+        self._order_vars = []
+        for idx in range(3):
+            num_label = tk.Label(
+                order_inner,
+                text=str(idx + 1),
+                bg="#2b2b2b",
+                fg="#aaaaaa",
+                font=("Segoe UI", 9),
+                width=2,
+            )
+            num_label.pack(side=tk.LEFT, padx=(0, 2))
+
+            var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
+            combo = ttk.Combobox(
+                order_inner,
+                textvariable=var,
+                values=order_choices,
+                state="readonly",
+                width=7,
+            )
+            combo.configure(style="Dark.TCombobox")
+            combo.pack(side=tk.LEFT, padx=(0, 6))
+            self._order_vars.append(var)
+
+        save_order_btn = tk.Button(
+            frame,
+            text="Save Order",
+            command=self._save_account_play_order,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        save_order_btn.pack(anchor="w", pady=(12, 0))
+
+        close_btn = tk.Button(
+            frame,
+            text="Close",
+            command=self.destroy,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        close_btn.pack(anchor="w", pady=(10, 0))
+
+    def _save_switch_minutes(self):
+        raw = (self.switch_minutes_var.get() or "").strip()
+        if raw == "":
+            return
+        try:
+            minutes = int(raw)
+        except ValueError:
+            return
+        if minutes < 0:
+            minutes = 0
+        self.switch_minutes_var.set(str(minutes))
+        self._config_manager.set_account_switch_minutes(minutes)
+        messagebox.showinfo("Saved", "Switch account minutes saved.")
+
+    def _save_account_play_order(self):
+        order = [var.get().strip() for var in getattr(self, "_order_vars", [])]
+        order = [item for item in order if item]
+        self._config_manager.set_account_play_order(order)
+        # When the order changes, start from the first entry next time.
+        self._config_manager.set_account_cycle_index(0)
+        parent = getattr(self._parent, "master", None)
+        if parent and getattr(parent, "bot_running", False) and getattr(parent, "_controller", None):
+            try:
+                parent._controller.set_account_play_order(order)
+                parent._controller.set_account_cycle_index(0)
+            except Exception:
+                pass
+        messagebox.showinfo("Saved", "Account play order saved.")
+
+
+class RecordActionsWindow(tk.Toplevel):
+    def __init__(self, parent: SettingsWindow):
+        super().__init__(parent)
+        self._parent = parent
+        self.title("Record Actions")
+        self.geometry("320x160")
+        self.resizable(False, False)
+        self.configure(bg="#2b2b2b")
+
+        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        record_btn = tk.Button(
+            frame,
+            text="Record",
+            command=self._parent._record_actions_prompt,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        record_btn.pack(anchor="w")
+
+        show_btn = tk.Button(
+            frame,
+            text="Show Records",
+            command=self._parent._show_records,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        show_btn.pack(anchor="w", pady=(8, 0))
+
+        close_btn = tk.Button(
+            frame,
+            text="Close",
+            command=self.destroy,
+            bg="#3a3a3a",
+            fg="white",
+            activebackground="#444444",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+        )
+        close_btn.pack(anchor="w", pady=(10, 0))
+
+        self._parent.record_btn = record_btn
+        self._parent.show_records_btn = show_btn
+
+    def destroy(self):
+        if getattr(self._parent, "record_btn", None) is self._parent.record_btn:
+            self._parent.record_btn = None
+        if getattr(self._parent, "show_records_btn", None) is self._parent.show_records_btn:
+            self._parent.show_records_btn = None
+        super().destroy()
 
 
 class LogWindow(tk.Toplevel):
