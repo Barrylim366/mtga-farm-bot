@@ -45,6 +45,8 @@ Stop bot any time with **Mouse Wheel Down**.
 - Accounts are defined in `credentials.txt` (do not commit secrets).
 - Switch happens when the timer expires and the bot reaches a safe screen.
 - Logout/login uses recorded action sequence + credentials injection.
+- If the client is in the Store scene during fallback logout, the bot logs the last scene and presses ESC twice to reach the options menu.
+- SelectN stack/trigger selections are delayed while `pendingMessageCount > 0` or the bot is not the decision player to avoid hover spam.
 - Login wait before typing credentials: 5 seconds.
 - Post-login wait before running the recorded action: 20 seconds.
 - Order follows **Account Play Order** in Settings; the first entry is used as the next switch target.
@@ -58,8 +60,11 @@ After account switch the bot:
 1) clicks Play -> Find Match -> Historic Play -> My Decks (image matching)
 2) parses quests from `Player.log`
 3) selects a deck image from `Acc_1/Acc_2/Acc_3` folder that best matches quest colors
+   - If no guild/color quest exists but a creature quest is present, it selects `C.png`
+   - If no quests are available, it selects a random deck image
 
 Deck images are matched by filename letters (e.g. `RG.png`, `WU.png`, `R.png`).
+Creature quests use `C.png`.
 The `Acc_1`, `Acc_2`, `Acc_3` and `Buttons` folders are kept in Git, but their
 contents are ignored (see .gitignore). Keep your local images there.
 
@@ -78,6 +83,9 @@ The bot defers decisions while the game reports pending messages to avoid acting
 mid-resolution or while the UI is still busy.
 It also auto-confirms mana payment prompts when MTGA requests pay costs.
 In main phases, decisions are also deferred while the stack contains objects.
+If the bot is the decision player, `pendingMessageCount` is zero, and a `Pass` action is available, it will still resolve priority even with stack objects present.
+SelectN prompts pause decisions for a short window after submit, and retries are rate-limited to avoid duplicate submits while discards resolve.
+If the local seat ID is temporarily unknown, stack resolution can still proceed when a Pass action is available.
 
 ## Card Data Updates
 
@@ -94,3 +102,5 @@ Fallback:
 - `bot.log` – main bot debug
 - `human.log` – high-level actions
 - `bot_gui_subprocess.log` – UI subprocess log (if used)
+- Hover logs are suppressed by default and only enabled during selection scans.
+- A one-line match summary is logged at match completion.

@@ -24,7 +24,7 @@ _GUILD_COLOR_MAP = {
     "boros": "RW",
     "simic": "UG",
 }
-_COLOR_LETTERS = set("WUBRG")
+_COLOR_LETTERS = set("WUBRGC")
 
 
 class Controller(ControllerSecondary):
@@ -173,6 +173,7 @@ class Controller(ControllerSecondary):
         self.__pending_target_select = None
         self.__last_submit_targets_ts = 0.0
         self.__pending_select_n = None
+        self.__last_submit_selection_ts = 0.0
         self.__target_submit_cooldown_sec = 1.0
         self.__pending_pay_costs_ts = 0.0
         self._account_switch_interval = max(0, int(account_switch_minutes or 0)) * 60
@@ -254,6 +255,30 @@ class Controller(ControllerSecondary):
             bot_logger.log_error(f"Failed to read player.log tail: {e}")
             return ""
 
+    def _get_last_scene_name(self) -> str | None:
+        if not self._log_path:
+            return None
+        log_tail = self._read_log_tail(self._log_path, max_bytes=250000)
+        if not log_tail:
+            return None
+        idx = log_tail.rfind("Client.SceneChange")
+        if idx == -1:
+            return None
+        line_start = log_tail.rfind("\n", 0, idx)
+        line_end = log_tail.find("\n", idx)
+        if line_start == -1:
+            line_start = 0
+        if line_end == -1:
+            line_end = len(log_tail)
+        line = log_tail[line_start:line_end]
+        match = re.search(r'"toSceneName":"([^"]+)"', line)
+        if not match:
+            return None
+        return match.group(1)
+
+    def _last_scene_is_store(self) -> bool:
+        return self._get_last_scene_name() == "Store"
+
     def _extract_latest_quests(self) -> list[dict]:
         if not self._log_path:
             return []
@@ -276,10 +301,8 @@ class Controller(ControllerSecondary):
             return quests
         return []
 
-    def _parse_guild_quests(self) -> list[dict]:
-        quests = self._extract_latest_quests()
+    def _parse_guild_quests(self, quests: list[dict]) -> list[dict]:
         parsed = []
-        bot_logger.log_info(f"Post-login: parsed {len(quests)} quest entries from player.log.")
         for quest in quests:
             loc_key = str(quest.get("locKey", "")).lower()
             guild = None
@@ -301,12 +324,25 @@ class Controller(ControllerSecondary):
             bot_logger.log_info(f"Post-login: quest guild={guild} gold={gold}.")
         return parsed
 
+    def _has_creature_quest(self, quests: list[dict]) -> bool:
+        for quest in quests:
+            loc_key = str(quest.get("locKey", "")).lower()
+            if "quest_creature" in loc_key:
+                return True
+        return False
+
     def _select_best_quest(self) -> dict | None:
-        quests = self._parse_guild_quests()
-        if not quests:
-            return None
-        quests.sort(key=lambda q: q.get("gold", 0), reverse=True)
-        return quests[0]
+        quests = self._extract_latest_quests()
+        bot_logger.log_info(f"Post-login: parsed {len(quests)} quest entries from player.log.")
+        guild_quests = self._parse_guild_quests(quests)
+        if guild_quests:
+            guild_quests.sort(key=lambda q: q.get("gold", 0), reverse=True)
+            top = guild_quests[0]
+            top["type"] = "guild"
+            return top
+        if self._has_creature_quest(quests):
+            return {"type": "creature"}
+        return None
 
     def _resolve_account_dir(self, account_index: int) -> str | None:
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -336,8 +372,9 @@ class Controller(ControllerSecondary):
             bot_logger.log_error("Post-login: no deck images found in account folder.")
             return None
         if not target_letters:
-            bot_logger.log_info(f"Post-login: no target letters; defaulting to {images[0]}.")
-            return os.path.join(account_dir, images[0])
+            choice = random.choice(images)
+            bot_logger.log_info(f"Post-login: no target letters; randomly selected {choice}.")
+            return os.path.join(account_dir, choice)
 
         target_set = set(target_letters.upper())
         best = None
@@ -368,12 +405,17 @@ class Controller(ControllerSecondary):
             return False
         quest = self._select_best_quest()
         if quest:
-            guild = quest.get("guild")
-            gold = quest.get("gold", 0)
-            colors = _GUILD_COLOR_MAP.get(guild or "", "")
-            bot_logger.log_info(
-                f"Post-login: selected quest guild={guild} colors={colors} gold={gold}."
-            )
+            if quest.get("type") == "guild":
+                guild = quest.get("guild")
+                gold = quest.get("gold", 0)
+                colors = _GUILD_COLOR_MAP.get(guild or "", "")
+                bot_logger.log_info(
+                    f"Post-login: selected quest guild={guild} colors={colors} gold={gold}."
+                )
+            else:
+                guild = None
+                colors = "C"
+                bot_logger.log_info("Post-login: selected creature quest; using colors=C.")
         else:
             guild = None
             colors = ""
@@ -524,91 +566,93 @@ class Controller(ControllerSecondary):
                     pass
 
     def cast(self, card_id: int) -> None:
-        # Clear any stale hover events from previous scans
-        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+        bot_logger.set_hover_logging(True)
+        try:
+            # Clear any stale hover events from previous scans
+            self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
 
-        # Move above start point first to reset any hover states
-        reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
-        bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_SCAN (target card_id={card_id})")
-        self.input.move_abs(reset_pos[0], reset_pos[1])
-        time.sleep(0.5)
+            # Move above start point first to reset any hover states
+            reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+            bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_SCAN (target card_id={card_id})")
+            self.input.move_abs(reset_pos[0], reset_pos[1])
+            time.sleep(0.5)
 
-        # Move to start of hand scan
-        bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SCAN")
-        self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
+            # Move to start of hand scan
+            bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SCAN")
+            self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
 
-        current_hovered_id = None
-        start_x = self.hand_scan_p1[0]
-        end_x = self.hand_scan_p2[0]
+            current_hovered_id = None
+            start_x = self.hand_scan_p1[0]
+            end_x = self.hand_scan_p2[0]
 
-        # Ensure we are scanning in the correct direction (left to right usually)
-        direction = 1 if end_x > start_x else -1
-        total_dx = (end_x - start_x) if end_x != start_x else 1
-        start_y = self.hand_scan_p1[1]
-        end_y = self.hand_scan_p2[1]
+            # Ensure we are scanning in the correct direction (left to right usually)
+            direction = 1 if end_x > start_x else -1
+            total_dx = (end_x - start_x) if end_x != start_x else 1
+            start_y = self.hand_scan_p1[1]
+            end_y = self.hand_scan_p2[1]
 
-        while current_hovered_id != card_id:
-            # Check if we have exceeded the scan area
-            current_x = self.input.position().x
-            if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
-                bot_logger.log_error(f"SCAN_FAILED: Card {card_id} not found. Scanned from x={start_x} to x={end_x}, ended at x={current_x}")
-                print(f"Scanned entire hand area but did not find card_id: {card_id}")
-                break
-
-            # Move slightly to find next card
-            # We move until we get a log update, or until we move a certain distance?
-            # Original code waited for log update. We should do the same but with bounds check.
-
-            # Inner loop: move until log updates or bounds hit
-            while not self.log_reader.has_new_line(self.patterns['hover_id']):
-                step_dx = self.cast_card_dist * direction
-                pos = self.input.position()
-                next_x = pos.x + step_dx
-                # Follow a (potentially sloped) scan line from p1 -> p2 to better match fanned hands.
-                t = (next_x - start_x) / total_dx
-                if t < 0:
-                    t = 0
-                elif t > 1:
-                    t = 1
-                desired_y = int(round(start_y + t * (end_y - start_y)))
-                dy = desired_y - pos.y
-                self.input.move_rel(step_dx, dy)
-                time.sleep(self.cast_speed)
-
-                # Check bounds inside inner loop too
+            while current_hovered_id != card_id:
+                # Check if we have exceeded the scan area
                 current_x = self.input.position().x
                 if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                    bot_logger.log_error(
+                        f"SCAN_FAILED: Card {card_id} not found. Scanned from x={start_x} to x={end_x}, ended at x={current_x}"
+                    )
+                    print(f"Scanned entire hand area but did not find card_id: {card_id}")
                     break
 
-            if self.log_reader.has_new_line(self.patterns['hover_id']):
-                parsed = self.__parse_hover_id_line(
-                    self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
-                )
-                if parsed is None:
-                    continue
-                current_hovered_id = parsed
-                bot_logger.log_hover(current_hovered_id)
-                print(str(current_hovered_id) + '|' + str(card_id))
-            else:
-                 # Break outer loop if we hit bounds without finding new log line
-                 bot_logger.log_error(
-                     f"SCAN_STOPPED: No hover update before bounds (target={card_id}, start=({start_x},{start_y}), end=({end_x},{end_y}))"
-                 )
-                 break
+                # Inner loop: move until log updates or bounds hit
+                while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                    step_dx = self.cast_card_dist * direction
+                    pos = self.input.position()
+                    next_x = pos.x + step_dx
+                    # Follow a (potentially sloped) scan line from p1 -> p2 to better match fanned hands.
+                    t = (next_x - start_x) / total_dx
+                    if t < 0:
+                        t = 0
+                    elif t > 1:
+                        t = 1
+                    desired_y = int(round(start_y + t * (end_y - start_y)))
+                    dy = desired_y - pos.y
+                    self.input.move_rel(step_dx, dy)
+                    time.sleep(self.cast_speed)
 
-        if current_hovered_id == card_id:
-            click_pos = self.input.position()
-            bot_logger.log_click(click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})")
-            time.sleep(0.5)
-            self.input.left_click(1)
-            time.sleep(0.1)
-            self.input.left_click(1)
-            time.sleep(0.7)
+                    # Check bounds inside inner loop too
+                    current_x = self.input.position().x
+                    if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                        break
 
-        # Reset position
-        reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
-        bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
-        self.input.move_abs(reset_pos[0], reset_pos[1])
+                if self.log_reader.has_new_line(self.patterns['hover_id']):
+                    parsed = self.__parse_hover_id_line(
+                        self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                    )
+                    if parsed is None:
+                        continue
+                    current_hovered_id = parsed
+                    bot_logger.log_hover(current_hovered_id)
+                    print(str(current_hovered_id) + '|' + str(card_id))
+                else:
+                    # Break outer loop if we hit bounds without finding new log line
+                    bot_logger.log_error(
+                        f"SCAN_STOPPED: No hover update before bounds (target={card_id}, start=({start_x},{start_y}), end=({end_x},{end_y}))"
+                    )
+                    break
+
+            if current_hovered_id == card_id:
+                click_pos = self.input.position()
+                bot_logger.log_click(click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})")
+                time.sleep(0.5)
+                self.input.left_click(1)
+                time.sleep(0.1)
+                self.input.left_click(1)
+                time.sleep(0.7)
+
+            # Reset position
+            reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+            bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
+            self.input.move_abs(reset_pos[0], reset_pos[1])
+        finally:
+            bot_logger.set_hover_logging(False)
 
     def all_attack(self) -> None:
         bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "ATTACK_ALL")
@@ -640,102 +684,111 @@ class Controller(ControllerSecondary):
     
     def select_hand_card(self, card_id: int, clicks: int = 1) -> bool:
         """Select a card in hand by hovering until objectId matches, then click."""
-        # Clear any stale hover events from previous scans
-        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+        bot_logger.set_hover_logging(True)
+        try:
+            # Clear any stale hover events from previous scans
+            self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
 
-        # Move above start point first to reset any hover states
-        reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
-        bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_HAND_SELECT (target card_id={card_id})")
-        self.input.move_abs(reset_pos[0], reset_pos[1])
-        time.sleep(0.3)
+            # Move above start point first to reset any hover states
+            reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+            bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_HAND_SELECT (target card_id={card_id})")
+            self.input.move_abs(reset_pos[0], reset_pos[1])
+            time.sleep(0.3)
 
-        # Move to start of hand scan
-        bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SELECT_SCAN")
-        self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
+            # Move to start of hand scan
+            bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SELECT_SCAN")
+            self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
 
-        current_hovered_id = None
-        start_x = self.hand_scan_p1[0]
-        end_x = self.hand_scan_p2[0]
+            current_hovered_id = None
+            start_x = self.hand_scan_p1[0]
+            end_x = self.hand_scan_p2[0]
 
-        # Ensure we are scanning in the correct direction (left to right usually)
-        direction = 1 if end_x > start_x else -1
-        total_dx = (end_x - start_x) if end_x != start_x else 1
-        start_y = self.hand_scan_p1[1]
-        end_y = self.hand_scan_p2[1]
+            # Ensure we are scanning in the correct direction (left to right usually)
+            direction = 1 if end_x > start_x else -1
+            total_dx = (end_x - start_x) if end_x != start_x else 1
+            start_y = self.hand_scan_p1[1]
+            end_y = self.hand_scan_p2[1]
 
-        while current_hovered_id != card_id:
-            current_x = self.input.position().x
-            if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
-                bot_logger.log_error(
-                    f"HAND_SELECT_FAILED: Card {card_id} not found. Scanned x={start_x}..{end_x}, end={current_x}"
-                )
-                return False
-
-            while not self.log_reader.has_new_line(self.patterns['hover_id']):
-                step_dx = self.cast_card_dist * direction
-                pos = self.input.position()
-                next_x = pos.x + step_dx
-                t = (next_x - start_x) / total_dx
-                if t < 0:
-                    t = 0
-                elif t > 1:
-                    t = 1
-                desired_y = int(round(start_y + t * (end_y - start_y)))
-                dy = desired_y - pos.y
-                self.input.move_rel(step_dx, dy)
-                time.sleep(self.cast_speed)
-
+            while current_hovered_id != card_id:
                 current_x = self.input.position().x
                 if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
-                    break
+                    bot_logger.log_error(
+                        f"HAND_SELECT_FAILED: Card {card_id} not found. Scanned x={start_x}..{end_x}, end={current_x}"
+                    )
+                    return False
 
-            if self.log_reader.has_new_line(self.patterns['hover_id']):
-                parsed = self.__parse_hover_id_line(
-                    self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
-                )
-                if parsed is None:
-                    continue
-                current_hovered_id = parsed
-                bot_logger.log_hover(current_hovered_id)
-            else:
-                bot_logger.log_error(
-                    f"HAND_SELECT_STOPPED: No hover update before bounds (target={card_id})"
-                )
-                return False
+                while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                    step_dx = self.cast_card_dist * direction
+                    pos = self.input.position()
+                    next_x = pos.x + step_dx
+                    t = (next_x - start_x) / total_dx
+                    if t < 0:
+                        t = 0
+                    elif t > 1:
+                        t = 1
+                    desired_y = int(round(start_y + t * (end_y - start_y)))
+                    dy = desired_y - pos.y
+                    self.input.move_rel(step_dx, dy)
+                    time.sleep(self.cast_speed)
 
-        click_pos = self.input.position()
-        bot_logger.log_click(click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})")
-        for _ in range(max(1, int(clicks))):
-            self.input.left_click(1)
-            time.sleep(0.1)
-        return True
+                    current_x = self.input.position().x
+                    if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                        break
+
+                if self.log_reader.has_new_line(self.patterns['hover_id']):
+                    parsed = self.__parse_hover_id_line(
+                        self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                    )
+                    if parsed is None:
+                        continue
+                    current_hovered_id = parsed
+                    bot_logger.log_hover(current_hovered_id)
+                else:
+                    bot_logger.log_error(
+                        f"HAND_SELECT_STOPPED: No hover update before bounds (target={card_id})"
+                    )
+                    return False
+
+            click_pos = self.input.position()
+            bot_logger.log_click(click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})")
+            for _ in range(max(1, int(clicks))):
+                self.input.left_click(1)
+                time.sleep(0.1)
+            return True
+        finally:
+            bot_logger.set_hover_logging(False)
 
     def select_stack_item(self, card_id: int, clicks: int = 1) -> bool:
         """Select a stack/prompt item by scanning a grid for matching hover objectId."""
-        if self.__select_object_in_region(
-            card_id=card_id,
-            p1=self.stack_scan_p1,
-            p2=self.stack_scan_p2,
-            step=self.stack_scan_step,
-            clicks=clicks,
-            label="STACK_ITEM",
-        ):
-            return True
-        bot_logger.log_info("Stack scan fallback to center region")
-        return self.__select_object_in_region(
-            card_id=card_id,
-            p1=self.stack_scan_fallback_p1,
-            p2=self.stack_scan_fallback_p2,
-            step=self.stack_scan_fallback_step,
-            clicks=clicks,
-            label="STACK_ITEM_FALLBACK",
-        )
+        bot_logger.set_hover_logging(True)
+        try:
+            if self.__select_object_in_region(
+                card_id=card_id,
+                p1=self.stack_scan_p1,
+                p2=self.stack_scan_p2,
+                step=self.stack_scan_step,
+                clicks=clicks,
+                label="STACK_ITEM",
+            ):
+                return True
+            bot_logger.log_info("Stack scan fallback to center region")
+            return self.__select_object_in_region(
+                card_id=card_id,
+                p1=self.stack_scan_fallback_p1,
+                p2=self.stack_scan_fallback_p2,
+                step=self.stack_scan_fallback_step,
+                clicks=clicks,
+                label="STACK_ITEM_FALLBACK",
+            )
+        finally:
+            bot_logger.set_hover_logging(False)
 
     def submit_selection(self) -> None:
         bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "SUBMIT_SELECTION")
         self.input.move_abs(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1])
         time.sleep(0.1)
         self.input.left_click(1)
+        self.__last_submit_selection_ts = time.time()
 
     def resolve(self) -> None:
         turn_info = self.updated_game_state.get_turn_info() or {}
@@ -962,6 +1015,58 @@ class Controller(ControllerSecondary):
             return int(m.group(1))
         return None
 
+    def __log_match_summary(self, line: str) -> None:
+        match_id = None
+        try:
+            start = line.find("{")
+            if start != -1:
+                payload = json.loads(line[start:])
+                match_info = payload.get("matchGameRoomStateChangedEvent", {}).get("gameRoomInfo", {})
+                match_id = match_info.get("gameRoomConfig", {}).get("matchId")
+        except Exception:
+            match_id = None
+
+        result = "unknown"
+        if self.__last_match_won is True:
+            result = "win"
+        elif self.__last_match_won is False:
+            result = "loss"
+
+        turn_info = self.updated_game_state.get_turn_info() or {}
+        turn = turn_info.get("turnNumber")
+        phase = turn_info.get("phase")
+        step = turn_info.get("step")
+
+        my_seat = self.__system_seat_id
+        my_life = None
+        opp_life = None
+        try:
+            players = self.updated_game_state.get_players() or []
+            if my_seat is not None:
+                for player in players:
+                    if player.get("systemSeatNumber") == my_seat:
+                        my_life = player.get("lifeTotal")
+                    elif opp_life is None:
+                        opp_life = player.get("lifeTotal")
+            elif players:
+                my_life = players[0].get("lifeTotal")
+                if len(players) > 1:
+                    opp_life = players[1].get("lifeTotal")
+        except Exception:
+            pass
+
+        bot_logger.log_info(
+            "Match summary: matchId={}, result={}, turn={}, phase={}, step={}, life_me={}, life_opp={}".format(
+                match_id or "unknown",
+                result,
+                turn if turn is not None else "unknown",
+                phase or "unknown",
+                step or "unknown",
+                my_life if my_life is not None else "unknown",
+                opp_life if opp_life is not None else "unknown",
+            )
+        )
+
     def __log_callback(self, pattern: str, line_containing_pattern: str):
         if pattern == self.patterns["game_state"]:
             self.__update_game_state(json.loads(line_containing_pattern))
@@ -980,6 +1085,7 @@ class Controller(ControllerSecondary):
             outcome = self.__infer_match_won(line_containing_pattern)
             if outcome is not None:
                 self.__last_match_won = outcome
+            self.__log_match_summary(line_containing_pattern)
             self._match_end_dismissed = False
             self._post_match_ready_ts = None
             # Wait a moment for end screen to fully appear, then dismiss it
@@ -1260,7 +1366,15 @@ class Controller(ControllerSecondary):
                 bot_logger.log_info("Recorded logout replay unavailable; falling back to fixed logout clicks.")
                 bot_logger.log_info("Account switch: pressing ESC to open options menu.")
                 self.input.tap_escape()
-                time.sleep(2.0)
+                time.sleep(1.0)
+                last_scene = self._get_last_scene_name()
+                bot_logger.log_info(f"Account switch: last scene before fallback logout = {last_scene or 'unknown'}.")
+                if last_scene == "Store":
+                    bot_logger.log_info("Account switch: Store scene detected; pressing ESC again for options menu.")
+                    self.input.tap_escape()
+                    time.sleep(1.0)
+                else:
+                    time.sleep(1.0)
                 bot_logger.log_info(
                     f"Account switch: clicking LOG_OUT_BTN at ({self.log_out_btn_coors[0]}, {self.log_out_btn_coors[1]})."
                 )
@@ -1472,7 +1586,17 @@ class Controller(ControllerSecondary):
                             return
                         hand_ids = set(hand_zone.get("objectInstanceIds", []) or [])
                         still_in_hand = [cid for cid in selected_ids if cid in hand_ids]
-                        if still_in_hand and attempt < 2:
+                        if not still_in_hand:
+                            self.__pending_select_n = None
+                            return
+                        pending_count = self.updated_game_state.get_pending_message_count()
+                        pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
+                        pending_ids = set(pending_zone.get("objectInstanceIds", []) or []) if pending_zone else set()
+                        if pending_count > 0 or pending_ids.intersection(still_in_hand):
+                            return
+                        if time.time() - self.__last_submit_selection_ts < 2.5:
+                            return
+                        if attempt < 2:
                             bot_logger.log_info(
                                 f"SelectN verify: ids still in hand {still_in_hand}, retrying (attempt {attempt + 1})"
                             )
@@ -1484,6 +1608,32 @@ class Controller(ControllerSecondary):
                     def _do_selection():
                         if self._suppress_selections or self._stop_requested:
                             self.__pending_select_n = None
+                            return
+                        try:
+                            turn_info = self.updated_game_state.get_turn_info() or {}
+                            decision_player = turn_info.get("decisionPlayer")
+                        except Exception:
+                            decision_player = None
+                        pending_count = self.updated_game_state.get_pending_message_count()
+                        if (
+                            self.__system_seat_id is not None
+                            and decision_player is not None
+                            and decision_player != self.__system_seat_id
+                        ) or pending_count > 0:
+                            if attempt < 3:
+                                bot_logger.log_info(
+                                    "SelectN delayed: decisionPlayer={}, pendingMessages={}, retrying (attempt {}).".format(
+                                        decision_player, pending_count, attempt + 1
+                                    )
+                                )
+                                _attempt_selection(attempt + 1, delay=0.8)
+                            else:
+                                bot_logger.log_info(
+                                    "SelectN aborted: decisionPlayer={}, pendingMessages={}.".format(
+                                        decision_player, pending_count
+                                    )
+                                )
+                                self.__pending_select_n = None
                             return
                         selected = 0
                         selected_ids: list[int] = []
@@ -1505,7 +1655,8 @@ class Controller(ControllerSecondary):
                             return
                         time.sleep(0.4)
                         self.submit_selection()
-                        self.__pending_select_n = None
+                        if self.__pending_select_n is not None:
+                            self.__pending_select_n["ts"] = time.time()
                         threading.Timer(1.2, _verify_selection, args=(selected_ids, attempt)).start()
 
                     threading.Timer(delay, _do_selection).start()
@@ -1935,11 +2086,26 @@ class Controller(ControllerSecondary):
         )
 
         if stack_count > 0 and turn_info_dict and turn_info_dict.get("phase") in ("Phase_Main1", "Phase_Main2"):
-            if self.__decision_execution_thread is not None:
-                self.__decision_execution_thread.cancel()
-                self.__decision_execution_thread = None
-            bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
-            return
+            my_seat = self.__system_seat_id or turn_info_dict.get("decisionPlayer")
+            if my_seat is not None and turn_info_dict.get("decisionPlayer") == my_seat and pending_count == 0:
+                actions = self.updated_game_state.get_actions() or []
+                has_pass = any(action.get("actionType") == "ActionType_Pass" for action in actions)
+                if has_pass:
+                    bot_logger.log_info(
+                        "Stack present but safe to resolve: decisionPlayer=me, pendingMessageCount=0, pass available."
+                    )
+                else:
+                    if self.__decision_execution_thread is not None:
+                        self.__decision_execution_thread.cancel()
+                        self.__decision_execution_thread = None
+                    bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
+                    return
+            else:
+                if self.__decision_execution_thread is not None:
+                    self.__decision_execution_thread.cancel()
+                    self.__decision_execution_thread = None
+                bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
+                return
 
         if pending_count > 0:
             if self.__decision_execution_thread is not None:
