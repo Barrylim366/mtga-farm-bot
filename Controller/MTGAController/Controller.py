@@ -334,6 +334,14 @@ class Controller(ControllerSecondary):
                 return True
         return False
 
+    def _has_quest_loc_key(self, quests: list[dict], key_fragment: str) -> bool:
+        needle = key_fragment.lower()
+        for quest in quests:
+            loc_key = str(quest.get("locKey", "")).lower()
+            if needle in loc_key:
+                return True
+        return False
+
     def _select_best_quest(self) -> dict | None:
         quests = self._extract_latest_quests()
         bot_logger.log_info(f"Post-login: parsed {len(quests)} quest entries from player.log.")
@@ -343,6 +351,10 @@ class Controller(ControllerSecondary):
             top = guild_quests[0]
             top["type"] = "guild"
             return top
+        if self._has_quest_loc_key(quests, "quest_fatal_push"):
+            return {"type": "forced_file", "file": "B.png", "reason": "fatal_push"}
+        if self._has_quest_loc_key(quests, "quest_raiding_party"):
+            return {"type": "forced_file", "file": "C.png", "reason": "raiding_party"}
         if self._has_creature_quest(quests):
             return {"type": "creature"}
         return None
@@ -362,7 +374,12 @@ class Controller(ControllerSecondary):
             return None
         return None
 
-    def _choose_deck_image(self, account_index: int, target_letters: str | None) -> str | None:
+    def _choose_deck_image(
+        self,
+        account_index: int,
+        target_letters: str | None,
+        forced_filename: str | None = None,
+    ) -> str | None:
         account_dir = self._resolve_account_dir(account_index)
         if not account_dir:
             bot_logger.log_error("Post-login: account folder not found.")
@@ -374,6 +391,15 @@ class Controller(ControllerSecondary):
         if not images:
             bot_logger.log_error("Post-login: no deck images found in account folder.")
             return None
+        if forced_filename:
+            force_lower = forced_filename.lower()
+            for name in images:
+                if name.lower() == force_lower:
+                    bot_logger.log_info(f"Post-login: forced quest deck selected {name}.")
+                    return os.path.join(account_dir, name)
+            bot_logger.log_info(
+                f"Post-login: forced quest deck {forced_filename} not found; using fallback logic."
+            )
         if not target_letters:
             choice = random.choice(images)
             bot_logger.log_info(f"Post-login: no target letters; randomly selected {choice}.")
@@ -407,6 +433,7 @@ class Controller(ControllerSecondary):
         if self._stop_requested:
             return False
         quest = self._select_best_quest()
+        forced_filename = None
         if quest:
             if quest.get("type") == "guild":
                 guild = quest.get("guild")
@@ -414,6 +441,14 @@ class Controller(ControllerSecondary):
                 colors = _GUILD_COLOR_MAP.get(guild or "", "")
                 bot_logger.log_info(
                     f"Post-login: selected quest guild={guild} colors={colors} gold={gold}."
+                )
+            elif quest.get("type") == "forced_file":
+                guild = None
+                colors = ""
+                forced_filename = str(quest.get("file") or "")
+                reason = str(quest.get("reason") or "forced_file")
+                bot_logger.log_info(
+                    f"Post-login: selected quest rule={reason}; forcing deck {forced_filename}."
                 )
             else:
                 guild = None
@@ -424,7 +459,7 @@ class Controller(ControllerSecondary):
             colors = ""
             bot_logger.log_info("Post-login: no guild quests found; using fallback deck.")
 
-        deck_image = self._choose_deck_image(account_index, colors)
+        deck_image = self._choose_deck_image(account_index, colors, forced_filename)
         if not deck_image:
             return False
 

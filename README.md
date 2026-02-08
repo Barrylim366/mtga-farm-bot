@@ -65,7 +65,10 @@ After account switch the bot:
 2) parses quests from `Player.log`
 3) selects a deck image from `Acc_1/Acc_2/Acc_3` folder that best matches quest colors
    - If no guild/color quest exists but a creature quest is present, it selects `C.png`
+   - If no guild/color quest exists and `Quests/Quest_Fatal_Push` is active, it selects `B.png`
+   - If no guild/color quest exists and `Quests/Quest_Raiding_Party` is active, it selects `C.png`
    - If no quests are available, it selects a random deck image
+   - If a forced file (`B.png`/`C.png`) is not present, it falls back to the existing selection logic
 
 Deck images are matched by filename letters (e.g. `RG.png`, `WU.png`, `R.png`).
 Creature quests use `C.png`.
