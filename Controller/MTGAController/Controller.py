@@ -1657,6 +1657,13 @@ class Controller(ControllerSecondary):
                 if min_sel < 1:
                     min_sel = 1
                 random.shuffle(ids)
+                def _clear_pending_select_n(reason: str | None = None) -> None:
+                    if reason:
+                        bot_logger.log_info(reason)
+                    self.__pending_select_n = None
+                    self.__select_n_in_progress = False
+                    bot_logger.log_info("SelectN cleared: decisions may resume.")
+
                 context = req.get("context")
                 option_context = req.get("optionContext")
                 discard_context = False
@@ -1726,13 +1733,6 @@ class Controller(ControllerSecondary):
                         return
                 else:
                     ids = ids_in_hand
-
-                def _clear_pending_select_n(reason: str | None = None) -> None:
-                    if reason:
-                        bot_logger.log_info(reason)
-                    self.__pending_select_n = None
-                    self.__select_n_in_progress = False
-                    bot_logger.log_info("SelectN cleared: decisions may resume.")
 
                 def _select_n_valid() -> bool:
                     if self._suppress_selections or self._stop_requested:

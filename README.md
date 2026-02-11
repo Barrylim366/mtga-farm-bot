@@ -1,4 +1,4 @@
-# MTGA Bot
+# Red Lotus Bot
 
 Automated MTGA bot with UI, calibration, account switching, and quest-based deck selection.
 
@@ -26,6 +26,21 @@ pip install pyautogui opencv-python pillow pynput
 ```
 python ui.py
 ```
+
+UI logo asset: `ui_symbol.png` (project root).
+The main window now uses a ttk-based dark theme with centralized design tokens in `MTGBotUI._build_ui_theme()`:
+- Background/surface layering (`#0F1115` + `#151A21`) with a subtle rounded card shell
+- Single accent color (`#C8141E`)
+- System-first font stack (`Segoe UI Variable`/`Segoe UI`/`Inter`/`Arial`)
+- Compact hierarchy: centered logo, title, and uniform button grid
+- Unified button states and spacing grid (Start primary uses subtle green `#1F3A2D`, soft secondary buttons, muted disabled state)
+- Stop button enabled only while the bot runs
+- Status shown as plain text (no box background, no border frame)
+- Outer dark card rim/shadow was removed for a cleaner edge (card surround now matches surface color)
+- Stop button uses a subtle red background treatment
+- Button focus outline is neutralized (no red focus ring on the last clicked button)
+
+Standalone runnable UI example (single file): `red_lotus_ui_example.py`.
 
 
 2) Calibrate buttons via **Calibrate**:
@@ -78,12 +93,14 @@ contents are ignored (see .gitignore). Keep your local images there.
 ## Casting Logic
 
 In main phases the bot tries to use as much available mana as possible across all castable spells:
-- It chooses casts that maximize total CMC spent this turn.
+- Cast feasibility is based on effective action mana costs (`availableActions[].manaCost`), so discounted costs are respected correctly.
+- It chooses casts that maximize total paid mana this turn.
 - If multiple options spend the same total, it prefers a single higher-cost spell
   over multiple cheaper spells.
 - If CMC is tied, it prefers: creature -> instant -> sorcery -> enchantment -> other.
 - Multi-spell plans are validated against color requirements, not just CMC.
  - Convoke is supported using untapped creatures as colored mana sources.
+- Heavily discounted high-mana-value spells are prioritized when castable.
 
 ## Decision Safety
 
@@ -105,6 +122,7 @@ If the selected card remains in hand, resolution SelectN will re-select and re-s
 If `Buttons/submit_btn.png` exists, Submit clicks use image matching before falling back to the calibrated coordinate.
 Resolution SelectN waits for the stack to clear before starting selection.
 Discard (SelectN) prompts allow a single delayed retry when hand zone data is missing and avoid aggressive reselect loops.
+SelectN pending-state clear is now robustly initialized before early abort branches, avoiding handler crashes during discard/stack prompts.
 SelectN resolution waits for the stack to clear, but has a timeout to avoid indefinite stalls and clears on match end/reset. Stack-item scanning is disabled; SelectN now only selects from hand IDs.
 
 ## Card Data Updates

@@ -72,6 +72,19 @@ class DummyAI(AIKernel):
         """Check if we can pay a mana cost from the action's manaCost field."""
         return self._can_cast_with_mana_costs(action_mana_cost, available_colors, total_mana, sources)
 
+    @staticmethod
+    def _mana_cost_total(action_mana_cost):
+        """Return total mana symbols to pay from an action manaCost list."""
+        if not action_mana_cost:
+            return 0
+        total = 0
+        for entry in action_mana_cost:
+            try:
+                total += int(entry.get('count', 0) or 0)
+            except Exception:
+                continue
+        return total
+
     def _can_cast_with_mana_costs(self, combined_mana_cost, available_colors, total_mana, sources):
         """Check if we can pay combined mana costs (multiple spells)."""
         if not combined_mana_cost:
@@ -338,12 +351,12 @@ class DummyAI(AIKernel):
             if idx >= len(actions):
                 return
 
-            cmc, _instance_id, _card_name, _mana_cost_str, action_mana_cost, _uses_convoke, _type_priority = actions[idx]
+            paid_cost, _instance_id, _card_name, _mana_cost_str, action_mana_cost, _uses_convoke, _type_priority, _nominal_cmc, _is_discounted = actions[idx]
             _dfs(
                 idx + 1,
-                spent + cmc,
+                spent + paid_cost,
                 count + 1,
-                max(max_cmc, cmc),
+                max(max_cmc, paid_cost),
                 indices + [idx],
                 combined_costs + list(action_mana_cost or []),
             )
@@ -533,7 +546,9 @@ class DummyAI(AIKernel):
 
                         card_name = card_info.get('name', f'Card#{instance_id}')
                         mana_cost_str = card_info.get('manaCost', '')
-                        cmc = CardInfo.calculate_cmc(mana_cost_str)
+                        nominal_cmc = CardInfo.calculate_cmc(mana_cost_str)
+                        paid_cost = self._mana_cost_total(action_mana_cost)
+                        is_discounted = paid_cost < nominal_cmc
 
                         uses_convoke = CardInfo.card_has_convoke(grp_id) if grp_id else False
                         eff_colors = set(available_colors)
@@ -548,10 +563,20 @@ class DummyAI(AIKernel):
                         if self._can_cast_with_mana_costs(action_mana_cost, eff_colors, eff_total_mana, eff_sources):
                             type_priority = self._card_type_priority(card_types)
                             cast_actions.append(
-                                (cmc, instance_id, card_name, mana_cost_str, action_mana_cost, uses_convoke, type_priority)
+                                (
+                                    paid_cost,
+                                    instance_id,
+                                    card_name,
+                                    mana_cost_str,
+                                    action_mana_cost,
+                                    uses_convoke,
+                                    type_priority,
+                                    nominal_cmc,
+                                    is_discounted,
+                                )
                             )
                             self._debug(
-                                f"Can cast: {card_name} (cost={mana_cost_str}, cmc={cmc}, convoke={uses_convoke})"
+                                f"Can cast: {card_name} (cost={mana_cost_str}, paid={paid_cost}, cmc={nominal_cmc}, discounted={is_discounted}, convoke={uses_convoke})"
                             )
                             if is_sorcery:
                                 sorcery_found += 1
@@ -566,6 +591,16 @@ class DummyAI(AIKernel):
                                 sorcery_blocked_mana += 1
 
                     if cast_actions:
+                        # If a high-mana-value spell is heavily discounted by effects, prioritize it.
+                        discounted_bombs = [a for a in cast_actions if a[8] and a[7] >= 6]
+                        if discounted_bombs:
+                            chosen = max(discounted_bombs, key=lambda a: (a[7], a[6], -a[0]))
+                            self._debug(
+                                f"Discount priority: choosing {chosen[2]} (paid={chosen[0]}, cmc={chosen[7]})"
+                            )
+                            move = {'cast': [chosen[1]]}
+                            return move
+
                         non_convoke_actions = [a for a in cast_actions if not a[5]]
                         convoke_actions = [a for a in cast_actions if a[5]]
 
@@ -583,8 +618,10 @@ class DummyAI(AIKernel):
                                 chosen_score = convoke_score
 
                         if chosen:
-                            cmc, instance_id, card_name, mana_cost, _action_mana_cost, _uses_convoke, _type_priority = chosen
-                            self._debug(f"CASTING: {card_name} (instanceId={instance_id}, cost={mana_cost})")
+                            paid_cost, instance_id, card_name, mana_cost, _action_mana_cost, _uses_convoke, _type_priority, nominal_cmc, _is_discounted = chosen
+                            self._debug(
+                                f"CASTING: {card_name} (instanceId={instance_id}, cost={mana_cost}, paid={paid_cost}, cmc={nominal_cmc})"
+                            )
                             if sorcery_found:
                                 self._debug(
                                     f"Sorcery debug: found={sorcery_found}, castable={sorcery_castable}, "

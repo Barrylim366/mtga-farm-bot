@@ -1,9 +1,10 @@
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 from datetime import datetime
 import os
 import time
-from PIL import Image, ImageTk
+from PIL import Image, ImageOps, ImageTk
 import json
 import re
 import shutil
@@ -624,11 +625,9 @@ class MTGBotUI(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("MTGA Bot")
-        # Slightly taller window so all controls fit on typical font/DPI setups
-        self.geometry("400x680")
+        self.title("Red Lotus Bot")
+        self.geometry("460x780")
         self.resizable(False, True)
-        self.configure(bg="#1e1e1e")
 
         self.config_manager = ConfigManager()
         self.bot_running = False
@@ -639,6 +638,10 @@ class MTGBotUI(tk.Tk):
         self.settings_window = None
         self._controller = None
 
+        self.ui_theme = self._build_ui_theme()
+        self.configure(bg=self.ui_theme["colors"]["bg"])
+        self._style = ttk.Style(self)
+        self._setup_theme_styles()
         self._setup_ui()
         self._setup_stop_hotkey()
 
@@ -660,122 +663,288 @@ class MTGBotUI(tk.Tk):
             except Exception:
                 pass
 
-    def _setup_ui(self):
-        # Main container with grid
-        main_frame = tk.Frame(self, bg="#1e1e1e")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
+    def _pick_font_family(self):
+        preferred = ["Segoe UI Variable", "Segoe UI", "Inter", "Arial"]
+        available = {name.lower(): name for name in tkfont.families(self)}
+        for candidate in preferred:
+            resolved = available.get(candidate.lower())
+            if resolved:
+                return resolved
+        return "TkDefaultFont"
 
-        # Logo section
-        logo_frame = tk.Frame(main_frame, bg="#1e1e1e")
-        logo_frame.pack(fill=tk.X, pady=(0, 30))
+    def _build_ui_theme(self):
+        base_font = self._pick_font_family()
+        return {
+            "colors": {
+                "bg": "#0F1115",
+                "surface": "#151A21",
+                "surface_2": "#1B2230",
+                "text": "#E7EAF0",
+                "text_muted": "#9AA3B2",
+                "accent": "#C8141E",
+                "accent_primary": "#1F3A2D",
+                "accent_hover": "#274837",
+                "accent_pressed": "#1A3026",
+                "accent_primary_border": "#2E5A45",
+                "subtitle_green": "#8FB9A3",
+                "border": "#242B36",
+                "disabled_bg": "#1A202B",
+                "disabled_text": "#6E7686",
+                "shadow": "#0B0E13",
+                "pill_bg": "#1B2230",
+                "pill_border": "#30394A",
+                "pill_running_bg": "#12301F",
+                "pill_running_text": "#8FE0B0",
+            },
+            "spacing": {"xs": 8, "sm": 12, "md": 14, "lg": 18, "xl": 28, "card_pad": 28, "outer_margin": 20},
+            "size": {"logo": 210, "button_width": 30, "card_width": 392},
+            "font": {
+                "family": base_font,
+                "title": (base_font, 26, "bold"),
+                "subtitle": (base_font, 10),
+                "body": (base_font, 11),
+                "button": (base_font, 11, "bold"),
+            },
+            "radius": {"card": 18, "button": 13},
+        }
 
-        # Load and display logo
+    def _setup_theme_styles(self):
+        c = self.ui_theme["colors"]
+        f = self.ui_theme["font"]
+        style = self._style
         try:
-            logo_path = os.path.join(os.path.dirname(__file__), "ui_symbol.jpg")
-            logo_image = Image.open(logo_path)
-            logo_image = logo_image.resize((120, 120), Image.Resampling.LANCZOS)
+            style.theme_use("clam")
+        except Exception:
+            pass
 
-            # Convert to RGBA and mask everything outside the circle to the UI background.
-            # This removes the checkerboard/square border in the source image while keeping the round gray badge.
-            logo_image = logo_image.convert("RGBA")
-            bg_color = (30, 30, 30, 255)  # #1e1e1e in RGBA
-            bg_image = Image.new("RGBA", logo_image.size, bg_color)
-            # Build an anti-aliased circular mask by drawing at higher res and downsampling.
-            from PIL import ImageDraw
-            aa = 4
-            pad = 6
-            mask_big = Image.new("L", (logo_image.width * aa, logo_image.height * aa), 0)
-            draw = ImageDraw.Draw(mask_big)
-            pad_big = pad * aa
-            draw.ellipse(
-                (pad_big, pad_big, logo_image.width * aa - pad_big - 1, logo_image.height * aa - pad_big - 1),
-                fill=255,
-            )
-            mask = mask_big.resize(logo_image.size, Image.Resampling.LANCZOS)
-            logo_image = Image.composite(logo_image, bg_image, mask)
+        style.configure("App.TFrame", background=c["bg"])
+        style.configure("Card.TFrame", background=c["surface"])
+        style.configure("Body.TLabel", background=c["surface"], foreground=c["text"], font=f["body"])
+        style.configure("Muted.TLabel", background=c["surface"], foreground=c["text_muted"], font=f["body"])
+        style.configure("Title.TLabel", background=c["surface"], foreground=c["text"], font=f["title"])
+        style.configure("Subtitle.TLabel", background=c["surface"], foreground=c["subtitle_green"], font=f["subtitle"])
+        style.configure("Status.TLabel", background=c["surface"], foreground=c["text_muted"], font=f["body"])
+        style.configure("ETA.TLabel", background=c["surface"], foreground=c["text_muted"], font=f["body"])
 
-            self.logo_photo = ImageTk.PhotoImage(logo_image)
-            logo_label = tk.Label(logo_frame, image=self.logo_photo, bg="#1e1e1e")
-            logo_label.pack()
-        except Exception as e:
-            # Fallback if image can't be loaded
-            logo_label = tk.Label(logo_frame, text="MTG", bg="#1e1e1e", fg="white",
-                                 font=("Segoe UI", 36, "bold"))
-            logo_label.pack()
+        common_btn = {
+            "font": f["button"],
+            "padding": (18, 11),
+            "borderwidth": 1,
+            "relief": "flat",
+            "focuscolor": c["surface_2"],
+        }
 
-        # Title
-        title_label = tk.Label(main_frame, text="MTGA Bot", bg="#1e1e1e", fg="white",
-                              font=("Segoe UI", 24, "bold"))
-        title_label.pack(pady=(0, 40))
-
-        # Buttons frame
-        buttons_frame = tk.Frame(main_frame, bg="#1e1e1e")
-        buttons_frame.pack(fill=tk.X)
-
-        # Button style settings
-        btn_width = 20
-        btn_height = 2
-        btn_font = ("Segoe UI", 11)
-        btn_pady = 8
-
-        # Start Button
-        self.start_btn = tk.Button(buttons_frame, text="Start Bot", command=self._start_bot,
-                                   bg="#2d5a2d", fg="white", font=btn_font,
-                                   activebackground="#3d6a3d", activeforeground="white",
-                                   relief=tk.FLAT, width=btn_width, height=btn_height,
-                                   cursor="hand2")
-        self.start_btn.pack(pady=btn_pady)
-
-        # Stop Button
-        self.stop_btn = tk.Button(buttons_frame, text="Stop Bot [Wheel Down]", command=self._stop_bot,
-                                  bg="#5a2d2d", fg="white", font=btn_font,
-                                  activebackground="#6a3d3d", activeforeground="white",
-                                  relief=tk.FLAT, width=btn_width, height=btn_height,
-                                  state=tk.DISABLED, cursor="hand2")
-        self.stop_btn.pack(pady=btn_pady)
-
-        # Calibrate Button
-        self.calibrate_btn = tk.Button(buttons_frame, text="Calibrate", command=self._open_calibration,
-                                       bg="#4a4a4a", fg="white", font=btn_font,
-                                       activebackground="#5a5a5a", activeforeground="white",
-                                       relief=tk.FLAT, width=btn_width, height=btn_height,
-                                       cursor="hand2")
-        self.calibrate_btn.pack(pady=btn_pady)
-
-        # Settings Button
-        self.session_btn = tk.Button(buttons_frame, text="Settings", command=self._open_settings,
-                                     bg="#2d4f8a", fg="white", font=btn_font,
-                                     activebackground="#3a63aa", activeforeground="white",
-                                     relief=tk.FLAT, width=btn_width, height=btn_height,
-                                     cursor="hand2")
-        self.session_btn.pack(pady=btn_pady)
-
-        # Status section
-        status_frame = tk.Frame(main_frame, bg="#1e1e1e")
-        status_frame.pack(fill=tk.X, pady=(30, 0))
-
-        self.status_label = tk.Label(status_frame, text="Status: Stopped", bg="#1e1e1e",
-                                    fg="#ff6666", font=("Segoe UI", 10))
-        self.status_label.pack()
-        self.switch_eta_label = tk.Label(
-            status_frame,
-            text="",
-            bg="#1e1e1e",
-            fg="#66ff66",
-            font=("Segoe UI", 10),
+        style.configure(
+            "Primary.TButton",
+            **common_btn,
+            foreground=c["text"],
+            background=c["accent_primary"],
+            bordercolor=c["accent_primary_border"],
         )
-        self.switch_eta_label.pack()
+        style.map(
+            "Primary.TButton",
+            background=[("pressed", c["accent_pressed"]), ("active", c["accent_hover"]), ("disabled", c["disabled_bg"])],
+            foreground=[("disabled", c["disabled_text"])],
+            bordercolor=[("pressed", c["accent_primary_border"]), ("active", c["accent_primary_border"]), ("disabled", c["border"])],
+        )
+
+        style.configure(
+            "Secondary.TButton",
+            **common_btn,
+            foreground=c["text"],
+            background=c["surface_2"],
+            bordercolor=c["pill_border"],
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("pressed", "#202838"), ("active", "#253041"), ("disabled", c["disabled_bg"])],
+            foreground=[("disabled", c["disabled_text"])],
+            bordercolor=[("active", c["pill_border"]), ("pressed", c["pill_border"]), ("disabled", c["border"])],
+        )
+
+        style.configure(
+            "Destructive.TButton",
+            **common_btn,
+            foreground=c["text"],
+            background="#3A2025",
+            bordercolor="#5A2A31",
+        )
+        style.map(
+            "Destructive.TButton",
+            background=[("pressed", "#311B20"), ("active", "#4A262C"), ("disabled", c["disabled_bg"])],
+            foreground=[("disabled", c["disabled_text"])],
+            bordercolor=[("pressed", "#5A2A31"), ("active", "#5A2A31"), ("disabled", c["border"])],
+        )
+
+    def _setup_ui(self):
+        c = self.ui_theme["colors"]
+        sp = self.ui_theme["spacing"]
+        size = self.ui_theme["size"]
+
+        # Match canvas to card surface so no darker outer rim is visible.
+        self._card_canvas = tk.Canvas(self, bg=c["surface"], highlightthickness=0, bd=0)
+        self._card_canvas.pack(fill=tk.BOTH, expand=True)
+        self._card_frame = ttk.Frame(self._card_canvas, style="Card.TFrame", padding=sp["card_pad"])
+        self._card_window = self._card_canvas.create_window(0, 0, anchor="nw", window=self._card_frame, width=size["card_width"])
+        self._card_bg = None
+
+        card = self._card_frame
+
+        logo_wrap = ttk.Frame(card, style="Card.TFrame")
+        logo_wrap.pack(fill=tk.X, pady=(0, 6))
+
+        try:
+            logo_path = os.path.join(os.path.dirname(__file__), "ui_symbol.png")
+            logo_image = Image.open(logo_path).convert("RGBA")
+            target_size = (size["logo"], size["logo"])
+            fitted_logo = ImageOps.contain(logo_image, target_size, Image.Resampling.LANCZOS)
+            bg_rgb = tuple(int(c["surface"].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)) + (255,)
+            composed_logo = Image.new("RGBA", target_size, bg_rgb)
+            x = (target_size[0] - fitted_logo.width) // 2
+            y = (target_size[1] - fitted_logo.height) // 2
+            composed_logo.alpha_composite(fitted_logo, dest=(x, y))
+            self.logo_photo = ImageTk.PhotoImage(composed_logo)
+            logo_label = ttk.Label(logo_wrap, image=self.logo_photo, style="Body.TLabel")
+            logo_label.pack()
+        except Exception:
+            logo_label = ttk.Label(logo_wrap, text="MTG", style="Title.TLabel")
+            logo_label.pack()
+
+        title_label = ttk.Label(card, text="Red Lotus Bot", style="Title.TLabel", anchor="center")
+        title_label.pack(fill=tk.X, pady=(0, sp["lg"]))
+
+        buttons_frame = ttk.Frame(card, style="Card.TFrame")
+        buttons_frame.pack(fill=tk.X, pady=(0, sp["md"]))
+
+        btn_width = size["button_width"]
+        gap = 13
+
+        self.start_btn = ttk.Button(
+            buttons_frame,
+            text="Start Bot",
+            command=self._start_bot,
+            style="Primary.TButton",
+            width=btn_width,
+        )
+        self.start_btn.pack(fill=tk.X, pady=(0, gap))
+
+        self.stop_btn = ttk.Button(
+            buttons_frame,
+            text="Stop Bot [Wheel Down]",
+            command=self._stop_bot,
+            style="Destructive.TButton",
+            width=btn_width,
+            state=tk.DISABLED,
+        )
+        self.stop_btn.pack(fill=tk.X, pady=(0, gap))
+
+        self.calibrate_btn = ttk.Button(
+            buttons_frame,
+            text="Calibrate",
+            command=self._open_calibration,
+            style="Secondary.TButton",
+            width=btn_width,
+        )
+        self.calibrate_btn.pack(fill=tk.X, pady=(0, gap))
+
+        self.session_btn = ttk.Button(
+            buttons_frame,
+            text="Settings",
+            command=self._open_settings,
+            style="Secondary.TButton",
+            width=btn_width,
+        )
+        self.session_btn.pack(fill=tk.X)
+
+        status_frame = ttk.Frame(card, style="Card.TFrame")
+        status_frame.pack(fill=tk.X, pady=(sp["lg"], 0))
+
+        self.status_pill = tk.Label(
+            status_frame,
+            text="Status: Stopped",
+            bg=c["surface"],
+            fg=c["text_muted"],
+            font=self.ui_theme["font"]["body"],
+            padx=0,
+            pady=0,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.status_pill.pack()
+        self.switch_eta_label = ttk.Label(status_frame, text="", style="ETA.TLabel", anchor="center")
+        self.switch_eta_label.pack(fill=tk.X, pady=(sp["xs"], 0))
+
+        self._card_canvas.bind("<Configure>", lambda _e: self._refresh_card_layout())
+        self.after(0, self._refresh_card_layout)
+        self._set_running_state(False)
+
+    def _rounded_rect_points(self, x1, y1, x2, y2, r):
+        return [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+
+    def _refresh_card_layout(self):
+        if not hasattr(self, "_card_canvas"):
+            return
+        c = self.ui_theme["colors"]
+        sp = self.ui_theme["spacing"]
+        size = self.ui_theme["size"]
+        radius = self.ui_theme["radius"]["card"]
+
+        canvas_w = self._card_canvas.winfo_width()
+        canvas_h = self._card_canvas.winfo_height()
+        if canvas_w <= 1 or canvas_h <= 1:
+            return
+
+        card_w = min(size["card_width"], max(320, canvas_w - sp["outer_margin"] * 2))
+        self._card_canvas.itemconfigure(self._card_window, width=card_w)
+        self.update_idletasks()
+        card_h = self._card_frame.winfo_reqheight()
+        x = (canvas_w - card_w) // 2
+        y = max(sp["outer_margin"], (canvas_h - card_h) // 2)
+        self._card_canvas.coords(self._card_window, x, y)
+
+        if self._card_bg:
+            self._card_canvas.delete(self._card_bg)
+
+        bg_pts = self._rounded_rect_points(x, y, x + card_w, y + card_h, radius)
+        self._card_bg = self._card_canvas.create_polygon(
+            bg_pts, smooth=True, splinesteps=36, fill=c["surface"], outline=""
+        )
+        self._card_canvas.tag_raise(self._card_window)
+
+    def _set_running_state(self, running: bool):
+        c = self.ui_theme["colors"]
+        if running:
+            self.start_btn.state(["disabled"])
+            self.stop_btn.state(["!disabled"])
+            self.calibrate_btn.state(["disabled"])
+            self.status_pill.configure(
+                text="Status: Running",
+                bg=c["surface"],
+                fg=c["pill_running_text"],
+            )
+            self.switch_eta_label.configure(text="0 Min till Account Switch (off)", foreground=c["text_muted"])
+            return
+
+        self.start_btn.state(["!disabled"])
+        self.stop_btn.state(["disabled"])
+        self.calibrate_btn.state(["!disabled"])
+        self.status_pill.configure(
+            text="Status: Stopped",
+            bg=c["surface"],
+            fg=c["text_muted"],
+        )
+        self.switch_eta_label.configure(text="", foreground=c["text_muted"])
 
     def _start_bot(self):
         if self.bot_running:
             return
 
         self.bot_running = True
-        self.start_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self.calibrate_btn.config(state=tk.DISABLED)
-        self.status_label.config(text="Status: Running", fg="#66ff66")
-        self.switch_eta_label.config(text="0 Min till Account Switch (off)", fg="#66ff66")
+        self._set_running_state(True)
 
         # Start bot in separate thread
         self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
@@ -840,13 +1009,8 @@ class MTGBotUI(tk.Tk):
                 pass
             self.game = None
 
-        self.start_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.calibrate_btn.config(state=tk.NORMAL)
-        self.status_label.config(text="Status: Stopped", fg="#ff6666")
-        self.switch_eta_label.config(text="")
+        self._set_running_state(False)
         self._controller = None
-        self.switch_eta_label.config(text="")
 
     def _open_calibration(self):
         CalibrationWindow(self, self.config_manager)
