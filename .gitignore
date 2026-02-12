@@ -1,7 +1,8 @@
 # Ignore generated card data
 cards.json
 cards_metadata.json
-
+#ignore credentials
+credentials.txt
 # Build artifacts
 build/
 dist/
@@ -10,4 +11,10 @@ dist/
 .venv/
 *.log
 
-nul
+# Keep folders, ignore their contents
+Buttons/*
+Accounts/*
+!Buttons/.gitkeep
+!Accounts/.gitkeep
+
+

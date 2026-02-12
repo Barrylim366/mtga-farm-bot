@@ -1,0 +1,94 @@
+{
+    "log_path": "/home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+    "screen_bounds": [
+        [
+            0,
+            0
+        ],
+        [
+            2560,
+            1440
+        ]
+    ],
+    "click_targets": {
+        "keep_hand": {
+            "x": 1883,
+            "y": 1063
+        },
+        "queue_button": {
+            "x": 2485,
+            "y": 1194
+        },
+        "next": {
+            "x": 2546,
+            "y": 1137
+        },
+        "concede": {
+            "x": 1714,
+            "y": 814
+        },
+        "attack_all": {
+            "x": 2529,
+            "y": 1131
+        },
+        "opponent_avatar": {
+            "x": 1720,
+            "y": 295
+        },
+        "assign_damage_done": {
+            "x": 1721,
+            "y": 1064
+        },
+        "hand_scan_points": {
+            "p1": {
+                "x": 994,
+                "y": 1255
+            },
+            "p2": {
+                "x": 2421,
+                "y": 1253
+            }
+        },
+        "log_out_btn": {
+            "x": 1727,
+            "y": 854
+        },
+        "logout_ok_btn": {
+            "x": 1878,
+            "y": 809
+        },
+        "log_out_ok_btn": {
+            "x": 1874,
+            "y": 811
+        }
+    },
+    "input_backend": "pynput",
+    "account_switch_minutes": 30,
+    "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
+    "account_cycle_index": 0,
+    "account_play_order": [
+        "TEUBAT",
+        "Ayaylll",
+        "Affinity2004"
+    ],
+    "managed_accounts": [
+        {
+            "name": "TEUBAT",
+            "email": "giacomo.joghurt@web.de",
+            "pw": "Universal123*",
+            "folder": "TEUBAT"
+        },
+        {
+            "name": "Affinity2004",
+            "email": "giacomoj92@gmail.com",
+            "pw": "Universal123*",
+            "folder": "Affinity2004"
+        },
+        {
+            "name": "Ayaylll",
+            "email": "giacogispower@gmail.com",
+            "pw": "Universal123*",
+            "folder": "Ayaylll"
+        }
+    ]
+}
