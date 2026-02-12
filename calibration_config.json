@@ -1,5 +1,5 @@
 {
-    "log_path": "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+    "log_path": "/home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
     "screen_bounds": [
         [
             0,
@@ -62,7 +62,7 @@
             "y": 811
         }
     },
-    "input_backend": "auto",
+    "input_backend": "pynput",
     "account_switch_minutes": 30,
     "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
     "account_cycle_index": 0,

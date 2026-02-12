@@ -4,7 +4,7 @@ Automated MTGA bot with UI, calibration, account switching, and quest-based deck
 
 ## Requirements
 
-- Windows 10/11
+- CachyOS (Linux) with Steam + Proton
 - Python 3.10+
 - MTG Arena installed (Steam)
 - Python packages:
@@ -25,6 +25,12 @@ pip install pyautogui opencv-python pillow pynput
 
 ```
 python ui.py
+```
+
+Or use the executable launcher (creates/uses `.venv` and starts the UI there):
+
+```
+./start_ui.sh
 ```
 
 UI logo asset: `ui_symbol.png` (project root).
@@ -178,6 +184,6 @@ Fallback:
 - `bot.log` – main bot debug
 - `human.log` – high-level actions
 - `bot_gui_subprocess.log` – UI subprocess log (if used)
-- `Player.log` default path: `C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
+- `Player.log` default path: `/home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
 - Hover logs are suppressed by default and only enabled during selection scans.
 - A one-line match summary is logged at match completion.

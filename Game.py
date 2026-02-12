@@ -146,11 +146,17 @@ class Game:
         bot_logger.log_info(message)
 
     def _refresh_card_data(self):
-        """Refresh cards.json from local MTGA data (Windows path)."""
+        """Refresh cards.json from local MTGA data (Linux/Windows Steam path)."""
         try:
             import sys
             import subprocess
             base_candidates = [
+                os.path.expanduser("~/.local/share/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
+                os.path.expanduser("~/.steam/steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
+                os.path.expanduser("~/.steam/root/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
+                os.path.expanduser(
+                    "~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"
+                ),
                 r"C:\\Program Files (x86)\\Steam\\steamapps\\common\\MTGA\\MTGA_Data\\Downloads\\Raw",
                 r"C:\\Program Files\\Steam\\steamapps\\common\\MTGA\\MTGA_Data\\Downloads\\Raw",
             ]

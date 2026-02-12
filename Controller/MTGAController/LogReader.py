@@ -1,17 +1,40 @@
 import threading
 import time
 from collections import deque
+import os
 import bot_logger
 
 
 class LogReader:
     LOG_UPDATE_SPEED = 0.1
 
+    @staticmethod
+    def _default_player_log_path() -> str:
+        home = os.path.expanduser("~")
+        return os.path.join(
+            home,
+            ".local",
+            "share",
+            "Steam",
+            "steamapps",
+            "compatdata",
+            "2141910",
+            "pfx",
+            "drive_c",
+            "users",
+            "steamuser",
+            "AppData",
+            "LocalLow",
+            "Wizards Of The Coast",
+            "MTGA",
+            "Player.log",
+        )
+
     def __init__(self, patterns, callback=lambda pat, patstr: None,
-                 log_path="/Users/Elliot Roe/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+                 log_path=None,
                  player_id="LE3ZCMCJZBHUDGATTY2EJLUEIM"):
         self.__player = player_id
-        self.__log_path = log_path
+        self.__log_path = log_path or self._default_player_log_path()
         self.__lines_containing_pattern = {}
         self.__has_new_line = {}
         self.__lines_queue = {}

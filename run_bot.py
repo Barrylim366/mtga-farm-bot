@@ -5,6 +5,15 @@ import time
 import os
 import pathlib
 
+
+def _default_player_log_path() -> str:
+    home = pathlib.Path.home()
+    return str(
+        home
+        / ".local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log"
+    )
+
+
 def main():
     print("Starting MTG AI Bot...")
 
@@ -31,7 +40,7 @@ def main():
             found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
             log_path = str(found[0])
         else:
-            log_path = "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log"
+            log_path = _default_player_log_path()
     
     click_targets = {
         "keep_hand": {
@@ -77,7 +86,7 @@ def main():
     try:
         # Initialize components
         print(f"Initializing Controller with log path: {log_path}")
-        input_backend = os.environ.get("MTGA_BOT_INPUT_BACKEND")  # "ydotool" / "pynput" / "auto"
+        input_backend = os.environ.get("MTGA_BOT_INPUT_BACKEND", "pynput")  # "ydotool" / "pynput" / "auto"
         controller = Controller(
             log_path=log_path,
             screen_bounds=screen_bounds,

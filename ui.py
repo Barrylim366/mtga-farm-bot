@@ -15,6 +15,28 @@ from AI.DummyAI import DummyAI
 from Game import Game
 
 
+def _default_player_log_path() -> str:
+    home = os.path.expanduser("~")
+    return os.path.join(
+        home,
+        ".local",
+        "share",
+        "Steam",
+        "steamapps",
+        "compatdata",
+        "2141910",
+        "pfx",
+        "drive_c",
+        "users",
+        "steamuser",
+        "AppData",
+        "LocalLow",
+        "Wizards Of The Coast",
+        "MTGA",
+        "Player.log",
+    )
+
+
 def _submenu_palette():
     return {
         "bg": "#0F1115",
@@ -603,9 +625,9 @@ class ConfigManager:
     def _default_config(self):
         detected_log = self._detect_player_log_path()
         return {
-            "log_path": detected_log or "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+            "log_path": detected_log or _default_player_log_path(),
             "screen_bounds": [[0, 0], [2560, 1440]],
-            "input_backend": "auto",
+            "input_backend": "pynput",
             "account_switch_minutes": 0,
             "managed_accounts": [],
             "account_cycle_index": 0,
@@ -1295,7 +1317,8 @@ class MTGBotUI(tk.Tk):
                 time.sleep(1)
 
         except Exception as e:
-            self.after(0, lambda: self._handle_bot_error(str(e)))
+            err_msg = str(e)
+            self.after(0, lambda msg=err_msg: self._handle_bot_error(msg))
 
     def _handle_bot_error(self, error_msg):
         self._stop_bot()
@@ -2450,6 +2473,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 

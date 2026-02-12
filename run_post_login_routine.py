@@ -5,6 +5,29 @@ import time
 
 import pyautogui
 
+
+def _default_player_log_path() -> str:
+    home = os.path.expanduser("~")
+    return os.path.join(
+        home,
+        ".local",
+        "share",
+        "Steam",
+        "steamapps",
+        "compatdata",
+        "2141910",
+        "pfx",
+        "drive_c",
+        "users",
+        "steamuser",
+        "AppData",
+        "LocalLow",
+        "Wizards Of The Coast",
+        "MTGA",
+        "Player.log",
+    )
+
+
 GUILD_COLOR_MAP = {
     "azorius": "WU",
     "dimir": "UB",
@@ -145,7 +168,7 @@ def main():
     parser.add_argument("--account", default="Account_1", help="Account folder name")
     parser.add_argument(
         "--log",
-        default="C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+        default=_default_player_log_path(),
     )
     args = parser.parse_args()
 
