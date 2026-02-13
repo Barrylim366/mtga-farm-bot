@@ -25,6 +25,11 @@ _GUILD_COLOR_MAP = {
     "simic": "UG",
 }
 _COLOR_LETTERS = set("WUBRGC")
+_MY_TIMER_TYPES = {
+    "TimerType_ActivePlayer",
+    "TimerType_NonActivePlayer",
+    "TimerType_Inactivity",
+}
 
 
 class Controller(ControllerSecondary):
@@ -173,11 +178,18 @@ class Controller(ControllerSecondary):
         self.__last_submit_targets_ts = 0.0
         self.__pending_select_n = None
         self.__select_n_in_progress = False
+        self.__select_n_in_progress_since = 0.0
         self.__last_submit_selection_ts = 0.0
         self.__select_n_token_counter = 0
         self.__select_n_stack_wait_timeout_sec = 8.0
         self.__target_submit_cooldown_sec = 1.0
         self.__pending_pay_costs_ts = 0.0
+        self.__combat_recovery_key = None
+        self.__combat_recovery_attempts = 0
+        self.__combat_recovery_deadline_ts = 0.0
+        self.__combat_recovery_timer = None
+        self.__last_attack_submit_ts = 0.0
+        self.__my_timer_state = {}
         self._account_switch_interval = max(0, int(account_switch_minutes or 0)) * 60
         self._account_cycle_index = int(account_cycle_index or 0)
         self._account_play_order = account_play_order or []
@@ -601,6 +613,13 @@ class Controller(ControllerSecondary):
             # UI stop should never crash; at worst the monitor thread will exit on process end.
             pass
 
+        self.__clear_combat_recovery("Stop requested")
+        self.__my_timer_state = {}
+        self.__pending_select_n = None
+        self.__select_n_in_progress = False
+        self.__select_n_in_progress_since = 0.0
+        self.__select_n_token_counter += 1
+
         # Disable any further input actions (timers may still fire briefly).
         self._disable_input()
 
@@ -730,6 +749,7 @@ class Controller(ControllerSecondary):
         self.input.left_click(1)
         time.sleep(1)
         self.input.left_click(1)
+        self.__last_attack_submit_ts = time.time()
         if self.__attack_target_required:
             time.sleep(0.3)
             self.select_target(-1)
@@ -745,6 +765,86 @@ class Controller(ControllerSecondary):
         self.input.left_click(1)
         time.sleep(0.2)
         self.__attack_target_required = False
+
+    def __cancel_combat_recovery_timer(self) -> None:
+        if self.__combat_recovery_timer is None:
+            return
+        try:
+            self.__combat_recovery_timer.cancel()
+        except Exception:
+            pass
+        self.__combat_recovery_timer = None
+
+    def __clear_combat_recovery(self, reason: str | None = None) -> None:
+        if reason:
+            bot_logger.log_info(f"COMBAT_RECOVERY_CLEAR: {reason}")
+        self.__cancel_combat_recovery_timer()
+        self.__combat_recovery_key = None
+        self.__combat_recovery_attempts = 0
+        self.__combat_recovery_deadline_ts = 0.0
+
+    def __combat_step_ready_for_recovery(self) -> bool:
+        turn_info = self.updated_game_state.get_turn_info() or {}
+        my_seat = self.__system_seat_id
+        if my_seat is None:
+            return False
+        if turn_info.get("phase") != "Phase_Combat" or turn_info.get("step") != "Step_DeclareAttack":
+            return False
+        if turn_info.get("decisionPlayer") != my_seat:
+            return False
+        if self.updated_game_state.get_pending_message_count() > 0:
+            return False
+        if self.__pending_target_select is not None:
+            return False
+        if self.__pending_select_n is not None or self.__select_n_in_progress:
+            return False
+        if self.__should_pause_for_pay_costs():
+            return False
+        return True
+
+    def __arm_combat_recovery(self, key: str, delay: float = 1.0) -> None:
+        if self._stop_requested or self._suppress_selections:
+            return
+        if key != self.__combat_recovery_key:
+            self.__combat_recovery_attempts = 0
+        self.__combat_recovery_key = key
+        self.__combat_recovery_deadline_ts = time.time() + 6.0
+        self.__cancel_combat_recovery_timer()
+
+        def _tick() -> None:
+            self.__combat_recovery_timer = None
+            if self._stop_requested or self._suppress_selections:
+                return
+            if self.__combat_recovery_key != key:
+                return
+            if time.time() > self.__combat_recovery_deadline_ts:
+                self.__clear_combat_recovery(f"Combat recovery expired (key={key}).")
+                return
+            if self.__combat_recovery_attempts >= 2:
+                self.__clear_combat_recovery("Combat recovery exhausted attempts.")
+                return
+            if not self.__combat_step_ready_for_recovery():
+                self.__combat_recovery_timer = threading.Timer(0.5, _tick)
+                self.__combat_recovery_timer.start()
+                return
+            if (time.time() - self.__last_attack_submit_ts) < 1.4:
+                self.__clear_combat_recovery("Combat recovery skipped: recent attack submit already happened.")
+                return
+            self.__combat_recovery_attempts += 1
+            attempt = self.__combat_recovery_attempts
+            bot_logger.log_info(
+                f"COMBAT_RECOVERY_ATTEMPT: {attempt}/2 forcing all_attack + submit (key={key})"
+            )
+            self.all_attack()
+            self.submit_selection(reason=f"combat_recovery_attempt_{attempt}", force=True)
+            if attempt < 2:
+                self.__combat_recovery_timer = threading.Timer(1.2, _tick)
+                self.__combat_recovery_timer.start()
+            else:
+                self.__clear_combat_recovery("Combat recovery complete.")
+
+        self.__combat_recovery_timer = threading.Timer(max(0.0, float(delay)), _tick)
+        self.__combat_recovery_timer.start()
 
     def activate_ability(self, card_id: int, ability_id: int) -> None:
         bot_logger.log_info(f"Activating ability: card_id={card_id}, ability_id={ability_id}")
@@ -860,6 +960,7 @@ class Controller(ControllerSecondary):
                 step=self.stack_scan_step,
                 clicks=clicks,
                 label="STACK_ITEM",
+                max_scan_sec=3.0,
             ):
                 return True
             bot_logger.log_info("Stack scan fallback to center region")
@@ -870,6 +971,7 @@ class Controller(ControllerSecondary):
                 step=self.stack_scan_fallback_step,
                 clicks=clicks,
                 label="STACK_ITEM_FALLBACK",
+                max_scan_sec=4.0,
             )
         finally:
             bot_logger.set_hover_logging(False)
@@ -939,6 +1041,7 @@ class Controller(ControllerSecondary):
         step: int,
         clicks: int,
         label: str,
+        max_scan_sec: float | None = None,
     ) -> bool:
         self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
         x1, y1 = p1
@@ -946,6 +1049,7 @@ class Controller(ControllerSecondary):
         x_min, x_max = (x1, x2) if x1 <= x2 else (x2, x1)
         y_min, y_max = (y1, y2) if y1 <= y2 else (y2, y1)
         step = max(10, int(step))
+        start_ts = time.time()
 
         reset_x = x_min
         reset_y = max(self.screen_bounds[0][1], y_min - 80)
@@ -955,6 +1059,14 @@ class Controller(ControllerSecondary):
 
         for y in range(y_min, y_max + 1, step):
             for x in range(x_min, x_max + 1, step):
+                if self._stop_requested or self._suppress_selections:
+                    bot_logger.log_info(f"{label}_ABORTED: stop/suppress requested")
+                    return False
+                if max_scan_sec is not None and (time.time() - start_ts) > max_scan_sec:
+                    bot_logger.log_error(
+                        f"{label}_TIMEOUT: card {card_id} not found within {max_scan_sec:.1f}s"
+                    )
+                    return False
                 self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
                 self.input.move_abs(x, y)
                 time.sleep(0.05)
@@ -1077,7 +1189,11 @@ class Controller(ControllerSecondary):
         self.__inst_id_grp_id_dict = {}
         self.__pending_select_n = None
         self.__select_n_in_progress = False
+        self.__select_n_in_progress_since = 0.0
         self.__select_n_token_counter += 1
+        self.__clear_combat_recovery("Reset for new game")
+        self.__last_attack_submit_ts = 0.0
+        self.__my_timer_state = {}
         # Cancel any pending decision timers
         if self.__decision_execution_thread is not None:
             self.__decision_execution_thread.cancel()
@@ -1199,8 +1315,10 @@ class Controller(ControllerSecondary):
             self._suppress_selections = True
             self.__pending_select_n = None
             self.__select_n_in_progress = False
+            self.__select_n_in_progress_since = 0.0
             self.__select_n_token_counter += 1
             self.__pending_target_select = None
+            self.__my_timer_state = {}
             remaining = self.get_account_switch_remaining_sec()
             if self._account_switch_interval > 0:
                 bot_logger.log_info(f"Account switch ETA: {remaining}s remaining.")
@@ -1698,6 +1816,7 @@ class Controller(ControllerSecondary):
                         bot_logger.log_info(reason)
                     self.__pending_select_n = None
                     self.__select_n_in_progress = False
+                    self.__select_n_in_progress_since = 0.0
                     bot_logger.log_info("SelectN cleared: decisions may resume.")
 
                 context = req.get("context")
@@ -1734,6 +1853,7 @@ class Controller(ControllerSecondary):
                         )
                         self.__pending_select_n = None
                         self.__select_n_in_progress = False
+                        self.__select_n_in_progress_since = 0.0
                         return
                     bot_logger.log_info(
                         f"SelectN delayed: stack has {stack_count} object(s) during resolution."
@@ -1745,6 +1865,15 @@ class Controller(ControllerSecondary):
                 hand_ids = set(hand_zone.get("objectInstanceIds", []) or []) if hand_zone else set()
                 ids_in_hand = [cid for cid in ids if cid in hand_ids]
                 use_hand_selection = bool(ids_in_hand)
+                pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
+                pending_ids = set(pending_zone.get("objectInstanceIds", []) or []) if pending_zone else set()
+                stack_zone = self.updated_game_state.get_zone("ZoneType_Stack")
+                stack_ids = set(stack_zone.get("objectInstanceIds", []) or []) if stack_zone else set()
+                prompt_ids = [cid for cid in ids if cid in pending_ids or cid in stack_ids]
+                if prompt_ids:
+                    use_stack_selection = True
+                elif isinstance(option_context, str) and "stack" in option_context.lower():
+                    bot_logger.log_info("SelectN stack context detected but prompt ids are not active.")
                 if not ids_in_hand:
                     # Hand zone can be missing in this update (e.g., discard prompts from opponent effects).
                     # Fall back to the provided ids and retry selection after a brief delay.
@@ -1763,12 +1892,22 @@ class Controller(ControllerSecondary):
                             )
                             threading.Timer(1.0, lambda: self.__handle_select_n_req(line)).start()
                             return
-                    if not use_hand_selection:
-                        bot_logger.log_info("SelectN aborting: ids not in hand and stack scan disabled.")
+                    if not use_hand_selection and not use_stack_selection:
+                        bot_logger.log_info("SelectN aborting: ids not in hand and no prompt candidates found.")
                         _clear_pending_select_n()
                         return
                 else:
                     ids = ids_in_hand
+                if use_stack_selection and not use_hand_selection:
+                    if prompt_ids:
+                        ids = prompt_ids
+                    bot_logger.log_info(
+                        f"SelectN using stack/pending selection for ids={ids}"
+                    )
+                if self.__pending_select_n is not None:
+                    self.__pending_select_n["mode"] = (
+                        "stack" if (use_stack_selection and not use_hand_selection) else "hand"
+                    )
 
                 def _select_n_valid() -> bool:
                     if self._suppress_selections or self._stop_requested:
@@ -1776,10 +1915,35 @@ class Controller(ControllerSecondary):
                     pending = self.__pending_select_n
                     return bool(pending and pending.get("token") == token)
 
+                def _current_prompt_ids() -> set[int]:
+                    try:
+                        pending_zone_local = self.updated_game_state.get_zone("ZoneType_Pending")
+                        pending_ids_local = set(
+                            pending_zone_local.get("objectInstanceIds", []) or []
+                        ) if pending_zone_local else set()
+                    except Exception:
+                        pending_ids_local = set()
+                    try:
+                        stack_zone_local = self.updated_game_state.get_zone("ZoneType_Stack")
+                        stack_ids_local = set(
+                            stack_zone_local.get("objectInstanceIds", []) or []
+                        ) if stack_zone_local else set()
+                    except Exception:
+                        stack_ids_local = set()
+                    return pending_ids_local.union(stack_ids_local)
+
                 def _verify_selection(selected_ids: list[int], attempt: int) -> None:
                     try:
                         if not _select_n_valid():
                             return
+                        if use_stack_selection and not use_hand_selection:
+                            selected_set = set(selected_ids or [])
+                            active_prompt_ids = _current_prompt_ids()
+                            if selected_set and not selected_set.intersection(active_prompt_ids):
+                                _clear_pending_select_n(
+                                    "SelectN stack verify: prompt resolved."
+                                )
+                                return
                         if self.__system_seat_id is None:
                             return
                         hand_zone = self.updated_game_state.get_zone("ZoneType_Hand", self.__system_seat_id)
@@ -1837,6 +2001,7 @@ class Controller(ControllerSecondary):
                             if not _select_n_valid():
                                 return
                             self.__select_n_in_progress = True
+                            self.__select_n_in_progress_since = time.time()
                             if attempt == 1:
                                 wait_sec = 3.0
                                 if discard_context:
@@ -1881,9 +2046,20 @@ class Controller(ControllerSecondary):
                             used_hover_ids: set[int] = set()
                             base_clicks = 2 if resolution_context else 1
                             clicks = base_clicks if attempt == 1 else 2
-                            for card_id in ids:
+                            ids_to_select = list(ids)
+                            if use_stack_selection and not use_hand_selection:
+                                active_prompt_ids = _current_prompt_ids()
+                                ids_to_select = [cid for cid in ids_to_select if cid in active_prompt_ids]
+                                if not ids_to_select:
+                                    bot_logger.log_info(
+                                        "SelectN stack/pending prompt no longer active; aborting stale selection."
+                                    )
+                                    _clear_pending_select_n()
+                                    return
+                            for card_id in ids_to_select:
                                 if selected >= min_sel:
                                     break
+                                selected_ok = False
                                 if use_hand_selection:
                                     selected_ok = self.select_hand_card(card_id, clicks=clicks)
                                     if not selected_ok and discard_context:
@@ -1893,6 +2069,13 @@ class Controller(ControllerSecondary):
                                             )
                                             if selected_ok:
                                                 break
+                                elif use_stack_selection:
+                                    if card_id not in _current_prompt_ids():
+                                        bot_logger.log_info(
+                                            f"SelectN skipping stale prompt id={card_id} before stack click."
+                                        )
+                                        continue
+                                    selected_ok = self.select_stack_item(card_id, clicks=1)
                                 if selected_ok:
                                     selected += 1
                                     selected_ids.append(card_id)
@@ -2063,6 +2246,135 @@ class Controller(ControllerSecondary):
             return 0.0
         return 0.0
 
+    @staticmethod
+    def __timer_elapsed_remaining(timer: dict) -> tuple[float | None, float | None]:
+        duration = timer.get("durationSec")
+        duration_sec = None
+        if duration is not None:
+            try:
+                duration_sec = float(duration)
+            except Exception:
+                duration_sec = None
+        elapsed_sec = None
+        if "elapsedSec" in timer:
+            try:
+                elapsed_sec = float(timer.get("elapsedSec", 0) or 0)
+            except Exception:
+                elapsed_sec = None
+        elif "elapsedMs" in timer:
+            try:
+                elapsed_sec = float(timer.get("elapsedMs", 0) or 0) / 1000.0
+            except Exception:
+                elapsed_sec = None
+        remaining_sec = None
+        if duration_sec is not None and elapsed_sec is not None:
+            remaining_sec = max(0.0, duration_sec - elapsed_sec)
+        return elapsed_sec, remaining_sec
+
+    def __log_my_timer_status(self) -> None:
+        if self.__system_seat_id is None:
+            return
+        try:
+            full_state = self.updated_game_state.get_full_state()
+        except Exception:
+            return
+        players = full_state.get("players", []) or []
+        my_timer_ids: set[int] = set()
+        for player in players:
+            if player.get("systemSeatNumber") != self.__system_seat_id:
+                continue
+            raw_ids = player.get("timerIds", []) or []
+            for raw_id in raw_ids:
+                if isinstance(raw_id, int):
+                    my_timer_ids.add(raw_id)
+            break
+        if not my_timer_ids:
+            return
+        timers = full_state.get("timers", []) or []
+        current_running: set[int] = set()
+        seen_timer_ids: set[int] = set()
+        for timer in timers:
+            timer_id = timer.get("timerId")
+            if not isinstance(timer_id, int) or timer_id not in my_timer_ids:
+                continue
+            timer_type = str(timer.get("type") or "?")
+            if timer_type not in _MY_TIMER_TYPES:
+                continue
+            seen_timer_ids.add(timer_id)
+            running = bool(timer.get("running", False))
+            elapsed_sec, remaining_sec = self.__timer_elapsed_remaining(timer)
+            warning_threshold = timer.get("warningThresholdSec")
+            warning_sec = None
+            if warning_threshold is not None:
+                try:
+                    warning_sec = float(warning_threshold)
+                except Exception:
+                    warning_sec = None
+
+            prev = self.__my_timer_state.get(timer_id, {})
+            was_running = bool(prev.get("running", False))
+            warned = bool(prev.get("warned", False))
+            critical = bool(prev.get("critical", False))
+            if running:
+                current_running.add(timer_id)
+                if not was_running:
+                    msg = f"MY_TIMER_START: timerId={timer_id} type={timer_type}"
+                    if elapsed_sec is not None:
+                        msg += f" elapsed={elapsed_sec:.1f}s"
+                    if remaining_sec is not None:
+                        msg += f" remaining={remaining_sec:.1f}s"
+                    bot_logger.log_info(msg)
+                    warned = False
+                    critical = False
+                if (
+                    remaining_sec is not None
+                    and warning_sec is not None
+                    and warning_sec > 0
+                    and remaining_sec <= warning_sec
+                    and not warned
+                ):
+                    bot_logger.log_info(
+                        f"MY_TIMER_WARNING: timerId={timer_id} type={timer_type} remaining={remaining_sec:.1f}s threshold={warning_sec:.1f}s"
+                    )
+                    warned = True
+                if remaining_sec is not None and remaining_sec <= 5.0 and not critical:
+                    bot_logger.log_info(
+                        f"MY_TIMER_CRITICAL: timerId={timer_id} type={timer_type} remaining={remaining_sec:.1f}s"
+                    )
+                    critical = True
+                if remaining_sec is not None and remaining_sec > 5.0:
+                    critical = False
+                self.__my_timer_state[timer_id] = {
+                    "running": True,
+                    "warned": warned,
+                    "critical": critical,
+                    "type": timer_type,
+                }
+            else:
+                if was_running:
+                    bot_logger.log_info(f"MY_TIMER_STOP: timerId={timer_id} type={timer_type}")
+                self.__my_timer_state[timer_id] = {
+                    "running": False,
+                    "warned": False,
+                    "critical": False,
+                    "type": timer_type,
+                }
+        for timer_id, prev in list(self.__my_timer_state.items()):
+            if not prev.get("running", False):
+                continue
+            if timer_id in current_running:
+                continue
+            if timer_id in seen_timer_ids:
+                continue
+            timer_type = prev.get("type", "?")
+            bot_logger.log_info(f"MY_TIMER_STOP: timerId={timer_id} type={timer_type} (not running)")
+            self.__my_timer_state[timer_id] = {
+                "running": False,
+                "warned": False,
+                "critical": False,
+                "type": timer_type,
+            }
+
     def __update_pending_target_select(
         self,
         source_id: int | None,
@@ -2197,22 +2509,51 @@ class Controller(ControllerSecondary):
         if self._suppress_selections:
             self.__pending_select_n = None
             self.__select_n_in_progress = False
+            self.__select_n_in_progress_since = 0.0
             return False
+        pending_ids = set()
+        stack_ids = set()
+        pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
+        if pending_zone:
+            pending_ids = set(pending_zone.get("objectInstanceIds", []) or [])
+        stack_zone = self.updated_game_state.get_zone("ZoneType_Stack")
+        if stack_zone:
+            stack_ids = set(stack_zone.get("objectInstanceIds", []) or [])
+        active_prompt_ids = pending_ids.union(stack_ids)
+
         if self.__select_n_in_progress:
+            pending = self.__pending_select_n or {}
+            mode = pending.get("mode")
+            ids = set(pending.get("ids", []) or [])
+            in_progress_age = time.time() - float(self.__select_n_in_progress_since or 0.0)
+            # Fail-safe for stack/pending prompts: if ids vanished, unblock decisions.
+            if mode == "stack" and ids and not ids.intersection(active_prompt_ids):
+                if (time.time() - self.__last_submit_selection_ts) > 0.8:
+                    self.__pending_select_n = None
+                    self.__select_n_in_progress = False
+                    self.__select_n_in_progress_since = 0.0
+                    bot_logger.log_info("SelectN auto-clear: stack prompt resolved.")
+                    return False
+            # Hard timeout guard to avoid infinite selection stalls.
+            if in_progress_age > 20.0:
+                self.__pending_select_n = None
+                self.__select_n_in_progress = False
+                self.__select_n_in_progress_since = 0.0
+                bot_logger.log_info("SelectN auto-clear: in-progress timeout.")
+                return False
             bot_logger.log_info("SelectN in progress: pausing other decisions.")
             return True
         if not self.__pending_select_n:
             return False
         ts = self.__pending_select_n.get("ts", 0.0)
         ids = set(self.__pending_select_n.get("ids", []) or [])
-        pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
-        pending_ids = set(pending_zone.get("objectInstanceIds", []) or []) if pending_zone else set()
         if pending_ids and ids.intersection(pending_ids):
             return True
         if time.time() - ts < 3.0:
             return True
         self.__pending_select_n = None
         self.__select_n_in_progress = False
+        self.__select_n_in_progress_since = 0.0
         bot_logger.log_info("SelectN auto-clear: pending window elapsed.")
         return False
 
@@ -2305,18 +2646,40 @@ class Controller(ControllerSecondary):
                 return
             payload = json.loads(line[start:])
             messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+            request_id = payload.get("requestId")
             for message in messages:
                 if message.get("type") != "GREMessageType_DeclareAttackersReq":
                     continue
+                seat_ids = message.get("systemSeatIds") or []
+                if self.__system_seat_id is not None and seat_ids and self.__system_seat_id not in seat_ids:
+                    continue
                 req = message.get("declareAttackersReq", {})
                 attackers = req.get("attackers", []) or req.get("qualifiedAttackers", [])
+                self.__attack_target_required = False
                 for attacker in attackers:
                     recipients = attacker.get("legalDamageRecipients", []) or []
                     for rec in recipients:
                         if rec.get("type") == "DamageRecType_PlanesWalker":
                             self.__attack_target_required = True
                             bot_logger.log_info("DeclareAttackersReq: planeswalker target present")
-                            return
+                            break
+                    if self.__attack_target_required:
+                        break
+                turn_info = self.updated_game_state.get_turn_info() or {}
+                fallback_key = "combat:{}:{}:{}".format(
+                    turn_info.get("turnNumber", "?"),
+                    turn_info.get("activePlayer", "?"),
+                    turn_info.get("decisionPlayer", "?"),
+                )
+                recovery_key = f"req:{request_id}" if request_id is not None else fallback_key
+                bot_logger.log_info(
+                    "COMBAT_RECOVERY_ARMED: key={} canSubmitAttackers={}".format(
+                        recovery_key,
+                        req.get("canSubmitAttackers"),
+                    )
+                )
+                self.__arm_combat_recovery(recovery_key, delay=1.0)
+                return
         except Exception as e:
             bot_logger.log_error(f"Failed to parse DeclareAttackersReq: {e}")
 
@@ -2415,6 +2778,7 @@ class Controller(ControllerSecondary):
         system_seat_id = Controller.__get_system_seat_id_from_raw_dict(raw_dict)
         if system_seat_id is not None and system_seat_id != self.__system_seat_id:
             self.__system_seat_id = system_seat_id
+            self.__my_timer_state = {}
             bot_logger.log_info(f"Detected local systemSeatId={self.__system_seat_id}")
 
         outcome = self.__infer_match_won_from_raw_dict(raw_dict)
@@ -2427,6 +2791,7 @@ class Controller(ControllerSecondary):
 
         # Log all parsed game state data to bot.log
         bot_logger.log_game_state_update(self.updated_game_state.get_full_state())
+        self.__log_my_timer_status()
 
         self.__handle_target_selection_from_raw_dict(raw_dict)
 
@@ -2441,6 +2806,16 @@ class Controller(ControllerSecondary):
         is_complete = self.updated_game_state.is_complete()
         pending_count = self.updated_game_state.get_pending_message_count()
         stack_count = self.updated_game_state.get_zone_object_count("ZoneType_Stack")
+        my_seat = self.__system_seat_id
+        is_my_combat_declare = (
+            bool(turn_info_dict)
+            and my_seat is not None
+            and turn_info_dict.get("phase") == "Phase_Combat"
+            and turn_info_dict.get("step") == "Step_DeclareAttack"
+            and turn_info_dict.get("decisionPlayer") == my_seat
+        )
+        if not is_my_combat_declare and self.__combat_recovery_key is not None:
+            self.__clear_combat_recovery("Left Step_DeclareAttack or lost priority")
 
         # Log controller state
         bot_logger.log_controller_event(

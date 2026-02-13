@@ -1838,7 +1838,7 @@ class SwitchAccountWindow(tk.Toplevel):
         self._parent = parent
         self._config_manager = config_manager
         self.title("Manage Accounts")
-        self.geometry("920x720")
+        self.geometry("920x760")
         self.resizable(False, False)
         self.configure(bg="#2b2b2b")
         self._order_combos = []
@@ -2473,4 +2473,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

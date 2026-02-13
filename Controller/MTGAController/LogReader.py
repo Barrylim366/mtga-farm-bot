@@ -60,18 +60,26 @@ class LogReader:
 
     def __monitor_log_file(self):
         # debug: print(self.__log_path)
-        log_file = open(self.__log_path, "r")
-        log_lines = self.__follow(log_file)
-        for line in log_lines:
-            if self.__stop_monitor:
-                return
-            for pattern in self.__lines_containing_pattern:
-                if pattern in line:
-                    self.__lines_containing_pattern[pattern] = line
-                    self.__lines_queue[pattern].append(line)
-                    self.__has_new_line[pattern] = True
-                    bot_logger.log_raw_line(pattern, line)
-                    self.__callback(pattern, self.__lines_containing_pattern[pattern])
+        try:
+            with open(self.__log_path, "r") as log_file:
+                log_lines = self.__follow(log_file)
+                for line in log_lines:
+                    if self.__stop_monitor:
+                        return
+                    for pattern in self.__lines_containing_pattern:
+                        if pattern in line:
+                            self.__lines_containing_pattern[pattern] = line
+                            self.__lines_queue[pattern].append(line)
+                            self.__has_new_line[pattern] = True
+                            bot_logger.log_raw_line(pattern, line)
+                            try:
+                                self.__callback(pattern, self.__lines_containing_pattern[pattern])
+                            except Exception as e:
+                                bot_logger.log_error(
+                                    f"LogReader callback failed for pattern '{pattern}': {e}"
+                                )
+        except Exception as e:
+            bot_logger.log_error(f"LogReader monitor failed: {e}")
 
     def start_log_monitor(self):
         self.__stop_monitor = False
@@ -124,7 +132,12 @@ class LogReader:
                         self.__has_new_line[pattern] = True
                         self.__lines_containing_pattern[pattern] = line
                         bot_logger.log_raw_line(pattern, line)
-                        self.__callback(pattern, self.__lines_containing_pattern[pattern])
+                        try:
+                            self.__callback(pattern, self.__lines_containing_pattern[pattern])
+                        except Exception as e:
+                            bot_logger.log_error(
+                                f"LogReader callback failed during full read for pattern '{pattern}': {e}"
+                            )
                 line = log_file.readline()
         else:
             print("Unable to do read as log monitoring is already in progress")
