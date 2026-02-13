@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=MTGA Bot UI
+Comment=Startet die MTGA Bot UI mit lokaler .venv
+Exec=bash -lc 'cd /home/barrylim/Dokumente/mtga_bot && ./start_ui.sh; rc=$?; echo; echo "Exit-Code: $rc"; echo "Druecke Enter zum Schliessen..."; read -r _'
+Path=/home/barrylim/Dokumente/mtga_bot
+Terminal=true
+Icon=/home/barrylim/Dokumente/mtga_bot/ui_symbol.png
+Categories=Game;Utility;
+StartupNotify=true

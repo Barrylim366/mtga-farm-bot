@@ -33,6 +33,15 @@ Or use the executable launcher (creates/uses `.venv` and starts the UI there):
 ./start_ui.sh
 ```
 
+For double-click start in KDE/Dolphin, use:
+
+```
+./MTGA_Bot_UI.desktop
+```
+
+This launcher always calls `start_ui.sh`, so the UI runs from the project `.venv`
+with `pynput` from that environment.
+
 UI logo asset: `ui_symbol.png` (project root).
 The main window now uses a ttk-based dark theme with centralized design tokens in `MTGBotUI._build_ui_theme()`:
 - Background/surface layering (`#0F1115` + `#151A21`) with a subtle rounded card shell
@@ -55,6 +64,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Password input fields in **Manage Accounts** are masked (`*`) while typing
 - In **Manage Accounts**, the **Switch account (min)** save button is placed directly next to `0 = off` with a prominent blue style
 - Manage Accounts window height was increased to avoid bottom content clipping
+- Manage Accounts window height is set to `920x760` so bottom action buttons are fully visible
 - Manage Accounts action buttons use compact, unified sizing; the switch-time `Save` button now matches the other button size
 - Buttons were reverted to the classic UI styling and original color direction
 - Main menu window size is fixed (width and height are both non-resizable)
@@ -148,6 +158,11 @@ are now handled directly via `GREMessageType_PayCostsReq` cost selection, instea
 only on `SelectNReq`.
 When `GREMessageType_DeclareAttackersReq` arrives, any temporary pay-cost pause window is
 cleared immediately so combat prompts are not blocked by stale pay-cost timing.
+DeclareAttack prompts now arm a bounded combat-recovery fallback (`COMBAT_RECOVERY_ARMED`),
+which can force `all_attack + submit` up to two times if the bot is still stuck on
+`Phase_Combat / Step_DeclareAttack`.
+Combat-recovery events are logged with explicit markers:
+`COMBAT_RECOVERY_ARMED`, `COMBAT_RECOVERY_ATTEMPT`, `COMBAT_RECOVERY_CLEAR`.
 If the bot is paused by a PayCosts prompt and no new game-state message arrives, it now
 automatically retries the decision loop shortly after the pause window so `Next/Pass`
 does not get stuck.
@@ -167,7 +182,13 @@ If `Buttons/submit_btn.png` exists, Submit clicks use image matching before fall
 Resolution SelectN waits for the stack to clear before starting selection.
 Discard (SelectN) prompts allow a single delayed retry when hand zone data is missing and avoid aggressive reselect loops.
 SelectN pending-state clear is now robustly initialized before early abort branches, avoiding handler crashes during discard/stack prompts.
-SelectN resolution waits for the stack to clear, but has a timeout to avoid indefinite stalls and clears on match end/reset. Stack-item scanning is disabled; SelectN now only selects from hand IDs.
+SelectN resolution waits for the stack to clear, but has a timeout to avoid indefinite stalls and clears on match end/reset.
+If SelectN IDs are not in hand, the bot can now fall back to pending/stack item scanning.
+
+Own timer ("sand clock") status is parsed from `Player.log` game-state timer data (only for
+the local player seat, not opponent timers).
+Timer transitions are logged as:
+`MY_TIMER_START`, `MY_TIMER_WARNING`, `MY_TIMER_CRITICAL`, `MY_TIMER_STOP`.
 
 ## Card Data Updates
 
