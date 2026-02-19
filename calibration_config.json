@@ -65,7 +65,7 @@
     "input_backend": "pynput",
     "account_switch_minutes": 0,
     "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
-    "account_cycle_index": 0,
+    "account_cycle_index": 1,
     "account_play_order": [
         "Affinity2004",
         "Ayaylll",

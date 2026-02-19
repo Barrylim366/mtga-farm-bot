@@ -150,6 +150,19 @@ class Game:
         try:
             import sys
             import subprocess
+            if getattr(sys, "frozen", False):
+                self._debug("Card data refresh: frozen build detected, skipping local exporter subprocess.")
+                try:
+                    CardInfo.reload_cards_from_disk()
+                    self._debug("Card data refresh: cards.json reloaded into memory.")
+                except Exception as e:
+                    self._debug(f"Card data refresh: reload failed: {e}")
+                try:
+                    CardInfo.refresh_cards_from_scryfall_bulk_if_needed()
+                    self._debug("Card data refresh: Scryfall bulk delta check done.")
+                except Exception as e:
+                    self._debug(f"Card data refresh: Scryfall bulk delta failed: {e}")
+                return
             base_candidates = [
                 os.path.expanduser("~/.local/share/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
                 os.path.expanduser("~/.steam/steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),

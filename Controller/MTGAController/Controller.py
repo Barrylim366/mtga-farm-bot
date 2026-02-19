@@ -4,6 +4,7 @@ import re
 import threading
 import time
 import os
+import sys
 
 from Controller.ControllerInterface import ControllerSecondary
 from Controller.MTGAController.LogReader import LogReader
@@ -215,7 +216,15 @@ class Controller(ControllerSecondary):
         self.log_out_ok_btn_coors = (1875, 809)
 
     def _buttons_dir(self) -> str:
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Buttons"))
+        return os.path.join(self._app_root_dir(), "Buttons")
+
+    def _app_root_dir(self) -> str:
+        if getattr(sys, "frozen", False):
+            return os.path.abspath(os.path.dirname(sys.executable))
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+    def _app_path(self, *parts: str) -> str:
+        return os.path.join(self._app_root_dir(), *parts)
 
     def _click_image(self, image_path: str, label: str, confidence: float = 0.82, timeout: float = 20.0) -> bool:
         try:
@@ -370,7 +379,7 @@ class Controller(ControllerSecondary):
         return None
 
     def _accounts_base_dir(self) -> str:
-        base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Accounts"))
+        base = self._app_path("Accounts")
         try:
             os.makedirs(base, exist_ok=True)
         except Exception:
@@ -378,7 +387,7 @@ class Controller(ControllerSecondary):
         return base
 
     def _legacy_accounts_base_dir(self) -> str:
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        return self._app_root_dir()
 
     def _resolve_account_dir(self, account: dict) -> str | None:
         folder_name = str(account.get("folder", "")).strip()
@@ -1382,9 +1391,7 @@ class Controller(ControllerSecondary):
         return self._replay_named_record("Account Switch", tag_prefix="LOGOUT", allow_keys={"esc"})
 
     def _replay_named_record(self, name: str, tag_prefix: str = "REPLAY", allow_keys: set[str] | None = None) -> bool:
-        path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "recorded_actions_records.json")
-        )
+        path = self._app_path("recorded_actions_records.json")
         if not os.path.exists(path):
             return False
         try:
@@ -1757,9 +1764,7 @@ class Controller(ControllerSecondary):
 
     def _persist_account_cycle_index(self) -> None:
         try:
-            config_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "calibration_config.json")
-            )
+            config_path = self._app_path("calibration_config.json")
             if not os.path.exists(config_path):
                 return
             with open(config_path, "r", encoding="utf-8") as f:

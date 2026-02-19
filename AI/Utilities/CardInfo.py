@@ -2,12 +2,24 @@ import json
 import urllib.request
 import urllib.error
 import os
+import sys
 
-CARD_DATA_PATH = "cards.json"
-SCRYFALL_CACHE_PATH = "scryfall_cache.json"
-SCRYFALL_ORACLE_CACHE_PATH = "scryfall_oracle_cache.json"
-MISSING_CARDS_PATH = "missing_cards.json"
-SCRYFALL_BULK_META_PATH = "scryfall_bulk_metadata.json"
+
+def _app_root_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.abspath(os.path.dirname(sys.executable))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _app_data_path(filename: str) -> str:
+    return os.path.join(_app_root_dir(), filename)
+
+
+CARD_DATA_PATH = _app_data_path("cards.json")
+SCRYFALL_CACHE_PATH = _app_data_path("scryfall_cache.json")
+SCRYFALL_ORACLE_CACHE_PATH = _app_data_path("scryfall_oracle_cache.json")
+MISSING_CARDS_PATH = _app_data_path("missing_cards.json")
+SCRYFALL_BULK_META_PATH = _app_data_path("scryfall_bulk_metadata.json")
 _card_data = []
 _scryfall_cache = {}
 _scryfall_oracle_cache = {}

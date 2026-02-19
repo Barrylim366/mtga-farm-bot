@@ -1,4 +1,4 @@
-# Red Lotus Bot
+# Burning Lotus Bot
 
 Automated MTGA bot with UI, calibration, account switching, and quest-based deck selection.
 
@@ -36,7 +36,7 @@ Or use the executable launcher (creates/uses `.venv` and starts the UI there):
 For double-click start in KDE/Dolphin, use:
 
 ```
-./MTGA_Bot_UI.desktop
+./Burning\ Lotus\ Bot.desktop
 ```
 
 This launcher always calls `start_ui.sh`, so the UI runs from the project `.venv`
@@ -44,14 +44,15 @@ with `pynput` from that environment.
 
 UI logo asset: `ui_symbol.png` (project root).
 The main window now uses a ttk-based dark theme with centralized design tokens in `MTGBotUI._build_ui_theme()`:
-- Background/surface layering (`#0F1115` + `#151A21`) with a subtle rounded card shell
+- Start page uses a full-canvas background image loaded from `background` (project root)
 - Single accent color (`#C8141E`)
 - System-first font stack (`Segoe UI Variable`/`Segoe UI`/`Inter`/`Arial`)
 - Compact hierarchy: centered logo, title, and uniform button grid
-- Unified button states and spacing grid (Start primary uses subtle green `#1F3A2D`, soft secondary buttons, muted disabled state)
+- Main window/start title now reads `Burning Lotus`
+- Main menu buttons are canvas-rendered (no ttk widget box) with rounded edges, subtle inner shadow, stronger visibility (rim/shadow/glow), and fixed body color `#3D130E` slightly more transparent
 - Stop button enabled only while the bot runs
 - Status shown as plain text (no box background, no border frame)
-- Outer dark card rim/shadow was removed for a cleaner edge (card surround now matches surface color)
+- No inner center card is rendered on the start page (logo/title/buttons are placed directly on the background)
 - Stop button uses a subtle red background treatment
 - Button focus outline is neutralized (no red focus ring on the last clicked button)
 - All submenu/pop-up windows now inherit the same bluish-dark UI palette via centralized submenu theming
@@ -73,7 +74,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Fixed a startup regression in `ui.py` caused by a mismatched theme token in the loading bar style
 - `Status: Stopped` now uses a subtle red text tone
 
-Standalone runnable UI example (single file): `red_lotus_ui_example.py`.
+Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
 
 
 2) Calibrate buttons via **Calibrate**:
@@ -98,6 +99,52 @@ Standalone runnable UI example (single file): `red_lotus_ui_example.py`.
 5) Start Bot.
 
 Stop bot any time with **Mouse Wheel Down**.
+
+
+## PyInstaller Build (Linux)
+
+Use this if you want to share the bot without sending the source code.
+
+1) Install PyInstaller into project venv:
+
+```
+.venv/bin/python -m pip install pyinstaller
+```
+
+2) Build the bundle (`onedir`, recommended):
+
+```
+./build_pyinstaller.sh
+```
+
+Or single binary (`onefile`):
+
+```
+./build_pyinstaller.sh onefile
+```
+
+3) Run the packaged app:
+
+```
+./dist/BurningLotusBot/BurningLotusBot
+```
+
+For `onefile` build:
+
+```
+./dist/BurningLotusBot
+```
+
+4) Share the whole folder `dist/BurningLotusBot/` (or archive it):
+
+```
+tar -czf BurningLotusBot-linux.tar.gz -C dist BurningLotusBot
+```
+
+Notes:
+- Build and target system should use the same OS/architecture.
+- On Linux, output is a Linux binary (not a `.exe`).
+- For a real Windows `.exe`, build on Windows.
 
 
 ## Account Switching
