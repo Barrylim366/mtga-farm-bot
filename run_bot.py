@@ -4,6 +4,7 @@ from Game import Game
 import time
 import os
 import pathlib
+from licensing.validator import require_license_or_block
 
 
 def _default_player_log_path() -> str:
@@ -59,6 +60,11 @@ def _detect_player_log_path() -> str:
 
 def main():
     print("Starting MTG AI Bot...")
+    license_result = require_license_or_block()
+    if not license_result.valid:
+        print(f"License check failed: {license_result.message}")
+        print("Open the UI and activate a valid license first.")
+        return
 
     # User configuration
     log_path = os.environ.get("MTGA_BOT_LOG_PATH", "")

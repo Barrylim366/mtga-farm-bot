@@ -1,4 +1,4 @@
-# Burning Lotus Bot
+﻿# Burning Lotus Bot
 
 Automated MTGA bot with UI, calibration, account switching, and quest-based deck selection.
 
@@ -12,11 +12,12 @@ Automated MTGA bot with UI, calibration, account switching, and quest-based deck
   - opencv-python (needed for image matching confidence)
   - pillow
   - pynput
+  - cryptography (Ed25519 license verification)
 
 Install packages:
 
 ```
-pip install pyautogui opencv-python pillow pynput
+pip install pyautogui opencv-python pillow pynput cryptography
 ```
 
 ## Quick Start
@@ -131,9 +132,71 @@ Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
    - **Record Action** opens a window for **Record** (uses F8 to stop) and **Show Records**.
      Saved records include per-action timestamps (`ts`) in `recorded_actions_records.json`.
 
-5) Start Bot.
+5) Open **License**, copy your **Device ID**, import/paste your signed `.bllic`, then click **Aktivieren**.
+
+6) Start Bot (only possible with valid activated license).
 
 Stop bot any time with **Mouse Wheel Down**.
+
+## Offline Licensing (Ed25519 + Device Binding)
+
+- Bot automation is blocked by default until a valid license is activated.
+- Main menu includes a **License** button with:
+  - Status (`Activated` / `Not activated` + details)
+  - Local Device ID (copy button)
+  - License paste box
+  - `Import license file` + `Activate`
+- License check runs on app startup and again before bot start.
+- Without a valid license, **Start Bot** remains disabled and the UI shows a hint.
+
+Public key location:
+- Put your Ed25519 public key (raw 32-byte Base64/Base64URL) in `licensing/validator.py` at `PUBLIC_KEY_B64`.
+- Optional override for local testing: environment variable `BLB_PUBLIC_KEY_B64`.
+
+Device binding:
+- `device_id` is derived from a stable OS fingerprint and encoded as Base32.
+- License payload uses `device_id_hash = SHA256(device_id)`.
+
+Stored license path (per user):
+- Windows: `%APPDATA%/BurningLotusBot/license.bllic`
+- Linux: `~/.config/burninglotusbot/license.bllic`
+- macOS: `~/Library/Application Support/BurningLotusBot/license.bllic`
+
+Validation checks:
+- Ed25519 signature valid
+- `product == BurningLotusBot`
+- `seat_index in {1,2}`
+- `device_id_hash` matches current machine
+- `expires_at` not expired (if set)
+
+Typical error messages:
+- `Invalid signature`
+- `Wrong device`
+- `Expired`
+- `Wrong product`
+- `Corrupt file`
+
+Developer license generator (not shipped at runtime):
+- Script: `tools/gen_license.py`
+- UI helper: `tools/ui_licensing.py` (paste Device ID + private key, generate compact license string, save `.bllic`)
+- `tools/ui_licensing.py` now opens even if crypto backends are missing and shows a clear warning (`cryptography` or `pynacl` required for signing).
+- Private key source:
+  - `BLB_PRIVATE_KEY_B64` environment variable, or
+  - `--private-key-file <path>` (raw/base64/PEM)
+- Supported argument styles: kebab-case and snake_case (for example `--customer-id` / `--customer_id`).
+- Example:
+
+```bash
+python tools/gen_license.py --customer-id CUST001 --device-id ABCDEFGHIJKLMNOPQRSTUVWX234567 --seat-index 1 --expires-at 2027-01-01T00:00:00Z --out CUST001_seat1.bllic --print
+```
+
+UI example:
+
+```bash
+python tools/ui_licensing.py
+```
+
+`tools/` is not included in runtime packaging because builds target `ui.py` only and do not add `tools/` as data.
 
 ## Windows EXE Build
 
@@ -269,6 +332,16 @@ If `cards.json` is missing on first run, it will be generated automatically.
 Fallback:
 - `missing_cards.json` tracks cards encountered in matches but not in `cards.json`.
 
+## Licensing Tests
+
+Run the new licensing tests with:
+
+```bash
+python -m unittest tests/test_licensing.py
+```
+
+- The signature roundtrip test is skipped automatically if `cryptography` is not installed.
+
 ## Logs
 
 - `bot.log` - main bot debug
@@ -277,4 +350,5 @@ Fallback:
 - `Player.log` default path: `C:/Users/<YourUser>/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
 - Hover logs are suppressed by default and only enabled during selection scans.
 - A one-line match summary is logged at match completion.
+
 
