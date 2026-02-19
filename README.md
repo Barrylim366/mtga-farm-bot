@@ -1,4 +1,4 @@
-# Red Lotus Bot
+# Burning Lotus Bot
 
 Automated MTGA bot with UI, calibration, account switching, and quest-based deck selection.
 
@@ -27,29 +27,66 @@ pip install pyautogui opencv-python pillow pynput
 python ui.py
 ```
 
-UI logo asset: `ui_symbol.png` (project root).
+UI assets are loaded from `images/`:
+- `images/ui_symbol.png`
+- `images/background`
 The main window now uses a ttk-based dark theme with centralized design tokens in `MTGBotUI._build_ui_theme()`:
-- Background/surface layering (`#0F1115` + `#151A21`) with a subtle rounded card shell
+- Start page uses a full-canvas background image loaded from `images/background`
 - Single accent color (`#C8141E`)
 - System-first font stack (`Segoe UI Variable`/`Segoe UI`/`Inter`/`Arial`)
 - Compact hierarchy: centered logo, title, and uniform button grid
-- Unified button states and spacing grid (Start primary uses subtle green `#1F3A2D`, soft secondary buttons, muted disabled state)
+- Main window/start title now reads `Burning Lotus`
+- Main menu buttons are canvas-rendered (no ttk widget box) with rounded edges, subtle inner shadow, stronger visibility (rim/shadow/glow), and fixed body color `#3D130E` slightly more transparent
 - Stop button enabled only while the bot runs
 - Status shown as plain text (no box background, no border frame)
-- Outer dark card rim/shadow was removed for a cleaner edge (card surround now matches surface color)
+- No inner center card is rendered on the start page (logo/title/buttons are placed directly on the background)
 - Stop button uses a subtle red background treatment
 - Button focus outline is neutralized (no red focus ring on the last clicked button)
-- All submenu/pop-up windows now inherit the same bluish-dark UI palette via centralized submenu theming
+- Manage Accounts now uses the same background image source as the main UI (`images/background` / `images/background.png`)
+- Manage Accounts panel colors now follow the main UI palette (`bg/surface/surface_2/border/text`) with a subtle pseudo-transparency blend against the background image
+- Manage Accounts container borders were tuned from cool-blue to warm red tones; panel blend opacity was reduced for a lighter translucent look on the fire background
 - Main menu now includes a dedicated **Current Session** button between **Calibrate** and **Settings**
 - **Current Session** opens in the same submenu position logic as **Settings** (below main window, ~5 mm gap, aligned X)
 - Current session stats (`X Min till Account Switch`, `Games played`, `Win`) were moved out of **Settings** into **Current Session**
-- Settings window uses the same width (`460`) with a reduced height (`230`) focused on account/actions tools
-- **Manage Accounts** now supports up to 10 accounts with editable `Name`, `Email`, `Password` rows and dynamic play-order slots
+- Settings window keeps the main menu visual language: same background image source, centered title, and canvas-rendered action buttons using the shared main button skins
+- Settings window size/position follows submenu behavior (`460x430`, opens below main with ~5 mm gap, aligned to main window X)
+- Calibrate window now uses a background-scene layout like Settings/Record Actions (no large dark outer frame), keeps glow-style action buttons, and opens to the right of the main window with ~0.4 cm gap
+- Calibrate action buttons were reflowed to remove overlap artifacts
+- Calibrate buttons are now reduced in width/height (roughly one-third smaller than before) and aligned to the same horizontal line as the dropdowns for `Calibrate` and `Test Click`
+- Current Session window was restyled to the same fire/main theme (background image, unified panel colors, styled Back button) and now opens aligned below the main window
+- Current Session no longer uses a large dark container frame; stats and Back are rendered directly on the background scene, and the dark box-frame around Back was removed
+- Record Actions window now matches Settings layout more closely: title/buttons are rendered directly on the background scene (no outer dark container), using the same canvas glow-button skins as the main/settings UI
+- Record Actions background now refreshes on canvas resize to prevent bottom strip artifacts during first paint
+- Record Actions now opens to the right of Settings with ~0.4 cm gap and the same window size (`460x430`), while still clamping to visible screen bounds
+- **Manage Accounts** was rebuilt to match the provided reference design (fire/red split layout)
+- Manage Accounts now opens aligned below Settings and uses tuned action-button border styling consistent with the updated submenu look
+- Manage Accounts outer shell frames were removed for the switch row, accounts wrapper, and play-order wrapper; only inner functional/table/widget frames remain
+- Remaining dark outer blocks in Manage Accounts were removed by blending wrapper rows/labels with the background image so only intended interactive/table elements remain framed
+- Manage Accounts was further flattened: table/details row borders and entry highlight frames were removed so the view reads mostly as text on background
+- All six Manage Accounts action buttons now use the same shared submenu button style as the other windows (`Secondary.TButton`)
+- Manage Accounts controls were flattened further: buttons are now text-only (no box), and combobox/input field borders were removed to eliminate remaining dark/red frame artifacts
+- Manage Accounts buttons now use the same main UI glow-button styles (`Primary.TButton` for save actions, `Secondary.TButton` for neutral actions)
+- Manage Accounts background patch blending for wrapper blocks/headings was removed to eliminate rectangular color artifacts on the fire background
+- Manage Accounts rows now use subtle dark list cards with a clearer selected-row highlight instead of heavy section boxes
+- Manage Accounts list rows/inputs were flattened further: row borders and input/dropdown frames are removed for a cleaner, less boxed appearance
+- Manage Accounts account-row selection is now indicated by text emphasis/color instead of a framed row border
+- Manage Accounts now uses a canvas-first scene layout (like the main window) for titles/table text and button placement, removing large frame-based panel backgrounds
+- Manage Accounts default window size was increased to `900x980` to avoid right/bottom clipping with the canvas layout
+- Manage Accounts action buttons are now flat no-border buttons (no glow-frame outline) to remove remaining visible button borders
+- Manage Accounts buttons are now canvas-rendered rounded dark-red translucent controls (matching the other windows' rounded behavior) while keeping the prior button size footprint
 - Saving accounts creates/updates one folder per account under `Accounts/` and writes `credentials.json` inside that folder
-- Password input fields in **Manage Accounts** are masked (`*`) while typing
-- In **Manage Accounts**, the **Switch account (min)** save button is placed directly next to `0 = off` with a prominent blue style
-- Manage Accounts window height was increased to avoid bottom content clipping
-- Manage Accounts action buttons use compact, unified sizing; the switch-time `Save` button now matches the other button size
+- **Manage Accounts** now uses a split panel: account table on the left, `Account Details` editor on the right
+- Row selection is clickable; selected row gets highlight and the active cycling account is marked with an `Active` badge
+- Password fields in **Manage Accounts** are masked (`*`) while typing
+- `Save Account` updates the selected row, `Save Accounts` persists all valid rows to config/folders
+- Play order is now shown as a 5-slot priority list (dropdowns) under the table section
+- Manage Accounts window width is auto-fitted to content with a small right margin
+- The former global dark content wrapper around all Manage Accounts blocks was removed; sections are now laid directly on the background with only left padding
+- The headings `Manage Accounts` and `Accounts (max 10)` are now plain text on background (their dark title containers were removed)
+- Heading labels in Manage Accounts now use cropped background-image patches (no solid color fill) to avoid visible red/dark heading blocks
+- Manage Accounts background refresh no longer runs continuously on `<Configure>`; heading/background patching is applied on startup to prevent layout drift
+- Heading labels no longer use fixed character widths; a delayed final background patch refresh avoids clipped text and stale border artifacts
+- Manage Accounts minimum window height was increased to `900` to keep the full content visible without bottom clipping
 - Buttons were reverted to the classic UI styling and original color direction
 - Main menu window size is fixed (width and height are both non-resizable)
 - Main menu top-left corner is fixed at screen coordinates `x=18`, `y=24`; Settings follows the main window position
@@ -57,7 +94,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Fixed a startup regression in `ui.py` caused by a mismatched theme token in the loading bar style
 - `Status: Stopped` now uses a subtle red text tone
 
-Standalone runnable UI example (single file): `red_lotus_ui_example.py`.
+Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
 
 
 2) Calibrate buttons via **Calibrate**:
@@ -82,6 +119,38 @@ Standalone runnable UI example (single file): `red_lotus_ui_example.py`.
 5) Start Bot.
 
 Stop bot any time with **Mouse Wheel Down**.
+
+## Windows EXE Build
+
+Create Windows executables with your logo as file icon (`burning_lotus_icon.ico`).
+
+1) Install PyInstaller once:
+
+```bash
+python -m pip install pyinstaller
+```
+
+2) Build app folder (recommended):
+
+```bat
+build_windows_exe.bat
+```
+
+3) Output (folder build):
+
+- `dist/BurningLotusBot/BurningLotusBot.exe`
+- For distribution, copy the whole folder `dist/BurningLotusBot` to the target laptop.
+
+4) Build single-file `.exe`:
+
+```bat
+build_windows_exe_onefile.bat
+```
+
+5) Output (single-file build):
+
+- `dist/BurningLotusBot.exe`
+- For distribution, copy just this one file.
 
 
 ## Account Switching
@@ -142,6 +211,11 @@ are now handled directly via `GREMessageType_PayCostsReq` cost selection, instea
 only on `SelectNReq`.
 When `GREMessageType_DeclareAttackersReq` arrives, any temporary pay-cost pause window is
 cleared immediately so combat prompts are not blocked by stale pay-cost timing.
+DeclareAttack prompts now arm a bounded combat-recovery fallback (`COMBAT_RECOVERY_ARMED`),
+which can force `all_attack + submit` up to two times if the bot is still stuck on
+`Phase_Combat / Step_DeclareAttack`.
+Combat-recovery events are logged with explicit markers:
+`COMBAT_RECOVERY_ARMED`, `COMBAT_RECOVERY_ATTEMPT`, `COMBAT_RECOVERY_CLEAR`.
 If the bot is paused by a PayCosts prompt and no new game-state message arrives, it now
 automatically retries the decision loop shortly after the pause window so `Next/Pass`
 does not get stuck.
@@ -161,12 +235,19 @@ If `Buttons/submit_btn.png` exists, Submit clicks use image matching before fall
 Resolution SelectN waits for the stack to clear before starting selection.
 Discard (SelectN) prompts allow a single delayed retry when hand zone data is missing and avoid aggressive reselect loops.
 SelectN pending-state clear is now robustly initialized before early abort branches, avoiding handler crashes during discard/stack prompts.
-SelectN resolution waits for the stack to clear, but has a timeout to avoid indefinite stalls and clears on match end/reset. Stack-item scanning is disabled; SelectN now only selects from hand IDs.
+SelectN resolution waits for the stack to clear, but has a timeout to avoid indefinite stalls and clears on match end/reset.
+If SelectN IDs are not in hand, the bot can now fall back to pending/stack item scanning.
+
+Own timer ("sand clock") status is parsed from `Player.log` game-state timer data (only for
+the local player seat, not opponent timers).
+Timer transitions are logged as:
+`MY_TIMER_START`, `MY_TIMER_WARNING`, `MY_TIMER_CRITICAL`, `MY_TIMER_STOP`.
 
 ## Card Data Updates
 
 On startup:
 - MTGA card DB export refreshes `cards.json` if the local MTGA data changed.
+- Raw card-data discovery supports common Linux Steam paths and Windows Steam install paths.
 - Scryfall bulk delta check fetches new Arena IDs and merges missing cards.
 If `cards.json` is missing on first run, it will be generated automatically.
 
@@ -175,9 +256,10 @@ Fallback:
 
 ## Logs
 
-- `bot.log` – main bot debug
-- `human.log` – high-level actions
-- `bot_gui_subprocess.log` – UI subprocess log (if used)
-- `Player.log` default path: `C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
+- `bot.log` - main bot debug
+- `human.log` - high-level actions
+- `bot_gui_subprocess.log` - UI subprocess log (if used)
+- `Player.log` default path: `C:/Users/<YourUser>/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
 - Hover logs are suppressed by default and only enabled during selection scans.
 - A one-line match summary is logged at match completion.
+

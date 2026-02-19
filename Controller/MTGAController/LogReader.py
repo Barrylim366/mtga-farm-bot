@@ -1,17 +1,49 @@
 import threading
 import time
 from collections import deque
+import os
 import bot_logger
 
 
 class LogReader:
     LOG_UPDATE_SPEED = 0.1
 
+    @staticmethod
+    def _default_player_log_path() -> str:
+        home = os.path.expanduser("~")
+        if os.name == "nt":
+            return os.path.join(
+                home,
+                "AppData",
+                "LocalLow",
+                "Wizards Of The Coast",
+                "MTGA",
+                "Player.log",
+            )
+        return os.path.join(
+            home,
+            ".local",
+            "share",
+            "Steam",
+            "steamapps",
+            "compatdata",
+            "2141910",
+            "pfx",
+            "drive_c",
+            "users",
+            "steamuser",
+            "AppData",
+            "LocalLow",
+            "Wizards Of The Coast",
+            "MTGA",
+            "Player.log",
+        )
+
     def __init__(self, patterns, callback=lambda pat, patstr: None,
-                 log_path="/Users/Elliot Roe/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+                 log_path=None,
                  player_id="LE3ZCMCJZBHUDGATTY2EJLUEIM"):
         self.__player = player_id
-        self.__log_path = log_path
+        self.__log_path = log_path or self._default_player_log_path()
         self.__lines_containing_pattern = {}
         self.__has_new_line = {}
         self.__lines_queue = {}
@@ -37,18 +69,26 @@ class LogReader:
 
     def __monitor_log_file(self):
         # debug: print(self.__log_path)
-        log_file = open(self.__log_path, "r")
-        log_lines = self.__follow(log_file)
-        for line in log_lines:
-            if self.__stop_monitor:
-                return
-            for pattern in self.__lines_containing_pattern:
-                if pattern in line:
-                    self.__lines_containing_pattern[pattern] = line
-                    self.__lines_queue[pattern].append(line)
-                    self.__has_new_line[pattern] = True
-                    bot_logger.log_raw_line(pattern, line)
-                    self.__callback(pattern, self.__lines_containing_pattern[pattern])
+        try:
+            with open(self.__log_path, "r") as log_file:
+                log_lines = self.__follow(log_file)
+                for line in log_lines:
+                    if self.__stop_monitor:
+                        return
+                    for pattern in self.__lines_containing_pattern:
+                        if pattern in line:
+                            self.__lines_containing_pattern[pattern] = line
+                            self.__lines_queue[pattern].append(line)
+                            self.__has_new_line[pattern] = True
+                            bot_logger.log_raw_line(pattern, line)
+                            try:
+                                self.__callback(pattern, self.__lines_containing_pattern[pattern])
+                            except Exception as e:
+                                bot_logger.log_error(
+                                    f"LogReader callback failed for pattern '{pattern}': {e}"
+                                )
+        except Exception as e:
+            bot_logger.log_error(f"LogReader monitor failed: {e}")
 
     def start_log_monitor(self):
         self.__stop_monitor = False
@@ -101,7 +141,12 @@ class LogReader:
                         self.__has_new_line[pattern] = True
                         self.__lines_containing_pattern[pattern] = line
                         bot_logger.log_raw_line(pattern, line)
-                        self.__callback(pattern, self.__lines_containing_pattern[pattern])
+                        try:
+                            self.__callback(pattern, self.__lines_containing_pattern[pattern])
+                        except Exception as e:
+                            bot_logger.log_error(
+                                f"LogReader callback failed during full read for pattern '{pattern}': {e}"
+                            )
                 line = log_file.readline()
         else:
             print("Unable to do read as log monitoring is already in progress")

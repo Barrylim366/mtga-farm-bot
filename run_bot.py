@@ -5,33 +5,65 @@ import time
 import os
 import pathlib
 
+
+def _default_player_log_path() -> str:
+    home = pathlib.Path.home()
+    if os.name == "nt":
+        return str(home / "AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log")
+    return str(
+        home
+        / ".local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log"
+    )
+
+
+def _detect_player_log_path() -> str:
+    if os.name == "nt":
+        candidates = []
+        roots = []
+        user_profile = os.environ.get("USERPROFILE", "")
+        if user_profile:
+            roots.append(pathlib.Path(user_profile))
+        home = pathlib.Path.home()
+        if home not in roots:
+            roots.append(home)
+        for root in roots:
+            candidate = root / "AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log"
+            if candidate.is_file():
+                candidates.append(candidate)
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return str(candidates[0])
+        return _default_player_log_path()
+
+    home = pathlib.Path.home()
+    steam_bases = [
+        home / ".local/share/Steam",
+        home / ".steam/steam",
+        home / ".steam/root",
+        home / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+    ]
+    found: list[pathlib.Path] = []
+    for base in steam_bases:
+        compat = base / "steamapps/compatdata"
+        if not compat.is_dir():
+            continue
+        for p in compat.rglob("Player.log"):
+            s = str(p)
+            if "Wizards Of The Coast/MTGA/Player.log" in s:
+                found.append(p)
+    if found:
+        found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return str(found[0])
+    return _default_player_log_path()
+
+
 def main():
     print("Starting MTG AI Bot...")
 
     # User configuration
     log_path = os.environ.get("MTGA_BOT_LOG_PATH", "")
     if not log_path:
-        home = pathlib.Path.home()
-        steam_bases = [
-            home / ".local/share/Steam",
-            home / ".steam/steam",
-            home / ".steam/root",
-            home / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
-        ]
-        found: list[pathlib.Path] = []
-        for base in steam_bases:
-            compat = base / "steamapps/compatdata"
-            if not compat.is_dir():
-                continue
-            for p in compat.rglob("Player.log"):
-                s = str(p)
-                if "Wizards Of The Coast/MTGA/Player.log" in s:
-                    found.append(p)
-        if found:
-            found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            log_path = str(found[0])
-        else:
-            log_path = "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log"
+        log_path = _detect_player_log_path()
     
     click_targets = {
         "keep_hand": {
@@ -77,7 +109,7 @@ def main():
     try:
         # Initialize components
         print(f"Initializing Controller with log path: {log_path}")
-        input_backend = os.environ.get("MTGA_BOT_INPUT_BACKEND")  # "ydotool" / "pynput" / "auto"
+        input_backend = os.environ.get("MTGA_BOT_INPUT_BACKEND", "pynput")  # "ydotool" / "pynput" / "auto"
         controller = Controller(
             log_path=log_path,
             screen_bounds=screen_bounds,
