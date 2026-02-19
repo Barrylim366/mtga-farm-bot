@@ -3,8 +3,9 @@ import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 from datetime import datetime
 import os
+import sys
 import time
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageStat, ImageTk
 import json
 import threading
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
@@ -13,6 +14,76 @@ from Controller.Utilities.input_controller import InputControllerError, create_i
 from Controller.MTGAController.Controller import Controller
 from AI.DummyAI import DummyAI
 from Game import Game
+
+
+def _default_player_log_path() -> str:
+    home = os.path.expanduser("~")
+    if os.name == "nt":
+        return os.path.join(
+            home,
+            "AppData",
+            "LocalLow",
+            "Wizards Of The Coast",
+            "MTGA",
+            "Player.log",
+        )
+    return os.path.join(
+        home,
+        ".local",
+        "share",
+        "Steam",
+        "steamapps",
+        "compatdata",
+        "2141910",
+        "pfx",
+        "drive_c",
+        "users",
+        "steamuser",
+        "AppData",
+        "LocalLow",
+        "Wizards Of The Coast",
+        "MTGA",
+        "Player.log",
+    )
+
+
+def _app_root_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.abspath(os.path.dirname(sys.executable))
+    return os.path.abspath(os.path.dirname(__file__))
+
+
+def _app_path(*parts: str) -> str:
+    return os.path.join(_app_root_dir(), *parts)
+
+
+def _resource_root_dir() -> str:
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if isinstance(meipass, str) and meipass and os.path.isdir(meipass):
+            return os.path.abspath(meipass)
+    return os.path.abspath(os.path.dirname(__file__))
+
+
+def _resource_path(*parts: str) -> str:
+    return os.path.join(_resource_root_dir(), *parts)
+
+
+def _image_path(filename: str) -> str:
+    candidates = [
+        _resource_path("images", filename),
+        _app_path("images", filename),
+        _resource_path(filename),
+        _app_path(filename),
+    ]
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
 
 
 def _submenu_palette():
@@ -225,11 +296,19 @@ class CalibrationWindow(tk.Toplevel):
         super().__init__(parent)
         self.parent = parent
         self.config_manager = config_manager
-        self.title("Calibration")
-        # Increased height to fit calibration + test controls
-        self.geometry("500x420")
-        self.resizable(True, False)
-        self.configure(bg="#2b2b2b")
+        self.title("Calibrate")
+        width, height = 640, 520
+        gap_px = int(parent.winfo_fpixels("4m"))  # ~0.4 cm
+        parent.update_idletasks()
+        x = parent.winfo_x() + parent.winfo_width() + gap_px
+        y = parent.winfo_y()
+        max_x = max(0, self.winfo_screenwidth() - width)
+        max_y = max(0, self.winfo_screenheight() - height)
+        x = min(max(0, x), max_x)
+        y = min(max(0, y), max_y)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.resizable(False, False)
+        self.configure(bg="#0F1115")
 
         self.is_calibrating = False
         self.mouse_listener = None
@@ -237,25 +316,373 @@ class CalibrationWindow(tk.Toplevel):
         self._pynput = None
         self.current_x = 0
         self.current_y = 0
+        self._theme = {
+            "bg": "#0F1115",
+            "panel_alt": "#341616",
+            "border": "#5D2E34",
+            "text": "#E7EAF0",
+            "text_muted": "#B8A9AE",
+            "value": "#F7E5B1",
+            "ok": "#8FE0B0",
+            "warn": "#F5D07A",
+            "error": "#E38790",
+        }
+        self._bg_source_image = None
+        self._bg_photo = None
+        self._bg_canvas_item = None
+
+        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._canvas.bind("<Configure>", self._on_canvas_resize_background)
+        self._title_item = self._canvas.create_text(
+            0,
+            0,
+            text="Calibrate",
+            fill=self._theme["text"],
+            font=("Segoe UI", 24, "bold"),
+            anchor="n",
+        )
+        self._instruction_item = None
+        self._x_value_item = None
+        self._y_value_item = None
+        self._calibrate_button_name = "calibrate"
+        self._test_button_name = "test_click"
+        self._canvas_buttons = {}
+        self._canvas_button_order = []
+        self._button_skin_cache = {}
 
         self._setup_ui()
-        _apply_submenu_theme(self)
+        self._load_background_image()
+        self.bind("<Configure>", self._on_resize_background)
+        self.after(30, self._refresh_scene)
+        self.after(120, self._refresh_scene)
         self._update_calibration_capabilities()
 
+    def _load_background_image(self):
+        self._bg_source_image = None
+        for path in (_image_path("background"), _image_path("background.png")):
+            if not os.path.exists(path):
+                continue
+            try:
+                with Image.open(path) as image:
+                    self._bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _on_resize_background(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        self._refresh_scene()
+
+    def _on_canvas_resize_background(self, event=None):
+        if event is not None and event.widget is not self._canvas:
+            return
+        self._refresh_scene()
+
+    def _refresh_scene(self):
+        self._refresh_background()
+        self._layout_scene()
+
+    def _refresh_background(self):
+        if self._bg_source_image is None:
+            return
+        width = max(2, self._canvas.winfo_width())
+        height = max(2, self._canvas.winfo_height())
+        try:
+            fitted = ImageOps.fit(
+                self._bg_source_image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._bg_photo = ImageTk.PhotoImage(fitted)
+            if self._bg_canvas_item is None:
+                self._bg_canvas_item = self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+            else:
+                self._canvas.coords(self._bg_canvas_item, 0, 0)
+                self._canvas.itemconfigure(self._bg_canvas_item, image=self._bg_photo)
+            self._canvas.tag_lower(self._bg_canvas_item)
+        except Exception:
+            pass
+
+    def _setup_calibrate_combobox_style(self):
+        c = self._theme
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(
+            "CalibrateFire.TCombobox",
+            fieldbackground=c["panel_alt"],
+            background=c["panel_alt"],
+            foreground=c["text"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            arrowcolor=c["text"],
+            borderwidth=1,
+            padding=4,
+        )
+        style.map(
+            "CalibrateFire.TCombobox",
+            fieldbackground=[("readonly", "#341616")],
+            background=[("readonly", "#341616")],
+            foreground=[("readonly", c["text"])],
+        )
+
+    def _resolve_button_skins(self, style_name: str, body_width: int | None = None, body_height: int | None = None):
+        parent_ui = getattr(self, "master", None)
+        if parent_ui is not None and body_width and body_height:
+            key = (style_name, int(body_width), int(body_height))
+            cached = self._button_skin_cache.get(key)
+            if cached:
+                return cached
+            render_skin = getattr(parent_ui, "_render_button_skin", None)
+            if callable(render_skin):
+                specs = {
+                    "Primary.TButton": {
+                        "normal": ("#2FC07B", "#1F7F4F", "#6AE5A8", "#4DDC98"),
+                        "hover": ("#3AD58A", "#23975A", "#86EDBC", "#64E3AA"),
+                        "pressed": ("#1A6E43", "#145938", "#4FC087", "#2EA86D"),
+                        "disabled": ("#3C4B47", "#2C3835", "#55655F", "#3F504A"),
+                    },
+                    "Secondary.TButton": {
+                        "normal": ("#3B4D74", "#24324D", "#6078A6", "#5E77A8"),
+                        "hover": ("#47608D", "#2B3C5C", "#7E98C6", "#728EBE"),
+                        "pressed": ("#253753", "#1C2940", "#4B628A", "#425A84"),
+                        "disabled": ("#39414F", "#2C3442", "#546078", "#46526A"),
+                    },
+                    "Destructive.TButton": {
+                        "normal": ("#7D3F4A", "#5A2B33", "#A96673", "#985A66"),
+                        "hover": ("#92505C", "#6A343E", "#C07E89", "#AF707B"),
+                        "pressed": ("#5F2E37", "#4A232A", "#8F5560", "#7E474F"),
+                        "disabled": ("#4A3E42", "#3A2F34", "#66575D", "#564A50"),
+                    },
+                }
+                spec = specs.get(style_name) or specs["Secondary.TButton"]
+                radius = max(8, int(int(body_height) * 0.28))
+                skins = {}
+                for state_name in ("normal", "hover", "pressed", "disabled"):
+                    top, bottom, border, glow = spec[state_name]
+                    skins[state_name] = render_skin(int(body_width), int(body_height), radius, top, bottom, border, glow)
+                self._button_skin_cache[key] = skins
+                return skins
+        if parent_ui is not None:
+            skins_all = getattr(parent_ui, "_button_skins", {})
+            skins = skins_all.get(style_name)
+            if skins is None and skins_all:
+                skins = next(iter(skins_all.values()))
+            return skins
+        return None
+
+    def _create_canvas_button(
+        self,
+        name: str,
+        text: str,
+        command,
+        style_name: str = "Secondary.TButton",
+        button_width: int | None = None,
+        button_height: int | None = None,
+    ):
+        skins = self._resolve_button_skins(style_name, button_width, button_height)
+        if not skins:
+            return
+        tag = f"calibrate_btn_{name}"
+        bg_item = self._canvas.create_image(0, 0, anchor="nw", image=skins["normal"], tags=(tag,))
+        text_item = self._canvas.create_text(
+            0,
+            0,
+            text=text,
+            fill="#F2F6FF",
+            font=("Segoe UI", 11, "bold"),
+            anchor="center",
+            tags=(tag,),
+        )
+        self._canvas_buttons[name] = {
+            "command": command,
+            "enabled": True,
+            "hover": False,
+            "pressed": False,
+            "style": style_name,
+            "body_w": int(button_width) if button_width else None,
+            "body_h": int(button_height) if button_height else None,
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "width": int(skins["normal"].width()),
+            "height": int(skins["normal"].height()),
+        }
+        self._canvas_button_order.append(name)
+        self._canvas.tag_bind(tag, "<Enter>", lambda _e, n=name: self._on_canvas_button_enter(n))
+        self._canvas.tag_bind(tag, "<Leave>", lambda _e, n=name: self._on_canvas_button_leave(n))
+        self._canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, n=name: self._on_canvas_button_press(n))
+        self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, n=name: self._on_canvas_button_release(n))
+        self._refresh_canvas_button_state(name)
+
+    def _set_canvas_button_text(self, name: str, text: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        self._canvas.itemconfigure(btn["text_item"], text=text)
+
+    def _set_canvas_button_style(self, name: str, style_name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        skins = self._resolve_button_skins(style_name, btn.get("body_w"), btn.get("body_h"))
+        if not skins:
+            return
+        btn["style"] = style_name
+        btn["skins"] = skins
+        btn["width"] = int(skins["normal"].width())
+        btn["height"] = int(skins["normal"].height())
+        self._refresh_canvas_button_state(name)
+        self._layout_scene()
+
+    def _set_canvas_button_enabled(self, name: str, enabled: bool):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        btn["enabled"] = bool(enabled)
+        if not btn["enabled"]:
+            btn["hover"] = False
+            btn["pressed"] = False
+        self._refresh_canvas_button_state(name)
+
+    def _refresh_canvas_button_state(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        if not btn["enabled"]:
+            state_key = "disabled"
+            text_color = "#A5AFBF"
+        elif btn["pressed"]:
+            state_key = "pressed"
+            text_color = "#FFFFFF"
+        elif btn["hover"]:
+            state_key = "hover"
+            text_color = "#FFFFFF"
+        else:
+            state_key = "normal"
+            text_color = "#F2F6FF"
+        self._canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
+        self._canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _on_canvas_button_enter(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        self._canvas.configure(cursor="hand2")
+        btn["hover"] = True
+        self._refresh_canvas_button_state(name)
+
+    def _on_canvas_button_leave(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        self._canvas.configure(cursor="")
+        btn["hover"] = False
+        btn["pressed"] = False
+        self._refresh_canvas_button_state(name)
+
+    def _on_canvas_button_press(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        btn["pressed"] = True
+        self._refresh_canvas_button_state(name)
+
+    def _on_canvas_button_release(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        should_fire = bool(btn["enabled"] and btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_canvas_button_state(name)
+        if should_fire:
+            try:
+                btn["command"]()
+            except Exception:
+                pass
+
+    def _set_instruction(self, text: str, color: str):
+        if self._instruction_item is None:
+            return
+        self._canvas.itemconfigure(self._instruction_item, text=text, fill=color)
+
+    def _layout_scene(self):
+        if not self._canvas or not self._canvas.winfo_exists():
+            return
+        cw = max(2, int(self._canvas.winfo_width()))
+        self._canvas.coords(self._title_item, cw // 2, 26)
+
+        row1_y = 108
+        row2_y = 324
+        label_x = 42
+        dropdown_x = 170
+        dropdown_w = int(self.dropdown.winfo_width()) if self.dropdown.winfo_width() > 10 else int(self.dropdown.winfo_reqwidth())
+        test_dropdown_w = int(self.test_dropdown.winfo_width()) if self.test_dropdown.winfo_width() > 10 else int(self.test_dropdown.winfo_reqwidth())
+        btn_gap = 12
+
+        self._canvas.coords(self._select_label_item, label_x, row1_y + 18)
+        self._canvas.coords(self._dropdown_window, dropdown_x, row1_y)
+
+        cal_btn = self._canvas_buttons.get(self._calibrate_button_name)
+        if cal_btn:
+            cal_x = dropdown_x + dropdown_w + btn_gap
+            self._canvas.coords(cal_btn["bg_item"], cal_x, row1_y)
+            self._canvas.coords(cal_btn["text_item"], cal_x + cal_btn["width"] // 2, row1_y + cal_btn["height"] // 2 - 2)
+
+        self._canvas.coords(self._x_label_item, 62, 194)
+        self._canvas.coords(self._x_value_item, 108, 194)
+        self._canvas.coords(self._y_label_item, 62, 236)
+        self._canvas.coords(self._y_value_item, 108, 236)
+        self._canvas.coords(self._instruction_item, cw // 2, 280)
+
+        self._canvas.coords(self._test_label_item, label_x, row2_y + 18)
+        self._canvas.coords(self._test_dropdown_window, dropdown_x, row2_y)
+
+        test_btn = self._canvas_buttons.get(self._test_button_name)
+        if test_btn:
+            test_x = dropdown_x + test_dropdown_w + btn_gap
+            self._canvas.coords(test_btn["bg_item"], test_x, row2_y)
+            self._canvas.coords(test_btn["text_item"], test_x + test_btn["width"] // 2, row2_y + test_btn["height"] // 2 - 2)
+
+        save_btn = self._canvas_buttons.get("saved")
+        back_btn = self._canvas_buttons.get("back")
+        if save_btn:
+            action_y = 404
+            if back_btn:
+                total_w = save_btn["width"] + back_btn["width"] + 14
+                start_x = max(14, (cw - total_w) // 2)
+                self._canvas.coords(save_btn["bg_item"], start_x, action_y)
+                self._canvas.coords(
+                    save_btn["text_item"],
+                    start_x + save_btn["width"] // 2,
+                    action_y + save_btn["height"] // 2 - 2,
+                )
+                back_x = start_x + save_btn["width"] + 14
+                self._canvas.coords(back_btn["bg_item"], back_x, action_y)
+                self._canvas.coords(
+                    back_btn["text_item"],
+                    back_x + back_btn["width"] // 2,
+                    action_y + back_btn["height"] // 2 - 2,
+                )
+            else:
+                save_x = max(14, (cw - save_btn["width"]) // 2)
+                self._canvas.coords(save_btn["bg_item"], save_x, action_y)
+                self._canvas.coords(
+                    save_btn["text_item"],
+                    save_x + save_btn["width"] // 2,
+                    action_y + save_btn["height"] // 2 - 2,
+                )
+
     def _setup_ui(self):
-        # Main frame with padding
-        main_frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        c = self._theme
+        self._setup_calibrate_combobox_style()
 
-        # Row 1: Dropdown and Calibrate button
-        row1 = tk.Frame(main_frame, bg="#2b2b2b")
-        row1.pack(fill=tk.X, pady=(0, 20))
-
-        # Label
-        label = tk.Label(row1, text="Select Button:", bg="#2b2b2b", fg="white", font=("Segoe UI", 10))
-        label.pack(side=tk.LEFT, padx=(0, 10))
-
-        # Dropdown for button selection
         self.button_options = [
             "keep_hand",
             "queue_button",
@@ -269,81 +696,94 @@ class CalibrationWindow(tk.Toplevel):
             "log_out_btn",
             "log_out_ok_btn"
         ]
+        self._select_label_item = self._canvas.create_text(
+            0,
+            0,
+            text="Select Button:",
+            fill=c["text"],
+            font=("Segoe UI", 12),
+            anchor="w",
+        )
 
         self.selected_button = tk.StringVar(value=self.button_options[0])
-        self.dropdown = ttk.Combobox(row1, textvariable=self.selected_button,
-                                      values=self.button_options, state="readonly", width=20)
-        self.dropdown.pack(side=tk.LEFT, padx=(0, 10))
-
-        # Calibrate button
-        self.calibrate_btn = ttk.Button(row1, text="Calibrate", command=self._start_calibration)
-        self.calibrate_btn.pack(side=tk.LEFT)
-
-        # Row 2: Coordinate display
-        coord_frame = tk.Frame(main_frame, bg="#3b3b3b", padx=15, pady=15)
-        coord_frame.pack(fill=tk.X, pady=(0, 20))
-
-        # X coordinate
-        x_frame = tk.Frame(coord_frame, bg="#3b3b3b")
-        x_frame.pack(fill=tk.X, pady=5)
-
-        x_label = tk.Label(x_frame, text="X:", bg="#3b3b3b", fg="white",
-                          font=("Segoe UI", 12, "bold"), width=3, anchor="e")
-        x_label.pack(side=tk.LEFT)
-
-        self.x_value = tk.Label(x_frame, text="0", bg="#3b3b3b", fg="#00ff00",
-                                font=("Consolas", 14), width=10, anchor="w")
-        self.x_value.pack(side=tk.LEFT, padx=(10, 0))
-
-        # Y coordinate
-        y_frame = tk.Frame(coord_frame, bg="#3b3b3b")
-        y_frame.pack(fill=tk.X, pady=5)
-
-        y_label = tk.Label(y_frame, text="Y:", bg="#3b3b3b", fg="white",
-                          font=("Segoe UI", 12, "bold"), width=3, anchor="e")
-        y_label.pack(side=tk.LEFT)
-
-        self.y_value = tk.Label(y_frame, text="0", bg="#3b3b3b", fg="#00ff00",
-                                font=("Consolas", 14), width=10, anchor="w")
-        self.y_value.pack(side=tk.LEFT, padx=(10, 0))
-
-        # Row 3: Instructions
-        self.instruction_label = tk.Label(main_frame, text="Select a button and click 'Calibrate'",
-                                          bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 9))
-        self.instruction_label.pack(pady=(0, 15))
-
-        # Row 4: Saved Buttons button
-        self.saved_btn = ttk.Button(main_frame, text="Saved Buttons", command=self._show_saved_buttons)
-        self.saved_btn.pack()
-
-        back_btn = ttk.Button(
-            main_frame,
-            text="Back",
-            command=self.destroy,
+        self.dropdown = ttk.Combobox(
+            self._canvas,
+            textvariable=self.selected_button,
+            values=self.button_options,
+            state="readonly",
+            width=20,
+            style="CalibrateFire.TCombobox",
         )
-        back_btn.pack(pady=(10, 0))
+        self._dropdown_window = self._canvas.create_window(0, 0, anchor="nw", window=self.dropdown)
+        self.update_idletasks()
+        btn_body_w = max(160, int(self.dropdown.winfo_reqwidth()))
+        btn_body_h = max(26, int(self.dropdown.winfo_reqheight()))
+        self._button_body_w = btn_body_w
+        self._button_body_h = btn_body_h
+        self._create_canvas_button(
+            self._calibrate_button_name,
+            "Calibrate",
+            self._start_calibration,
+            "Secondary.TButton",
+            button_width=btn_body_w,
+            button_height=btn_body_h,
+        )
 
-        # Row 5: Test saved coordinate click
-        test_frame = tk.Frame(main_frame, bg="#2b2b2b")
-        test_frame.pack(fill=tk.X, pady=(20, 0))
+        self._x_label_item = self._canvas.create_text(0, 0, text="X:", fill=c["text"], font=("Segoe UI", 14, "bold"), anchor="w")
+        self._x_value_item = self._canvas.create_text(0, 0, text="0", fill=c["value"], font=("Consolas", 16), anchor="w")
+        self._y_label_item = self._canvas.create_text(0, 0, text="Y:", fill=c["text"], font=("Segoe UI", 14, "bold"), anchor="w")
+        self._y_value_item = self._canvas.create_text(0, 0, text="0", fill=c["value"], font=("Consolas", 16), anchor="w")
 
-        test_label = tk.Label(test_frame, text="Test Button:", bg="#2b2b2b", fg="white", font=("Segoe UI", 10))
-        test_label.pack(side=tk.LEFT, padx=(0, 10))
+        self._instruction_item = self._canvas.create_text(
+            0,
+            0,
+            text="Select a button and click 'Calibrate'",
+            fill=c["text_muted"],
+            font=("Segoe UI", 11),
+            anchor="center",
+        )
+
+        self._create_canvas_button(
+            "saved",
+            "Saved Buttons",
+            self._show_saved_buttons,
+            "Secondary.TButton",
+            button_width=btn_body_w,
+            button_height=btn_body_h,
+        )
+        self._create_canvas_button(
+            "back",
+            "Back",
+            self.destroy,
+            "Secondary.TButton",
+            button_width=btn_body_w,
+            button_height=btn_body_h,
+        )
+
+        self._test_label_item = self._canvas.create_text(0, 0, text="Test Button:", fill=c["text"], font=("Segoe UI", 12), anchor="w")
 
         self.test_button_var = tk.StringVar(value=self.button_options[0])
         self.test_dropdown = ttk.Combobox(
-            test_frame, textvariable=self.test_button_var, values=self.button_options, state="readonly", width=20
+            self._canvas,
+            textvariable=self.test_button_var,
+            values=self.button_options,
+            state="readonly",
+            width=20,
+            style="CalibrateFire.TCombobox",
         )
-        self.test_dropdown.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.test_btn = ttk.Button(
-            test_frame,
-            text="Test Click",
-            command=self._test_saved_click,
+        self._test_dropdown_window = self._canvas.create_window(0, 0, anchor="nw", window=self.test_dropdown)
+        self._create_canvas_button(
+            self._test_button_name,
+            "Test Click",
+            self._test_saved_click,
+            "Secondary.TButton",
+            button_width=btn_body_w,
+            button_height=btn_body_h,
         )
-        self.test_btn.pack(side=tk.LEFT)
+        self._layout_scene()
 
     def _update_calibration_capabilities(self):
+        c = self._theme
         # Global calibration requires pynput.
         can_use_pynput = True
         try:
@@ -352,11 +792,10 @@ class CalibrationWindow(tk.Toplevel):
             can_use_pynput = False
 
         if not can_use_pynput:
-            self.calibrate_btn.config(state=tk.DISABLED)
-            self.instruction_label.config(
-                text="Kalibrierung braucht 'pynput'. Bitte installieren.",
-                fg="#ff6666",
-            )
+            self._set_canvas_button_enabled(self._calibrate_button_name, False)
+            self._set_instruction("Calibration requires 'pynput'. Please install it.", c["error"])
+        else:
+            self._set_canvas_button_enabled(self._calibrate_button_name, True)
 
         # Enable test click only when the configured backend can be initialized.
         try:
@@ -364,18 +803,20 @@ class CalibrationWindow(tk.Toplevel):
             screen_bounds = self.config_manager.get_screen_bounds()
             input_controller = create_input_controller(backend)
             input_controller.configure_screen_bounds(screen_bounds)
-            self.test_btn.config(state=tk.NORMAL)
+            self._set_canvas_button_enabled(self._test_button_name, True)
         except Exception:
-            self.test_btn.config(state=tk.DISABLED)
+            self._set_canvas_button_enabled(self._test_button_name, False)
 
     def _start_calibration(self):
+        c = self._theme
         if self.is_calibrating:
             self._stop_calibration()
             return
 
         self.is_calibrating = True
-        self.calibrate_btn.config(text="Stop", style="SubmenuDanger.TButton")
-        self.instruction_label.config(text="Move mouse to target. Press ENTER to save.", fg="#ffff00")
+        self._set_canvas_button_text(self._calibrate_button_name, "Stop")
+        self._set_canvas_button_style(self._calibrate_button_name, "Destructive.TButton")
+        self._set_instruction("Move mouse to target. Press ENTER to save.", c["warn"])
 
         try:
             if self._pynput is None:
@@ -389,15 +830,14 @@ class CalibrationWindow(tk.Toplevel):
             self.keyboard_listener.start()
         except Exception as e:
             self._stop_calibration()
-            self.instruction_label.config(
-                text="Kalibrierung per Live-Tracking nicht verf++gbar.",
-                fg="#ffcc66",
-            )
+            self._set_instruction("Live tracking is unavailable.", c["warn"])
 
     def _stop_calibration(self):
+        c = self._theme
         self.is_calibrating = False
-        self.calibrate_btn.config(text="Calibrate", style="Submenu.TButton")
-        self.instruction_label.config(text="Select a button and click 'Calibrate'", fg="#aaaaaa")
+        self._set_canvas_button_text(self._calibrate_button_name, "Calibrate")
+        self._set_canvas_button_style(self._calibrate_button_name, "Secondary.TButton")
+        self._set_instruction("Select a button and click 'Calibrate'", c["text_muted"])
 
         if self.mouse_listener:
             self.mouse_listener.stop()
@@ -413,8 +853,8 @@ class CalibrationWindow(tk.Toplevel):
         self.after(0, self._update_coordinates)
 
     def _update_coordinates(self):
-        self.x_value.config(text=str(self.current_x))
-        self.y_value.config(text=str(self.current_y))
+        self._canvas.itemconfigure(self._x_value_item, text=str(self.current_x))
+        self._canvas.itemconfigure(self._y_value_item, text=str(self.current_y))
 
     def _on_key_press(self, key):
         if self._pynput is None:
@@ -424,17 +864,19 @@ class CalibrationWindow(tk.Toplevel):
             self._save_coordinates()
 
     def _save_coordinates(self):
+        c = self._theme
         button_name = self.selected_button.get()
         self.config_manager.save_coordinate(button_name, self.current_x, self.current_y)
         self._stop_calibration()
-        self.instruction_label.config(text=f"Saved {button_name}: ({self.current_x}, {self.current_y})", fg="#00ff00")
+        self._set_instruction(f"Saved {button_name}: ({self.current_x}, {self.current_y})", c["ok"])
 
     def _test_saved_click(self):
+        c = self._theme
         button_name = self.test_button_var.get()
         coords = self.config_manager.get_all_coordinates()
         coord = coords.get(button_name)
         if not isinstance(coord, dict) or "x" not in coord or "y" not in coord:
-            self.instruction_label.config(text=f"Kein gespeicherter Punkt f++r '{button_name}'.", fg="#ffcc66")
+            self._set_instruction(f"No saved point for '{button_name}'.", c["warn"])
             return
 
         x, y = int(coord["x"]), int(coord["y"])
@@ -446,11 +888,11 @@ class CalibrationWindow(tk.Toplevel):
             input_controller.configure_screen_bounds(screen_bounds)
             input_controller.move_abs(x, y)
             input_controller.left_click(1)
-            self.instruction_label.config(text=f"Test-Klick: {button_name} ({x}, {y})", fg="#00ff00")
+            self._set_instruction(f"Test click: {button_name} ({x}, {y})", c["ok"])
         except InputControllerError as e:
-            self.instruction_label.config(text=f"Test fehlgeschlagen: {e}", fg="#ff6666")
+            self._set_instruction(f"Test failed: {e}", c["error"])
         except Exception as e:
-            self.instruction_label.config(text=f"Test fehlgeschlagen: {e}", fg="#ff6666")
+            self._set_instruction(f"Test failed: {e}", c["error"])
 
     def _show_saved_buttons(self):
         SavedButtonsWindow(self, self.config_manager)
@@ -559,12 +1001,38 @@ class ConfigManager:
     """Manages loading and saving of calibration configuration"""
 
     def __init__(self, config_path="calibration_config.json"):
-        self.config_path = config_path
+        self.config_path = config_path if os.path.isabs(config_path) else _app_path(config_path)
         self.config = self._load_config()
 
     def _detect_player_log_path(self) -> str:
         candidates: list[str] = []
         home = os.path.expanduser("~")
+
+        if os.name == "nt":
+            windows_roots: list[str] = []
+            user_profile = os.environ.get("USERPROFILE", "")
+            if user_profile:
+                windows_roots.append(user_profile)
+            if home and home not in windows_roots:
+                windows_roots.append(home)
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            if local_app_data:
+                app_data_root = os.path.abspath(os.path.join(local_app_data, os.pardir))
+                user_root = os.path.abspath(os.path.join(app_data_root, os.pardir))
+                if user_root and user_root not in windows_roots:
+                    windows_roots.append(user_root)
+
+            for base in windows_roots:
+                full = os.path.join(
+                    base,
+                    "AppData",
+                    "LocalLow",
+                    "Wizards Of The Coast",
+                    "MTGA",
+                    "Player.log",
+                )
+                if os.path.isfile(full):
+                    candidates.append(full)
 
         steam_bases = [
             os.path.join(home, ".local", "share", "Steam"),
@@ -603,9 +1071,9 @@ class ConfigManager:
     def _default_config(self):
         detected_log = self._detect_player_log_path()
         return {
-            "log_path": detected_log or "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+            "log_path": detected_log or _default_player_log_path(),
             "screen_bounds": [[0, 0], [2560, 1440]],
-            "input_backend": "auto",
+            "input_backend": "pynput",
             "account_switch_minutes": 0,
             "managed_accounts": [],
             "account_cycle_index": 0,
@@ -708,7 +1176,7 @@ class ConfigManager:
         self._save_config()
 
     def _repo_root(self) -> str:
-        return os.path.abspath(os.path.dirname(__file__))
+        return _app_root_dir()
 
     def _accounts_root(self) -> str:
         root = os.path.join(self._repo_root(), "Accounts")
@@ -868,7 +1336,8 @@ class MTGBotUI(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("Red Lotus Bot")
+        self.title("Burning Lotus")
+        self._suppress_tk_default_icon()
         width, height = 460, 780
         x, y = 18, 24
         self.geometry(f"{width}x{height}+{x}+{y}")
@@ -888,9 +1357,21 @@ class MTGBotUI(tk.Tk):
         self.ui_theme = self._build_ui_theme()
         self.configure(bg=self.ui_theme["colors"]["bg"])
         self._style = ttk.Style(self)
+        self._bg_source_image = None
+        self._bg_photo = None
+        self._bg_canvas_item = None
+        self._bg_cache_size = None
+        self._load_main_background_image()
         self._setup_theme_styles()
         self._setup_ui()
         self._setup_stop_hotkey()
+
+    def _suppress_tk_default_icon(self):
+        try:
+            self._blank_icon = tk.PhotoImage(width=1, height=1)
+            self.iconphoto(True, self._blank_icon)
+        except Exception:
+            pass
 
     def _setup_stop_hotkey(self):
         # Global hotkey via pynput (mouse wheel down).
@@ -955,6 +1436,305 @@ class MTGBotUI(tk.Tk):
             },
             "radius": {"card": 18, "button": 13},
         }
+
+    @staticmethod
+    def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+        color = color.lstrip("#")
+        if len(color) != 6:
+            return (0, 0, 0)
+        return tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+
+    @staticmethod
+    def _mix_rgb(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+        t = max(0.0, min(1.0, t))
+        return (
+            int(c1[0] + (c2[0] - c1[0]) * t),
+            int(c1[1] + (c2[1] - c1[1]) * t),
+            int(c1[2] + (c2[2] - c1[2]) * t),
+        )
+
+    def _render_button_skin(
+        self,
+        width: int,
+        height: int,
+        radius: int,
+        top_hex: str,
+        bottom_hex: str,
+        border_hex: str,
+        glow_hex: str,
+    ) -> ImageTk.PhotoImage:
+        glow_pad = 6
+        img_w = width + glow_pad * 2
+        img_h = height + glow_pad * 2
+        base = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+
+        # Soft drop shadow to separate the button from busy backgrounds.
+        shadow = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow)
+        shadow_draw.rounded_rectangle(
+            (glow_pad, glow_pad + 1, glow_pad + width - 1, glow_pad + height),
+            radius=radius,
+            fill=(0, 0, 0, 115),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(4))
+        base = Image.alpha_composite(base, shadow)
+
+        glow = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow)
+        gr, gg, gb = self._hex_to_rgb(glow_hex)
+        glow_draw.rounded_rectangle(
+            (glow_pad, glow_pad, glow_pad + width - 1, glow_pad + height - 1),
+            radius=radius,
+            outline=(gr, gg, gb, 205),
+            width=2,
+        )
+        glow = glow.filter(ImageFilter.GaussianBlur(4))
+        base = Image.alpha_composite(base, glow)
+
+        shape_mask = Image.new("L", (width, height), 0)
+        shape_mask_draw = ImageDraw.Draw(shape_mask)
+        shape_mask_draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
+
+        # Fixed button body color requested by user: #3D130E slightly more transparent.
+        body_fill = Image.new("RGBA", (width, height), (61, 19, 14, 210))
+        base.paste(body_fill, (glow_pad, glow_pad), shape_mask)
+
+        rim = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        rim_draw = ImageDraw.Draw(rim)
+        br, bg, bb = self._hex_to_rgb(border_hex)
+        rim_draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, outline=(br, bg, bb, 245), width=2)
+        rim_draw.rounded_rectangle(
+            (2, 2, width - 3, height - 3),
+            radius=max(2, radius - 2),
+            outline=(255, 255, 255, 92),
+            width=1,
+        )
+        rim_layer = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        rim_layer.paste(rim, (glow_pad, glow_pad), rim)
+        base = Image.alpha_composite(base, rim_layer)
+
+        sheen = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        sheen_draw = ImageDraw.Draw(sheen)
+        half = max(1, height // 2)
+        for y in range(half):
+            alpha = int(96 * (1.0 - (y / half)))
+            sheen_draw.line((2, y + 2, width - 3, y + 2), fill=(255, 255, 255, alpha))
+        for y in range(half, height):
+            t = (y - half) / max(1, (height - half))
+            alpha = int(78 * t)
+            sheen_draw.line((2, y, width - 3, y), fill=(0, 0, 0, alpha))
+        sheen_layer = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        sheen_layer.paste(sheen, (glow_pad, glow_pad), sheen)
+        base = Image.alpha_composite(base, sheen_layer)
+
+        inner = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        inner_draw = ImageDraw.Draw(inner)
+        inner_draw.rounded_rectangle(
+            (1, 1, width - 2, height - 2),
+            radius=max(2, radius - 1),
+            outline=(0, 0, 0, 45),
+            width=1,
+        )
+        inner_layer = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        inner_layer.paste(inner, (glow_pad, glow_pad), inner)
+        base = Image.alpha_composite(base, inner_layer)
+
+        return ImageTk.PhotoImage(base)
+
+    def _install_button_skin_style(self, style_name: str, element_name: str, skins: dict[str, ImageTk.PhotoImage]):
+        try:
+            self._style.element_create(
+                element_name,
+                "image",
+                skins["normal"],
+                ("disabled", skins["disabled"]),
+                ("pressed", skins["pressed"]),
+                ("active", skins["hover"]),
+                border=(22, 16),
+                sticky="nsew",
+            )
+        except tk.TclError:
+            pass
+
+        self._style.layout(
+            style_name,
+            [
+                (
+                    element_name,
+                    {
+                        "sticky": "nsew",
+                        "children": [
+                            (
+                                "Button.padding",
+                                {
+                                    "sticky": "nsew",
+                                    "children": [("Button.label", {"sticky": "nsew"})],
+                                },
+                            )
+                        ],
+                    },
+                )
+            ],
+        )
+        self._style.configure(
+            style_name,
+            padding=(0, 0),
+            borderwidth=0,
+            relief="flat",
+            anchor="center",
+            foreground="#F2F6FF",
+            font=self.ui_theme["font"]["button"],
+        )
+        self._style.map(
+            style_name,
+            foreground=[
+                ("disabled", "#A5AFBF"),
+                ("pressed", "#FFFFFF"),
+                ("active", "#FFFFFF"),
+            ],
+        )
+
+    def _setup_main_menu_button_skins(self):
+        width = 336
+        height = 48
+        radius = 14
+        specs = {
+            "Primary.TButton": {
+                "element": "MainPrimaryGlow.button",
+                "normal": ("#2FC07B", "#1F7F4F", "#6AE5A8", "#4DDC98"),
+                "hover": ("#3AD58A", "#23975A", "#86EDBC", "#64E3AA"),
+                "pressed": ("#1A6E43", "#145938", "#4FC087", "#2EA86D"),
+                "disabled": ("#3C4B47", "#2C3835", "#55655F", "#3F504A"),
+            },
+            "Secondary.TButton": {
+                "element": "MainSecondaryGlow.button",
+                "normal": ("#3B4D74", "#24324D", "#6078A6", "#5E77A8"),
+                "hover": ("#47608D", "#2B3C5C", "#7E98C6", "#728EBE"),
+                "pressed": ("#253753", "#1C2940", "#4B628A", "#425A84"),
+                "disabled": ("#39414F", "#2C3442", "#546078", "#46526A"),
+            },
+            "Destructive.TButton": {
+                "element": "MainDangerGlow.button",
+                "normal": ("#7D3F4A", "#5A2B33", "#A96673", "#985A66"),
+                "hover": ("#92505C", "#6A343E", "#C07E89", "#AF707B"),
+                "pressed": ("#5F2E37", "#4A232A", "#8F5560", "#7E474F"),
+                "disabled": ("#4A3E42", "#3A2F34", "#66575D", "#564A50"),
+            },
+        }
+
+        self._button_skins = {}
+        for style_name, spec in specs.items():
+            states = {}
+            for state_name in ("normal", "hover", "pressed", "disabled"):
+                top, bottom, border, glow = spec[state_name]
+                states[state_name] = self._render_button_skin(width, height, radius, top, bottom, border, glow)
+            self._button_skins[style_name] = states
+            self._install_button_skin_style(style_name, spec["element"], states)
+
+    def _create_canvas_menu_button(
+        self,
+        name: str,
+        text: str,
+        style_name: str,
+        command,
+        enabled: bool = True,
+    ) -> None:
+        skins = self._button_skins[style_name]
+        tag = f"main_btn_{name}"
+        bg_item = self._card_canvas.create_image(0, 0, anchor="n", image=skins["normal"], tags=(tag,))
+        text_item = self._card_canvas.create_text(
+            0,
+            0,
+            text=text,
+            fill="#F2F6FF",
+            font=self.ui_theme["font"]["button"],
+            anchor="center",
+            tags=(tag,),
+        )
+        self._menu_buttons[name] = {
+            "style": style_name,
+            "command": command,
+            "enabled": bool(enabled),
+            "hover": False,
+            "pressed": False,
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "width": int(skins["normal"].width()),
+            "height": int(skins["normal"].height()),
+        }
+        self._menu_button_order.append(name)
+        self._card_canvas.tag_bind(tag, "<Enter>", lambda _e, n=name: self._on_canvas_menu_button_enter(n))
+        self._card_canvas.tag_bind(tag, "<Leave>", lambda _e, n=name: self._on_canvas_menu_button_leave(n))
+        self._card_canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, n=name: self._on_canvas_menu_button_press(n))
+        self._card_canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, n=name: self._on_canvas_menu_button_release(n))
+        self._refresh_canvas_menu_button_state(name)
+
+    def _refresh_canvas_menu_button_state(self, name: str) -> None:
+        btn = self._menu_buttons.get(name)
+        if not btn:
+            return
+        if not btn["enabled"]:
+            state_key = "disabled"
+            text_color = "#A5AFBF"
+        elif btn["pressed"]:
+            state_key = "pressed"
+            text_color = "#FFFFFF"
+        elif btn["hover"]:
+            state_key = "hover"
+            text_color = "#FFFFFF"
+        else:
+            state_key = "normal"
+            text_color = "#F2F6FF"
+
+        self._card_canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
+        self._card_canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _set_canvas_menu_button_enabled(self, name: str, enabled: bool) -> None:
+        btn = self._menu_buttons.get(name)
+        if not btn:
+            return
+        btn["enabled"] = bool(enabled)
+        btn["hover"] = False
+        btn["pressed"] = False
+        self._refresh_canvas_menu_button_state(name)
+
+    def _on_canvas_menu_button_enter(self, name: str) -> None:
+        btn = self._menu_buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        self._card_canvas.configure(cursor="hand2")
+        btn["hover"] = True
+        self._refresh_canvas_menu_button_state(name)
+
+    def _on_canvas_menu_button_leave(self, name: str) -> None:
+        btn = self._menu_buttons.get(name)
+        if not btn:
+            return
+        self._card_canvas.configure(cursor="")
+        btn["hover"] = False
+        btn["pressed"] = False
+        self._refresh_canvas_menu_button_state(name)
+
+    def _on_canvas_menu_button_press(self, name: str) -> None:
+        btn = self._menu_buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        btn["pressed"] = True
+        self._refresh_canvas_menu_button_state(name)
+
+    def _on_canvas_menu_button_release(self, name: str) -> None:
+        btn = self._menu_buttons.get(name)
+        if not btn:
+            return
+        should_fire = bool(btn["enabled"] and btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_canvas_menu_button_state(name)
+        if should_fire:
+            try:
+                btn["command"]()
+            except Exception:
+                pass
 
     def _setup_theme_styles(self):
         c = self.ui_theme["colors"]
@@ -1034,189 +1814,220 @@ class MTGBotUI(tk.Tk):
         style.configure("Primary.TButton", font=f["button"])
         style.configure("Secondary.TButton", font=f["button"])
         style.configure("Destructive.TButton", font=f["button"])
+        self._setup_main_menu_button_skins()
+
+    def _load_main_background_image(self):
+        self._bg_source_image = None
+        bg_candidates = [
+            _image_path("background"),
+            _image_path("background.png"),
+        ]
+        for bg_path in bg_candidates:
+            if not os.path.exists(bg_path):
+                continue
+            try:
+                with Image.open(bg_path) as bg_image:
+                    self._bg_source_image = bg_image.convert("RGB")
+                return
+            except Exception:
+                continue
+
+    def _refresh_canvas_background(self, canvas_w: int, canvas_h: int):
+        if self._bg_source_image is None:
+            return
+        if canvas_w <= 1 or canvas_h <= 1:
+            return
+
+        target_size = (canvas_w, canvas_h)
+        if self._bg_cache_size != target_size or self._bg_photo is None:
+            fitted_bg = ImageOps.fit(
+                self._bg_source_image,
+                target_size,
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._bg_photo = ImageTk.PhotoImage(fitted_bg)
+            self._bg_cache_size = target_size
+
+        if self._bg_canvas_item is None:
+            self._bg_canvas_item = self._card_canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+        else:
+            self._card_canvas.coords(self._bg_canvas_item, 0, 0)
+            self._card_canvas.itemconfigure(self._bg_canvas_item, image=self._bg_photo)
+        self._card_canvas.tag_lower(self._bg_canvas_item)
 
     def _setup_ui(self):
         c = self.ui_theme["colors"]
         sp = self.ui_theme["spacing"]
         size = self.ui_theme["size"]
 
-        # Match canvas to card surface so no darker outer rim is visible.
+        # Start page content sits directly on the background canvas (no inner card panel).
         self._card_canvas = tk.Canvas(self, bg=c["surface"], highlightthickness=0, bd=0)
         self._card_canvas.pack(fill=tk.BOTH, expand=True)
-        self._card_frame = ttk.Frame(self._card_canvas, style="Card.TFrame", padding=sp["card_pad"])
-        self._card_window = self._card_canvas.create_window(0, 0, anchor="nw", window=self._card_frame, width=size["card_width"])
-        self._card_bg = None
-
-        card = self._card_frame
-
-        logo_wrap = ttk.Frame(card, style="Card.TFrame")
-        logo_wrap.pack(fill=tk.X, pady=(0, 6))
 
         try:
-            logo_path = os.path.join(os.path.dirname(__file__), "ui_symbol.png")
+            logo_path = _image_path("ui_symbol.png")
             logo_image = Image.open(logo_path).convert("RGBA")
             target_size = (size["logo"], size["logo"])
             fitted_logo = ImageOps.contain(logo_image, target_size, Image.Resampling.LANCZOS)
-            bg_rgb = tuple(int(c["surface"].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)) + (255,)
-            composed_logo = Image.new("RGBA", target_size, bg_rgb)
+            composed_logo = Image.new("RGBA", target_size, (0, 0, 0, 0))
             x = (target_size[0] - fitted_logo.width) // 2
             y = (target_size[1] - fitted_logo.height) // 2
             composed_logo.alpha_composite(fitted_logo, dest=(x, y))
             self.logo_photo = ImageTk.PhotoImage(composed_logo)
-            logo_label = ttk.Label(logo_wrap, image=self.logo_photo, style="Body.TLabel")
-            logo_label.pack()
+            self._logo_item = self._card_canvas.create_image(0, 0, image=self.logo_photo, anchor="n")
+            self._logo_fallback_item = None
         except Exception:
-            logo_label = ttk.Label(logo_wrap, text="MTG", style="Title.TLabel")
-            logo_label.pack()
+            self._logo_item = None
+            self._logo_fallback_item = self._card_canvas.create_text(
+                0,
+                0,
+                text="MTG",
+                fill=c["text"],
+                font=self.ui_theme["font"]["title"],
+                anchor="n",
+            )
 
-        title_label = ttk.Label(card, text="Red Lotus Bot", style="Title.TLabel", anchor="center")
-        title_label.pack(fill=tk.X, pady=(0, sp["lg"]))
-
-        buttons_frame = ttk.Frame(card, style="Card.TFrame")
-        buttons_frame.pack(fill=tk.X, pady=(0, sp["md"]))
-
-        btn_width = size["button_width"]
-        gap = 13
-
-        self.start_btn = ttk.Button(
-            buttons_frame,
-            text="Start Bot",
-            command=self._start_bot,
-            style="Primary.TButton",
-            width=btn_width,
+        self._title_item = self._card_canvas.create_text(
+            0,
+            0,
+            text="Burning Lotus",
+            fill=c["text"],
+            font=self.ui_theme["font"]["title"],
+            anchor="n",
         )
-        self.start_btn.pack(fill=tk.X, pady=(0, gap))
 
-        self.stop_btn = ttk.Button(
-            buttons_frame,
-            text="Stop Bot [Wheel Down]",
-            command=self._stop_bot,
-            style="Destructive.TButton",
-            width=btn_width,
-            state=tk.DISABLED,
-        )
-        self.stop_btn.pack(fill=tk.X, pady=(0, gap))
+        self._menu_buttons: dict[str, dict] = {}
+        self._menu_button_order: list[str] = []
+        self._create_canvas_menu_button("start", "Start Bot", "Primary.TButton", self._start_bot, enabled=True)
+        self._create_canvas_menu_button("stop", "Stop Bot [Wheel Down]", "Destructive.TButton", self._stop_bot, enabled=False)
+        self._create_canvas_menu_button("calibrate", "Calibrate", "Secondary.TButton", self._open_calibration, enabled=True)
+        self._create_canvas_menu_button("current_session", "Current Session", "Secondary.TButton", self._open_current_session, enabled=True)
+        self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
-        self.calibrate_btn = ttk.Button(
-            buttons_frame,
-            text="Calibrate",
-            command=self._open_calibration,
-            style="Secondary.TButton",
-            width=btn_width,
-        )
-        self.calibrate_btn.pack(fill=tk.X, pady=(0, gap))
-
-        self.current_session_btn = ttk.Button(
-            buttons_frame,
-            text="Current Session",
-            command=self._open_current_session,
-            style="Secondary.TButton",
-            width=btn_width,
-        )
-        self.current_session_btn.pack(fill=tk.X, pady=(0, gap))
-
-        self.settings_btn = ttk.Button(
-            buttons_frame,
-            text="Settings",
-            command=self._open_settings,
-            style="Secondary.TButton",
-            width=btn_width,
-        )
-        self.settings_btn.pack(fill=tk.X)
-
-        self.loading_frame = ttk.Frame(card, style="Card.TFrame")
-        self.loading_label = ttk.Label(
-            self.loading_frame,
+        self._loading_text_item = self._card_canvas.create_text(
+            0,
+            0,
             text="Loading Carddata",
-            style="Muted.TLabel",
-            anchor="center",
+            fill=c["text_muted"],
+            font=self.ui_theme["font"]["body"],
+            anchor="n",
         )
-        self.loading_label.pack(fill=tk.X, pady=(0, sp["xs"]))
         self.loading_bar = ttk.Progressbar(
-            self.loading_frame,
+            self._card_canvas,
             mode="indeterminate",
             style="Card.Horizontal.TProgressbar",
         )
-        self.loading_bar.pack(fill=tk.X)
+        self._loading_bar_window = self._card_canvas.create_window(0, 0, anchor="n", window=self.loading_bar)
+        self._loading_visible = False
 
-        status_frame = ttk.Frame(card, style="Card.TFrame")
-        status_frame.pack(fill=tk.X, pady=(sp["lg"], 0))
-
-        self.status_pill = tk.Label(
-            status_frame,
+        self._status_text_item = self._card_canvas.create_text(
+            0,
+            0,
             text="Status: Stopped",
-            bg=c["surface"],
-            fg=c["status_stopped_text"],
+            fill=c["status_stopped_text"],
             font=self.ui_theme["font"]["body"],
-            padx=0,
-            pady=0,
-            highlightthickness=0,
-            bd=0,
+            anchor="n",
         )
-        self.status_pill.pack()
 
         self._card_canvas.bind("<Configure>", lambda _e: self._refresh_card_layout())
         self.after(0, self._refresh_card_layout)
         self._set_startup_loading(False)
         self._set_running_state(False)
 
-    def _rounded_rect_points(self, x1, y1, x2, y2, r):
-        return [
-            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
-            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
-            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
-        ]
-
     def _refresh_card_layout(self):
         if not hasattr(self, "_card_canvas"):
             return
-        c = self.ui_theme["colors"]
         sp = self.ui_theme["spacing"]
         size = self.ui_theme["size"]
-        radius = self.ui_theme["radius"]["card"]
 
         canvas_w = self._card_canvas.winfo_width()
         canvas_h = self._card_canvas.winfo_height()
         if canvas_w <= 1 or canvas_h <= 1:
             return
+        self._refresh_canvas_background(canvas_w, canvas_h)
 
-        card_w = min(size["card_width"], max(320, canvas_w - sp["outer_margin"] * 2))
-        self._card_canvas.itemconfigure(self._card_window, width=card_w)
         self.update_idletasks()
-        card_h = self._card_frame.winfo_reqheight()
-        x = (canvas_w - card_w) // 2
-        y = max(sp["outer_margin"], (canvas_h - card_h) // 2)
-        self._card_canvas.coords(self._card_window, x, y)
 
-        if self._card_bg:
-            self._card_canvas.delete(self._card_bg)
+        center_x = canvas_w // 2
+        button_gap = 13
 
-        bg_pts = self._rounded_rect_points(x, y, x + card_w, y + card_h, radius)
-        self._card_bg = self._card_canvas.create_polygon(
-            bg_pts, smooth=True, splinesteps=36, fill=c["surface"], outline=""
-        )
-        self._card_canvas.tag_raise(self._card_window)
+        menu_buttons = [self._menu_buttons[name] for name in self._menu_button_order if name in self._menu_buttons]
+        btn_h = max((btn["height"] for btn in menu_buttons), default=52)
+        btn_w = max((btn["width"] for btn in menu_buttons), default=336)
+        self._card_canvas.itemconfigure(self._loading_bar_window, width=max(240, btn_w - 14))
+
+        title_font = tkfont.Font(font=self.ui_theme["font"]["title"])
+        body_font = tkfont.Font(font=self.ui_theme["font"]["body"])
+        title_h = title_font.metrics("linespace")
+        body_h = body_font.metrics("linespace")
+        logo_h = size["logo"] if self._logo_item is not None else title_h
+        loading_bar_h = self.loading_bar.winfo_reqheight()
+
+        total_h = logo_h + 6 + title_h + sp["lg"]
+        total_h += (btn_h * len(menu_buttons)) + (button_gap * max(0, len(menu_buttons) - 1))
+        if self._loading_visible:
+            total_h += body_h + sp["xs"] + loading_bar_h + sp["md"]
+        total_h += sp["lg"] + body_h
+
+        y = max(sp["outer_margin"], (canvas_h - total_h) // 2)
+
+        if self._logo_item is not None:
+            self._card_canvas.coords(self._logo_item, center_x, y)
+            y += logo_h + 6
+            if self._logo_fallback_item is not None:
+                self._card_canvas.itemconfigure(self._logo_fallback_item, state="hidden")
+        else:
+            if self._logo_fallback_item is not None:
+                self._card_canvas.itemconfigure(self._logo_fallback_item, state="normal")
+                self._card_canvas.coords(self._logo_fallback_item, center_x, y)
+            y += logo_h + 6
+
+        self._card_canvas.coords(self._title_item, center_x, y)
+        y += title_h + sp["lg"]
+
+        for idx, name in enumerate(self._menu_button_order):
+            btn = self._menu_buttons.get(name)
+            if not btn:
+                continue
+            self._card_canvas.coords(btn["bg_item"], center_x, y)
+            self._card_canvas.coords(btn["text_item"], center_x, y + (btn["height"] // 2))
+            is_last = idx == (len(self._menu_button_order) - 1)
+            y += btn_h + (sp["lg"] if is_last else button_gap)
+
+        if self._loading_visible:
+            self._card_canvas.itemconfigure(self._loading_text_item, state="normal")
+            self._card_canvas.itemconfigure(self._loading_bar_window, state="normal")
+            self._card_canvas.coords(self._loading_text_item, center_x, y)
+            y += body_h + sp["xs"]
+            self._card_canvas.coords(self._loading_bar_window, center_x, y)
+            y += loading_bar_h + sp["md"]
+        else:
+            self._card_canvas.itemconfigure(self._loading_text_item, state="hidden")
+            self._card_canvas.itemconfigure(self._loading_bar_window, state="hidden")
+
+        self._card_canvas.coords(self._status_text_item, center_x, y)
 
     def _set_running_state(self, running: bool):
         c = self.ui_theme["colors"]
         if running:
-            self.start_btn.state(["disabled"])
-            self.stop_btn.state(["!disabled"])
-            self.calibrate_btn.state(["disabled"])
-            self.status_pill.configure(
+            self._set_canvas_menu_button_enabled("start", False)
+            self._set_canvas_menu_button_enabled("stop", True)
+            self._set_canvas_menu_button_enabled("calibrate", False)
+            self._card_canvas.itemconfigure(
+                self._status_text_item,
                 text="Status: Running",
-                bg=c["surface"],
-                fg=c["pill_running_text"],
+                fill=c["pill_running_text"],
             )
             return
 
-        self.start_btn.state(["!disabled"])
-        self.stop_btn.state(["disabled"])
-        self.calibrate_btn.state(["!disabled"])
-        self.status_pill.configure(
+        self._set_canvas_menu_button_enabled("start", True)
+        self._set_canvas_menu_button_enabled("stop", False)
+        self._set_canvas_menu_button_enabled("calibrate", True)
+        self._card_canvas.itemconfigure(
+            self._status_text_item,
             text="Status: Stopped",
-            bg=c["surface"],
-            fg=c["status_stopped_text"],
+            fill=c["status_stopped_text"],
         )
         self._switch_eta_text = self._get_configured_switch_eta_text()
 
@@ -1231,14 +2042,15 @@ class MTGBotUI(tk.Tk):
         return f"{minutes} Min till Account Switch"
 
     def _set_startup_loading(self, loading: bool):
-        if not hasattr(self, "loading_frame"):
+        if not hasattr(self, "loading_bar"):
             return
         if loading:
-            self.loading_frame.pack(fill=tk.X, pady=(0, self.ui_theme["spacing"]["md"]))
+            self._loading_visible = True
             self.loading_bar.start(12)
+            self._refresh_card_layout()
             return
+        self._loading_visible = False
         self.loading_bar.stop()
-        self.loading_frame.pack_forget()
         self._refresh_card_layout()
 
     def _start_bot(self):
@@ -1295,7 +2107,8 @@ class MTGBotUI(tk.Tk):
                 time.sleep(1)
 
         except Exception as e:
-            self.after(0, lambda: self._handle_bot_error(str(e)))
+            err_msg = str(e)
+            self.after(0, lambda msg=err_msg: self._handle_bot_error(msg))
 
     def _handle_bot_error(self, error_msg):
         self._stop_bot()
@@ -1361,7 +2174,7 @@ class CurrentSessionWindow(tk.Toplevel):
     def __init__(self, parent, games: int, wins: int):
         super().__init__(parent)
         self.title("Current Session")
-        width, height = 460, 220
+        width, height = 460, 320
         gap_px = int(parent.winfo_fpixels("5m"))  # ~5 mm
         parent.update_idletasks()
         x = parent.winfo_x()
@@ -1370,49 +2183,226 @@ class CurrentSessionWindow(tk.Toplevel):
         y = min(y, max_y)
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
-        self.configure(bg="#2b2b2b")
+        self.configure(bg="#0F1115")
+        self._theme = {
+            "bg": "#0F1115",
+            "text": "#E7EAF0",
+            "text_muted": "#B8A9AE",
+            "value": "#F7E5B1",
+        }
+        self._bg_source_image = None
+        self._bg_photo = None
+        self._bg_canvas_item = None
+        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._canvas.bind("<Configure>", self._on_canvas_resize_background)
 
-        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        title = tk.Label(frame, text="Current session", bg="#2b2b2b", fg="white",
-                         font=("Segoe UI", 12, "bold"))
-        title.pack(pady=(0, 12))
-
-        stats_frame = tk.Frame(frame, bg="#2b2b2b")
-        stats_frame.pack(fill=tk.X)
-
-        self.switch_eta_label = tk.Label(stats_frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
-        self.switch_eta_label.pack(anchor="w", pady=4)
-
-        self.games_label = tk.Label(stats_frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
-        self.games_label.pack(anchor="w", pady=4)
-
-        self.wins_label = tk.Label(stats_frame, text="", bg="#2b2b2b", fg="#00ff00", font=("Consolas", 12))
-        self.wins_label.pack(anchor="w", pady=4)
-
-        back_btn = ttk.Button(
-            frame,
-            text="Back",
-            command=self.destroy,
+        self._title_item = self._canvas.create_text(
+            0,
+            0,
+            text="Current Session",
+            fill=self._theme["text"],
+            font=("Segoe UI", 24, "bold"),
+            anchor="n",
         )
-        back_btn.pack(anchor="w", pady=(12, 0))
+        self._switch_eta_item = self._canvas.create_text(
+            0,
+            0,
+            text="",
+            fill=self._theme["value"],
+            font=("Consolas", 12),
+            anchor="w",
+        )
+        self._games_item = self._canvas.create_text(
+            0,
+            0,
+            text="",
+            fill=self._theme["value"],
+            font=("Consolas", 12),
+            anchor="w",
+        )
+        self._wins_item = self._canvas.create_text(
+            0,
+            0,
+            text="",
+            fill=self._theme["value"],
+            font=("Consolas", 12),
+            anchor="w",
+        )
+        self._back_btn = None
+
+        self._load_background_image()
+        self.bind("<Configure>", self._on_resize_background)
+        self._create_back_button()
 
         self.update_stats(games, wins, "Account switch: off")
-        _apply_submenu_theme(self)
+        self.after(40, self._refresh_scene)
+        self.after(160, self._refresh_scene)
+
+    def _load_background_image(self):
+        self._bg_source_image = None
+        for path in (_image_path("background"), _image_path("background.png")):
+            if not os.path.exists(path):
+                continue
+            try:
+                with Image.open(path) as image:
+                    self._bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _on_resize_background(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        self._refresh_scene()
+
+    def _on_canvas_resize_background(self, event=None):
+        if event is not None and event.widget is not self._canvas:
+            return
+        self._refresh_scene()
+
+    def _refresh_scene(self):
+        self._refresh_background()
+        self._layout_scene()
+
+    def _refresh_background(self):
+        if self._bg_source_image is None:
+            return
+        width = max(2, self._canvas.winfo_width())
+        height = max(2, self._canvas.winfo_height())
+        try:
+            fitted = ImageOps.fit(
+                self._bg_source_image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._bg_photo = ImageTk.PhotoImage(fitted)
+            if self._bg_canvas_item is None:
+                self._bg_canvas_item = self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+            else:
+                self._canvas.coords(self._bg_canvas_item, 0, 0)
+                self._canvas.itemconfigure(self._bg_canvas_item, image=self._bg_photo)
+            self._canvas.tag_lower(self._bg_canvas_item)
+        except Exception:
+            pass
+
+    def _create_back_button(self):
+        parent_ui = getattr(self, "master", None)
+        skins = None
+        if parent_ui is not None:
+            skins_all = getattr(parent_ui, "_button_skins", {})
+            skins = skins_all.get("Secondary.TButton")
+            if skins is None and skins_all:
+                skins = next(iter(skins_all.values()))
+        if not skins:
+            return
+
+        tag = "current_session_back_btn"
+        bg_item = self._canvas.create_image(0, 0, anchor="n", image=skins["normal"], tags=(tag,))
+        text_item = self._canvas.create_text(
+            0,
+            0,
+            text="Back",
+            fill="#F2F6FF",
+            font=("Segoe UI", 11, "bold"),
+            anchor="center",
+            tags=(tag,),
+        )
+        self._back_btn = {
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "hover": False,
+            "pressed": False,
+            "enabled": True,
+            "width": int(skins["normal"].width()),
+            "height": int(skins["normal"].height()),
+        }
+        self._canvas.tag_bind(tag, "<Enter>", self._on_back_enter)
+        self._canvas.tag_bind(tag, "<Leave>", self._on_back_leave)
+        self._canvas.tag_bind(tag, "<ButtonPress-1>", self._on_back_press)
+        self._canvas.tag_bind(tag, "<ButtonRelease-1>", self._on_back_release)
+        self._refresh_back_button_state()
+
+    def _refresh_back_button_state(self):
+        btn = self._back_btn
+        if not btn:
+            return
+        if not btn["enabled"]:
+            state_key = "disabled"
+            text_color = "#A5AFBF"
+        elif btn["pressed"]:
+            state_key = "pressed"
+            text_color = "#FFFFFF"
+        elif btn["hover"]:
+            state_key = "hover"
+            text_color = "#FFFFFF"
+        else:
+            state_key = "normal"
+            text_color = "#F2F6FF"
+        self._canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
+        self._canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _on_back_enter(self, _event=None):
+        btn = self._back_btn
+        if not btn or not btn["enabled"]:
+            return
+        self._canvas.configure(cursor="hand2")
+        btn["hover"] = True
+        self._refresh_back_button_state()
+
+    def _on_back_leave(self, _event=None):
+        btn = self._back_btn
+        if not btn:
+            return
+        self._canvas.configure(cursor="")
+        btn["hover"] = False
+        btn["pressed"] = False
+        self._refresh_back_button_state()
+
+    def _on_back_press(self, _event=None):
+        btn = self._back_btn
+        if not btn or not btn["enabled"]:
+            return
+        btn["pressed"] = True
+        self._refresh_back_button_state()
+
+    def _on_back_release(self, _event=None):
+        btn = self._back_btn
+        if not btn:
+            return
+        should_close = bool(btn["enabled"] and btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_back_button_state()
+        if should_close:
+            self.destroy()
+
+    def _layout_scene(self):
+        if not self._canvas or not self._canvas.winfo_exists():
+            return
+        cw = max(2, int(self._canvas.winfo_width()))
+        self._canvas.coords(self._title_item, cw // 2, 30)
+        self._canvas.coords(self._switch_eta_item, 36, 122)
+        self._canvas.coords(self._games_item, 36, 164)
+        self._canvas.coords(self._wins_item, 36, 206)
+        if self._back_btn:
+            y = 238
+            self._canvas.coords(self._back_btn["bg_item"], cw // 2, y)
+            self._canvas.coords(self._back_btn["text_item"], cw // 2, y + self._back_btn["height"] // 2 - 2)
 
     def update_stats(self, games: int, wins: int, switch_eta_text: str | None = None):
         if switch_eta_text is not None:
-            self.switch_eta_label.config(text=switch_eta_text)
-        self.games_label.config(text=f"Games played: {games}")
-        self.wins_label.config(text=f"Win: {wins}")
+            self._canvas.itemconfigure(self._switch_eta_item, text=switch_eta_text)
+        self._canvas.itemconfigure(self._games_item, text=f"Games played: {games}")
+        self._canvas.itemconfigure(self._wins_item, text=f"Win: {wins}")
 
 
 class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, config_manager: ConfigManager):
         super().__init__(parent)
         self.title("Settings")
-        width, height = 460, 230
+        width, height = 460, 430
         gap_px = int(parent.winfo_fpixels("5m"))  # ~5 mm
         parent.update_idletasks()
         x = parent.winfo_x()
@@ -1421,7 +2411,7 @@ class SettingsWindow(tk.Toplevel):
         y = min(y, max_y)
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
-        self.configure(bg="#2b2b2b")
+        self.configure(bg="#0F1115")
         self._config_manager = config_manager
         self._recording = False
         self._record_ignore_first = False
@@ -1431,90 +2421,295 @@ class SettingsWindow(tk.Toplevel):
         self._playback_keyboard_listener = None
         self._playback_stop_event = threading.Event()
         self._current_record_events = []
-        self._records_path = os.path.join(os.path.dirname(__file__), "recorded_actions_records.json")
+        self._records_path = _app_path("recorded_actions_records.json")
         self._switch_save_job = None
         self.record_btn = None
         self.show_records_btn = None
+        self._theme = {
+            "bg": "#0F1115",
+            "text": "#E7EAF0",
+            "text_muted": "#9AA3B2",
+            "button_bg": "#3D130E",
+            "button_hover": "#4A1A14",
+            "button_active": "#32100C",
+            "button_border": "#4B628A",
+            "button_border_active": "#728EBE",
+        }
+        self._settings_bg_source_image = None
+        self._settings_bg_photo = None
+        self._settings_bg_canvas_item = None
+        self._settings_canvas = None
+        self._title_item = None
 
-        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
-        frame.pack(fill=tk.BOTH, expand=True)
+        self._load_settings_background_image()
+        self._build_settings_shell()
+        self.bind("<Configure>", self._on_settings_configure)
+        self.after(40, self._refresh_settings_scene)
+        self.after(160, self._refresh_settings_scene)
 
-        style = ttk.Style(self)
+    def _load_settings_background_image(self):
+        self._settings_bg_source_image = None
+        for path in (_image_path("background"), _image_path("background.png")):
+            if not os.path.exists(path):
+                continue
+            try:
+                with Image.open(path) as image:
+                    self._settings_bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _on_settings_configure(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        self._refresh_settings_scene()
+
+    def _refresh_settings_scene(self):
+        self._refresh_settings_background()
+        self._layout_settings_canvas()
+
+    def _refresh_settings_background(self):
+        if not self._settings_canvas or not self._settings_canvas.winfo_exists():
+            return
+        width = max(2, self._settings_canvas.winfo_width())
+        height = max(2, self._settings_canvas.winfo_height())
+        if self._settings_bg_source_image is None:
+            self._settings_canvas.configure(bg=self._theme["bg"])
+            return
         try:
-            style.theme_use("clam")
+            fitted = ImageOps.fit(
+                self._settings_bg_source_image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._settings_bg_photo = ImageTk.PhotoImage(fitted)
+            if self._settings_bg_canvas_item is None:
+                self._settings_bg_canvas_item = self._settings_canvas.create_image(
+                    0, 0, anchor="nw", image=self._settings_bg_photo
+                )
+            else:
+                self._settings_canvas.coords(self._settings_bg_canvas_item, 0, 0)
+                self._settings_canvas.itemconfigure(self._settings_bg_canvas_item, image=self._settings_bg_photo)
+            self._settings_canvas.tag_lower(self._settings_bg_canvas_item)
         except Exception:
             pass
-        style.configure(
-            "Dark.TCombobox",
-            fieldbackground="#1e1e1e",
-            background="#3a3a3a",
-            foreground="white",
-            bordercolor="#2b2b2b",
-            lightcolor="#2b2b2b",
-            darkcolor="#2b2b2b",
-            arrowcolor="white",
+
+    def _build_settings_shell(self):
+        c = self._theme
+        self._settings_canvas = tk.Canvas(
+            self,
+            bg=c["bg"],
+            highlightthickness=0,
+            bd=0,
         )
-        style.map(
-            "Dark.TCombobox",
-            fieldbackground=[("readonly", "#1e1e1e")],
-            background=[("readonly", "#3a3a3a")],
-            foreground=[("readonly", "white")],
-        )
-        style.configure(
-            "Manage.TButton",
-            font=("Segoe UI", 10),
-            padding=(12, 4),
-            foreground="white",
-            background="#3a3a3a",
-            borderwidth=0,
-            relief="flat",
-        )
-        style.map(
-            "Manage.TButton",
-            background=[("pressed", "#323232"), ("active", "#444444")],
-        )
-        style.configure(
-            "ManagePrimary.TButton",
-            font=("Segoe UI", 10),
-            padding=(12, 4),
-            foreground="white",
-            background="#3a3a3a",
-            borderwidth=0,
-            relief="flat",
-        )
-        style.map(
-            "ManagePrimary.TButton",
-            background=[("pressed", "#323232"), ("active", "#444444")],
+        self._settings_canvas.pack(fill=tk.BOTH, expand=True)
+
+        self._title_item = self._settings_canvas.create_text(
+            0,
+            0,
+            text="Settings",
+            fill=c["text"],
+            font=("Segoe UI", 24, "bold"),
+            anchor="n",
         )
 
-        manage_row = tk.Frame(frame, bg="#2b2b2b")
-        manage_row.pack(fill=tk.X)
-
-        manage_btn = ttk.Button(
-            manage_row,
-            text="Manage Accounts",
-            command=self._open_switch_account_window,
+        self._settings_buttons = {}
+        self._settings_button_order = []
+        self._create_settings_canvas_button(
+            "manage",
+            "Manage Accounts",
+            self._open_switch_account_window,
+            style_name="Secondary.TButton",
         )
-        manage_btn.pack(side=tk.LEFT)
-
-        record_row = tk.Frame(frame, bg="#2b2b2b")
-        record_row.pack(fill=tk.X, pady=(12, 0))
-
-        record_btn = ttk.Button(
-            record_row,
-            text="Record Action",
-            command=self._open_record_actions_window,
+        self._create_settings_canvas_button(
+            "record",
+            "Record Action",
+            self._open_record_actions_window,
+            style_name="Secondary.TButton",
         )
-        record_btn.pack(side=tk.LEFT)
-
-        back_btn = ttk.Button(
-            frame,
-            text="Back",
-            command=self.destroy,
+        self._create_settings_canvas_button(
+            "back",
+            "Back",
+            self.destroy,
+            style_name="Secondary.TButton",
         )
-        back_btn.pack(anchor="w", pady=(12, 0))
+        self._layout_settings_canvas()
 
-        _apply_submenu_theme(self)
+    def _create_settings_canvas_button(self, name: str, text: str, command, style_name: str = "Secondary.TButton") -> None:
+        parent_ui = getattr(self, "master", None)
+        skins = None
+        if parent_ui is not None:
+            skins_all = getattr(parent_ui, "_button_skins", {})
+            skins = skins_all.get(style_name)
+            if skins is None and skins_all:
+                skins = next(iter(skins_all.values()))
+        if not skins:
+            width = 336
+            height = 48
+            tag = f"settings_btn_{name}"
+            bg_item = self._settings_canvas.create_rectangle(
+                0,
+                0,
+                width,
+                height,
+                fill=self._theme["button_bg"],
+                outline=self._theme["button_border"],
+                width=1,
+                tags=(tag,),
+            )
+            text_item = self._settings_canvas.create_text(
+                0,
+                0,
+                text=text,
+                fill="#F2F6FF",
+                font=("Segoe UI", 11, "bold"),
+                anchor="center",
+                tags=(tag,),
+            )
+            self._settings_buttons[name] = {
+                "command": command,
+                "enabled": True,
+                "hover": False,
+                "pressed": False,
+                "skins": None,
+                "bg_item": bg_item,
+                "text_item": text_item,
+                "width": width,
+                "height": height,
+            }
+            self._settings_button_order.append(name)
+            self._settings_canvas.tag_bind(tag, "<Enter>", lambda _e, n=name: self._on_settings_button_enter(n))
+            self._settings_canvas.tag_bind(tag, "<Leave>", lambda _e, n=name: self._on_settings_button_leave(n))
+            self._settings_canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, n=name: self._on_settings_button_press(n))
+            self._settings_canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, n=name: self._on_settings_button_release(n))
+            self._refresh_settings_canvas_button_state(name)
+            return
+
+        tag = f"settings_btn_{name}"
+        bg_item = self._settings_canvas.create_image(0, 0, anchor="n", image=skins["normal"], tags=(tag,))
+        text_item = self._settings_canvas.create_text(
+            0,
+            0,
+            text=text,
+            fill="#F2F6FF",
+            font=("Segoe UI", 11, "bold"),
+            anchor="center",
+            tags=(tag,),
+        )
+        self._settings_buttons[name] = {
+            "command": command,
+            "enabled": True,
+            "hover": False,
+            "pressed": False,
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "width": int(skins["normal"].width()),
+            "height": int(skins["normal"].height()),
+        }
+        self._settings_button_order.append(name)
+
+        self._settings_canvas.tag_bind(tag, "<Enter>", lambda _e, n=name: self._on_settings_button_enter(n))
+        self._settings_canvas.tag_bind(tag, "<Leave>", lambda _e, n=name: self._on_settings_button_leave(n))
+        self._settings_canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, n=name: self._on_settings_button_press(n))
+        self._settings_canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, n=name: self._on_settings_button_release(n))
+        self._refresh_settings_canvas_button_state(name)
+
+    def _refresh_settings_canvas_button_state(self, name: str) -> None:
+        btn = self._settings_buttons.get(name)
+        if not btn:
+            return
+        if not btn["enabled"]:
+            state_key = "disabled"
+            text_color = "#A5AFBF"
+        elif btn["pressed"]:
+            state_key = "pressed"
+            text_color = "#FFFFFF"
+        elif btn["hover"]:
+            state_key = "hover"
+            text_color = "#FFFFFF"
+        else:
+            state_key = "normal"
+            text_color = "#F2F6FF"
+        if btn["skins"]:
+            self._settings_canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
+        else:
+            fill_color = self._theme["button_bg"]
+            outline_color = self._theme["button_border"]
+            if not btn["enabled"]:
+                fill_color = "#2A1210"
+                outline_color = "#5A3F3A"
+            elif btn["pressed"]:
+                fill_color = self._theme["button_active"]
+                outline_color = self._theme["button_border_active"]
+            elif btn["hover"]:
+                fill_color = self._theme["button_hover"]
+                outline_color = self._theme["button_border_active"]
+            self._settings_canvas.itemconfigure(btn["bg_item"], fill=fill_color, outline=outline_color)
+        self._settings_canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _on_settings_button_enter(self, name: str) -> None:
+        btn = self._settings_buttons.get(name)
+        if not btn:
+            return
+        self._settings_canvas.configure(cursor="hand2")
+        btn["hover"] = True
+        self._refresh_settings_canvas_button_state(name)
+
+    def _on_settings_button_leave(self, name: str) -> None:
+        btn = self._settings_buttons.get(name)
+        if not btn:
+            return
+        self._settings_canvas.configure(cursor="")
+        btn["hover"] = False
+        btn["pressed"] = False
+        self._refresh_settings_canvas_button_state(name)
+
+    def _on_settings_button_press(self, name: str) -> None:
+        btn = self._settings_buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        btn["pressed"] = True
+        self._refresh_settings_canvas_button_state(name)
+
+    def _on_settings_button_release(self, name: str) -> None:
+        btn = self._settings_buttons.get(name)
+        if not btn:
+            return
+        should_fire = bool(btn["enabled"] and btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_settings_canvas_button_state(name)
+        if should_fire:
+            try:
+                btn["command"]()
+            except Exception:
+                pass
+
+    def _layout_settings_canvas(self):
+        if not hasattr(self, "_settings_canvas"):
+            return
+        cw = max(10, int(self._settings_canvas.winfo_width()))
+        if self._title_item is not None:
+            self._settings_canvas.coords(self._title_item, cw // 2, 34)
+
+        if not getattr(self, "_settings_button_order", None):
+            return
+        x = cw // 2
+        y_start = 116
+        y_step = 76
+        for idx, name in enumerate(self._settings_button_order):
+            btn = self._settings_buttons.get(name)
+            if not btn:
+                continue
+            y = y_start + idx * y_step
+            if btn["skins"]:
+                self._settings_canvas.coords(btn["bg_item"], x, y)
+            else:
+                w = btn["width"]
+                h = btn["height"]
+                self._settings_canvas.coords(btn["bg_item"], x - (w // 2), y, x + (w // 2), y + h)
+            self._settings_canvas.coords(btn["text_item"], x, y + btn["height"] // 2 - 2)
 
     def _record_actions_prompt(self):
         if self._recording:
@@ -1814,242 +3009,667 @@ class SwitchAccountWindow(tk.Toplevel):
         super().__init__(parent)
         self._parent = parent
         self._config_manager = config_manager
+        self._theme = {
+            "bg": "#0F1115",
+            "panel": "#121923",
+            "panel_alt": "#182231",
+            "panel_hover": "#223145",
+            "border": "#2E3B50",
+            "widget_border": "#3A4A63",
+            "table_border": "#2A3548",
+            "text": "#E7EAF0",
+            "text_muted": "#9AA3B2",
+            "accent": "#2FC07B",
+            "accent_hover": "#3AD58A",
+            "accent_pressed": "#1A6E43",
+            "entry_bg": "#0F1115",
+            "badge_bg": "#12301F",
+            "badge_text": "#8FE0B0",
+            "button_bg": "#1B2230",
+            "button_hover": "#253041",
+            "button_active": "#202838",
+            "button_border": "#4B628A",
+            "button_border_active": "#728EBE",
+            "row_bg": "#0F1115",
+            "row_selected_bg": "#151E2B",
+            "row_selected_text": "#F2F6FF",
+        }
         self.title("Manage Accounts")
-        self.geometry("920x720")
+        width, height = 900, 980
+        gap_px = int(parent.winfo_fpixels("5m"))
+        parent.update_idletasks()
+        x = parent.winfo_x()
+        y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        max_y = max(0, self.winfo_screenheight() - height)
+        y = min(y, max_y)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
-        self.configure(bg="#2b2b2b")
+        self.configure(bg=self._theme["bg"])
+
+        self._max_accounts = 10
+        self._order_slots = 5
+
         self._order_combos = []
         self._order_vars = []
-        self._account_rows = []
+        self._accounts_data = []
+        self._table_rows = []
+        self._selected_account_idx = 0
 
-        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
-        frame.pack(fill=tk.BOTH, expand=True)
+        self._manage_bg_source_image = None
+        self._manage_bg_photo = None
+        self._bg_canvas_item = None
+        self._heading_bg_images = {}
+        self._translucent_widgets = []
+        self._content = None
+        self._title_label = None
+        self._accounts_title_label = None
+        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._canvas.bind("<Configure>", self._on_resize_manage_background)
 
+        self._load_accounts_from_config()
+        self._setup_styles()
+        self._build_ui()
+        self._load_manage_background_image()
+        self.after(40, self._refresh_manage_background)
+        self.after(160, self._refresh_manage_background)
+        self.after(420, self._refresh_manage_background)
+        self._refresh_accounts_table()
+        self._populate_details_fields()
+        self._refresh_order_choices()
+
+    def _load_accounts_from_config(self):
+        existing = self._config_manager.get_managed_accounts()[: self._max_accounts]
+        self._accounts_data = []
+        for idx in range(self._max_accounts):
+            account = existing[idx] if idx < len(existing) else {}
+            self._accounts_data.append(
+                {
+                    "name": str(account.get("name", "")),
+                    "email": str(account.get("email", "")),
+                    "pw": str(account.get("pw", "")),
+                    "folder": str(account.get("folder", "")),
+                }
+            )
+        for idx, account in enumerate(self._accounts_data):
+            if account["name"] or account["email"] or account["pw"]:
+                self._selected_account_idx = idx
+                break
+
+    def _setup_styles(self):
+        c = self._theme
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except Exception:
             pass
         style.configure(
-            "Dark.TCombobox",
-            fieldbackground="#1e1e1e",
-            background="#3a3a3a",
-            foreground="white",
-            bordercolor="#2b2b2b",
-            lightcolor="#2b2b2b",
-            darkcolor="#2b2b2b",
-            arrowcolor="white",
+            "ManageFire.TCombobox",
+            fieldbackground="#3D130E",
+            background="#3D130E",
+            foreground=c["text"],
+            bordercolor="#3D130E",
+            lightcolor="#3D130E",
+            darkcolor="#3D130E",
+            arrowcolor=c["text"],
+            borderwidth=0,
+            padding=0,
         )
         style.map(
-            "Dark.TCombobox",
-            fieldbackground=[("readonly", "#1e1e1e")],
-            background=[("readonly", "#3a3a3a")],
-            foreground=[("readonly", "white")],
+            "ManageFire.TCombobox",
+            fieldbackground=[("readonly", "#3D130E")],
+            background=[("readonly", "#3D130E")],
+            foreground=[("readonly", c["text"])],
         )
 
-        title = tk.Label(
-            frame,
-            text="Manage Accounts",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 12, "bold"),
+    def _load_manage_background_image(self):
+        self._manage_bg_source_image = None
+        candidates = [
+            _image_path("background"),
+            _image_path("background.png"),
+        ]
+        for bg_path in candidates:
+            if not os.path.exists(bg_path):
+                continue
+            try:
+                with Image.open(bg_path) as image:
+                    self._manage_bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _on_resize_manage_background(self, _event=None):
+        self._refresh_manage_background()
+
+    def _fit_window_to_content_width(self):
+        try:
+            self.update_idletasks()
+            max_right = 0
+            max_bottom = 0
+            for widget in self.winfo_children():
+                if widget is self._background_label:
+                    continue
+                if not widget.winfo_ismapped():
+                    continue
+                right = int(widget.winfo_x()) + int(widget.winfo_width())
+                bottom = int(widget.winfo_y()) + int(widget.winfo_height())
+                if right > max_right:
+                    max_right = right
+                if bottom > max_bottom:
+                    max_bottom = bottom
+            if max_right <= 0:
+                return
+            target_width = max_right + 24
+            target_height = max(900, max_bottom + 40)
+            self.geometry(f"{target_width}x{target_height}")
+        except Exception:
+            pass
+
+    def _refresh_manage_background(self):
+        if self._manage_bg_source_image is None:
+            return
+        width = max(2, self._canvas.winfo_width())
+        height = max(2, self._canvas.winfo_height())
+        try:
+            fitted = ImageOps.fit(
+                self._manage_bg_source_image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._manage_bg_photo = ImageTk.PhotoImage(fitted)
+            if self._bg_canvas_item is None:
+                self._bg_canvas_item = self._canvas.create_image(0, 0, anchor="nw", image=self._manage_bg_photo)
+            else:
+                self._canvas.coords(self._bg_canvas_item, 0, 0)
+                self._canvas.itemconfigure(self._bg_canvas_item, image=self._manage_bg_photo)
+            self._canvas.tag_lower(self._bg_canvas_item)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _hex_to_rgb(hex_color: str):
+        c = (hex_color or "").lstrip("#")
+        if len(c) != 6:
+            return (0, 0, 0)
+        return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+
+    @staticmethod
+    def _rgb_to_hex(rgb):
+        r, g, b = [max(0, min(255, int(v))) for v in rgb]
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    @staticmethod
+    def _mix_rgb(base_rgb, sample_rgb, base_weight: float):
+        t = max(0.0, min(1.0, float(base_weight)))
+        return (
+            int(base_rgb[0] * t + sample_rgb[0] * (1.0 - t)),
+            int(base_rgb[1] * t + sample_rgb[1] * (1.0 - t)),
+            int(base_rgb[2] * t + sample_rgb[2] * (1.0 - t)),
         )
-        title.pack(anchor="w", pady=(0, 10))
 
-        switch_row = tk.Frame(frame, bg="#2b2b2b")
-        switch_row.pack(fill=tk.X, pady=(0, 12))
+    def _sample_bg_rgb_for_widget(self, image, widget):
+        x0 = max(0, int(widget.winfo_rootx() - self.winfo_rootx()))
+        y0 = max(0, int(widget.winfo_rooty() - self.winfo_rooty()))
+        x1 = min(image.width, x0 + max(1, int(widget.winfo_width())))
+        y1 = min(image.height, y0 + max(1, int(widget.winfo_height())))
+        if x1 <= x0 or y1 <= y0:
+            return self._hex_to_rgb(self._theme["bg"])
+        region = image.crop((x0, y0, x1, y1)).convert("RGB")
+        stat = ImageStat.Stat(region)
+        return tuple(int(v) for v in stat.mean[:3])
 
-        switch_label = tk.Label(
-            switch_row,
-            text="Switch account (min)",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10),
+    def _register_translucent(self, widget, base_key: str = "panel", base_weight: float = 0.78):
+        if widget is None:
+            return
+        self._translucent_widgets.append((widget, base_key, base_weight))
+
+    def _apply_translucent_backgrounds(self, fitted_image):
+        if fitted_image is None:
+            return
+        for widget, _base_key, _weight in list(self._translucent_widgets):
+            if widget is None or not widget.winfo_exists():
+                continue
+            try:
+                sample_rgb = self._sample_bg_rgb_for_widget(fitted_image, widget)
+                color = self._rgb_to_hex(sample_rgb)
+                if isinstance(widget, tk.Entry):
+                    widget.configure(bg=color, insertbackground=self._theme["text"])
+                elif isinstance(widget, tk.Checkbutton):
+                    widget.configure(bg=color, activebackground=color)
+                else:
+                    widget.configure(bg=color)
+            except Exception:
+                continue
+
+    def _blend_heading_labels_with_background(self, fitted_image):
+        return
+
+    def _resolve_manage_button_skins(self, primary: bool, body_w: int, body_h: int):
+        key = ("primary" if primary else "secondary", int(body_w), int(body_h))
+        cache = getattr(self, "_manage_button_skin_cache", None)
+        if cache is None:
+            self._manage_button_skin_cache = {}
+            cache = self._manage_button_skin_cache
+        if key in cache:
+            return cache[key]
+
+        parent_ui = getattr(self._parent, "master", None)
+        render_skin = getattr(parent_ui, "_render_button_skin", None) if parent_ui is not None else None
+        if not callable(render_skin):
+            return None
+
+        if primary:
+            spec = {
+                "normal": ("#8A2D2D", "#5E1E1E", "#8F3A3A", "#742C2C"),
+                "hover": ("#A23838", "#6F2525", "#A64646", "#8A3333"),
+                "pressed": ("#6A2323", "#4F1818", "#6D2A2A", "#5A2121"),
+                "disabled": ("#4A3030", "#3A2525", "#5A3A3A", "#4A2E2E"),
+            }
+        else:
+            spec = {
+                "normal": ("#6E2A2A", "#4B1D1D", "#6F3333", "#5E2626"),
+                "hover": ("#873333", "#5A2323", "#884040", "#733030"),
+                "pressed": ("#572121", "#3E1717", "#5A2A2A", "#4A1E1E"),
+                "disabled": ("#453030", "#352424", "#564040", "#463434"),
+            }
+
+        radius = max(10, int(body_h * 0.28))
+        skins = {}
+        for state_name in ("normal", "hover", "pressed", "disabled"):
+            top, bottom, border, glow = spec[state_name]
+            skins[state_name] = render_skin(int(body_w), int(body_h), radius, top, bottom, border, glow)
+        cache[key] = skins
+        return skins
+
+    def _create_manage_canvas_button(
+        self,
+        name: str,
+        text: str,
+        x: int,
+        y: int,
+        body_w: int,
+        body_h: int,
+        command,
+        primary: bool,
+    ):
+        skins = self._resolve_manage_button_skins(primary=primary, body_w=body_w, body_h=body_h)
+        if not skins:
+            return
+        tag = f"manage_btn_{name}"
+        bg_item = self._canvas.create_image(x, y, anchor="nw", image=skins["normal"], tags=(tag,))
+        text_item = self._canvas.create_text(
+            x + (skins["normal"].width() // 2),
+            y + (skins["normal"].height() // 2) - 2,
+            text=text,
+            fill="#F2F6FF",
+            font=("Segoe UI", 11, "bold"),
+            anchor="center",
+            tags=(tag,),
         )
-        switch_label.pack(side=tk.LEFT)
+        self._canvas_buttons[name] = {
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "command": command,
+            "enabled": True,
+            "hover": False,
+            "pressed": False,
+        }
 
-        self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
-        switch_entry = tk.Entry(
-            switch_row,
-            textvariable=self.switch_minutes_var,
-            width=6,
-            bg="#1e1e1e",
-            fg="white",
-            insertbackground="white",
+        self._canvas.tag_bind(tag, "<Enter>", lambda _e, n=name: self._on_manage_button_enter(n))
+        self._canvas.tag_bind(tag, "<Leave>", lambda _e, n=name: self._on_manage_button_leave(n))
+        self._canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, n=name: self._on_manage_button_press(n))
+        self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, n=name: self._on_manage_button_release(n))
+        self._refresh_manage_button_state(name)
+
+    def _refresh_manage_button_state(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        if not btn["enabled"]:
+            state = "disabled"
+            color = "#A5AFBF"
+        elif btn["pressed"]:
+            state = "pressed"
+            color = "#FFFFFF"
+        elif btn["hover"]:
+            state = "hover"
+            color = "#FFFFFF"
+        else:
+            state = "normal"
+            color = "#F2F6FF"
+        self._canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state])
+        self._canvas.itemconfigure(btn["text_item"], fill=color)
+
+    def _on_manage_button_enter(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        self._canvas.configure(cursor="hand2")
+        btn["hover"] = True
+        self._refresh_manage_button_state(name)
+
+    def _on_manage_button_leave(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        self._canvas.configure(cursor="")
+        btn["hover"] = False
+        btn["pressed"] = False
+        self._refresh_manage_button_state(name)
+
+    def _on_manage_button_press(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        btn["pressed"] = True
+        self._refresh_manage_button_state(name)
+
+    def _on_manage_button_release(self, name: str):
+        btn = self._canvas_buttons.get(name)
+        if not btn:
+            return
+        should_fire = bool(btn["enabled"] and btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_manage_button_state(name)
+        if should_fire:
+            try:
+                btn["command"]()
+            except Exception:
+                pass
+
+    def _make_entry(self, parent, textvariable=None, width=16, show=None):
+        c = self._theme
+        entry = tk.Entry(
+            parent,
+            textvariable=textvariable,
+            width=width,
+            show=show,
+            bg=c["bg"],
+            fg=c["text"],
+            insertbackground=c["text"],
+            bd=0,
             relief=tk.FLAT,
-        )
-        switch_entry.pack(side=tk.LEFT, padx=(10, 6))
-        switch_entry.bind("<Return>", lambda _e: self._save_switch_minutes())
-
-        switch_hint = tk.Label(
-            switch_row,
-            text="0 = off",
-            bg="#2b2b2b",
-            fg="#aaaaaa",
-            font=("Segoe UI", 9),
-        )
-        switch_hint.pack(side=tk.LEFT, padx=(6, 0))
-
-        switch_save = ttk.Button(
-            switch_row,
-            text="Save",
-            command=self._save_switch_minutes,
-            style="ManagePrimary.TButton",
-        )
-        switch_save.pack(side=tk.LEFT, padx=(10, 0))
-
-        accounts_title = tk.Label(
-            frame,
-            text="Accounts (max 10)",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10, "bold"),
-        )
-        accounts_title.pack(anchor="w")
-
-        header = tk.Frame(frame, bg="#2b2b2b")
-        header.pack(fill=tk.X, pady=(6, 0))
-        tk.Label(header, text="#", width=3, bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        tk.Label(header, text="Name", width=18, anchor="w", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(6, 6))
-        tk.Label(header, text="Email", width=35, anchor="w", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Label(header, text="Password", width=24, anchor="w", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
-
-        rows_wrap = tk.Frame(frame, bg="#2b2b2b")
-        rows_wrap.pack(fill=tk.X, pady=(2, 0))
-
-        existing_accounts = self._config_manager.get_managed_accounts()
-        existing_accounts = existing_accounts[:10]
-        for idx in range(10):
-            row = tk.Frame(rows_wrap, bg="#2b2b2b")
-            row.pack(fill=tk.X, pady=2)
-            tk.Label(
-                row,
-                text=str(idx + 1),
-                width=3,
-                bg="#2b2b2b",
-                fg="#aaaaaa",
-                font=("Segoe UI", 9),
-            ).pack(side=tk.LEFT)
-
-            account = existing_accounts[idx] if idx < len(existing_accounts) else {}
-            name_var = tk.StringVar(value=str(account.get("name", "")))
-            email_var = tk.StringVar(value=str(account.get("email", "")))
-            pw_var = tk.StringVar(value=str(account.get("pw", "")))
-
-            name_entry = tk.Entry(
-                row,
-                textvariable=name_var,
-                width=20,
-                bg="#1e1e1e",
-                fg="white",
-                insertbackground="white",
-                relief=tk.FLAT,
-            )
-            name_entry.pack(side=tk.LEFT, padx=(6, 6))
-
-            email_entry = tk.Entry(
-                row,
-                textvariable=email_var,
-                width=38,
-                bg="#1e1e1e",
-                fg="white",
-                insertbackground="white",
-                relief=tk.FLAT,
-            )
-            email_entry.pack(side=tk.LEFT, padx=(0, 6))
-
-            pw_entry = tk.Entry(
-                row,
-                textvariable=pw_var,
-                show="*",
-                width=26,
-                bg="#1e1e1e",
-                fg="white",
-                insertbackground="white",
-                relief=tk.FLAT,
-            )
-            pw_entry.pack(side=tk.LEFT, padx=(0, 6))
-
-            self._account_rows.append({
-                "name_var": name_var,
-                "email_var": email_var,
-                "pw_var": pw_var,
-                "folder": str(account.get("folder", "")),
-            })
-
-        save_accounts_btn = ttk.Button(
-            frame,
-            text="Save Accounts",
-            command=self._save_accounts,
-            style="Manage.TButton",
-        )
-        save_accounts_btn.pack(anchor="w", pady=(10, 0))
-
-        sep = tk.Frame(frame, bg="#4a4a4a", height=1)
-        sep.pack(fill=tk.X, pady=(12, 10))
-
-        order_row = tk.Frame(frame, bg="#2b2b2b")
-        order_row.pack(fill=tk.X)
-
-        order_label = tk.Label(
-            order_row,
-            text="Account Play Order",
-            bg="#2b2b2b",
-            fg="white",
+            highlightthickness=0,
             font=("Segoe UI", 10),
         )
-        order_label.pack(side=tk.LEFT)
+        return entry
 
-        order_inner = tk.Frame(order_row, bg="#2b2b2b")
-        order_inner.pack(side=tk.LEFT, padx=(10, 0))
+    def _make_button(self, parent, text, command, primary=False, width=12):
+        c = self._theme
+        bg = c["accent_pressed"] if primary else c["button_bg"]
+        hover = c["accent"] if primary else c["button_hover"]
+        btn = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            bg=bg,
+            fg=c["text"],
+            activebackground=hover,
+            activeforeground=c["text"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=0,
+            padx=8,
+            pady=5,
+            font=("Segoe UI", 11, "bold"),
+            cursor="hand2",
+        )
+        return btn
 
-        order_choices = [""] + [acc.get("name", "") for acc in existing_accounts if acc.get("name")]
+    def _build_ui(self):
+        c = self._theme
+        cv = self._canvas
+        self._content = cv
+        self._canvas_buttons = {}
+        self._manage_button_skin_cache = {}
+
+        cv.create_text(18, 18, text="Manage Accounts", fill=c["text"], font=("Segoe UI", 24, "bold"), anchor="nw")
+
+        cv.create_text(18, 82, text="Switch account (min)", fill=c["text"], font=("Segoe UI", 12), anchor="nw")
+        self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
+        switch_entry = self._make_entry(self, textvariable=self.switch_minutes_var, width=6)
+        switch_entry.bind("<Return>", lambda _e: self._save_switch_minutes())
+        cv.create_window(170, 84, anchor="nw", window=switch_entry)
+        cv.create_text(236, 82, text="0 = off", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+        self._create_manage_canvas_button(
+            name="save_switch",
+            text="Save",
+            x=340,
+            y=76,
+            body_w=120,
+            body_h=40,
+            command=self._save_switch_minutes,
+            primary=True,
+        )
+
+        cv.create_text(18, 128, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 15, "bold"), anchor="nw")
+        cv.create_text(18, 164, text="#", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+        cv.create_text(54, 164, text="Name", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+        cv.create_text(200, 164, text="Email", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+
+        cv.create_text(430, 164, text="Account Details", fill=c["text"], font=("Segoe UI", 12, "bold"), anchor="nw")
+
+        self._table_rows = []
+        row_y_start = 196
+        row_step = 36
+        for idx in range(self._max_accounts):
+            y = row_y_start + idx * row_step
+            tag = f"acct_row_{idx}"
+            idx_item = cv.create_text(18, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw", tags=(tag,))
+            name_item = cv.create_text(54, y, text="", fill=c["text"], font=("Segoe UI", 11, "bold"), anchor="nw", tags=(tag,))
+            email_item = cv.create_text(200, y, text="", fill=c["text"], font=("Segoe UI", 11), anchor="nw", tags=(tag,))
+            badge_item = cv.create_text(396, y, text="", fill=c["badge_text"], font=("Segoe UI", 9, "bold"), anchor="nw", tags=(tag,))
+            cv.tag_bind(tag, "<Button-1>", lambda _e, i=idx: self._select_account_row(i))
+            cv.tag_bind(tag, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
+            cv.tag_bind(tag, "<Leave>", lambda _e: cv.configure(cursor=""))
+            self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item, "badge": badge_item})
+
+        cv.create_text(430, 208, text="Name:", fill=c["text"], font=("Segoe UI", 11), anchor="nw")
+        self._detail_name_var = tk.StringVar()
+        self._detail_name_entry = self._make_entry(self, textvariable=self._detail_name_var, width=24)
+        cv.create_window(430, 236, anchor="nw", window=self._detail_name_entry)
+
+        cv.create_text(430, 274, text="Email:", fill=c["text"], font=("Segoe UI", 11), anchor="nw")
+        self._detail_email_var = tk.StringVar()
+        self._detail_email_entry = self._make_entry(self, textvariable=self._detail_email_var, width=24)
+        cv.create_window(430, 302, anchor="nw", window=self._detail_email_entry)
+
+        cv.create_text(430, 340, text="Password:", fill=c["text"], font=("Segoe UI", 11), anchor="nw")
+        self._detail_pw_var = tk.StringVar()
+        self._detail_pw_entry = self._make_entry(self, textvariable=self._detail_pw_var, width=24, show="*")
+        cv.create_window(430, 368, anchor="nw", window=self._detail_pw_entry)
+
+        self._remember_pw_var = tk.BooleanVar(value=True)
+        remember = tk.Checkbutton(
+            self,
+            text="Remember password",
+            variable=self._remember_pw_var,
+            onvalue=True,
+            offvalue=False,
+            bg=c["bg"],
+            fg=c["text_muted"],
+            activebackground=c["bg"],
+            activeforeground=c["text"],
+            selectcolor=c["bg"],
+            highlightthickness=0,
+            bd=0,
+            font=("Segoe UI", 10),
+        )
+        cv.create_window(430, 400, anchor="nw", window=remember)
+
+        self._create_manage_canvas_button(
+            name="save_account",
+            text="Save Account",
+            x=430,
+            y=448,
+            body_w=220,
+            body_h=40,
+            command=self._save_selected_account,
+            primary=True,
+        )
+        self._create_manage_canvas_button(
+            name="close_details",
+            text="Close",
+            x=430,
+            y=516,
+            body_w=220,
+            body_h=40,
+            command=self.destroy,
+            primary=False,
+        )
+
+        self._create_manage_canvas_button(
+            name="save_accounts",
+            text="Save Accounts",
+            x=18,
+            y=584,
+            body_w=160,
+            body_h=40,
+            command=self._save_accounts,
+            primary=False,
+        )
+
+        cv.create_text(18, 652, text="Account Play Order", fill=c["text"], font=("Segoe UI", 12), anchor="nw")
         current_order = self._config_manager.get_account_play_order()
-        current_order = current_order[:10] + [""] * 10
-
-        for idx in range(10):
-            num_label = tk.Label(
-                order_inner,
-                text=str(idx + 1),
-                bg="#2b2b2b",
-                fg="#aaaaaa",
-                font=("Segoe UI", 9),
-                width=2,
-            )
-            row_i = idx % 5
-            col_i = idx // 5
-            num_label.grid(row=row_i, column=col_i * 2, sticky="w", padx=(0, 2), pady=2)
-
+        self._order_vars = []
+        self._order_combos = []
+        for idx in range(self._order_slots):
+            y = 652 + idx * 38
+            cv.create_text(210, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
-                order_inner,
+                self,
                 textvariable=var,
-                values=order_choices,
+                values=[],
                 state="readonly",
-                width=18,
+                width=17,
             )
-            combo.configure(style="Dark.TCombobox")
-            combo.grid(row=row_i, column=col_i * 2 + 1, sticky="w", padx=(0, 12), pady=2)
+            combo.configure(style="ManageFire.TCombobox")
+            cv.create_window(230, y - 2, anchor="nw", window=combo)
             self._order_vars.append(var)
             self._order_combos.append(combo)
 
-        save_order_btn = ttk.Button(
-            frame,
+        self._create_manage_canvas_button(
+            name="save_order",
             text="Save Order",
+            x=18,
+            y=836,
+            body_w=140,
+            body_h=40,
             command=self._save_account_play_order,
-            style="Manage.TButton",
+            primary=False,
         )
-        save_order_btn.pack(anchor="w", pady=(12, 0))
-
-        close_btn = ttk.Button(
-            frame,
+        self._create_manage_canvas_button(
+            name="close_bottom",
             text="Close",
+            x=238,
+            y=836,
+            body_w=120,
+            body_h=40,
             command=self.destroy,
-            style="Manage.TButton",
+            primary=False,
         )
-        close_btn.pack(anchor="w", pady=(10, 0))
-        _apply_submenu_theme(self)
+
+    def _truncate_text(self, text: str, max_len: int) -> str:
+        value = text or ""
+        if len(value) <= max_len:
+            return value
+        return value[: max_len - 1] + "..."
+
+    def _refresh_accounts_table(self):
+        c = self._theme
+        active_name = ""
+        saved_accounts = self._config_manager.get_managed_accounts()
+        if saved_accounts:
+            cycle_idx = self._config_manager.get_account_cycle_index()
+            if cycle_idx < 0:
+                cycle_idx = 0
+            if cycle_idx >= len(saved_accounts):
+                cycle_idx = 0
+            active_name = str(saved_accounts[cycle_idx].get("name", "")).strip()
+
+        for idx, row_widgets in enumerate(self._table_rows):
+            account = self._accounts_data[idx]
+            is_selected = idx == self._selected_account_idx
+            name_fg = c["row_selected_text"] if is_selected else c["text"]
+            email_fg = c["row_selected_text"] if is_selected else c["text"]
+            idx_fg = c["badge_text"] if is_selected else c["text_muted"]
+            self._canvas.itemconfigure(row_widgets["idx"], fill=idx_fg)
+            self._canvas.itemconfigure(row_widgets["name"], fill=name_fg, text=self._truncate_text(account["name"], 14))
+            self._canvas.itemconfigure(row_widgets["email"], fill=email_fg, text=self._truncate_text(account["email"], 22))
+            if active_name and account["name"].strip() and account["name"].strip().casefold() == active_name.casefold():
+                self._canvas.itemconfigure(row_widgets["badge"], text="Active", fill=c["badge_text"])
+            else:
+                self._canvas.itemconfigure(row_widgets["badge"], text="", fill=c["badge_text"])
+
+    def _populate_details_fields(self):
+        if not self._accounts_data:
+            return
+        account = self._accounts_data[self._selected_account_idx]
+        self._detail_name_var.set(account["name"])
+        self._detail_email_var.set(account["email"])
+        self._detail_pw_var.set(account["pw"])
+
+    def _apply_details_to_selected(self, validate: bool, show_error: bool = False) -> bool:
+        idx = self._selected_account_idx
+        name = (self._detail_name_var.get() or "").strip()
+        email = (self._detail_email_var.get() or "").strip()
+        pw = (self._detail_pw_var.get() or "").strip()
+
+        any_data = bool(name or email or pw)
+        if validate and any_data and (not name or not email or not pw):
+            if show_error:
+                messagebox.showerror("Save Account", f"Row {idx + 1}: Name, Email and Password are required.")
+            return False
+
+        row = self._accounts_data[idx]
+        row["name"] = name
+        row["email"] = email
+        row["pw"] = pw
+        return True
+
+    def _select_account_row(self, idx: int):
+        if idx < 0 or idx >= len(self._accounts_data):
+            return
+        self._apply_details_to_selected(validate=False, show_error=False)
+        self._selected_account_idx = idx
+        self._populate_details_fields()
+        self._refresh_accounts_table()
+
+    def _save_selected_account(self):
+        if not self._apply_details_to_selected(validate=True, show_error=True):
+            return
+        self._refresh_accounts_table()
         self._refresh_order_choices()
+        messagebox.showinfo("Saved", f"Account row {self._selected_account_idx + 1} updated.")
+
+    def _collect_accounts_for_save(self):
+        accounts = []
+        seen = set()
+        for idx, row in enumerate(self._accounts_data, start=1):
+            name = (row.get("name", "") or "").strip()
+            email = (row.get("email", "") or "").strip()
+            pw = (row.get("pw", "") or "").strip()
+            if not name and not email and not pw:
+                continue
+            if not name or not email or not pw:
+                raise ValueError(f"Row {idx}: Name, Email and Password are required.")
+            key = name.casefold()
+            if key in seen:
+                raise ValueError(f"Duplicate account name: {name}")
+            seen.add(key)
+            accounts.append(
+                {
+                    "name": name,
+                    "email": email,
+                    "pw": pw,
+                    "folder": row.get("folder", ""),
+                }
+            )
+        return accounts
 
     def _save_switch_minutes(self):
         raw = (self.switch_minutes_var.get() or "").strip()
@@ -2066,9 +3686,10 @@ class SwitchAccountWindow(tk.Toplevel):
         messagebox.showinfo("Saved", "Switch account minutes saved.")
 
     def _refresh_order_choices(self):
+        self._apply_details_to_selected(validate=False, show_error=False)
         names = []
-        for row in self._account_rows:
-            name = (row["name_var"].get() or "").strip()
+        for row in self._accounts_data:
+            name = (row.get("name", "") or "").strip()
             if name and name not in names:
                 names.append(name)
         choices = [""] + names
@@ -2079,41 +3700,30 @@ class SwitchAccountWindow(tk.Toplevel):
                 var.set("")
 
     def _save_accounts(self):
-        accounts = []
-        seen = set()
-        for idx, row in enumerate(self._account_rows, start=1):
-            name = (row["name_var"].get() or "").strip()
-            email = (row["email_var"].get() or "").strip()
-            pw = (row["pw_var"].get() or "").strip()
-            if not name and not email and not pw:
-                continue
-            if not name or not email or not pw:
-                messagebox.showerror("Save Accounts", f"Row {idx}: Name, Email and Password are required.")
-                return
-            key = name.casefold()
-            if key in seen:
-                messagebox.showerror("Save Accounts", f"Duplicate account name: {name}")
-                return
-            seen.add(key)
-            accounts.append({
-                "name": name,
-                "email": email,
-                "pw": pw,
-                "folder": row.get("folder", ""),
-            })
+        if not self._apply_details_to_selected(validate=False, show_error=False):
+            return
+        try:
+            accounts = self._collect_accounts_for_save()
+        except ValueError as e:
+            messagebox.showerror("Save Accounts", str(e))
+            return
 
         try:
             saved_accounts = self._config_manager.save_managed_accounts(accounts)
         except Exception as e:
             messagebox.showerror("Save Accounts", f"Failed to save accounts: {e}")
             return
-        for idx, item in enumerate(saved_accounts):
-            if idx >= len(self._account_rows):
-                break
-            self._account_rows[idx]["folder"] = str(item.get("folder", ""))
-        for idx in range(len(saved_accounts), len(self._account_rows)):
-            self._account_rows[idx]["folder"] = ""
+
+        saved_iter = iter(saved_accounts)
+        for row in self._accounts_data:
+            if row["name"] and row["email"] and row["pw"]:
+                saved = next(saved_iter, {})
+                row["folder"] = str(saved.get("folder", ""))
+            else:
+                row["folder"] = ""
+
         self._refresh_order_choices()
+        self._refresh_accounts_table()
         messagebox.showinfo("Saved", f"Saved {len(saved_accounts)} account(s).")
 
     def _save_account_play_order(self):
@@ -2121,7 +3731,6 @@ class SwitchAccountWindow(tk.Toplevel):
         order = [var.get().strip() for var in getattr(self, "_order_vars", [])]
         order = [item for item in order if item]
         self._config_manager.set_account_play_order(order)
-        # When the order changes, start from the first entry next time.
         self._config_manager.set_account_cycle_index(0)
         parent = getattr(self._parent, "master", None)
         if parent and getattr(parent, "bot_running", False) and getattr(parent, "_controller", None):
@@ -2131,6 +3740,21 @@ class SwitchAccountWindow(tk.Toplevel):
             except Exception:
                 pass
         messagebox.showinfo("Saved", "Account play order saved.")
+class _RecordActionsButtonProxy:
+    def __init__(self, window, name: str):
+        self._window = window
+        self._name = name
+
+    def config(self, **kwargs):
+        self.configure(**kwargs)
+
+    def configure(self, **kwargs):
+        if "text" in kwargs:
+            self._window._set_canvas_button_text(self._name, str(kwargs["text"]))
+        if "state" in kwargs:
+            state = str(kwargs["state"]).lower()
+            enabled = state not in (str(tk.DISABLED).lower(), "disabled")
+            self._window._set_canvas_button_enabled(self._name, enabled)
 
 
 class RecordActionsWindow(tk.Toplevel):
@@ -2138,42 +3762,234 @@ class RecordActionsWindow(tk.Toplevel):
         super().__init__(parent)
         self._parent = parent
         self.title("Record Actions")
-        self.geometry("320x160")
+        width, height = 460, 430
+        gap_px = int(parent.winfo_fpixels("4m"))  # ~0.4 cm
+        parent.update_idletasks()
+        x = parent.winfo_x() + parent.winfo_width() + gap_px
+        y = parent.winfo_y()
+        max_x = max(0, self.winfo_screenwidth() - width)
+        max_y = max(0, self.winfo_screenheight() - height)
+        x = min(max(0, x), max_x)
+        y = min(max(0, y), max_y)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
-        self.configure(bg="#2b2b2b")
-
-        frame = tk.Frame(self, bg="#2b2b2b", padx=20, pady=20)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        record_btn = ttk.Button(
-            frame,
-            text="Record",
-            command=self._parent._record_actions_prompt,
+        self.configure(bg="#0F1115")
+        self._theme = {
+            "bg": "#0F1115",
+            "text": "#E7EAF0",
+        }
+        self._bg_source_image = None
+        self._bg_photo = None
+        self._bg_canvas_item = None
+        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._canvas.bind("<Configure>", self._on_canvas_resize_background)
+        self._title_item = self._canvas.create_text(
+            0,
+            0,
+            text="Record Actions",
+            fill=self._theme["text"],
+            font=("Segoe UI", 24, "bold"),
+            anchor="n",
         )
-        record_btn.pack(anchor="w")
 
-        show_btn = ttk.Button(
-            frame,
-            text="Show Records",
-            command=self._parent._show_records,
+        self._buttons = {}
+        self._button_order = []
+        self._create_canvas_button("record", "Record", self._parent._record_actions_prompt, "Secondary.TButton")
+        self._create_canvas_button("show_records", "Show Records", self._parent._show_records, "Secondary.TButton")
+        self._create_canvas_button("close", "Close", self.destroy, "Secondary.TButton")
+
+        self._record_btn_proxy = _RecordActionsButtonProxy(self, "record")
+        self._show_btn_proxy = _RecordActionsButtonProxy(self, "show_records")
+        self._parent.record_btn = self._record_btn_proxy
+        self._parent.show_records_btn = self._show_btn_proxy
+
+        self._load_background_image()
+        self.bind("<Configure>", self._on_resize_background)
+        self.after(30, self._refresh_scene)
+        self.after(120, self._refresh_scene)
+
+    def _create_canvas_button(self, name: str, text: str, command, style_name: str = "Secondary.TButton"):
+        parent_ui = getattr(self._parent, "master", None)
+        skins = None
+        if parent_ui is not None:
+            skins_all = getattr(parent_ui, "_button_skins", {})
+            skins = skins_all.get(style_name)
+            if skins is None and skins_all:
+                skins = next(iter(skins_all.values()))
+        if not skins:
+            return
+
+        tag = f"record_actions_btn_{name}"
+        bg_item = self._canvas.create_image(0, 0, anchor="n", image=skins["normal"], tags=(tag,))
+        text_item = self._canvas.create_text(
+            0,
+            0,
+            text=text,
+            fill="#F2F6FF",
+            font=("Segoe UI", 11, "bold"),
+            anchor="center",
+            tags=(tag,),
         )
-        show_btn.pack(anchor="w", pady=(8, 0))
+        self._buttons[name] = {
+            "command": command,
+            "enabled": True,
+            "hover": False,
+            "pressed": False,
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "width": int(skins["normal"].width()),
+            "height": int(skins["normal"].height()),
+        }
+        self._button_order.append(name)
 
-        close_btn = ttk.Button(
-            frame,
-            text="Close",
-            command=self.destroy,
-        )
-        close_btn.pack(anchor="w", pady=(10, 0))
+        self._canvas.tag_bind(tag, "<Enter>", lambda _e, n=name: self._on_button_enter(n))
+        self._canvas.tag_bind(tag, "<Leave>", lambda _e, n=name: self._on_button_leave(n))
+        self._canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, n=name: self._on_button_press(n))
+        self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, n=name: self._on_button_release(n))
+        self._refresh_canvas_button_state(name)
 
-        self._parent.record_btn = record_btn
-        self._parent.show_records_btn = show_btn
-        _apply_submenu_theme(self)
+    def _set_canvas_button_text(self, name: str, text: str):
+        btn = self._buttons.get(name)
+        if not btn:
+            return
+        self._canvas.itemconfigure(btn["text_item"], text=text)
+
+    def _set_canvas_button_enabled(self, name: str, enabled: bool):
+        btn = self._buttons.get(name)
+        if not btn:
+            return
+        btn["enabled"] = bool(enabled)
+        if not btn["enabled"]:
+            btn["hover"] = False
+            btn["pressed"] = False
+        self._refresh_canvas_button_state(name)
+
+    def _refresh_canvas_button_state(self, name: str):
+        btn = self._buttons.get(name)
+        if not btn:
+            return
+        if not btn["enabled"]:
+            state_key = "disabled"
+            text_color = "#A5AFBF"
+        elif btn["pressed"]:
+            state_key = "pressed"
+            text_color = "#FFFFFF"
+        elif btn["hover"]:
+            state_key = "hover"
+            text_color = "#FFFFFF"
+        else:
+            state_key = "normal"
+            text_color = "#F2F6FF"
+        self._canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
+        self._canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _on_button_enter(self, name: str):
+        btn = self._buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        self._canvas.configure(cursor="hand2")
+        btn["hover"] = True
+        self._refresh_canvas_button_state(name)
+
+    def _on_button_leave(self, name: str):
+        btn = self._buttons.get(name)
+        if not btn:
+            return
+        self._canvas.configure(cursor="")
+        btn["hover"] = False
+        btn["pressed"] = False
+        self._refresh_canvas_button_state(name)
+
+    def _on_button_press(self, name: str):
+        btn = self._buttons.get(name)
+        if not btn or not btn["enabled"]:
+            return
+        btn["pressed"] = True
+        self._refresh_canvas_button_state(name)
+
+    def _on_button_release(self, name: str):
+        btn = self._buttons.get(name)
+        if not btn:
+            return
+        should_fire = bool(btn["enabled"] and btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_canvas_button_state(name)
+        if should_fire:
+            try:
+                btn["command"]()
+            except Exception:
+                pass
+
+    def _load_background_image(self):
+        self._bg_source_image = None
+        for path in (_image_path("background"), _image_path("background.png")):
+            if not os.path.exists(path):
+                continue
+            try:
+                with Image.open(path) as image:
+                    self._bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _on_resize_background(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        self._refresh_scene()
+
+    def _on_canvas_resize_background(self, event=None):
+        if event is not None and event.widget is not self._canvas:
+            return
+        self._refresh_scene()
+
+    def _refresh_scene(self):
+        self._refresh_background()
+        self._layout_scene()
+
+    def _layout_scene(self):
+        if not self._canvas or not self._canvas.winfo_exists():
+            return
+        cw = max(2, self._canvas.winfo_width())
+        x = cw // 2
+        self._canvas.coords(self._title_item, x, 32)
+        y_start = 126
+        y_step = 78
+        for idx, name in enumerate(self._button_order):
+            btn = self._buttons.get(name)
+            if not btn:
+                continue
+            y = y_start + idx * y_step
+            self._canvas.coords(btn["bg_item"], x, y)
+            self._canvas.coords(btn["text_item"], x, y + btn["height"] // 2 - 2)
+
+    def _refresh_background(self):
+        if self._bg_source_image is None:
+            return
+        width = max(2, self._canvas.winfo_width())
+        height = max(2, self._canvas.winfo_height())
+        try:
+            fitted = ImageOps.fit(
+                self._bg_source_image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._bg_photo = ImageTk.PhotoImage(fitted)
+            if self._bg_canvas_item is None:
+                self._bg_canvas_item = self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+            else:
+                self._canvas.coords(self._bg_canvas_item, 0, 0)
+                self._canvas.itemconfigure(self._bg_canvas_item, image=self._bg_photo)
+            self._canvas.tag_lower(self._bg_canvas_item)
+        except Exception:
+            pass
 
     def destroy(self):
-        if getattr(self._parent, "record_btn", None) is self._parent.record_btn:
+        if getattr(self._parent, "record_btn", None) is self._record_btn_proxy:
             self._parent.record_btn = None
-        if getattr(self._parent, "show_records_btn", None) is self._parent.show_records_btn:
+        if getattr(self._parent, "show_records_btn", None) is self._show_btn_proxy:
             self._parent.show_records_btn = None
         super().destroy()
 
@@ -2350,7 +4166,7 @@ class RecordsWindow(tk.Toplevel):
         return []
 
     def _migrate_from_text(self) -> bool:
-        record_path = os.path.join(os.path.dirname(__file__), "recorded_actions.txt")
+        record_path = _app_path("recorded_actions.txt")
         if not os.path.exists(record_path):
             return False
         try:
@@ -2450,6 +4266,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-

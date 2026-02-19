@@ -63,13 +63,13 @@
         }
     },
     "input_backend": "auto",
-    "account_switch_minutes": 30,
+    "account_switch_minutes": 35,
     "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
-    "account_cycle_index": 0,
+    "account_cycle_index": 2,
     "account_play_order": [
-        "AccountOne",
         "AccountThree",
-        "AccountTwo"
+        "AccountTwo",
+        "AccountOne"
     ],
     "managed_accounts": [
         {
