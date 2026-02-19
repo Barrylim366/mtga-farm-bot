@@ -9,6 +9,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageStat, ImageTk
 import json
 import threading
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
+from licensing.ui import open_license_dialog
+from licensing.validator import LicenseValidationResult, require_license_or_block
 
 # Import bot components
 from Controller.MTGAController.Controller import Controller
@@ -1351,8 +1353,12 @@ class MTGBotUI(tk.Tk):
         self.session_wins = 0
         self.settings_window = None
         self.current_session_window = None
+        self.license_window = None
         self._controller = None
         self._switch_eta_text = self._get_configured_switch_eta_text()
+        self._license_result: LicenseValidationResult | None = None
+        self._license_active = False
+        self._license_notice_shown = False
 
         self.ui_theme = self._build_ui_theme()
         self.configure(bg=self.ui_theme["colors"]["bg"])
@@ -1365,6 +1371,7 @@ class MTGBotUI(tk.Tk):
         self._setup_theme_styles()
         self._setup_ui()
         self._setup_stop_hotkey()
+        self.after(120, lambda: self._refresh_license_state(show_hint=True))
 
     def _suppress_tk_default_icon(self):
         try:
@@ -1903,6 +1910,7 @@ class MTGBotUI(tk.Tk):
         self._create_canvas_menu_button("stop", "Stop Bot [Wheel Down]", "Destructive.TButton", self._stop_bot, enabled=False)
         self._create_canvas_menu_button("calibrate", "Calibrate", "Secondary.TButton", self._open_calibration, enabled=True)
         self._create_canvas_menu_button("current_session", "Current Session", "Secondary.TButton", self._open_current_session, enabled=True)
+        self._create_canvas_menu_button("license", "License", "Secondary.TButton", self._open_license, enabled=True)
         self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
         self._loading_text_item = self._card_canvas.create_text(
@@ -2021,12 +2029,13 @@ class MTGBotUI(tk.Tk):
             )
             return
 
-        self._set_canvas_menu_button_enabled("start", True)
+        self._set_canvas_menu_button_enabled("start", bool(self._license_active))
         self._set_canvas_menu_button_enabled("stop", False)
         self._set_canvas_menu_button_enabled("calibrate", True)
+        status_text = "Status: Stopped" if self._license_active else "Status: License Required"
         self._card_canvas.itemconfigure(
             self._status_text_item,
-            text="Status: Stopped",
+            text=status_text,
             fill=c["status_stopped_text"],
         )
         self._switch_eta_text = self._get_configured_switch_eta_text()
@@ -2055,6 +2064,18 @@ class MTGBotUI(tk.Tk):
 
     def _start_bot(self):
         if self.bot_running:
+            return
+
+        license_result = require_license_or_block()
+        self._license_result = license_result
+        self._license_active = license_result.valid
+        if not license_result.valid:
+            self._set_running_state(False)
+            self._license_notice_shown = True
+            messagebox.showwarning(
+                "License required",
+                f"{license_result.message}\n\nPlease activate a license from the 'License' menu first.",
+            )
             return
 
         self.bot_running = True
@@ -2127,6 +2148,36 @@ class MTGBotUI(tk.Tk):
         self._set_running_state(False)
         self._set_startup_loading(False)
         self._controller = None
+
+    def _refresh_license_state(self, show_hint: bool = False) -> None:
+        result = require_license_or_block()
+        self._license_result = result
+        self._license_active = result.valid
+        if not self.bot_running:
+            self._set_running_state(False)
+
+        if result.valid:
+            self._license_notice_shown = False
+            return
+        if show_hint and not self._license_notice_shown:
+            self._license_notice_shown = True
+            messagebox.showinfo(
+                "License",
+                f"{result.message}\n\nBot functions are blocked until a valid license is activated.",
+            )
+
+    def _on_license_change(self, result: LicenseValidationResult | None = None) -> None:
+        if result is not None:
+            self._license_result = result
+            self._license_active = result.valid
+        self._refresh_license_state(show_hint=False)
+
+    def _open_license(self):
+        if self.license_window and self.license_window.winfo_exists():
+            self.license_window.lift()
+            self.license_window.focus_force()
+            return
+        self.license_window = open_license_dialog(self, on_license_change=self._on_license_change)
 
     def _open_calibration(self):
         CalibrationWindow(self, self.config_manager)
