@@ -55,6 +55,11 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Calibrate buttons are now reduced in width/height (roughly one-third smaller than before) and aligned to the same horizontal line as the dropdowns for `Calibrate` and `Test Click`
 - Current Session window was restyled to the same fire/main theme (background image, unified panel colors, styled Back button) and now opens aligned below the main window
 - Current Session no longer uses a large dark container frame; stats and Back are rendered directly on the background scene, and the dark box-frame around Back was removed
+- Current Session stats are now grouped inside a bordered feature-card (`#320a02` fill, `#ff9318` border) with title/body typography aligned to the provided feature-box style
+- Current Session card was refined to only show the three session lines (title removed), with rounded corners and semi-transparent dark fill (~44% target opacity)
+- Current Session now uses the non-rounded feature-card style again, with no card title and all three stat lines shown in yellow inside the bordered card
+- Current Session stats-card background now uses RGBA alpha rendering (`(50,10,2,210)`) to match the Back button's translucent intensity more closely
+- Fixed Current Session stats text anchoring so the first line is fully inside the card and no longer clipped at the top
 - Record Actions window now matches Settings layout more closely: title/buttons are rendered directly on the background scene (no outer dark container), using the same canvas glow-button skins as the main/settings UI
 - Record Actions background now refreshes on canvas resize to prevent bottom strip artifacts during first paint
 - Record Actions now opens to the right of Settings with ~0.4 cm gap and the same window size (`460x430`), while still clamping to visible screen bounds
@@ -74,6 +79,16 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Manage Accounts default window size was increased to `900x980` to avoid right/bottom clipping with the canvas layout
 - Manage Accounts action buttons are now flat no-border buttons (no glow-frame outline) to remove remaining visible button borders
 - Manage Accounts buttons are now canvas-rendered rounded dark-red translucent controls (matching the other windows' rounded behavior) while keeping the prior button size footprint
+- Manage Accounts input fields (`Switch account`, `Name`, `Email`, `Password`) and `Remember password` checkbox now share the same dark-red control tone as the play-order dropdowns
+- Fixed Manage Accounts entry rendering so those fields now actually use `entry_bg` (dark-red) instead of falling back to the window background
+- Manage Accounts now includes two feature-style translucent group boxes (yellow border, dark-red RGBA fill) around the accounts list area and the account play-order area
+- Manage Accounts no longer shows the `Active` marker and no longer includes the `Account Details` editor section on the right side
+- Manage Accounts window width is now compact and sized to the left-side content area with a small margin
+- Manage Accounts now has a dedicated top `Switch account` group box in the same yellow bordered translucent style as the other manage groups
+- The top switch action button was renamed to `Save Time` and moved to the lower-left area inside that switch group box
+- `Save Accounts` was moved up to sit fully inside the accounts group box, and the play-order group box was enlarged so `Save Order` and `Close` are fully inside
+- Switch group height was increased and `Save Time` moved lower to avoid overlap with the switch label line
+- Manage Accounts window was widened slightly and group boxes are now inset with more symmetric left/right spacing
 - Saving accounts creates/updates one folder per account under `Accounts/` and writes `credentials.json` inside that folder
 - **Manage Accounts** now uses a split panel: account table on the left, `Account Details` editor on the right
 - Row selection is clickable; selected row gets highlight and the active cycling account is marked with an `Active` badge
@@ -92,7 +107,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Main menu top-left corner is fixed at screen coordinates `x=18`, `y=24`; Settings follows the main window position
 - During bot startup, the UI shows an indeterminate loading bar with the label `Loading Carddata` until initialization finishes
 - Fixed a startup regression in `ui.py` caused by a mismatched theme token in the loading bar style
-- `Status: Stopped` now uses a subtle red text tone
+- `Status: Stopped` now uses `#ffb02a`
 
 Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
 

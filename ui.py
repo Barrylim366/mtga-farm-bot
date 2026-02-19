@@ -1423,7 +1423,7 @@ class MTGBotUI(tk.Tk):
                 "pill_border": "#30394A",
                 "pill_running_bg": "#12301F",
                 "pill_running_text": "#8FE0B0",
-                "status_stopped_text": "#B07A80",
+                "status_stopped_text": "#ffb02a",
             },
             "spacing": {"xs": 8, "sm": 12, "md": 14, "lg": 18, "xl": 28, "card_pad": 28, "outer_margin": 20},
             "size": {"logo": 210, "button_width": 30, "card_width": 392},
@@ -1924,7 +1924,7 @@ class MTGBotUI(tk.Tk):
         self._status_text_item = self._card_canvas.create_text(
             0,
             0,
-            text="Status: Stopped",
+            text="Status: not running",
             fill=c["status_stopped_text"],
             font=self.ui_theme["font"]["body"],
             anchor="n",
@@ -2189,45 +2189,28 @@ class CurrentSessionWindow(tk.Toplevel):
             "text": "#E7EAF0",
             "text_muted": "#B8A9AE",
             "value": "#F7E5B1",
+            "card_bg": "#320a02",
+            "card_border": "#ff9318",
+            "card_body": "#ffb841",
         }
         self._bg_source_image = None
         self._bg_photo = None
         self._bg_canvas_item = None
+        self._stats_panel_photo = None
+        self._stats_panel_size = (0, 0)
         self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._canvas.bind("<Configure>", self._on_canvas_resize_background)
 
-        self._title_item = self._canvas.create_text(
-            0,
-            0,
-            text="Current Session",
-            fill=self._theme["text"],
-            font=("Segoe UI", 24, "bold"),
-            anchor="n",
-        )
-        self._switch_eta_item = self._canvas.create_text(
+        self._stats_panel_item = self._canvas.create_image(0, 0, anchor="nw")
+        self._stats_text_item = self._canvas.create_text(
             0,
             0,
             text="",
-            fill=self._theme["value"],
-            font=("Consolas", 12),
-            anchor="w",
-        )
-        self._games_item = self._canvas.create_text(
-            0,
-            0,
-            text="",
-            fill=self._theme["value"],
-            font=("Consolas", 12),
-            anchor="w",
-        )
-        self._wins_item = self._canvas.create_text(
-            0,
-            0,
-            text="",
-            fill=self._theme["value"],
-            font=("Consolas", 12),
-            anchor="w",
+            font=("Segoe UI", 13),
+            anchor="nw",
+            justify="left",
+            fill=self._theme["card_body"],
         )
         self._back_btn = None
 
@@ -2325,6 +2308,20 @@ class CurrentSessionWindow(tk.Toplevel):
         self._canvas.tag_bind(tag, "<ButtonRelease-1>", self._on_back_release)
         self._refresh_back_button_state()
 
+    def _render_stats_panel(self, width: int, height: int):
+        if width <= 2 or height <= 2:
+            return
+        if self._stats_panel_photo is not None and self._stats_panel_size == (width, height):
+            return
+
+        panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(panel)
+        # Match button skin transparency behavior (alpha 210 on dark red base).
+        draw.rectangle((0, 0, width - 1, height - 1), fill=(50, 10, 2, 210), outline=(255, 147, 24, 255), width=3)
+        self._stats_panel_photo = ImageTk.PhotoImage(panel)
+        self._stats_panel_size = (width, height)
+        self._canvas.itemconfigure(self._stats_panel_item, image=self._stats_panel_photo)
+
     def _refresh_back_button_state(self):
         btn = self._back_btn
         if not btn:
@@ -2382,20 +2379,23 @@ class CurrentSessionWindow(tk.Toplevel):
         if not self._canvas or not self._canvas.winfo_exists():
             return
         cw = max(2, int(self._canvas.winfo_width()))
-        self._canvas.coords(self._title_item, cw // 2, 30)
-        self._canvas.coords(self._switch_eta_item, 36, 122)
-        self._canvas.coords(self._games_item, 36, 164)
-        self._canvas.coords(self._wins_item, 36, 206)
+        box_w = min(408, max(320, cw - 48))
+        box_x = (cw - box_w) // 2
+        box_y = 96
+        box_h = 132
+        self._render_stats_panel(box_w, box_h)
+        self._canvas.coords(self._stats_panel_item, box_x, box_y)
+        self._canvas.coords(self._stats_text_item, box_x + 24, box_y + 20)
+        self._canvas.tag_raise(self._stats_text_item)
         if self._back_btn:
-            y = 238
+            y = box_y + box_h + 22
             self._canvas.coords(self._back_btn["bg_item"], cw // 2, y)
             self._canvas.coords(self._back_btn["text_item"], cw // 2, y + self._back_btn["height"] // 2 - 2)
 
     def update_stats(self, games: int, wins: int, switch_eta_text: str | None = None):
-        if switch_eta_text is not None:
-            self._canvas.itemconfigure(self._switch_eta_item, text=switch_eta_text)
-        self._canvas.itemconfigure(self._games_item, text=f"Games played: {games}")
-        self._canvas.itemconfigure(self._wins_item, text=f"Win: {wins}")
+        switch_line = switch_eta_text if switch_eta_text is not None else "Account switch: off"
+        self._canvas.itemconfigure(self._stats_text_item, text=f"{switch_line}\nGames played: {games}\nWin: {wins}")
+        self._layout_scene()
 
 
 class SettingsWindow(tk.Toplevel):
@@ -3022,7 +3022,7 @@ class SwitchAccountWindow(tk.Toplevel):
             "accent": "#2FC07B",
             "accent_hover": "#3AD58A",
             "accent_pressed": "#1A6E43",
-            "entry_bg": "#0F1115",
+            "entry_bg": "#3D130E",
             "badge_bg": "#12301F",
             "badge_text": "#8FE0B0",
             "button_bg": "#1B2230",
@@ -3035,7 +3035,7 @@ class SwitchAccountWindow(tk.Toplevel):
             "row_selected_text": "#F2F6FF",
         }
         self.title("Manage Accounts")
-        width, height = 900, 980
+        width, height = 460, 980
         gap_px = int(parent.winfo_fpixels("5m"))
         parent.update_idletasks()
         x = parent.winfo_x()
@@ -3058,6 +3058,8 @@ class SwitchAccountWindow(tk.Toplevel):
         self._manage_bg_source_image = None
         self._manage_bg_photo = None
         self._bg_canvas_item = None
+        self._group_panel_photos = {}
+        self._group_panel_items = {}
         self._heading_bg_images = {}
         self._translucent_widgets = []
         self._content = None
@@ -3075,7 +3077,6 @@ class SwitchAccountWindow(tk.Toplevel):
         self.after(160, self._refresh_manage_background)
         self.after(420, self._refresh_manage_background)
         self._refresh_accounts_table()
-        self._populate_details_fields()
         self._refresh_order_choices()
 
     def _load_accounts_from_config(self):
@@ -3184,6 +3185,8 @@ class SwitchAccountWindow(tk.Toplevel):
                 self._canvas.coords(self._bg_canvas_item, 0, 0)
                 self._canvas.itemconfigure(self._bg_canvas_item, image=self._manage_bg_photo)
             self._canvas.tag_lower(self._bg_canvas_item)
+            for item in self._group_panel_items.values():
+                self._canvas.tag_raise(item, self._bg_canvas_item)
         except Exception:
             pass
 
@@ -3244,6 +3247,23 @@ class SwitchAccountWindow(tk.Toplevel):
 
     def _blend_heading_labels_with_background(self, fitted_image):
         return
+
+    def _render_manage_group_panel(self, width: int, height: int):
+        key = (int(width), int(height))
+        cached = self._group_panel_photos.get(key)
+        if cached is not None:
+            return cached
+        panel = Image.new("RGBA", key, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(panel)
+        draw.rectangle((0, 0, key[0] - 1, key[1] - 1), fill=(50, 10, 2, 210), outline=(255, 147, 24, 255), width=3)
+        photo = ImageTk.PhotoImage(panel)
+        self._group_panel_photos[key] = photo
+        return photo
+
+    def _create_manage_group_panel(self, name: str, x: int, y: int, width: int, height: int):
+        panel_photo = self._render_manage_group_panel(width, height)
+        item = self._canvas.create_image(x, y, anchor="nw", image=panel_photo)
+        self._group_panel_items[name] = item
 
     def _resolve_manage_button_skins(self, primary: bool, body_w: int, body_h: int):
         key = ("primary" if primary else "secondary", int(body_w), int(body_h))
@@ -3386,7 +3406,7 @@ class SwitchAccountWindow(tk.Toplevel):
             textvariable=textvariable,
             width=width,
             show=show,
-            bg=c["bg"],
+            bg=c["entry_bg"],
             fg=c["text"],
             insertbackground=c["text"],
             bd=0,
@@ -3425,120 +3445,63 @@ class SwitchAccountWindow(tk.Toplevel):
         self._content = cv
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
+        self._create_manage_group_panel("switch_block", x=16, y=64, width=428, height=108)
+        self._create_manage_group_panel("accounts_block", x=16, y=184, width=428, height=506)
+        self._create_manage_group_panel("order_block", x=16, y=702, width=428, height=254)
 
-        cv.create_text(18, 18, text="Manage Accounts", fill=c["text"], font=("Segoe UI", 24, "bold"), anchor="nw")
+        cv.create_text(26, 18, text="Manage Accounts", fill=c["text"], font=("Segoe UI", 24, "bold"), anchor="nw")
 
-        cv.create_text(18, 82, text="Switch account (min)", fill=c["text"], font=("Segoe UI", 12), anchor="nw")
+        cv.create_text(26, 86, text="Switch account (min)", fill=c["text"], font=("Segoe UI", 12), anchor="nw")
         self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
         switch_entry = self._make_entry(self, textvariable=self.switch_minutes_var, width=6)
         switch_entry.bind("<Return>", lambda _e: self._save_switch_minutes())
-        cv.create_window(170, 84, anchor="nw", window=switch_entry)
-        cv.create_text(236, 82, text="0 = off", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+        cv.create_window(178, 88, anchor="nw", window=switch_entry)
+        cv.create_text(244, 86, text="0 = off", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
         self._create_manage_canvas_button(
             name="save_switch",
-            text="Save",
-            x=340,
-            y=76,
-            body_w=120,
+            text="Save Time",
+            x=26,
+            y=116,
+            body_w=150,
             body_h=40,
             command=self._save_switch_minutes,
             primary=True,
         )
 
-        cv.create_text(18, 128, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 15, "bold"), anchor="nw")
-        cv.create_text(18, 164, text="#", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
-        cv.create_text(54, 164, text="Name", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
-        cv.create_text(200, 164, text="Email", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
-
-        cv.create_text(430, 164, text="Account Details", fill=c["text"], font=("Segoe UI", 12, "bold"), anchor="nw")
+        cv.create_text(26, 190, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 15, "bold"), anchor="nw")
+        cv.create_text(26, 226, text="#", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+        cv.create_text(62, 226, text="Name", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+        cv.create_text(208, 226, text="Email", fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
 
         self._table_rows = []
-        row_y_start = 196
+        row_y_start = 258
         row_step = 36
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
             tag = f"acct_row_{idx}"
-            idx_item = cv.create_text(18, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw", tags=(tag,))
-            name_item = cv.create_text(54, y, text="", fill=c["text"], font=("Segoe UI", 11, "bold"), anchor="nw", tags=(tag,))
-            email_item = cv.create_text(200, y, text="", fill=c["text"], font=("Segoe UI", 11), anchor="nw", tags=(tag,))
-            badge_item = cv.create_text(396, y, text="", fill=c["badge_text"], font=("Segoe UI", 9, "bold"), anchor="nw", tags=(tag,))
-            cv.tag_bind(tag, "<Button-1>", lambda _e, i=idx: self._select_account_row(i))
-            cv.tag_bind(tag, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
-            cv.tag_bind(tag, "<Leave>", lambda _e: cv.configure(cursor=""))
-            self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item, "badge": badge_item})
-
-        cv.create_text(430, 208, text="Name:", fill=c["text"], font=("Segoe UI", 11), anchor="nw")
-        self._detail_name_var = tk.StringVar()
-        self._detail_name_entry = self._make_entry(self, textvariable=self._detail_name_var, width=24)
-        cv.create_window(430, 236, anchor="nw", window=self._detail_name_entry)
-
-        cv.create_text(430, 274, text="Email:", fill=c["text"], font=("Segoe UI", 11), anchor="nw")
-        self._detail_email_var = tk.StringVar()
-        self._detail_email_entry = self._make_entry(self, textvariable=self._detail_email_var, width=24)
-        cv.create_window(430, 302, anchor="nw", window=self._detail_email_entry)
-
-        cv.create_text(430, 340, text="Password:", fill=c["text"], font=("Segoe UI", 11), anchor="nw")
-        self._detail_pw_var = tk.StringVar()
-        self._detail_pw_entry = self._make_entry(self, textvariable=self._detail_pw_var, width=24, show="*")
-        cv.create_window(430, 368, anchor="nw", window=self._detail_pw_entry)
-
-        self._remember_pw_var = tk.BooleanVar(value=True)
-        remember = tk.Checkbutton(
-            self,
-            text="Remember password",
-            variable=self._remember_pw_var,
-            onvalue=True,
-            offvalue=False,
-            bg=c["bg"],
-            fg=c["text_muted"],
-            activebackground=c["bg"],
-            activeforeground=c["text"],
-            selectcolor=c["bg"],
-            highlightthickness=0,
-            bd=0,
-            font=("Segoe UI", 10),
-        )
-        cv.create_window(430, 400, anchor="nw", window=remember)
-
-        self._create_manage_canvas_button(
-            name="save_account",
-            text="Save Account",
-            x=430,
-            y=448,
-            body_w=220,
-            body_h=40,
-            command=self._save_selected_account,
-            primary=True,
-        )
-        self._create_manage_canvas_button(
-            name="close_details",
-            text="Close",
-            x=430,
-            y=516,
-            body_w=220,
-            body_h=40,
-            command=self.destroy,
-            primary=False,
-        )
+            idx_item = cv.create_text(26, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw", tags=(tag,))
+            name_item = cv.create_text(62, y, text="", fill=c["text"], font=("Segoe UI", 11, "bold"), anchor="nw", tags=(tag,))
+            email_item = cv.create_text(208, y, text="", fill=c["text"], font=("Segoe UI", 11), anchor="nw", tags=(tag,))
+            self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item})
 
         self._create_manage_canvas_button(
             name="save_accounts",
             text="Save Accounts",
-            x=18,
-            y=584,
+            x=26,
+            y=632,
             body_w=160,
             body_h=40,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(18, 652, text="Account Play Order", fill=c["text"], font=("Segoe UI", 12), anchor="nw")
+        cv.create_text(26, 714, text="Account Play Order", fill=c["text"], font=("Segoe UI", 12), anchor="nw")
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
         for idx in range(self._order_slots):
-            y = 652 + idx * 38
-            cv.create_text(210, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
+            y = 714 + idx * 38
+            cv.create_text(218, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 11), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
                 self,
@@ -3548,15 +3511,15 @@ class SwitchAccountWindow(tk.Toplevel):
                 width=17,
             )
             combo.configure(style="ManageFire.TCombobox")
-            cv.create_window(230, y - 2, anchor="nw", window=combo)
+            cv.create_window(238, y - 2, anchor="nw", window=combo)
             self._order_vars.append(var)
             self._order_combos.append(combo)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
-            x=18,
-            y=836,
+            x=26,
+            y=900,
             body_w=140,
             body_h=40,
             command=self._save_account_play_order,
@@ -3565,8 +3528,8 @@ class SwitchAccountWindow(tk.Toplevel):
         self._create_manage_canvas_button(
             name="close_bottom",
             text="Close",
-            x=238,
-            y=836,
+            x=246,
+            y=900,
             body_w=120,
             body_h=40,
             command=self.destroy,
@@ -3581,63 +3544,22 @@ class SwitchAccountWindow(tk.Toplevel):
 
     def _refresh_accounts_table(self):
         c = self._theme
-        active_name = ""
-        saved_accounts = self._config_manager.get_managed_accounts()
-        if saved_accounts:
-            cycle_idx = self._config_manager.get_account_cycle_index()
-            if cycle_idx < 0:
-                cycle_idx = 0
-            if cycle_idx >= len(saved_accounts):
-                cycle_idx = 0
-            active_name = str(saved_accounts[cycle_idx].get("name", "")).strip()
-
         for idx, row_widgets in enumerate(self._table_rows):
             account = self._accounts_data[idx]
-            is_selected = idx == self._selected_account_idx
-            name_fg = c["row_selected_text"] if is_selected else c["text"]
-            email_fg = c["row_selected_text"] if is_selected else c["text"]
-            idx_fg = c["badge_text"] if is_selected else c["text_muted"]
-            self._canvas.itemconfigure(row_widgets["idx"], fill=idx_fg)
+            self._canvas.itemconfigure(row_widgets["idx"], fill=c["text_muted"])
+            name_fg = c["text"]
+            email_fg = c["text"]
             self._canvas.itemconfigure(row_widgets["name"], fill=name_fg, text=self._truncate_text(account["name"], 14))
             self._canvas.itemconfigure(row_widgets["email"], fill=email_fg, text=self._truncate_text(account["email"], 22))
-            if active_name and account["name"].strip() and account["name"].strip().casefold() == active_name.casefold():
-                self._canvas.itemconfigure(row_widgets["badge"], text="Active", fill=c["badge_text"])
-            else:
-                self._canvas.itemconfigure(row_widgets["badge"], text="", fill=c["badge_text"])
 
     def _populate_details_fields(self):
-        if not self._accounts_data:
-            return
-        account = self._accounts_data[self._selected_account_idx]
-        self._detail_name_var.set(account["name"])
-        self._detail_email_var.set(account["email"])
-        self._detail_pw_var.set(account["pw"])
+        return
 
     def _apply_details_to_selected(self, validate: bool, show_error: bool = False) -> bool:
-        idx = self._selected_account_idx
-        name = (self._detail_name_var.get() or "").strip()
-        email = (self._detail_email_var.get() or "").strip()
-        pw = (self._detail_pw_var.get() or "").strip()
-
-        any_data = bool(name or email or pw)
-        if validate and any_data and (not name or not email or not pw):
-            if show_error:
-                messagebox.showerror("Save Account", f"Row {idx + 1}: Name, Email and Password are required.")
-            return False
-
-        row = self._accounts_data[idx]
-        row["name"] = name
-        row["email"] = email
-        row["pw"] = pw
         return True
 
     def _select_account_row(self, idx: int):
-        if idx < 0 or idx >= len(self._accounts_data):
-            return
-        self._apply_details_to_selected(validate=False, show_error=False)
-        self._selected_account_idx = idx
-        self._populate_details_fields()
-        self._refresh_accounts_table()
+        return
 
     def _save_selected_account(self):
         if not self._apply_details_to_selected(validate=True, show_error=True):
@@ -3686,7 +3608,6 @@ class SwitchAccountWindow(tk.Toplevel):
         messagebox.showinfo("Saved", "Switch account minutes saved.")
 
     def _refresh_order_choices(self):
-        self._apply_details_to_selected(validate=False, show_error=False)
         names = []
         for row in self._accounts_data:
             name = (row.get("name", "") or "").strip()
@@ -3700,8 +3621,6 @@ class SwitchAccountWindow(tk.Toplevel):
                 var.set("")
 
     def _save_accounts(self):
-        if not self._apply_details_to_selected(validate=False, show_error=False):
-            return
         try:
             accounts = self._collect_accounts_for_save()
         except ValueError as e:
