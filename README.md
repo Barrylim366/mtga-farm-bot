@@ -151,6 +151,7 @@ Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
    - **Record Action** opens a window for **Record** (uses F8 to stop) and **Show Records**.
      Saved records include per-action timestamps (`ts`) in `recorded_actions_records.json`.
   - Includes a **User Interface** button between **Record Action** and **Back**.
+  - Opening any Settings subwindow (**Manage Accounts**, **Record Action**, **User Interface**) temporarily replaces the Settings window at the same screen position.
   - **User Interface** opens a settings window with:
     - `UI Scale` slider (50%..120%)
     - `Keep UI windows on top` toggle
