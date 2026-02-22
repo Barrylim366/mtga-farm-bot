@@ -2530,12 +2530,34 @@ class MTGBotUI(tk.Tk):
         self.settings_window = SettingsWindow(self, self.config_manager)
         self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
 
-    def _open_ui_settings(self):
+    def _open_ui_settings(self, spawn_xy: tuple[int, int] | None = None, on_close=None):
         if self.ui_settings_window and self.ui_settings_window.winfo_exists():
+            if spawn_xy is not None:
+                try:
+                    x, y = int(spawn_xy[0]), int(spawn_xy[1])
+                    w = int(self.ui_settings_window.winfo_width() or self.ui_settings_window.winfo_reqwidth())
+                    h = int(self.ui_settings_window.winfo_height() or self.ui_settings_window.winfo_reqheight())
+                    max_x = max(0, self.winfo_screenwidth() - w)
+                    max_y = max(0, self.winfo_screenheight() - h)
+                    x = min(max(0, x), max_x)
+                    y = min(max(0, y), max_y)
+                    self.ui_settings_window.geometry(f"{w}x{h}+{x}+{y}")
+                except Exception:
+                    pass
+            if on_close is not None:
+                try:
+                    self.ui_settings_window._on_close_callback = on_close
+                except Exception:
+                    pass
             self.ui_settings_window.lift()
             self.ui_settings_window.focus_force()
             return
-        self.ui_settings_window = UISettingsWindow(self, self.config_manager)
+        self.ui_settings_window = UISettingsWindow(
+            self,
+            self.config_manager,
+            spawn_xy=spawn_xy,
+            on_close=on_close,
+        )
         self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
 
     def _update_switch_eta(self):
@@ -3138,11 +3160,14 @@ class SettingsWindow(tk.Toplevel):
             self._settings_canvas.coords(btn["text_item"], x, y + btn["height"] // 2 - 2)
     def _open_ui_settings_window(self):
         parent_ui = getattr(self, "master", None)
-        if parent_ui is not None and hasattr(parent_ui, "_open_ui_settings"):
-            try:
-                parent_ui._open_ui_settings()
-            except Exception:
-                pass
+        if parent_ui is None or not hasattr(parent_ui, "_open_ui_settings"):
+            return
+        self._open_replacement_subwindow(
+            lambda xy: parent_ui._open_ui_settings(
+                spawn_xy=xy,
+                on_close=self._restore_after_subwindow_close,
+            )
+        )
 
     def _record_actions_prompt(self):
         if self._recording:
@@ -3424,10 +3449,54 @@ class SettingsWindow(tk.Toplevel):
             self.test_action_btn.config(state=tk.NORMAL)
 
     def _open_switch_account_window(self):
-        SwitchAccountWindow(self, self._config_manager)
+        self._open_replacement_subwindow(
+            lambda xy: SwitchAccountWindow(
+                self,
+                self._config_manager,
+                spawn_xy=xy,
+                on_close=self._restore_after_subwindow_close,
+            )
+        )
 
     def _open_record_actions_window(self):
-        RecordActionsWindow(self)
+        self._open_replacement_subwindow(
+            lambda xy: RecordActionsWindow(
+                self,
+                spawn_xy=xy,
+                on_close=self._restore_after_subwindow_close,
+            )
+        )
+
+    def _open_replacement_subwindow(self, opener):
+        if not self.winfo_exists():
+            return
+        self.update_idletasks()
+        geo = self.geometry()
+        x = int(self.winfo_x())
+        y = int(self.winfo_y())
+        try:
+            # Use WM geometry directly to avoid platform-dependent root offset quirks.
+            if "+" in geo:
+                parts = geo.split("+")
+                if len(parts) >= 3:
+                    x = int(parts[1])
+                    y = int(parts[2])
+        except Exception:
+            pass
+        self.withdraw()
+        try:
+            opener((x, y))
+        except Exception:
+            self._restore_after_subwindow_close()
+
+    def _restore_after_subwindow_close(self):
+        try:
+            if self.winfo_exists():
+                self.deiconify()
+                self.lift()
+                self.focus_force()
+        except Exception:
+            pass
 
     def destroy(self):
         try:
@@ -3438,17 +3507,23 @@ class SettingsWindow(tk.Toplevel):
 
 
 class UISettingsWindow(tk.Toplevel):
-    def __init__(self, parent, config_manager: ConfigManager):
+    def __init__(self, parent, config_manager: ConfigManager, spawn_xy: tuple[int, int] | None = None, on_close=None):
         super().__init__(parent)
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self._config_manager = config_manager
+        self._on_close_callback = on_close
         self.title("User Interface")
         width, height = self._s(460), self._s(430)
-        gap_px = int(parent.winfo_fpixels("5m"))
         parent.update_idletasks()
-        x = parent.winfo_x()
-        y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        if spawn_xy is not None:
+            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+        else:
+            gap_px = int(parent.winfo_fpixels("5m"))
+            x = parent.winfo_x()
+            y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        max_x = max(0, self.winfo_screenwidth() - width)
         max_y = max(0, self.winfo_screenheight() - height)
+        x = min(max(0, x), max_x)
         y = min(y, max_y)
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
@@ -3741,13 +3816,31 @@ class UISettingsWindow(tk.Toplevel):
                 return
         messagebox.showinfo("User Interface", "Gespeichert.")
 
+    def destroy(self):
+        callback = getattr(self, "_on_close_callback", None)
+        try:
+            super().destroy()
+        finally:
+            if callable(callback):
+                try:
+                    callback()
+                except Exception:
+                    pass
+
 
 class SwitchAccountWindow(tk.Toplevel):
-    def __init__(self, parent: SettingsWindow, config_manager: ConfigManager):
+    def __init__(
+        self,
+        parent: SettingsWindow,
+        config_manager: ConfigManager,
+        spawn_xy: tuple[int, int] | None = None,
+        on_close=None,
+    ):
         super().__init__(parent)
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self._parent = parent
         self._config_manager = config_manager
+        self._on_close_callback = on_close
         self._theme = {
             "bg": "#0F1115",
             "panel": "#121923",
@@ -3776,11 +3869,16 @@ class SwitchAccountWindow(tk.Toplevel):
         self.title("Manage Accounts")
         width = self._s(460)
         height = min(self._s(720), max(560, self.winfo_screenheight() - 80))
-        gap_px = int(parent.winfo_fpixels("5m"))
         parent.update_idletasks()
-        x = parent.winfo_x()
-        y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        if spawn_xy is not None:
+            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+        else:
+            gap_px = int(parent.winfo_fpixels("5m"))
+            x = parent.winfo_x()
+            y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        max_x = max(0, self.winfo_screenwidth() - width)
         max_y = max(0, self.winfo_screenheight() - height)
+        x = min(max(0, x), max_x)
         y = min(y, max_y)
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
@@ -4414,6 +4512,17 @@ class SwitchAccountWindow(tk.Toplevel):
             except Exception:
                 pass
         messagebox.showinfo("Saved", "Account play order saved.")
+
+    def destroy(self):
+        callback = getattr(self, "_on_close_callback", None)
+        try:
+            super().destroy()
+        finally:
+            if callable(callback):
+                try:
+                    callback()
+                except Exception:
+                    pass
 class _RecordActionsButtonProxy:
     def __init__(self, window, name: str):
         self._window = window
@@ -4432,16 +4541,20 @@ class _RecordActionsButtonProxy:
 
 
 class RecordActionsWindow(tk.Toplevel):
-    def __init__(self, parent: SettingsWindow):
+    def __init__(self, parent: SettingsWindow, spawn_xy: tuple[int, int] | None = None, on_close=None):
         super().__init__(parent)
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self._parent = parent
+        self._on_close_callback = on_close
         self.title("Record Actions")
         width, height = self._s(460), self._s(430)
-        gap_px = int(parent.winfo_fpixels("4m"))  # ~0.4 cm
         parent.update_idletasks()
-        x = parent.winfo_x() + parent.winfo_width() + gap_px
-        y = parent.winfo_y()
+        if spawn_xy is not None:
+            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+        else:
+            gap_px = int(parent.winfo_fpixels("4m"))  # ~0.4 cm
+            x = parent.winfo_x() + parent.winfo_width() + gap_px
+            y = parent.winfo_y()
         max_x = max(0, self.winfo_screenwidth() - width)
         max_y = max(0, self.winfo_screenheight() - height)
         x = min(max(0, x), max_x)
@@ -4466,7 +4579,7 @@ class RecordActionsWindow(tk.Toplevel):
         self._button_order = []
         self._create_canvas_button("record", "Record", self._parent._record_actions_prompt, "Secondary.TButton")
         self._create_canvas_button("show_records", "Show Records", self._parent._show_records, "Secondary.TButton")
-        self._create_canvas_button("close", "Close", self.destroy, "Secondary.TButton")
+        self._create_canvas_button("back", "Back", self.destroy, "Secondary.TButton")
 
         self._record_btn_proxy = _RecordActionsButtonProxy(self, "record")
         self._show_btn_proxy = _RecordActionsButtonProxy(self, "show_records")
@@ -4477,7 +4590,6 @@ class RecordActionsWindow(tk.Toplevel):
         self.bind("<Configure>", self._on_resize_background)
         self.after(30, self._refresh_scene)
         self.after(120, self._refresh_scene)
-        self.after(220, self._apply_content_minsize)
 
     def _s(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
@@ -4620,18 +4732,6 @@ class RecordActionsWindow(tk.Toplevel):
     def _refresh_scene(self):
         self._refresh_background()
         self._layout_scene()
-        self._apply_content_minsize()
-
-    def _apply_content_minsize(self):
-        _fit_window_to_canvas_content(
-            self,
-            self._canvas,
-            exclude_items={self._bg_canvas_item} if self._bg_canvas_item else None,
-            pad_x=self._s(22),
-            pad_y=self._s(22),
-            floor_w=self._s(320),
-            floor_h=self._s(280),
-        )
 
     def _layout_scene(self):
         if not self._canvas or not self._canvas.winfo_exists():
@@ -4676,7 +4776,15 @@ class RecordActionsWindow(tk.Toplevel):
             self._parent.record_btn = None
         if getattr(self._parent, "show_records_btn", None) is self._show_btn_proxy:
             self._parent.show_records_btn = None
-        super().destroy()
+        callback = getattr(self, "_on_close_callback", None)
+        try:
+            super().destroy()
+        finally:
+            if callable(callback):
+                try:
+                    callback()
+                except Exception:
+                    pass
 
 
 class LogWindow(tk.Toplevel):
