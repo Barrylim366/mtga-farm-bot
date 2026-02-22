@@ -1581,8 +1581,10 @@ class MTGBotUI(tk.Tk):
         self.title("Burning Lotus")
         self._suppress_tk_default_icon()
         self._ui_scale = self._compute_ui_scale()
-        width, height = self._scale_value(460), self._scale_value(780)
+        width = self._scale_value(460)
+        extra_h = self._scale_value(96)
         x, y = 18, 24
+        height = self._scale_value(780) + extra_h
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
 
@@ -1592,6 +1594,7 @@ class MTGBotUI(tk.Tk):
         self.session_games = 0
         self.session_wins = 0
         self.settings_window = None
+        self._last_settings_xy: tuple[int, int] | None = None
         self.ui_settings_window = None
         self.current_session_window = None
         self.license_window = None
@@ -1623,6 +1626,21 @@ class MTGBotUI(tk.Tk):
         auto_scale = max(0.82, min(1.0, auto_scale))
         user_percent = float(self.config_manager.get_ui_scale_percent()) / 100.0
         return max(0.50, min(1.20, auto_scale * user_percent))
+
+    @staticmethod
+    def _read_window_xy(window) -> tuple[int, int]:
+        try:
+            geo = str(window.geometry() or "")
+            if "+" in geo:
+                parts = geo.split("+")
+                if len(parts) >= 3:
+                    return int(parts[1]), int(parts[2])
+        except Exception:
+            pass
+        try:
+            return int(window.winfo_x()), int(window.winfo_y())
+        except Exception:
+            return (0, 0)
 
     def _scale_value(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
@@ -1660,7 +1678,9 @@ class MTGBotUI(tk.Tk):
         x = int(self.winfo_x())
         y = int(self.winfo_y())
         self._ui_scale = self._compute_ui_scale()
-        width, height = self._scale_value(460), self._scale_value(780)
+        width = self._scale_value(460)
+        extra_h = self._scale_value(96)
+        height = self._scale_value(780) + extra_h
         self.geometry(f"{width}x{height}+{x}+{y}")
 
         was_loading = bool(getattr(self, "_loading_visible", False))
@@ -2510,11 +2530,30 @@ class MTGBotUI(tk.Tk):
         CalibrationWindow(self, self.config_manager)
 
     def _open_current_session(self):
+        gap_px = int(self.winfo_fpixels("5m"))
+        self.update_idletasks()
+        target_x = int(self.winfo_x())
+        target_y = int(self.winfo_rooty() + self.winfo_height() + gap_px)
         if self.current_session_window and self.current_session_window.winfo_exists():
+            try:
+                w = int(self.current_session_window.winfo_width() or self.current_session_window.winfo_reqwidth())
+                h = int(self.current_session_window.winfo_height() or self.current_session_window.winfo_reqheight())
+                max_x = max(0, self.winfo_screenwidth() - w)
+                max_y = max(0, self.winfo_screenheight() - h)
+                x = min(max(0, target_x), max_x)
+                y = min(max(0, target_y), max_y)
+                self.current_session_window.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception:
+                pass
             self.current_session_window.lift()
             self.current_session_window.focus_force()
             return
-        self.current_session_window = CurrentSessionWindow(self, self.session_games, self.session_wins)
+        self.current_session_window = CurrentSessionWindow(
+            self,
+            self.session_games,
+            self.session_wins,
+            spawn_xy=(target_x, target_y),
+        )
         self.current_session_window.update_stats(self.session_games, self.session_wins, self._switch_eta_text)
         self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
 
@@ -2528,6 +2567,19 @@ class MTGBotUI(tk.Tk):
             self.settings_window.focus_force()
             return
         self.settings_window = SettingsWindow(self, self.config_manager)
+        try:
+            self._last_settings_xy = self._read_window_xy(self.settings_window)
+            self.settings_window.bind(
+                "<Configure>",
+                lambda _e: setattr(
+                    self,
+                    "_last_settings_xy",
+                    self._read_window_xy(self.settings_window),
+                ),
+                add="+",
+            )
+        except Exception:
+            pass
         self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
 
     def _open_ui_settings(self, spawn_xy: tuple[int, int] | None = None, on_close=None):
@@ -2581,16 +2633,21 @@ class MTGBotUI(tk.Tk):
 
 
 class CurrentSessionWindow(tk.Toplevel):
-    def __init__(self, parent, games: int, wins: int):
+    def __init__(self, parent, games: int, wins: int, spawn_xy: tuple[int, int] | None = None):
         super().__init__(parent)
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self.title("Current Session")
         width, height = self._s(460), self._s(320)
-        gap_px = int(parent.winfo_fpixels("5m"))  # ~5 mm
         parent.update_idletasks()
-        x = parent.winfo_x()
-        y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        if spawn_xy is not None:
+            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+        else:
+            gap_px = int(parent.winfo_fpixels("5m"))  # ~5 mm
+            x = parent.winfo_x()
+            y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        max_x = max(0, self.winfo_screenwidth() - width)
         max_y = max(0, self.winfo_screenheight() - height)
+        x = min(max(0, x), max_x)
         y = min(y, max_y)
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
@@ -2619,7 +2676,7 @@ class CurrentSessionWindow(tk.Toplevel):
             0,
             0,
             text="",
-            font=("Segoe UI", 13),
+            font=("Segoe UI", 11),
             anchor="nw",
             justify="left",
             fill=self._theme["card_body"],
@@ -2633,7 +2690,6 @@ class CurrentSessionWindow(tk.Toplevel):
         self.update_stats(games, wins, "Account switch: off")
         self.after(40, self._refresh_scene)
         self.after(160, self._refresh_scene)
-        self.after(220, self._apply_content_minsize)
 
     def _s(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
@@ -2663,18 +2719,6 @@ class CurrentSessionWindow(tk.Toplevel):
     def _refresh_scene(self):
         self._refresh_background()
         self._layout_scene()
-        self._apply_content_minsize()
-
-    def _apply_content_minsize(self):
-        _fit_window_to_canvas_content(
-            self,
-            self._canvas,
-            exclude_items={self._bg_canvas_item} if self._bg_canvas_item else None,
-            pad_x=self._s(24),
-            pad_y=self._s(22),
-            floor_w=self._s(360),
-            floor_h=self._s(240),
-        )
 
     def _refresh_background(self):
         if self._bg_source_image is None:
@@ -2714,7 +2758,7 @@ class CurrentSessionWindow(tk.Toplevel):
         text_item = self._canvas.create_text(
             0,
             0,
-            text="Back",
+            text="Close",
             fill="#F2F6FF",
             font=("Segoe UI", 11, "bold"),
             anchor="center",
@@ -2811,10 +2855,10 @@ class CurrentSessionWindow(tk.Toplevel):
         box_w = min(s(408), max(s(320), cw - s(48)))
         box_x = (cw - box_w) // 2
         box_y = s(38)
-        box_h = s(132)
+        box_h = s(146)
         self._render_stats_panel(box_w, box_h)
         self._canvas.coords(self._stats_panel_item, box_x, box_y)
-        self._canvas.coords(self._stats_text_item, box_x + s(24), box_y + s(20))
+        self._canvas.coords(self._stats_text_item, box_x + s(20), box_y + s(16))
         self._canvas.tag_raise(self._stats_text_item)
         if self._back_btn:
             y = box_y + box_h + s(22)
@@ -2979,7 +3023,7 @@ class SettingsWindow(tk.Toplevel):
         )
         self._create_settings_canvas_button(
             "back",
-            "Back",
+            "Close",
             self.destroy,
             style_name="Secondary.TButton",
         )
@@ -3483,6 +3527,12 @@ class SettingsWindow(tk.Toplevel):
                     y = int(parts[2])
         except Exception:
             pass
+        try:
+            parent_ui = getattr(self, "master", None)
+            if parent_ui is not None and hasattr(parent_ui, "_last_settings_xy"):
+                parent_ui._last_settings_xy = (int(x), int(y))
+        except Exception:
+            pass
         self.withdraw()
         try:
             opener((x, y))
@@ -3499,6 +3549,12 @@ class SettingsWindow(tk.Toplevel):
             pass
 
     def destroy(self):
+        try:
+            parent_ui = getattr(self, "master", None)
+            if parent_ui is not None and hasattr(parent_ui, "_last_settings_xy"):
+                parent_ui._last_settings_xy = (int(self.winfo_x()), int(self.winfo_y()))
+        except Exception:
+            pass
         try:
             if self._recording:
                 self._stop_recording()
@@ -3870,12 +3926,20 @@ class SwitchAccountWindow(tk.Toplevel):
         width = self._s(460)
         height = min(self._s(720), max(560, self.winfo_screenheight() - 80))
         parent.update_idletasks()
+        base_main = getattr(parent, "master", None)
+        main_y = None
+        try:
+            if base_main is not None and hasattr(base_main, "winfo_y"):
+                main_y = int(base_main.winfo_y())
+        except Exception:
+            main_y = None
         if spawn_xy is not None:
-            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+            x = int(spawn_xy[0])
+            y = int(main_y if main_y is not None else spawn_xy[1])
         else:
             gap_px = int(parent.winfo_fpixels("5m"))
             x = parent.winfo_x()
-            y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+            y = int(main_y if main_y is not None else (parent.winfo_rooty() + parent.winfo_height() + gap_px))
         max_x = max(0, self.winfo_screenwidth() - width)
         max_y = max(0, self.winfo_screenheight() - height)
         x = min(max(0, x), max_x)
@@ -4380,7 +4444,7 @@ class SwitchAccountWindow(tk.Toplevel):
         )
         self._create_manage_canvas_button(
             name="close_bottom",
-            text="Close",
+            text="Back",
             x=246,
             y=634,
             body_w=120,
