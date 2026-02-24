@@ -1,67 +1,134 @@
-import hashlib
+import json
 import os
-import re
+import time
 import unittest
-from datetime import datetime, timezone
 from unittest import mock
 
+from licensing import codec, storage, validator
+
 try:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
     CRYPTO_AVAILABLE = True
 except Exception:
-    serialization = None
-    Ed25519PrivateKey = None
+    hashes = None
+    ec = None
     CRYPTO_AVAILABLE = False
 
-from licensing import codec, fingerprint, storage, validator
+
+def _b64u(raw: bytes) -> str:
+    return codec.b64url_encode(raw)
 
 
+@unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography is not installed")
 class LicensingTests(unittest.TestCase):
-    @unittest.skipUnless(CRYPTO_AVAILABLE, "cryptography is not installed")
-    def test_canonical_payload_signature_verify(self):
-        device_id = "A" * 32
-        private_key = Ed25519PrivateKey.generate()
-        public_key_raw = private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
+    def _make_keypair(self):
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        public_key = private_key.public_key().public_numbers()
+        x = int(public_key.x).to_bytes(32, "big")
+        y = int(public_key.y).to_bytes(32, "big")
+        jwk = {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": _b64u(x),
+            "y": _b64u(y),
+        }
+        return private_key, jwk
 
+    def _make_token(self, private_key, payload: dict) -> str:
+        payload_b64 = _b64u(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        signature = private_key.sign(payload_b64.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+        return f"{payload_b64}.{_b64u(signature)}"
+
+    def test_base64url_roundtrip(self):
+        raw = b"hello-license-token"
+        encoded = codec.b64url_encode(raw)
+        decoded = codec.b64url_decode(encoded)
+        self.assertEqual(raw, decoded)
+
+    def test_verify_local_token_ok(self):
+        private_key, jwk = self._make_keypair()
+        now = int(time.time())
         payload = {
-            "product": "BurningLotusBot",
-            "customer_id": "cust-123",
-            "seat_index": 1,
-            "device_id_hash": hashlib.sha256(device_id.encode("utf-8")).hexdigest(),
-            "issued_at": "2026-01-01T00:00:00Z",
-            "expires_at": "2027-01-01T00:00:00Z",
-            "features": ["full"],
+            "lic": "ABC-123-XYZ",
+            "mid": "MID-TEST-1",
+            "plat": "linux",
+            "iat": now - 10,
+            "exp": now + 3600,
         }
-        payload_bytes = codec.canonical_json_bytes(payload)
-        license_obj = {
-            "payload": codec.b64url_encode(payload_bytes),
-            "sig": codec.b64url_encode(private_key.sign(payload_bytes)),
+        token = self._make_token(private_key, payload)
+        state = {
+            "licenseKey": payload["lic"],
+            "token": token,
+            "exp": payload["exp"],
+            "platform": payload["plat"],
+            "machineId": payload["mid"],
+            "savedAt": now,
         }
 
-        result = validator.validate_license_object(
-            license_obj,
-            current_device_id=device_id,
-            public_key_bytes=public_key_raw,
-            now=datetime(2026, 2, 1, tzinfo=timezone.utc),
-        )
-        self.assertTrue(result.valid, result.message)
+        with mock.patch.dict(os.environ, {"BLB_PUBLIC_JWK": json.dumps(jwk)}, clear=False):
+            result = validator.verifyLocalToken(
+                state=state,
+                machine_id=payload["mid"],
+                platform=payload["plat"],
+                now_unix=now,
+            )
+        self.assertTrue(result.valid, msg=result.code)
 
-    def test_fingerprint_format(self):
-        with mock.patch("licensing.fingerprint.get_device_fingerprint_raw", return_value="example-raw-fingerprint"):
-            device_id = fingerprint.get_device_id(length=32)
-        self.assertEqual(32, len(device_id))
-        self.assertRegex(device_id, r"^[A-Z2-7]{32}$")
+    def test_verify_reason_codes(self):
+        private_key, jwk = self._make_keypair()
+        now = int(time.time())
+        payload = {
+            "lic": "KEY-1",
+            "mid": "MID-1",
+            "plat": "linux",
+            "iat": now - 20,
+            "exp": now + 30,
+        }
+        token = self._make_token(private_key, payload)
+        state = {
+            "licenseKey": payload["lic"],
+            "token": token,
+            "exp": payload["exp"],
+            "platform": payload["plat"],
+            "machineId": payload["mid"],
+            "savedAt": now,
+        }
+
+        with mock.patch.dict(os.environ, {"BLB_PUBLIC_JWK": json.dumps(jwk)}, clear=False):
+            self.assertEqual(
+                "machine_mismatch",
+                validator.verifyLocalToken(state=state, machine_id="MID-OTHER", platform="linux", now_unix=now).code,
+            )
+            self.assertEqual(
+                "platform_mismatch",
+                validator.verifyLocalToken(state=state, machine_id="MID-1", platform="win", now_unix=now).code,
+            )
+            self.assertEqual(
+                "token_expired",
+                validator.verifyLocalToken(state=state, machine_id="MID-1", platform="linux", now_unix=now + 999).code,
+            )
+
+    def test_token_format_invalid(self):
+        state = {
+            "licenseKey": "L1",
+            "token": "not-a-token",
+            "exp": 0,
+            "platform": "linux",
+            "machineId": "MID",
+            "savedAt": 0,
+        }
+        result = validator.verifyLocalToken(state=state, machine_id="MID", platform="linux", now_unix=0)
+        self.assertEqual("token_format_invalid", result.code)
 
     def test_storage_path_windows(self):
-        with mock.patch("licensing.storage.os.name", "nt"), mock.patch("licensing.storage.sys.platform", "win32"), mock.patch.dict(os.environ, {"APPDATA": r"C:\Users\Test\AppData\Roaming"}, clear=False):
+        with mock.patch("licensing.storage.sys.platform", "win32"), mock.patch.dict(os.environ, {"APPDATA": r"C:\Users\Test\AppData\Roaming"}, clear=False):
             path = storage.get_license_file_path()
         normalized = str(path).replace("/", "\\")
-        self.assertIn("BurningLotusBot", normalized)
-        self.assertTrue(normalized.endswith("\\license.bllic"))
+        self.assertIn("BurningLotus", normalized)
+        self.assertTrue(normalized.endswith("\\license.json"))
+
 
 if __name__ == "__main__":
     unittest.main()

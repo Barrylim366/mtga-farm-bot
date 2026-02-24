@@ -4,11 +4,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-APP_DIR_NAME_WINDOWS = "BurningLotusBot"
-APP_DIR_NAME_UNIX = "burninglotusbot"
-LICENSE_FILE_NAME = "license.bllic"
-STATUS_CACHE_FILE_NAME = "license_status.json"
-EMERGENCY_OVERRIDE_FILE_NAME = "emergency_override.json"
+APP_DIR_NAME = "BurningLotus"
+LICENSE_FILE_NAME = "license.json"
 
 
 def get_license_dir_path() -> Path:
@@ -16,91 +13,38 @@ def get_license_dir_path() -> Path:
     if os.name == "nt" or sys.platform.startswith("win"):
         appdata = os.environ.get("APPDATA", "").strip()
         if appdata:
-            return Path(appdata) / APP_DIR_NAME_WINDOWS
-        return home / "AppData" / "Roaming" / APP_DIR_NAME_WINDOWS
+            return Path(appdata) / APP_DIR_NAME
+        return home / "AppData" / "Roaming" / APP_DIR_NAME
     if sys.platform == "darwin":
-        return home / "Library" / "Application Support" / APP_DIR_NAME_WINDOWS
-    return home / ".config" / APP_DIR_NAME_UNIX
+        return home / "Library" / "Application Support" / APP_DIR_NAME
+    return home / ".config" / APP_DIR_NAME.lower()
 
 
 def get_license_file_path() -> Path:
     return get_license_dir_path() / LICENSE_FILE_NAME
 
 
-def get_status_cache_path() -> Path:
-    return get_license_dir_path() / STATUS_CACHE_FILE_NAME
-
-
-def get_emergency_override_path() -> Path:
-    return get_license_dir_path() / EMERGENCY_OVERRIDE_FILE_NAME
-
-
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def load_license_text() -> str | None:
+def load_license_state() -> dict[str, Any]:
     path = get_license_file_path()
-    if not path.is_file():
-        return None
-    return path.read_text(encoding="utf-8")
-
-
-def save_license_text(license_text: str) -> Path:
-    path = get_license_file_path()
-    _ensure_dir(path.parent)
-    path.write_text((license_text or "").strip() + "\n", encoding="utf-8")
-    return path
-
-
-def load_status_cache() -> dict[str, Any]:
-    path = get_status_cache_path()
     if not path.is_file():
         return {}
     try:
-        content = path.read_text(encoding="utf-8")
-        data = json.loads(content)
+        text = path.read_text(encoding="utf-8")
+        data = json.loads(text)
         if isinstance(data, dict):
             return data
-        return {}
     except Exception:
-        return {}
+        pass
+    return {}
 
 
-def save_status_cache(data: dict[str, Any]) -> Path:
-    path = get_status_cache_path()
+def save_license_state(data: dict[str, Any]) -> Path:
+    path = get_license_file_path()
     _ensure_dir(path.parent)
     payload = data if isinstance(data, dict) else {}
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
-
-
-def load_emergency_override() -> dict[str, Any]:
-    path = get_emergency_override_path()
-    if not path.is_file():
-        return {}
-    try:
-        content = path.read_text(encoding="utf-8")
-        data = json.loads(content)
-        if isinstance(data, dict):
-            return data
-        return {}
-    except Exception:
-        return {}
-
-
-def save_emergency_override(data: dict[str, Any]) -> Path:
-    path = get_emergency_override_path()
-    _ensure_dir(path.parent)
-    payload = data if isinstance(data, dict) else {}
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return path
-
-
-def clear_emergency_override() -> None:
-    path = get_emergency_override_path()
-    if path.is_file():
-        try:
-            path.unlink()
-        except Exception:
-            pass

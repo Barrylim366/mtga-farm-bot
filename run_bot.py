@@ -5,7 +5,7 @@ import time
 import os
 import pathlib
 import sys
-from licensing.validator import require_license_or_block
+from licensing.validator import ensureLicensedOrExit
 
 
 def _default_player_log_path() -> str:
@@ -73,10 +73,20 @@ def _detect_player_log_path() -> str:
 
 def main():
     print("Starting MTG AI Bot...")
-    license_result = require_license_or_block()
+    def _prompt_license_key(previous_result):
+        if not sys.stdin or not sys.stdin.isatty():
+            return ""
+        if previous_result is not None and previous_result.code:
+            print(f"License required ({previous_result.code}).")
+        try:
+            return input("Enter License Key: ").strip()
+        except EOFError:
+            return ""
+
+    license_result = ensureLicensedOrExit(prompt_license_key=_prompt_license_key)
     if not license_result.valid:
-        print(f"License check failed: {license_result.message}")
-        print("Open the UI and activate a valid license first.")
+        print(f"License check failed [{license_result.code}]: {license_result.message}")
+        print("Open the UI and activate a valid license key.")
         return
 
     # User configuration

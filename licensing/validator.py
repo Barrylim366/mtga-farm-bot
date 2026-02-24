@@ -1,33 +1,43 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
+import logging
 import os
-import re
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
-from .codec import b64url_decode, canonical_json_bytes, canonical_json_dumps, parse_json_object
-from .fingerprint import PRODUCT_NAME, get_device_id
+from .codec import b64url_decode, parse_json_object
+from .fingerprint import get_device_id
 from . import storage
 
 try:
     from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, utils
 except Exception:
     InvalidSignature = Exception
-    serialization = None
-    Ed25519PublicKey = None
+    hashes = None
+    ec = None
+    utils = None
 
-PUBLIC_KEY_B64 = "V6hbI9Sxwy/4DApuvISJBDNYlecgliJkTiMYYJhTUSA="
-PUBLIC_KEY_ENV = "BLB_PUBLIC_KEY_B64"
-EMERGENCY_CODE_HASH_DEFAULT = "d193e7a2be71b625c0e44b2733f69b01962bd5339d55a7693beabadc2668a0af"  # BLB-NOTFALL-2026
-EMERGENCY_CODE_HASH_ENV = "BLB_EMERGENCY_CODE_SHA256"
-EMERGENCY_CODE_ENV = "BLB_EMERGENCY_CODE"
-EMERGENCY_CODE_DAYS_ENV = "BLB_EMERGENCY_CODE_DAYS"
+logger = logging.getLogger(__name__)
+
+ACTIVATE_URL = "https://burninglotusbot.com/api/activate-license"
+VALIDATE_URL = "https://burninglotusbot.com/api/validate-license"
+HTTP_TIMEOUT_SECONDS = 12
+
+PUBLIC_JWK_DEFAULT = {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "_2XtSnQ4ROOcOX1YSrmnj0db7tQpY-p-Jp0VrT4tgnE",
+    "y": "L-IiEfn3M5NViPXQct0BkWar9atwroXku4uTQKwaMtk",
+}
+PUBLIC_JWK_ENV = "BLB_PUBLIC_JWK"
+PUBLIC_JWK_FILE_ENV = "BLB_PUBLIC_JWK_FILE"
 
 
 @dataclass(frozen=True)
@@ -59,451 +69,376 @@ def _result(
     )
 
 
-def _decode_base64_loose(value: str) -> bytes:
-    text = (value or "").strip()
-    if not text:
-        raise ValueError("empty key")
-    try:
-        return b64url_decode(text)
-    except Exception:
-        pass
-    padding = "=" * ((4 - len(text) % 4) % 4)
-    return base64.b64decode(text + padding)
+def _platform_code() -> str:
+    if os.name == "nt":
+        return "win"
+    if os.sys.platform == "darwin":
+        return "mac"
+    return "linux"
 
 
-def _resolve_public_key_bytes(
-    public_key_b64: str | None = None,
-    public_key_bytes: bytes | None = None,
-) -> bytes:
-    if public_key_bytes is not None:
-        raw = bytes(public_key_bytes)
-        if len(raw) != 32:
-            raise ValueError("Ed25519 public key must be 32 bytes.")
-        return raw
-
-    key_text = (
-        (public_key_b64 or "").strip()
-        or os.environ.get(PUBLIC_KEY_ENV, "").strip()
-        or (PUBLIC_KEY_B64 or "").strip()
-    )
-    if not key_text or "PASTE_ED25519_PUBLIC_KEY_BASE64_HERE" in key_text:
-        raise ValueError("PUBLIC_KEY_B64 is not configured.")
-
-    if key_text.startswith("-----BEGIN"):
-        if serialization is None or Ed25519PublicKey is None:
-            raise ValueError("cryptography package is not available.")
-        key_obj = serialization.load_pem_public_key(key_text.encode("utf-8"))
-        if not isinstance(key_obj, Ed25519PublicKey):
-            raise ValueError("PEM key is not an Ed25519 public key.")
-        return key_obj.public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-
-    raw = _decode_base64_loose(key_text)
-    if len(raw) != 32:
-        raise ValueError("Ed25519 public key must be 32 bytes after Base64 decode.")
-    return raw
+def _now() -> int:
+    return int(time.time())
 
 
-def _load_public_key(
-    public_key_b64: str | None = None,
-    public_key_bytes: bytes | None = None,
-):
-    if Ed25519PublicKey is None:
-        raise RuntimeError("cryptography package is missing.")
-    resolved_bytes = _resolve_public_key_bytes(
-        public_key_b64=public_key_b64,
-        public_key_bytes=public_key_bytes,
-    )
-    return Ed25519PublicKey.from_public_bytes(resolved_bytes)
+def _decode_b64url_to_int(text: str) -> int:
+    raw = b64url_decode(text)
+    if not raw:
+        raise ValueError("empty coordinate")
+    return int.from_bytes(raw, "big")
 
 
-def _parse_iso_datetime(value: Any) -> datetime:
-    text = str(value).strip()
-    if not text:
-        raise ValueError("empty datetime")
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    parsed = datetime.fromisoformat(text)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+def _resource_root_dir() -> Path:
+    if getattr(os.sys, "frozen", False):
+        meipass = getattr(os.sys, "_MEIPASS", "")
+        if isinstance(meipass, str) and meipass and os.path.isdir(meipass):
+            return Path(meipass).resolve()
+        return Path(os.path.dirname(os.sys.executable)).resolve()
+    return Path(__file__).resolve().parent.parent
 
 
-def _sha256_hex(value: str) -> str:
-    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
+def _candidate_jwk_paths() -> list[Path]:
+    app_root = _resource_root_dir()
+    return [
+        app_root / "config" / "public_key.jwk",
+        Path(__file__).resolve().parent / "public_key.jwk",
+    ]
 
 
-def _resolve_emergency_code_hashes() -> set[str]:
-    hashes: set[str] = set()
-    hashes.add(EMERGENCY_CODE_HASH_DEFAULT)
-    env_hash = os.environ.get(EMERGENCY_CODE_HASH_ENV, "").strip().lower()
-    if re.fullmatch(r"[0-9a-f]{64}", env_hash):
-        hashes.add(env_hash)
-    env_plain = os.environ.get(EMERGENCY_CODE_ENV, "").strip()
-    if env_plain:
-        hashes.add(_sha256_hex(env_plain))
-    return hashes
+def _load_public_jwk() -> dict[str, Any]:
+    env_json = (os.environ.get(PUBLIC_JWK_ENV, "") or "").strip()
+    if env_json:
+        data = parse_json_object(env_json)
+        return data
+
+    env_file = (os.environ.get(PUBLIC_JWK_FILE_ENV, "") or "").strip()
+    if env_file:
+        p = Path(env_file).expanduser().resolve()
+        if p.is_file():
+            return parse_json_object(p.read_text(encoding="utf-8"))
+
+    for candidate in _candidate_jwk_paths():
+        if candidate.is_file():
+            try:
+                return parse_json_object(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+    return dict(PUBLIC_JWK_DEFAULT)
 
 
-def _resolve_emergency_days() -> int:
-    raw = os.environ.get(EMERGENCY_CODE_DAYS_ENV, "").strip()
-    try:
-        value = int(raw) if raw else 3
-    except Exception:
-        value = 3
-    return max(1, min(30, value))
+def _load_public_key():
+    if ec is None or hashes is None:
+        raise RuntimeError("cryptography package is missing")
+    jwk = _load_public_jwk()
+    if jwk.get("kty") != "EC" or jwk.get("crv") != "P-256":
+        raise ValueError("public key must be EC P-256 JWK")
+    x = str(jwk.get("x", "")).strip()
+    y = str(jwk.get("y", "")).strip()
+    if not x or not y or "PASTE_" in x or "PASTE_" in y:
+        raise ValueError("public key is not configured")
+    numbers = ec.EllipticCurvePublicNumbers(_decode_b64url_to_int(x), _decode_b64url_to_int(y), ec.SECP256R1())
+    return numbers.public_key()
 
 
-def _validate_emergency_override(now_utc: datetime, current_device_id: str) -> LicenseValidationResult:
-    data = storage.load_emergency_override()
-    if not isinstance(data, dict) or not data:
-        return _result(False, "no_emergency_override", "No emergency override found.", device_id=current_device_id)
-
-    expires_raw = data.get("expires_at")
-    activated_raw = data.get("activated_at")
-    code_hash = str(data.get("code_hash", "")).strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", code_hash):
-        storage.clear_emergency_override()
-        return _result(False, "invalid_emergency_override", "Emergency override is corrupt.", device_id=current_device_id)
-    try:
-        expires_at = _parse_iso_datetime(expires_raw)
-        activated_at = _parse_iso_datetime(activated_raw)
-    except Exception:
-        storage.clear_emergency_override()
-        return _result(False, "invalid_emergency_override", "Emergency override is corrupt.", device_id=current_device_id)
-
-    if now_utc > expires_at:
-        storage.clear_emergency_override()
-        return _result(False, "emergency_expired", "Emergency code expired.", device_id=current_device_id)
-
-    payload = {
-        "customer_id": "EMERGENCY",
-        "seat_index": "emergency",
-        "issued_at": activated_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "expires_at": expires_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "features": ["emergency_override"],
-    }
-    return _result(
-        True,
-        "emergency_ok",
-        "Emergency code active.",
-        payload=payload,
-        device_id=current_device_id,
-    )
+def _ensure_der_signature(sig: bytes) -> list[bytes]:
+    sig = bytes(sig)
+    candidates = [sig]
+    if len(sig) == 64 and utils is not None:
+        r = int.from_bytes(sig[:32], "big")
+        s = int.from_bytes(sig[32:], "big")
+        candidates.append(utils.encode_dss_signature(r, s))
+    return candidates
 
 
-def parse_license_container(license_text: str) -> dict[str, str]:
-    try:
-        obj = parse_json_object(license_text)
-    except Exception as exc:
-        raise ValueError("Corrupt file: invalid license JSON.") from exc
-
-    payload = obj.get("payload")
-    sig = obj.get("sig")
-    if not isinstance(payload, str) or not isinstance(sig, str):
-        raise ValueError("Corrupt file: missing payload/sig.")
-    return {"payload": payload, "sig": sig}
-
-
-def _write_status_cache(result: LicenseValidationResult) -> None:
-    payload = result.payload or {}
-    data = {
-        "last_checked": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "valid": result.valid,
-        "code": result.code,
-        "message": result.message,
-        "customer_id": payload.get("customer_id"),
-        "seat_index": payload.get("seat_index"),
-        "expires_at": payload.get("expires_at"),
-    }
-    try:
-        storage.save_status_cache(data)
-    except Exception:
-        pass
-
-
-def _validate_payload(payload: dict[str, Any], current_device_id: str, now_utc: datetime) -> LicenseValidationResult:
-    product = str(payload.get("product", "")).strip()
-    if product != PRODUCT_NAME:
-        return _result(False, "wrong_product", "Wrong product.", payload=payload, device_id=current_device_id)
-
-    customer_id = str(payload.get("customer_id", "")).strip()
-    if not customer_id:
-        return _result(False, "invalid_payload", "Corrupt file: missing customer_id.", payload=payload, device_id=current_device_id)
-
-    try:
-        seat_index = int(payload.get("seat_index"))
-    except Exception:
-        return _result(False, "invalid_seat", "Corrupt file: invalid seat_index.", payload=payload, device_id=current_device_id)
-    if seat_index not in (1, 2):
-        return _result(False, "invalid_seat", "Corrupt file: seat_index must be 1 or 2.", payload=payload, device_id=current_device_id)
-
-    try:
-        issued_at_raw = payload.get("issued_at")
-        _parse_iso_datetime(issued_at_raw)
-    except Exception:
-        return _result(False, "invalid_payload", "Corrupt file: invalid issued_at.", payload=payload, device_id=current_device_id)
-
-    device_id_hash = str(payload.get("device_id_hash", "")).strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", device_id_hash):
-        return _result(False, "invalid_payload", "Corrupt file: invalid device_id_hash.", payload=payload, device_id=current_device_id)
-
-    expected_hash = hashlib.sha256(current_device_id.encode("utf-8")).hexdigest()
-    if device_id_hash != expected_hash:
-        return _result(False, "wrong_device", "Wrong device.", payload=payload, device_id=current_device_id)
-
-    expires_raw = payload.get("expires_at")
-    if expires_raw not in (None, "", "null"):
+def _verify_signature(payload_b64: str, sig_raw: bytes) -> bool:
+    key = _load_public_key()
+    data = payload_b64.encode("utf-8")
+    for candidate in _ensure_der_signature(sig_raw):
         try:
-            expires_at = _parse_iso_datetime(expires_raw)
+            key.verify(candidate, data, ec.ECDSA(hashes.SHA256()))
+            return True
+        except InvalidSignature:
+            continue
         except Exception:
-            return _result(False, "invalid_payload", "Corrupt file: invalid expires_at.", payload=payload, device_id=current_device_id)
-        if now_utc > expires_at:
-            return _result(False, "expired", "Expired.", payload=payload, device_id=current_device_id)
-
-    features = payload.get("features")
-    if features is not None and not isinstance(features, list):
-        return _result(False, "invalid_payload", "Corrupt file: features must be a list.", payload=payload, device_id=current_device_id)
-
-    return _result(True, "ok", "License activated.", payload=payload, device_id=current_device_id)
+            continue
+    return False
 
 
-def validate_license_object(
-    license_obj: dict[str, Any],
+def loadLicenseState() -> dict[str, Any]:
+    data = storage.load_license_state()
+    return data if isinstance(data, dict) else {}
+
+
+def _parse_token(token: str) -> tuple[str, bytes, dict[str, Any]]:
+    parts = (token or "").strip().split(".")
+    if len(parts) != 2:
+        raise ValueError("token_format_invalid")
+    payload_b64, sig_b64 = parts
+    payload_json_bytes = b64url_decode(payload_b64)
+    sig_raw = b64url_decode(sig_b64)
+    payload_obj = json.loads(payload_json_bytes.decode("utf-8"))
+    if not isinstance(payload_obj, dict):
+        raise ValueError("token_payload_invalid")
+    return payload_b64, sig_raw, payload_obj
+
+
+def _reason_message(code: str) -> str:
+    messages = {
+        "not_activated": "License is not activated.",
+        "token_format_invalid": "Stored token format is invalid.",
+        "token_payload_invalid": "Stored token payload is invalid.",
+        "signature_invalid": "Stored token signature is invalid.",
+        "machine_mismatch": "License token belongs to a different machine.",
+        "platform_mismatch": "License token belongs to a different platform.",
+        "token_expired": "License token is expired.",
+        "license_mismatch": "Stored license key does not match token payload.",
+        "key_error": "Public key is not configured correctly.",
+        "network_error": "License activation network error.",
+        "activation_failed": "License activation failed.",
+        "license_not_found": "License key was not found.",
+        "license_inactive": "License key is inactive.",
+        "license_revoked": "License key is revoked.",
+        "license_expired": "License key is expired.",
+        "machine_limit_reached": "Machine activation limit reached.",
+        "platform_not_allowed": "License is not allowed on this platform.",
+        "cloudflare_blocked": "Request was blocked by Cloudflare security.",
+        "http_403": "Server denied activation request (HTTP 403).",
+        "http_401": "Server denied activation request (HTTP 401).",
+        "http_429": "Too many activation requests (HTTP 429).",
+        "server_response_invalid": "Activation server returned invalid data.",
+        "ok": "License active.",
+    }
+    return messages.get(code, code)
+
+
+def verifyLocalToken(
     *,
-    current_device_id: str | None = None,
-    public_key_b64: str | None = None,
-    public_key_bytes: bytes | None = None,
-    now: datetime | None = None,
+    state: dict[str, Any] | None = None,
+    machine_id: str | None = None,
+    platform: str | None = None,
+    now_unix: int | None = None,
 ) -> LicenseValidationResult:
-    try:
-        resolved_device_id = current_device_id or get_device_id()
-    except Exception as exc:
-        return _result(False, "device_error", f"Could not determine device ID: {exc}")
-
-    if not isinstance(license_obj, dict):
-        return _result(False, "corrupt", "Corrupt file.", device_id=resolved_device_id)
-    payload_b64 = license_obj.get("payload")
-    sig_b64 = license_obj.get("sig")
-    if not isinstance(payload_b64, str) or not isinstance(sig_b64, str):
-        return _result(False, "corrupt", "Corrupt file.", device_id=resolved_device_id)
-
-    try:
-        payload_bytes = b64url_decode(payload_b64)
-        signature = b64url_decode(sig_b64)
-    except Exception:
-        return _result(False, "corrupt", "Corrupt file.", device_id=resolved_device_id)
-
-    try:
-        pub_key = _load_public_key(public_key_b64=public_key_b64, public_key_bytes=public_key_bytes)
-    except Exception as exc:
-        return _result(False, "key_error", f"Public Key Fehler: {exc}", device_id=resolved_device_id)
-
-    try:
-        pub_key.verify(signature, payload_bytes)
-    except InvalidSignature:
-        return _result(False, "invalid_signature", "Invalid signature.", device_id=resolved_device_id)
-    except Exception:
-        return _result(False, "invalid_signature", "Invalid signature.", device_id=resolved_device_id)
-
-    try:
-        payload_raw = payload_bytes.decode("utf-8")
-        payload_obj = json.loads(payload_raw)
-        if not isinstance(payload_obj, dict):
-            return _result(False, "corrupt", "Corrupt file.", device_id=resolved_device_id)
-    except Exception:
-        return _result(False, "corrupt", "Corrupt file.", device_id=resolved_device_id)
-
-    expected_payload_bytes = canonical_json_bytes(payload_obj)
-    if payload_bytes != expected_payload_bytes:
-        return _result(False, "corrupt", "Corrupt file: payload is not canonical.", device_id=resolved_device_id)
-
-    now_utc = now.astimezone(timezone.utc) if isinstance(now, datetime) and now.tzinfo else (now or datetime.now(timezone.utc))
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-    return _validate_payload(payload_obj, resolved_device_id, now_utc.astimezone(timezone.utc))
-
-
-def validate_license_text(
-    license_text: str,
-    *,
-    current_device_id: str | None = None,
-    public_key_b64: str | None = None,
-    public_key_bytes: bytes | None = None,
-    now: datetime | None = None,
-) -> LicenseValidationResult:
-    try:
-        container = parse_license_container(license_text)
-    except ValueError as exc:
-        try:
-            resolved_device_id = current_device_id or get_device_id()
-        except Exception:
-            resolved_device_id = current_device_id
-        return _result(False, "corrupt", str(exc), device_id=resolved_device_id)
-    return validate_license_object(
-        container,
-        current_device_id=current_device_id,
-        public_key_b64=public_key_b64,
-        public_key_bytes=public_key_bytes,
-        now=now,
-    )
-
-
-def validate_installed_license(
-    *,
-    current_device_id: str | None = None,
-    public_key_b64: str | None = None,
-    public_key_bytes: bytes | None = None,
-    now: datetime | None = None,
-) -> LicenseValidationResult:
-    now_utc = now.astimezone(timezone.utc) if isinstance(now, datetime) and now.tzinfo else (now or datetime.now(timezone.utc))
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-
-    try:
-        resolved_device_id = current_device_id or get_device_id()
-    except Exception as exc:
-        result = _result(False, "device_error", f"Could not determine device ID: {exc}")
-        _write_status_cache(result)
-        return result
-
+    machine = machine_id or get_device_id()
+    plat = platform or _platform_code()
+    now_ts = int(now_unix if now_unix is not None else _now())
     license_path = str(storage.get_license_file_path())
-    raw = storage.load_license_text()
-    if not raw or not raw.strip():
-        emergency_result = _validate_emergency_override(now_utc.astimezone(timezone.utc), resolved_device_id)
-        if emergency_result.valid:
-            emergency_result = replace(emergency_result, license_path=license_path)
-            _write_status_cache(emergency_result)
-            return emergency_result
-        result = _result(
-            False,
-            "not_activated",
-            "Not activated: no license found.",
-            device_id=resolved_device_id,
-            license_path=license_path,
-        )
-        _write_status_cache(result)
-        return result
 
-    result = validate_license_text(
-        raw,
-        current_device_id=resolved_device_id,
-        public_key_b64=public_key_b64,
-        public_key_bytes=public_key_bytes,
-        now=now_utc,
-    )
-    result = replace(result, license_path=license_path)
-    if not result.valid:
-        emergency_result = _validate_emergency_override(now_utc.astimezone(timezone.utc), resolved_device_id)
-        if emergency_result.valid:
-            emergency_result = replace(emergency_result, license_path=license_path)
-            _write_status_cache(emergency_result)
-            return emergency_result
-    _write_status_cache(result)
-    return result
+    st = state if isinstance(state, dict) else loadLicenseState()
+    token = str(st.get("token", "") or "").strip()
+    license_key = str(st.get("licenseKey", "") or "").strip()
+    if not token or not license_key:
+        return _result(False, "not_activated", _reason_message("not_activated"), device_id=machine, license_path=license_path)
 
-
-def activate_emergency_code(
-    emergency_code: str,
-    *,
-    current_device_id: str | None = None,
-    now: datetime | None = None,
-) -> LicenseValidationResult:
     try:
-        resolved_device_id = current_device_id or get_device_id()
+        payload_b64, sig_raw, payload = _parse_token(token)
+    except ValueError as exc:
+        code = str(exc)
+        logger.warning("license verify failed: %s", code)
+        return _result(False, code, _reason_message(code), device_id=machine, license_path=license_path)
+    except Exception:
+        logger.warning("license verify failed: token_payload_invalid")
+        return _result(False, "token_payload_invalid", _reason_message("token_payload_invalid"), device_id=machine, license_path=license_path)
+
+    try:
+        signature_ok = _verify_signature(payload_b64, sig_raw)
+    except Exception:
+        logger.warning("license verify failed: key_error")
+        return _result(False, "key_error", _reason_message("key_error"), device_id=machine, license_path=license_path)
+
+    if not signature_ok:
+        logger.warning("license verify failed: signature_invalid")
+        return _result(False, "signature_invalid", _reason_message("signature_invalid"), device_id=machine, license_path=license_path)
+
+    payload_lic = str(payload.get("lic", "") or "")
+    payload_mid = str(payload.get("mid", "") or "")
+    payload_plat = str(payload.get("plat", "") or "")
+    try:
+        payload_exp = int(payload.get("exp"))
+    except Exception:
+        logger.warning("license verify failed: token_payload_invalid")
+        return _result(False, "token_payload_invalid", _reason_message("token_payload_invalid"), payload=payload, device_id=machine, license_path=license_path)
+
+    if payload_lic != license_key:
+        logger.warning("license verify failed: license_mismatch")
+        return _result(False, "license_mismatch", _reason_message("license_mismatch"), payload=payload, device_id=machine, license_path=license_path)
+    if payload_mid != machine:
+        logger.warning("license verify failed: machine_mismatch")
+        return _result(False, "machine_mismatch", _reason_message("machine_mismatch"), payload=payload, device_id=machine, license_path=license_path)
+    if payload_plat != plat:
+        logger.warning("license verify failed: platform_mismatch")
+        return _result(False, "platform_mismatch", _reason_message("platform_mismatch"), payload=payload, device_id=machine, license_path=license_path)
+    if payload_exp <= now_ts:
+        logger.warning("license verify failed: token_expired")
+        return _result(False, "token_expired", _reason_message("token_expired"), payload=payload, device_id=machine, license_path=license_path)
+
+    return _result(True, "ok", _reason_message("ok"), payload=payload, device_id=machine, license_path=license_path)
+
+
+def _http_post_json(url: str, body: dict[str, Any]) -> tuple[int, dict[str, Any], str]:
+    data = json.dumps(body).encode("utf-8")
+    req = urlrequest.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            # Avoid being treated as default urllib bot traffic by edge protections.
+            "User-Agent": "BurningLotusBot/1.0 (+https://burninglotusbot.com)",
+        },
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+            code = int(getattr(resp, "status", 200) or 200)
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urlerror.HTTPError as exc:
+        code = int(exc.code)
+        raw = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
     except Exception as exc:
-        result = _result(False, "device_error", f"Could not determine device ID: {exc}")
-        _write_status_cache(result)
-        return result
+        raise RuntimeError(f"network_error:{exc}") from exc
 
-    code = (emergency_code or "").strip()
-    if not code:
-        result = _result(False, "invalid_emergency_code", "Emergency code is empty.", device_id=resolved_device_id)
-        _write_status_cache(result)
-        return result
+    try:
+        payload = parse_json_object(raw) if raw.strip() else {}
+    except Exception:
+        payload = {}
+    return code, payload, raw
 
-    code_hash = _sha256_hex(code)
-    valid_hashes = _resolve_emergency_code_hashes()
-    if code_hash not in valid_hashes:
-        result = _result(False, "invalid_emergency_code", "Emergency code is invalid.", device_id=resolved_device_id)
-        _write_status_cache(result)
-        return result
 
-    now_utc = now.astimezone(timezone.utc) if isinstance(now, datetime) and now.tzinfo else (now or datetime.now(timezone.utc))
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-    expires_at = now_utc + timedelta(days=_resolve_emergency_days())
-    payload = {
-        "version": 1,
-        "activated_at": now_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "expires_at": expires_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "code_hash": code_hash,
+def activateOnline(licenseKey: str) -> LicenseValidationResult:
+    key = str(licenseKey or "").strip()
+    machine = get_device_id()
+    plat = _platform_code()
+    if not key:
+        return _result(False, "activation_failed", "License key is empty.", device_id=machine, license_path=str(storage.get_license_file_path()))
+
+    body = {
+        "licenseKey": key,
+        "machineId": machine,
+        "platform": plat,
     }
     try:
-        storage.save_emergency_override(payload)
-    except Exception as exc:
-        result = _result(False, "storage_error", f"Could not save emergency override: {exc}", device_id=resolved_device_id)
-        _write_status_cache(result)
-        return result
+        status_code, response, raw_text = _http_post_json(ACTIVATE_URL, body)
+    except Exception:
+        logger.warning("license activation failed: network_error")
+        return _result(False, "network_error", _reason_message("network_error"), device_id=machine, license_path=str(storage.get_license_file_path()))
 
-    result = _validate_emergency_override(now_utc, resolved_device_id)
-    _write_status_cache(result)
-    return result
+    if status_code >= 400:
+        reason = str(response.get("code") or response.get("error") or "").strip()
+        if not reason:
+            raw_low = (raw_text or "").lower()
+            if "cloudflare" in raw_low or "ray id" in raw_low:
+                reason = "cloudflare_blocked"
+            else:
+                reason = f"http_{status_code}"
+        logger.warning("license activation failed: %s", reason)
+        return _result(
+            False,
+            reason,
+            f"{_reason_message(reason)} (http_{status_code})",
+            device_id=machine,
+            license_path=str(storage.get_license_file_path()),
+        )
 
+    ok = bool(response.get("ok"))
+    token = str(response.get("token", "") or "").strip()
+    exp_raw = response.get("exp")
+    try:
+        exp = int(exp_raw)
+    except Exception:
+        exp = 0
+    if not ok or not token or exp <= 0:
+        reason = str(response.get("code") or response.get("error") or "server_response_invalid")
+        logger.warning("license activation failed: server_response_invalid")
+        return _result(
+            False,
+            reason,
+            _reason_message(reason),
+            device_id=machine,
+            license_path=str(storage.get_license_file_path()),
+        )
 
-def activate_license_text(
-    license_text: str,
-    *,
-    current_device_id: str | None = None,
-    public_key_b64: str | None = None,
-    public_key_bytes: bytes | None = None,
-    now: datetime | None = None,
-) -> LicenseValidationResult:
-    result = validate_license_text(
-        license_text,
-        current_device_id=current_device_id,
-        public_key_b64=public_key_b64,
-        public_key_bytes=public_key_bytes,
-        now=now,
-    )
-    if not result.valid:
-        _write_status_cache(result)
-        return result
+    state = {
+        "licenseKey": key,
+        "token": token,
+        "exp": exp,
+        "platform": plat,
+        "machineId": machine,
+        "savedAt": _now(),
+    }
+    local = verifyLocalToken(state=state, machine_id=machine, platform=plat)
+    if not local.valid:
+        return local
 
     try:
-        container = parse_license_container(license_text)
-        normalized = canonical_json_dumps({"payload": container["payload"], "sig": container["sig"]})
-        path = storage.save_license_text(normalized)
-        storage.clear_emergency_override()
-        result = replace(result, license_path=str(path))
+        storage.save_license_state(state)
     except Exception as exc:
-        result = _result(
-            False,
-            "storage_error",
-            f"Could not save license: {exc}",
-            payload=result.payload,
-            device_id=result.device_id,
-        )
-    _write_status_cache(result)
-    return result
+        logger.warning("license activation failed: storage_error")
+        return _result(False, "activation_failed", f"Could not save license state: {exc}", device_id=machine)
+
+    return _result(True, "ok", _reason_message("ok"), payload=local.payload, device_id=machine, license_path=str(storage.get_license_file_path()))
 
 
-def require_license_or_block(
-    on_block: Callable[[LicenseValidationResult], None] | None = None,
-    *,
-    current_device_id: str | None = None,
-    public_key_b64: str | None = None,
-    public_key_bytes: bytes | None = None,
-    now: datetime | None = None,
+def ensureLicensedOrExit(
+    prompt_license_key: Callable[[LicenseValidationResult | None], str] | None = None,
+    on_locked: Callable[[LicenseValidationResult], None] | None = None,
 ) -> LicenseValidationResult:
-    result = validate_installed_license(
-        current_device_id=current_device_id,
-        public_key_b64=public_key_b64,
-        public_key_bytes=public_key_bytes,
-        now=now,
-    )
+    current = verifyLocalToken()
+    if current.valid:
+        return current
+
+    if prompt_license_key is None:
+        if on_locked is not None:
+            on_locked(current)
+        return current
+
+    latest = current
+    while True:
+        entered = (prompt_license_key(latest) or "").strip()
+        if not entered:
+            locked = _result(
+                False,
+                "not_activated",
+                "License activation cancelled.",
+                device_id=latest.device_id,
+                license_path=latest.license_path,
+            )
+            if on_locked is not None:
+                on_locked(locked)
+            return locked
+
+        activated = activateOnline(entered)
+        if activated.valid:
+            return activated
+        if on_locked is not None:
+            try:
+                on_locked(activated)
+            except Exception:
+                pass
+        latest = activated
+
+
+# Backward compatible wrappers used in existing UI/CLI code.
+def load_license_state() -> dict[str, Any]:
+    return loadLicenseState()
+
+
+def validate_installed_license(*, now: Any | None = None, **_kwargs: Any) -> LicenseValidationResult:
+    now_ts = None
+    if now is not None:
+        try:
+            now_ts = int(getattr(now, "timestamp")())
+        except Exception:
+            now_ts = None
+    return verifyLocalToken(now_unix=now_ts)
+
+
+def activate_license_text(license_text: str, **_kwargs: Any) -> LicenseValidationResult:
+    return activateOnline(license_text)
+
+
+def require_license_or_block(on_block=None, **_kwargs: Any) -> LicenseValidationResult:
+    result = verifyLocalToken()
     if not result.valid and on_block is not None:
         try:
             on_block(result)
@@ -515,20 +450,37 @@ def require_license_or_block(
 def format_license_details(payload: dict[str, Any] | None) -> str:
     if not payload:
         return "-"
-    customer_id = payload.get("customer_id") or "-"
-    seat_index = payload.get("seat_index") or "-"
-    issued_at = payload.get("issued_at") or "-"
-    expires_at = payload.get("expires_at")
-    expires_text = expires_at if expires_at not in (None, "") else "unbegrenzt"
-    features = payload.get("features")
-    if isinstance(features, list) and features:
-        feature_text = ",".join(str(x) for x in features)
-    else:
-        feature_text = "-"
-    return (
-        f"Customer: {customer_id}\n"
-        f"Seat: {seat_index}\n"
-        f"Issued: {issued_at}\n"
-        f"Expires: {expires_text}\n"
-        f"Features: {feature_text}"
-    )
+    lic = str(payload.get("lic") or "-")
+    plat = str(payload.get("plat") or "-")
+    mid = str(payload.get("mid") or "-")
+    exp = payload.get("exp")
+    try:
+        exp_text = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(exp)))
+    except Exception:
+        exp_text = "-"
+    return f"License: {lic} | Platform: {plat} | Machine: {mid[:8]}... | Expires: {exp_text}"
+
+
+def validate_license_text(license_text: str, **_kwargs: Any) -> LicenseValidationResult:
+    token = (license_text or "").strip()
+    if not token:
+        return _result(False, "not_activated", _reason_message("not_activated"))
+    state = {
+        "licenseKey": "",
+        "token": token,
+        "exp": 0,
+        "platform": _platform_code(),
+        "machineId": get_device_id(),
+        "savedAt": _now(),
+    }
+    try:
+        _payload_b64, _sig_raw, payload = _parse_token(token)
+    except Exception:
+        return _result(False, "token_format_invalid", _reason_message("token_format_invalid"))
+    state["licenseKey"] = str(payload.get("lic", "") or "")
+    state["exp"] = int(payload.get("exp") or 0)
+    return verifyLocalToken(state=state)
+
+
+def activate_emergency_code(*_args: Any, **_kwargs: Any) -> LicenseValidationResult:
+    return _result(False, "activation_failed", "Emergency codes are no longer supported in this build.")

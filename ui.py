@@ -9,8 +9,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageStat, ImageTk
 import json
 import threading
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
-from licensing.ui import open_license_dialog
-from licensing.validator import LicenseValidationResult, require_license_or_block
+from licensing.validator import LicenseValidationResult, ensureLicensedOrExit, require_license_or_block
 
 # Import bot components
 from Controller.MTGAController.Controller import Controller
@@ -1634,12 +1633,12 @@ class MTGBotUI(tk.Tk):
         self._last_settings_xy: tuple[int, int] | None = None
         self.ui_settings_window = None
         self.current_session_window = None
-        self.license_window = None
         self._controller = None
         self._switch_eta_text = self._get_configured_switch_eta_text()
         self._license_result: LicenseValidationResult | None = None
         self._license_active = False
         self._license_notice_shown = False
+        self._startup_license_flow_done = False
 
         self.ui_theme = self._build_ui_theme()
         self.configure(bg=self.ui_theme["colors"]["bg"])
@@ -1653,7 +1652,83 @@ class MTGBotUI(tk.Tk):
         self._setup_ui()
         self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
         self._setup_stop_hotkey()
-        self.after(120, lambda: self._refresh_license_state(show_hint=True))
+        self.after(220, self._run_startup_license_flow)
+
+    def _run_startup_license_flow(self) -> None:
+        if self._startup_license_flow_done:
+            return
+        self._startup_license_flow_done = True
+        self._ensure_license_on_startup()
+        self._refresh_license_state(show_hint=not self._license_active)
+
+    def _ensure_license_on_startup(self) -> None:
+        failure_box_shown = {"value": False}
+
+        def _prompt(previous_result: LicenseValidationResult | None) -> str:
+            if (
+                previous_result is not None
+                and previous_result.code not in ("not_activated", "")
+                and not previous_result.valid
+                and not failure_box_shown["value"]
+            ):
+                failure_box_shown["value"] = True
+                messagebox.showerror(
+                    "License activation failed",
+                    f"Reason: {previous_result.code}\n{previous_result.message}",
+                    parent=self,
+                )
+            msg = "Enter License Key"
+            if previous_result is not None and previous_result.code:
+                msg = f"Enter License Key\n\nReason: {previous_result.code}"
+            value = self._prompt_license_key_modal(msg)
+            failure_box_shown["value"] = False
+            return (value or "").strip()
+
+        result = ensureLicensedOrExit(prompt_license_key=_prompt)
+        self._license_result = result
+        self._license_active = result.valid
+        if not result.valid:
+            self._license_notice_shown = True
+
+    def _prompt_license_key_modal(self, prompt_text: str) -> str | None:
+        result = {"value": None}
+        dialog = tk.Toplevel(self)
+        dialog.title("License Activation")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        _apply_window_topmost(dialog, self.config_manager.get_ui_windows_topmost())
+
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text=prompt_text, justify="left", wraplength=420).pack(anchor="w", pady=(0, 10))
+
+        entry_var = tk.StringVar(value="")
+        entry = ttk.Entry(frame, textvariable=entry_var, width=56)
+        entry.pack(fill=tk.X, expand=True, pady=(0, 10))
+
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(fill=tk.X, expand=True)
+
+        def _ok() -> None:
+            result["value"] = entry_var.get().strip()
+            dialog.destroy()
+
+        def _cancel() -> None:
+            result["value"] = None
+            dialog.destroy()
+
+        ttk.Button(btn_row, text="OK", command=_ok).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(btn_row, text="Cancel", command=_cancel).pack(side=tk.RIGHT)
+
+        dialog.protocol("WM_DELETE_WINDOW", _cancel)
+        self.update_idletasks()
+        x = self.winfo_x() + max(0, (self.winfo_width() - 460) // 2)
+        y = self.winfo_y() + max(0, (self.winfo_height() - 180) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        entry.focus_set()
+        dialog.grab_set()
+        self.wait_window(dialog)
+        return result["value"]
 
     def _ensure_player_log_path_configured(self) -> bool:
         current_log = str(self.config_manager.get_log_path() or "").strip()
@@ -1727,7 +1802,7 @@ class MTGBotUI(tk.Tk):
     def apply_window_topmost_mode(self, enabled: bool) -> None:
         enabled_flag = bool(enabled)
         _apply_window_topmost(self, enabled_flag)
-        for window in (self.settings_window, self.ui_settings_window, self.current_session_window, self.license_window):
+        for window in (self.settings_window, self.ui_settings_window, self.current_session_window):
             if window is None:
                 continue
             try:
@@ -1739,11 +1814,10 @@ class MTGBotUI(tk.Tk):
     def apply_ui_scale_live(self, reopen_ui_settings: bool = False) -> None:
         was_settings_open = bool(self.settings_window and self.settings_window.winfo_exists())
         was_current_open = bool(self.current_session_window and self.current_session_window.winfo_exists())
-        was_license_open = bool(self.license_window and self.license_window.winfo_exists())
         should_reopen_ui_settings = bool(reopen_ui_settings and was_settings_open)
 
         # Close subwindows so they are recreated with the new scale.
-        for attr in ("ui_settings_window", "settings_window", "current_session_window", "license_window"):
+        for attr in ("ui_settings_window", "settings_window", "current_session_window"):
             window = getattr(self, attr, None)
             if window is None:
                 continue
@@ -1790,8 +1864,6 @@ class MTGBotUI(tk.Tk):
             self._open_settings()
             if should_reopen_ui_settings:
                 self._open_ui_settings()
-        if was_license_open:
-            self._open_license()
 
     def _suppress_tk_default_icon(self):
         try:
@@ -2335,7 +2407,6 @@ class MTGBotUI(tk.Tk):
         self._create_canvas_menu_button("stop", "Stop Bot [Wheel Down]", "Destructive.TButton", self._stop_bot, enabled=False)
         self._create_canvas_menu_button("calibrate", "Calibrate", "Secondary.TButton", self._open_calibration, enabled=True)
         self._create_canvas_menu_button("current_session", "Current Session", "Secondary.TButton", self._open_current_session, enabled=True)
-        self._create_canvas_menu_button("license", "License", "Secondary.TButton", self._open_license, enabled=True)
         self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
         self._loading_text_item = self._card_canvas.create_text(
@@ -2499,7 +2570,7 @@ class MTGBotUI(tk.Tk):
             self._license_notice_shown = True
             messagebox.showwarning(
                 "License required",
-                f"{license_result.message}\n\nPlease activate a license from the 'License' menu first.",
+                f"{license_result.message}\n\nRestart the app and enter a valid license key.",
             )
             return
 
@@ -2590,20 +2661,6 @@ class MTGBotUI(tk.Tk):
                 "License",
                 f"{result.message}\n\nBot functions are blocked until a valid license is activated.",
             )
-
-    def _on_license_change(self, result: LicenseValidationResult | None = None) -> None:
-        if result is not None:
-            self._license_result = result
-            self._license_active = result.valid
-        self._refresh_license_state(show_hint=False)
-
-    def _open_license(self):
-        if self.license_window and self.license_window.winfo_exists():
-            self.license_window.lift()
-            self.license_window.focus_force()
-            return
-        self.license_window = open_license_dialog(self, on_license_change=self._on_license_change)
-        self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
 
     def _open_calibration(self):
         CalibrationWindow(self, self.config_manager)

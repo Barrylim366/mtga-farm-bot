@@ -16,10 +16,10 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
   exit 1
 fi
 
-if ! "$VENV_PYTHON" -m pip show pynput pyautogui opencv-python pillow >/dev/null 2>&1; then
+if ! "$VENV_PYTHON" -m pip show pynput pyautogui opencv-python pillow cryptography >/dev/null 2>&1; then
   echo "[INFO] Installing required packages into .venv"
   "$VENV_PYTHON" -m pip install --upgrade pip
-  "$VENV_PYTHON" -m pip install pynput pyautogui opencv-python pillow
+  "$VENV_PYTHON" -m pip install pynput pyautogui opencv-python pillow cryptography
 fi
 
 exec "$VENV_PYTHON" "$ROOT_DIR/ui.py"
