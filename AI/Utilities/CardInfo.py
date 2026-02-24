@@ -2,6 +2,7 @@ import json
 import urllib.request
 import urllib.error
 import os
+import shutil
 import sys
 
 
@@ -15,27 +16,78 @@ def _app_data_path(filename: str) -> str:
     return os.path.join(_app_root_dir(), filename)
 
 
+def _resource_root_dir() -> str:
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if isinstance(meipass, str) and meipass and os.path.isdir(meipass):
+            return os.path.abspath(meipass)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _resource_data_path(filename: str) -> str:
+    return os.path.join(_resource_root_dir(), filename)
+
+
+def _seed_data_file(filename: str) -> None:
+    dst = _app_data_path(filename)
+    src = _resource_data_path(filename)
+    if os.path.exists(dst):
+        return
+    if not os.path.exists(src):
+        return
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return
+    try:
+        shutil.copy2(src, dst)
+    except Exception:
+        pass
+
+
+def _load_json_with_fallback(path: str, fallback_path: str, default):
+    for candidate in (path, fallback_path):
+        if not candidate:
+            continue
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return default
+
+
 CARD_DATA_PATH = _app_data_path("cards.json")
 SCRYFALL_CACHE_PATH = _app_data_path("scryfall_cache.json")
 SCRYFALL_ORACLE_CACHE_PATH = _app_data_path("scryfall_oracle_cache.json")
 MISSING_CARDS_PATH = _app_data_path("missing_cards.json")
 SCRYFALL_BULK_META_PATH = _app_data_path("scryfall_bulk_metadata.json")
+for _seed_name in (
+    "cards.json",
+    "scryfall_cache.json",
+    "scryfall_oracle_cache.json",
+    "missing_cards.json",
+    "scryfall_bulk_metadata.json",
+):
+    _seed_data_file(_seed_name)
 _card_data = []
 _scryfall_cache = {}
 _scryfall_oracle_cache = {}
 
-# Load scryfall cache if it exists
-try:
-    with open(SCRYFALL_CACHE_PATH, 'r', encoding='utf-8') as f:
-        _scryfall_cache = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+_scryfall_cache = _load_json_with_fallback(
+    SCRYFALL_CACHE_PATH,
+    _resource_data_path("scryfall_cache.json"),
+    {},
+)
+if not isinstance(_scryfall_cache, dict):
     _scryfall_cache = {}
 
-# Load oracle text cache if it exists
-try:
-    with open(SCRYFALL_ORACLE_CACHE_PATH, 'r', encoding='utf-8') as f:
-        _scryfall_oracle_cache = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
+_scryfall_oracle_cache = _load_json_with_fallback(
+    SCRYFALL_ORACLE_CACHE_PATH,
+    _resource_data_path("scryfall_oracle_cache.json"),
+    {},
+)
+if not isinstance(_scryfall_oracle_cache, dict):
     _scryfall_oracle_cache = {}
 
 
@@ -58,15 +110,17 @@ def _save_scryfall_cache():
 
 
 def _load_missing_cards() -> list[int]:
-    if not os.path.exists(MISSING_CARDS_PATH):
-        return []
-    try:
-        with open(MISSING_CARDS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return [int(x) for x in data if isinstance(x, int) or str(x).isdigit()]
-    except Exception:
-        return []
+    candidates = [MISSING_CARDS_PATH, _resource_data_path("missing_cards.json")]
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [int(x) for x in data if isinstance(x, int) or str(x).isdigit()]
+        except Exception:
+            continue
     return []
 
 
@@ -103,14 +157,12 @@ def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
 
 
 def _load_scryfall_bulk_metadata() -> dict:
-    if not os.path.exists(SCRYFALL_BULK_META_PATH):
-        return {}
-    try:
-        with open(SCRYFALL_BULK_META_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    data = _load_json_with_fallback(
+        SCRYFALL_BULK_META_PATH,
+        _resource_data_path("scryfall_bulk_metadata.json"),
+        {},
+    )
+    return data if isinstance(data, dict) else {}
 
 
 def _save_scryfall_bulk_metadata(meta: dict) -> None:
@@ -338,27 +390,25 @@ def get_mana_color_from_ability(ability_grp_id: int):
     """
     return MANA_ABILITY_MAP.get(ability_grp_id)
 
-try:
-    with open(CARD_DATA_PATH, "r", encoding="utf-8") as f:
-        _card_data = json.load(f)
-except FileNotFoundError:
-    # Allow first-run without noisy stderr; Game.start refresh will populate cards.json.
-    _card_data = []
-except json.JSONDecodeError:
-    # Corrupt file; fall back to empty and refresh later.
+_card_data = _load_json_with_fallback(
+    CARD_DATA_PATH,
+    _resource_data_path("cards.json"),
+    [],
+)
+if not isinstance(_card_data, list):
     _card_data = []
 
 
 def reload_cards_from_disk() -> None:
     """Reload cards.json into memory after an export/update."""
     global _card_data
-    try:
-        with open(CARD_DATA_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            _card_data = data
-    except Exception:
-        pass
+    data = _load_json_with_fallback(
+        CARD_DATA_PATH,
+        _resource_data_path("cards.json"),
+        [],
+    )
+    if isinstance(data, list):
+        _card_data = data
 
 
 def get_card_info(mtga_id: int):

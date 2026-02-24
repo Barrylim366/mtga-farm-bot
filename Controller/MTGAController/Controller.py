@@ -215,8 +215,19 @@ class Controller(ControllerSecondary):
         self.log_out_btn_coors = (1716, 851)
         self.log_out_ok_btn_coors = (1875, 809)
 
+    def _resource_root_dir(self) -> str:
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", "")
+            if isinstance(meipass, str) and meipass and os.path.isdir(meipass):
+                return os.path.abspath(meipass)
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
     def _buttons_dir(self) -> str:
-        return os.path.join(self._app_root_dir(), "Buttons")
+        bundled_path = os.path.join(self._resource_root_dir(), "Buttons")
+        local_path = os.path.join(self._app_root_dir(), "Buttons")
+        if os.path.isdir(bundled_path):
+            return bundled_path
+        return local_path
 
     def _app_root_dir(self) -> str:
         if getattr(sys, "frozen", False):

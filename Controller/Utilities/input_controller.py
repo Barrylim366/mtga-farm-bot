@@ -3,6 +3,7 @@ import platform
 import shutil
 import subprocess
 import stat
+import time
 from dataclasses import dataclass
 
 
@@ -128,6 +129,103 @@ class PynputInputController(InputController):
 
     def position(self) -> Point:
         x, y = self._mouse.position
+        return Point(int(x), int(y))
+
+
+class PyAutoGUIInputController(InputController):
+    def __init__(self) -> None:
+        try:
+            import pyautogui
+        except Exception as e:  # pragma: no cover
+            raise InputControllerError(f"Failed to import pyautogui: {e}") from e
+        self._pyautogui = pyautogui
+        try:
+            self._pyautogui.FAILSAFE = True
+            self._pyautogui.PAUSE = 0.0
+        except Exception:
+            pass
+        self._verify_mouse_control()
+
+    def _verify_mouse_control(self) -> None:
+        """Fail fast with a clear message if macOS blocks synthetic mouse control."""
+        try:
+            start_x, start_y = self._pyautogui.position()
+            width, _height = self._pyautogui.size()
+            if int(width) <= 1:
+                return
+            candidate_x = int(start_x) + 1 if int(start_x) + 1 < int(width) else int(start_x) - 1
+            candidate_y = int(start_y)
+            if candidate_x == int(start_x):
+                return
+
+            self._pyautogui.moveTo(candidate_x, candidate_y, duration=0)
+            time.sleep(0.03)
+            now_x, now_y = self._pyautogui.position()
+
+            # Always move cursor back to original position.
+            self._pyautogui.moveTo(int(start_x), int(start_y), duration=0)
+
+            if int(now_x) == int(start_x) and int(now_y) == int(start_y):
+                raise InputControllerError(
+                    "Mouse control blocked. Grant Accessibility permission to Terminal/Python in macOS "
+                    "(System Settings -> Privacy & Security -> Accessibility)."
+                )
+        except InputControllerError:
+            raise
+        except Exception as e:
+            raise InputControllerError(f"Mouse control self-test failed: {e}") from e
+
+    def move_abs(self, x: int, y: int) -> None:
+        self._pyautogui.moveTo(int(x), int(y), duration=0)
+
+    def move_rel(self, dx: int, dy: int) -> None:
+        self._pyautogui.moveRel(int(dx), int(dy), duration=0)
+
+    def left_click(self, count: int = 1) -> None:
+        self._pyautogui.click(button="left", clicks=max(1, int(count)))
+
+    def left_down(self) -> None:
+        self._pyautogui.mouseDown(button="left")
+
+    def left_up(self) -> None:
+        self._pyautogui.mouseUp(button="left")
+
+    def tap_enter(self) -> None:
+        self._pyautogui.press("enter")
+
+    def tap_shift_enter(self) -> None:
+        self._pyautogui.hotkey("shift", "enter")
+
+    def tap_tab(self) -> None:
+        self._pyautogui.press("tab")
+
+    def tap_delete(self) -> None:
+        self._pyautogui.press("delete")
+
+    def type_text(self, text: str) -> None:
+        self._pyautogui.typewrite(text or "", interval=0)
+
+    def tap_escape(self) -> None:
+        self._pyautogui.press("esc")
+
+    def tap_printscreen(self) -> None:
+        try:
+            self._pyautogui.press("printscreen")
+        except Exception:
+            pass
+
+    def tap_win_printscreen(self) -> None:
+        system = platform.system().lower()
+        try:
+            if system == "darwin":
+                self._pyautogui.hotkey("command", "shift", "3")
+            else:
+                self._pyautogui.hotkey("win", "printscreen")
+        except Exception:
+            pass
+
+    def position(self) -> Point:
+        x, y = self._pyautogui.position()
         return Point(int(x), int(y))
 
 
@@ -290,6 +388,20 @@ def create_input_controller(backend: str | None) -> InputController:
     """
     normalized = (backend or os.environ.get("MTGA_BOT_INPUT_BACKEND") or "auto").strip().lower()
     if normalized in ("auto", ""):
+        system = platform.system().lower()
+        if system == "darwin":
+            pyautogui_err: InputControllerError | None = None
+            try:
+                return PyAutoGUIInputController()
+            except InputControllerError as e:
+                pyautogui_err = e
+            try:
+                return PynputInputController()
+            except InputControllerError as e:
+                raise InputControllerError(
+                    f"Auto backend failed on macOS. pyautogui error: {pyautogui_err}; pynput error: {e}"
+                ) from e
+
         if platform.system().lower() == "linux" and shutil.which("ydotool") is not None:
             ydotool_err: InputControllerError | None = None
             try:
@@ -310,5 +422,7 @@ def create_input_controller(backend: str | None) -> InputController:
         return YdotoolInputController()
     if normalized == "pynput":
         return PynputInputController()
+    if normalized == "pyautogui":
+        return PyAutoGUIInputController()
 
     raise InputControllerError(f"Unknown input backend: {backend!r}")

@@ -2,6 +2,7 @@ import threading
 import time
 from collections import deque
 import os
+import sys
 import bot_logger
 
 
@@ -11,6 +12,24 @@ class LogReader:
     @staticmethod
     def _default_player_log_path() -> str:
         home = os.path.expanduser("~")
+        if os.name == "nt":
+            return os.path.join(
+                home,
+                "AppData",
+                "LocalLow",
+                "Wizards Of The Coast",
+                "MTGA",
+                "Player.log",
+            )
+        if sys.platform == "darwin":
+            return os.path.join(
+                home,
+                "Library",
+                "Logs",
+                "Wizards Of The Coast",
+                "MTGA",
+                "Player.log",
+            )
         return os.path.join(
             home,
             ".local",

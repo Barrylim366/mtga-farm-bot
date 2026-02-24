@@ -1,5 +1,5 @@
 {
-    "log_path": "/home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+    "log_path": "/Users/annejonas/Library/Logs/Wizards Of The Coast/MTGA/Player.log",
     "screen_bounds": [
         [
             0,
@@ -12,28 +12,28 @@
     ],
     "click_targets": {
         "keep_hand": {
-            "x": 1883,
-            "y": 1063
+            "x": 881,
+            "y": 719
         },
         "queue_button": {
-            "x": 2485,
-            "y": 1194
+            "x": 1280,
+            "y": 805
         },
         "next": {
-            "x": 2546,
-            "y": 1137
+            "x": 1300,
+            "y": 763
         },
         "concede": {
             "x": 1714,
             "y": 814
         },
         "attack_all": {
-            "x": 2529,
-            "y": 1131
+            "x": 1303,
+            "y": 765
         },
         "opponent_avatar": {
-            "x": 1720,
-            "y": 295
+            "x": 764,
+            "y": 209
         },
         "assign_damage_done": {
             "x": 1721,
@@ -62,13 +62,13 @@
             "y": 811
         }
     },
-    "input_backend": "pynput",
-    "account_switch_minutes": 0,
+    "input_backend": "auto",
+    "account_switch_minutes": 35,
     "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
-    "account_cycle_index": 1,
+    "account_cycle_index": 2,
     "account_play_order": [
-        "AccountTwo",
         "AccountThree",
+        "AccountTwo",
         "AccountOne"
     ],
     "managed_accounts": [
@@ -90,5 +90,7 @@
             "pw": "***REMOVED***",
             "folder": "AccountThree"
         }
-    ]
+    ],
+    "ui_windows_topmost": true,
+    "ui_scale_percent": 50
 }
