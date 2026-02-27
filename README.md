@@ -260,6 +260,79 @@ build_windows_exe_onefile.bat
 - `dist/BurningLotusBot.exe`
 - For distribution, copy just this one file.
 
+## Windows EXE Build (Nuitka)
+
+Use Nuitka for a compiled standalone Windows build (harder to reverse than plain Python bytecode shipping).
+
+1) Install prerequisites:
+
+- Microsoft C++ Build Tools (Visual Studio Build Tools, C++ workload)
+- Python packages:
+
+```bash
+python -m pip install nuitka ordered-set zstandard
+```
+
+Notes:
+- With Python 3.13, Nuitka may require MSVC 14.3+ for normal C compilation.
+- `build_windows_nuitka.bat` automatically retries using `--zig` if the default compiler path fails.
+
+2) Build standalone folder:
+
+```bat
+build_windows_nuitka.bat
+```
+
+3) Output:
+
+- `dist_nuitka/ui.dist/BurningLotusBot.exe`
+- For distribution, copy the whole folder `dist_nuitka/ui.dist`.
+
+## macOS Build (Nuitka)
+
+1) Install prerequisites:
+
+```bash
+python3 -m pip install nuitka ordered-set zstandard
+```
+
+2) Build:
+
+```bash
+chmod +x build_macos_nuitka.sh
+./build_macos_nuitka.sh
+```
+
+3) Output:
+
+- `dist_nuitka/ui.dist/BurningLotusBot`
+- Distribute the whole folder `dist_nuitka/ui.dist`.
+
+## Linux Build (Nuitka)
+
+1) Install prerequisites:
+
+```bash
+python3 -m pip install nuitka ordered-set zstandard
+```
+
+2) Build:
+
+```bash
+chmod +x build_linux_nuitka.sh
+./build_linux_nuitka.sh
+```
+
+3) Output:
+
+- `dist_nuitka/ui.dist/BurningLotusBot`
+- Distribute the whole folder `dist_nuitka/ui.dist`.
+
+## PyInstaller Status
+
+- PyInstaller can remain as fallback for quick packaging/troubleshooting.
+- Nuitka is now the recommended production build path for stronger code hardening.
+
 
 ## Account Switching
 
