@@ -129,6 +129,135 @@ class LicensingTests(unittest.TestCase):
         self.assertIn("BurningLotus", normalized)
         self.assertTrue(normalized.endswith("\\license.json"))
 
+    def test_require_license_revalidates_online_when_due(self):
+        private_key, jwk = self._make_keypair()
+        now = int(time.time())
+        payload = {
+            "lic": "KEY-ONLINE-OK",
+            "mid": "MID-TEST-ONLINE",
+            "plat": "linux",
+            "iat": now - 20,
+            "exp": now + 3600,
+        }
+        token = self._make_token(private_key, payload)
+        state = {
+            "licenseKey": payload["lic"],
+            "token": token,
+            "exp": payload["exp"],
+            "platform": payload["plat"],
+            "machineId": payload["mid"],
+            "savedAt": now - 10,
+            "lastValidatedAt": now - 10,
+        }
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "BLB_PUBLIC_JWK": json.dumps(jwk),
+                    "BLB_LICENSE_VALIDATE_INTERVAL_SECONDS": "0",
+                    "BLB_LICENSE_VALIDATE_GRACE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            mock.patch("licensing.validator.get_device_id", return_value=payload["mid"]),
+            mock.patch("licensing.validator._platform_code", return_value=payload["plat"]),
+            mock.patch("licensing.validator.loadLicenseState", return_value=state),
+            mock.patch("licensing.validator._http_post_json", return_value=(200, {"ok": True, "exp": payload["exp"]}, "{\"ok\":true}")) as http_mock,
+            mock.patch("licensing.storage.save_license_state") as save_mock,
+        ):
+            result = validator.require_license_or_block()
+
+        self.assertTrue(result.valid, msg=result.code)
+        self.assertEqual("ok", result.code)
+        self.assertEqual(validator.VALIDATE_URL, http_mock.call_args[0][0])
+        self.assertTrue(save_mock.called)
+        saved_state = save_mock.call_args[0][0]
+        self.assertEqual("ok", saved_state.get("lastValidationCode"))
+        self.assertGreater(int(saved_state.get("lastValidatedAt", 0)), 0)
+
+    def test_require_license_revalidation_denied_by_server(self):
+        private_key, jwk = self._make_keypair()
+        now = int(time.time())
+        payload = {
+            "lic": "KEY-REVOKED",
+            "mid": "MID-TEST-REV",
+            "plat": "linux",
+            "iat": now - 20,
+            "exp": now + 3600,
+        }
+        token = self._make_token(private_key, payload)
+        state = {
+            "licenseKey": payload["lic"],
+            "token": token,
+            "exp": payload["exp"],
+            "platform": payload["plat"],
+            "machineId": payload["mid"],
+            "savedAt": now - 10,
+            "lastValidatedAt": now - 10,
+        }
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "BLB_PUBLIC_JWK": json.dumps(jwk),
+                    "BLB_LICENSE_VALIDATE_INTERVAL_SECONDS": "0",
+                    "BLB_LICENSE_VALIDATE_GRACE_SECONDS": "0",
+                },
+                clear=False,
+            ),
+            mock.patch("licensing.validator.get_device_id", return_value=payload["mid"]),
+            mock.patch("licensing.validator._platform_code", return_value=payload["plat"]),
+            mock.patch("licensing.validator.loadLicenseState", return_value=state),
+            mock.patch("licensing.validator._http_post_json", return_value=(403, {"code": "license_revoked"}, "{\"code\":\"license_revoked\"}")),
+        ):
+            result = validator.require_license_or_block()
+
+        self.assertFalse(result.valid)
+        self.assertEqual("license_revoked", result.code)
+
+    def test_require_license_network_error_uses_offline_grace(self):
+        private_key, jwk = self._make_keypair()
+        now = int(time.time())
+        payload = {
+            "lic": "KEY-GRACE",
+            "mid": "MID-TEST-GRACE",
+            "plat": "linux",
+            "iat": now - 20,
+            "exp": now + 3600,
+        }
+        token = self._make_token(private_key, payload)
+        state = {
+            "licenseKey": payload["lic"],
+            "token": token,
+            "exp": payload["exp"],
+            "platform": payload["plat"],
+            "machineId": payload["mid"],
+            "savedAt": now - 40,
+            "lastValidatedAt": now - 40,
+        }
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "BLB_PUBLIC_JWK": json.dumps(jwk),
+                    "BLB_LICENSE_VALIDATE_INTERVAL_SECONDS": "0",
+                    "BLB_LICENSE_VALIDATE_GRACE_SECONDS": "300",
+                },
+                clear=False,
+            ),
+            mock.patch("licensing.validator.get_device_id", return_value=payload["mid"]),
+            mock.patch("licensing.validator._platform_code", return_value=payload["plat"]),
+            mock.patch("licensing.validator.loadLicenseState", return_value=state),
+            mock.patch("licensing.validator._http_post_json", side_effect=RuntimeError("network down")),
+        ):
+            result = validator.require_license_or_block()
+
+        self.assertTrue(result.valid)
+        self.assertEqual("ok_offline_grace", result.code)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 ACTIVATE_URL = "https://burninglotusbot.com/api/activate-license"
 VALIDATE_URL = "https://burninglotusbot.com/api/validate-license"
 HTTP_TIMEOUT_SECONDS = 12
+VALIDATE_INTERVAL_ENV = "BLB_LICENSE_VALIDATE_INTERVAL_SECONDS"
+VALIDATE_GRACE_ENV = "BLB_LICENSE_VALIDATE_GRACE_SECONDS"
+DEFAULT_VALIDATE_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_VALIDATE_GRACE_SECONDS = 48 * 60 * 60
 
 PUBLIC_JWK_DEFAULT = {
     "kty": "EC",
@@ -208,9 +212,53 @@ def _reason_message(code: str) -> str:
         "http_401": "Server denied activation request (HTTP 401).",
         "http_429": "Too many activation requests (HTTP 429).",
         "server_response_invalid": "Activation server returned invalid data.",
+        "validation_failed": "License validation failed.",
+        "ok_offline_grace": "License temporarily allowed during offline grace period.",
         "ok": "License active.",
     }
     return messages.get(code, code)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return int(default)
+
+
+def _validate_interval_seconds() -> int:
+    return _env_int(VALIDATE_INTERVAL_ENV, DEFAULT_VALIDATE_INTERVAL_SECONDS)
+
+
+def _validate_grace_seconds() -> int:
+    return _env_int(VALIDATE_GRACE_ENV, DEFAULT_VALIDATE_GRACE_SECONDS)
+
+
+def _validation_anchor_ts(state: dict[str, Any]) -> int:
+    try:
+        last_validated = int(state.get("lastValidatedAt") or 0)
+    except Exception:
+        last_validated = 0
+    if last_validated > 0:
+        return last_validated
+    try:
+        saved_at = int(state.get("savedAt") or 0)
+    except Exception:
+        saved_at = 0
+    return max(0, saved_at)
+
+
+def _derive_http_reason(status_code: int, response: dict[str, Any], raw_text: str) -> str:
+    reason = str(response.get("code") or response.get("error") or "").strip()
+    if reason:
+        return reason
+    raw_low = (raw_text or "").lower()
+    if "cloudflare" in raw_low or "ray id" in raw_low:
+        return "cloudflare_blocked"
+    return f"http_{status_code}"
 
 
 def verifyLocalToken(
@@ -331,13 +379,7 @@ def activateOnline(licenseKey: str) -> LicenseValidationResult:
         return _result(False, "network_error", _reason_message("network_error"), device_id=machine, license_path=str(storage.get_license_file_path()))
 
     if status_code >= 400:
-        reason = str(response.get("code") or response.get("error") or "").strip()
-        if not reason:
-            raw_low = (raw_text or "").lower()
-            if "cloudflare" in raw_low or "ray id" in raw_low:
-                reason = "cloudflare_blocked"
-            else:
-                reason = f"http_{status_code}"
+        reason = _derive_http_reason(status_code, response, raw_text)
         logger.warning("license activation failed: %s", reason)
         return _result(
             False,
@@ -372,6 +414,8 @@ def activateOnline(licenseKey: str) -> LicenseValidationResult:
         "platform": plat,
         "machineId": machine,
         "savedAt": _now(),
+        "lastValidatedAt": _now(),
+        "lastValidationCode": "ok",
     }
     local = verifyLocalToken(state=state, machine_id=machine, platform=plat)
     if not local.valid:
@@ -384,6 +428,82 @@ def activateOnline(licenseKey: str) -> LicenseValidationResult:
         return _result(False, "activation_failed", f"Could not save license state: {exc}", device_id=machine)
 
     return _result(True, "ok", _reason_message("ok"), payload=local.payload, device_id=machine, license_path=str(storage.get_license_file_path()))
+
+
+def validateOnline(
+    *,
+    state: dict[str, Any] | None = None,
+    machine_id: str | None = None,
+    platform: str | None = None,
+    now_unix: int | None = None,
+) -> LicenseValidationResult:
+    machine = machine_id or get_device_id()
+    plat = platform or _platform_code()
+    now_ts = int(now_unix if now_unix is not None else _now())
+    license_path = str(storage.get_license_file_path())
+
+    st = dict(state) if isinstance(state, dict) else loadLicenseState()
+    token = str(st.get("token", "") or "").strip()
+    license_key = str(st.get("licenseKey", "") or "").strip()
+    if not token or not license_key:
+        return _result(False, "not_activated", _reason_message("not_activated"), device_id=machine, license_path=license_path)
+
+    body = {
+        "licenseKey": license_key,
+        "machineId": machine,
+        "platform": plat,
+        "token": token,
+    }
+    try:
+        status_code, response, raw_text = _http_post_json(VALIDATE_URL, body)
+    except Exception:
+        logger.warning("license validation failed: network_error")
+        return _result(False, "network_error", _reason_message("network_error"), device_id=machine, license_path=license_path)
+
+    if status_code >= 400:
+        reason = _derive_http_reason(status_code, response, raw_text)
+        logger.warning("license validation failed: %s", reason)
+        return _result(
+            False,
+            reason,
+            f"{_reason_message(reason)} (http_{status_code})",
+            device_id=machine,
+            license_path=license_path,
+        )
+
+    ok = bool(response.get("ok"))
+    if not ok:
+        reason = str(response.get("code") or response.get("error") or "validation_failed").strip() or "validation_failed"
+        logger.warning("license validation failed: %s", reason)
+        return _result(False, reason, _reason_message(reason), device_id=machine, license_path=license_path)
+
+    new_state = dict(st)
+    returned_token = str(response.get("token", "") or "").strip()
+    if returned_token:
+        new_state["token"] = returned_token
+    if response.get("exp") is not None:
+        try:
+            new_state["exp"] = int(response.get("exp"))
+        except Exception:
+            logger.warning("license validation failed: server_response_invalid")
+            return _result(False, "server_response_invalid", _reason_message("server_response_invalid"), device_id=machine, license_path=license_path)
+    new_state["platform"] = plat
+    new_state["machineId"] = machine
+    new_state["lastValidatedAt"] = now_ts
+    new_state["lastValidationCode"] = "ok"
+
+    local = verifyLocalToken(state=new_state, machine_id=machine, platform=plat, now_unix=now_ts)
+    if not local.valid:
+        logger.warning("license validation failed: %s", local.code)
+        return local
+
+    try:
+        storage.save_license_state(new_state)
+    except Exception as exc:
+        logger.warning("license validation failed: storage_error")
+        return _result(False, "validation_failed", f"Could not save license state: {exc}", device_id=machine, license_path=license_path)
+
+    return _result(True, "ok", _reason_message("ok"), payload=local.payload, device_id=machine, license_path=license_path)
 
 
 def ensureLicensedOrExit(
@@ -446,6 +566,30 @@ def activate_license_text(license_text: str, **_kwargs: Any) -> LicenseValidatio
 
 def require_license_or_block(on_block=None, **_kwargs: Any) -> LicenseValidationResult:
     result = verifyLocalToken()
+    if result.valid:
+        st = loadLicenseState()
+        now_ts = _now()
+        interval = _validate_interval_seconds()
+        anchor_ts = _validation_anchor_ts(st)
+        due = interval == 0 or anchor_ts <= 0 or (now_ts - anchor_ts) >= interval
+
+        if due:
+            online = validateOnline(state=st, now_unix=now_ts)
+            if online.valid:
+                return online
+            if online.code == "network_error":
+                grace = _validate_grace_seconds()
+                if grace > 0 and anchor_ts > 0 and now_ts <= (anchor_ts + interval + grace):
+                    return _result(
+                        True,
+                        "ok_offline_grace",
+                        _reason_message("ok_offline_grace"),
+                        payload=result.payload,
+                        device_id=result.device_id,
+                        license_path=result.license_path,
+                    )
+            result = online
+
     if not result.valid and on_block is not None:
         try:
             on_block(result)
