@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageStat, ImageTk
 import json
 import threading
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
-from licensing.validator import LicenseValidationResult, ensureLicensedOrExit, require_license_or_block
+from licensing.validator import LicenseValidationResult, activateOnline, ensureLicensedOrExit, require_license_or_block
 
 # Import bot components
 from Controller.MTGAController.Controller import Controller
@@ -1638,6 +1638,7 @@ class MTGBotUI(tk.Tk):
         self._license_result: LicenseValidationResult | None = None
         self._license_active = False
         self._license_notice_shown = False
+        self._auto_reactivation_prompted = False
         self._startup_license_flow_done = False
 
         self.ui_theme = self._build_ui_theme()
@@ -1866,6 +1867,19 @@ class MTGBotUI(tk.Tk):
                 self._open_ui_settings()
 
     def _suppress_tk_default_icon(self):
+        try:
+            icon_path = _image_path("ui_symbol.png")
+            icon_image = Image.open(icon_path).convert("RGBA")
+            icon_sizes = [16, 24, 32, 48]
+            self._window_icons = []
+            for px in icon_sizes:
+                resized = icon_image.resize((px, px), Image.Resampling.LANCZOS)
+                self._window_icons.append(ImageTk.PhotoImage(resized))
+            if self._window_icons:
+                self.iconphoto(True, *self._window_icons)
+                return
+        except Exception:
+            pass
         try:
             self._blank_icon = tk.PhotoImage(width=1, height=1)
             self.iconphoto(True, self._blank_icon)
@@ -2566,11 +2580,29 @@ class MTGBotUI(tk.Tk):
         self._license_result = license_result
         self._license_active = license_result.valid
         if not license_result.valid:
+            reactivated = self._prompt_reactivation_modal(license_result)
+            self._license_result = reactivated
+            self._license_active = reactivated.valid
+            if reactivated.valid:
+                self._license_notice_shown = False
+                license_result = reactivated
+            else:
+                self._set_running_state(False)
+                self._license_notice_shown = True
+                messagebox.showwarning(
+                    "License required",
+                    f"{reactivated.message}\n\nEnter a valid license key to continue.",
+                )
+                return
+
+        self._license_result = license_result
+        self._license_active = bool(license_result.valid)
+        if not self._license_active:
             self._set_running_state(False)
             self._license_notice_shown = True
             messagebox.showwarning(
                 "License required",
-                f"{license_result.message}\n\nRestart the app and enter a valid license key.",
+                f"{license_result.message}\n\nEnter a valid license key to continue.",
             )
             return
 
@@ -2582,6 +2614,34 @@ class MTGBotUI(tk.Tk):
         self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
         self.bot_thread.start()
         self._update_switch_eta()
+
+    def _prompt_reactivation_modal(self, previous_result: LicenseValidationResult | None = None) -> LicenseValidationResult:
+        last = previous_result
+        while True:
+            msg = "Enter License Key"
+            if last is not None and last.code:
+                msg = f"Enter License Key\n\nReason: {last.code}"
+            entered = (self._prompt_license_key_modal(msg) or "").strip()
+            if not entered:
+                if last is not None:
+                    return last
+                return LicenseValidationResult(
+                    valid=False,
+                    code="not_activated",
+                    message="License activation cancelled.",
+                    payload=None,
+                    device_id=None,
+                    license_path=None,
+                )
+            activated = activateOnline(entered)
+            if activated.valid:
+                return activated
+            messagebox.showerror(
+                "License activation failed",
+                f"Reason: {activated.code}\n{activated.message}",
+                parent=self,
+            )
+            last = activated
 
     def _run_bot(self):
         try:
@@ -2654,7 +2714,22 @@ class MTGBotUI(tk.Tk):
 
         if result.valid:
             self._license_notice_shown = False
+            self._auto_reactivation_prompted = False
             return
+
+        if not self.bot_running and not self._auto_reactivation_prompted:
+            self._auto_reactivation_prompted = True
+            reactivated = self._prompt_reactivation_modal(result)
+            self._license_result = reactivated
+            self._license_active = reactivated.valid
+            if reactivated.valid:
+                self._license_notice_shown = False
+                self._auto_reactivation_prompted = False
+                if not self.bot_running:
+                    self._set_running_state(False)
+                return
+            result = reactivated
+
         if show_hint and not self._license_notice_shown:
             self._license_notice_shown = True
             messagebox.showinfo(

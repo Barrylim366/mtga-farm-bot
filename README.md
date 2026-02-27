@@ -125,6 +125,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Buttons were reverted to the classic UI styling and original color direction
 - Main menu window size is fixed (width and height are both non-resizable)
 - Main menu top-left corner is fixed at screen coordinates `x=18`, `y=24`; Settings follows the main window position
+- Window icon (top-left title bar) now uses a small `images/ui_symbol.png` logo instead of a black placeholder box
 - During bot startup, the UI shows an indeterminate loading bar with the label `Loading Carddata` until initialization finishes
 - Fixed a startup regression in `ui.py` caused by a mismatched theme token in the loading bar style
 - `Status: Stopped` now uses `#ffb02a`
@@ -174,7 +175,9 @@ Stop bot any time with **Mouse Wheel Down**.
   - Local Machine ID
   - License key input + `Activate`
 - License check runs on app startup and again before bot start.
+- Runtime checks now include periodic online re-validation against `https://burninglotusbot.com/api/validate-license`.
 - Without a valid license, **Start Bot** remains disabled and the UI shows a hint.
+- If runtime validation fails (for example revoked/deleted server-side), the app opens the license key prompt automatically so re-activation can be done immediately (no app restart required).
 
 Public key location:
 - Put your EC P-256 JWK in `config/public_key.jwk` (fields: `kty`, `crv`, `x`, `y`).
@@ -201,6 +204,15 @@ Validation checks:
 - Payload machine id matches current machine
 - Payload platform matches current platform
 - Token is not expired
+- Periodic server-side validation (revocation/status) via validate endpoint
+
+Re-validation timing (optional env vars):
+- `BLB_LICENSE_VALIDATE_INTERVAL_SECONDS` (default: `86400`)
+  - Interval for mandatory online re-validation.
+  - `0` means re-validate on every runtime check.
+- `BLB_LICENSE_VALIDATE_GRACE_SECONDS` (default: `172800`)
+  - Extra offline grace window if the validate call fails with network errors.
+  - Grace applies only when there was a previous successful activation/validation anchor.
 
 Typical error messages:
 - `signature_invalid`
@@ -209,6 +221,9 @@ Typical error messages:
 - `token_expired`
 - `crypto_missing`
 - `key_error`
+- `license_revoked`
+- `network_error`
+- `ok_offline_grace`
 
 Legacy note:
 - `tools/gen_license.py` and `tools/ui_licensing.py` belong to an older offline `.bllic` workflow and are not used by the runtime activation path in this build.
@@ -366,5 +381,6 @@ python -m unittest tests/test_licensing.py
   - macOS: `~/Library/Logs/Wizards Of The Coast/MTGA/Player.log`
   - Windows: `C:/Users/<YourUser>/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
   - Linux/Proton: `~/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
+- Windows fork preset: `calibration_config.json` keeps `log_path` at `C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`.
 - Hover logs are suppressed by default and only enabled during selection scans.
 - A one-line match summary is logged at match completion.
