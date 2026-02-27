@@ -6,6 +6,7 @@ credentials.txt
 # Build artifacts
 build/
 dist/
+dist_nuitka/
 
 # Local environment
 .venv/
