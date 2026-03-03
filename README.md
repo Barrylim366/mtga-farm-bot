@@ -72,7 +72,17 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Settings window size/position follows submenu behavior (`460x430`, opens below main with ~5 mm gap, aligned to main window X)
 - Calibrate window now uses a background-scene layout like Settings/Record Actions (no large dark outer frame), keeps glow-style action buttons, and opens to the right of the main window with ~0.4 cm gap
 - Calibrate action buttons were reflowed to remove overlap artifacts
-- Calibrate buttons are now reduced in width/height (roughly one-third smaller than before) and aligned to the same horizontal line as the dropdowns for `Calibrate` and `Test Click`
+- Calibrate window now follows a split `Capture` / `Verify` scene layout with a vertical divider, `Last Captured` coordinate card, dedicated `Status` card, and footer action row (`Saved Buttons`, `Back`)
+- Calibrate button sizes and visual styles remain unchanged from the existing bot theme
+- Fixed a Calibrate auto-resize loop by excluding full-canvas footer/background elements from content-based min-size calculation (prevents slow fullscreen growth and text overlap distortion)
+- Fixed remaining vertical growth loop by anchoring Calibrate scene/footer Y-layout to fixed scaled design coordinates (no height-coupled relayout feedback)
+- Calibrate vertical spacing was tuned so the `Advanced Calibration` title no longer collides with the `Capture/Verify` section headings
+- Calibrate window height was increased and the top `Advanced Calibration` title was removed; freed top space is now used by the main capture/verify content to prevent overlaps
+- Added defensive Calibrate layout guards so early canvas resize events cannot trigger attribute errors during widget initialization
+- Calibrate window geometry is now hard-locked (`minsize == maxsize`) and dynamic content-fit resizing is disabled to prevent any remaining downward drift/stretch behavior
+- Removed Calibrate field labels `Button Target:` and `Select for Test:` for a cleaner compact layout
+- Calibrate/Verify panel spacing is now symmetrical: distance from top action buttons to panel equals distance from panel bottom to footer action buttons
+- Top Calibrate action buttons (`Calibrate`, `Test Click`) now use the same centered two-button alignment model as the footer row to remove right-shift
 - Current Session window was restyled to the same fire/main theme (background image, unified panel colors, styled Back button) and now opens aligned below the main window
 - Current Session no longer uses a large dark container frame; stats and Back are rendered directly on the background scene, and the dark box-frame around Back was removed
 - Current Session stats are now grouped inside a bordered feature-card (`#320a02` fill, `#ff9318` border) with title/body typography aligned to the provided feature-box style

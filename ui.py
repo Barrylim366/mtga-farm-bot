@@ -388,7 +388,8 @@ class CalibrationWindow(tk.Toplevel):
         self.config_manager = config_manager
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self.title("Calibrate")
-        width, height = self._s(640), self._s(520)
+        # Increased width from 640 to 760 for more breathing room
+        width, height = self._s(760), self._s(680)
         gap_px = int(parent.winfo_fpixels("4m"))  # ~0.4 cm
         parent.update_idletasks()
         x = parent.winfo_x() + parent.winfo_width() + gap_px
@@ -399,6 +400,8 @@ class CalibrationWindow(tk.Toplevel):
         y = min(max(0, y), max_y)
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
+        self.minsize(width, height)
+        self.maxsize(width, height)
         self.configure(bg="#0F1115")
         _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
 
@@ -436,9 +439,26 @@ class CalibrationWindow(tk.Toplevel):
             font=("Segoe UI", 24, "bold"),
             anchor="n",
         )
+        self._divider_item = None
+        self._divider_glow_item = None
+        self._capture_title_item = None
+        self._capture_underline_item = None
+        self._verify_title_item = None
+        self._verify_underline_item = None
+        self._select_label_item = None
+        self._dropdown_window = None
+        self._capture_panel_item = None
+        self._capture_panel_title_item = None
+        self._x_label_item = None
         self._instruction_item = None
         self._x_value_item = None
+        self._y_label_item = None
         self._y_value_item = None
+        self._test_label_item = None
+        self._test_dropdown_window = None
+        self._status_panel_item = None
+        self._status_panel_title_item = None
+        self._footer_item = None
         self._calibrate_button_name = "calibrate"
         self._test_button_name = "test_click"
         self._canvas_buttons = {}
@@ -451,7 +471,6 @@ class CalibrationWindow(tk.Toplevel):
         self.after(30, self._refresh_scene)
         self.after(120, self._refresh_scene)
         self._update_calibration_capabilities()
-        self.after(180, self._apply_content_minsize)
 
     def _s(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
@@ -481,18 +500,11 @@ class CalibrationWindow(tk.Toplevel):
     def _refresh_scene(self):
         self._refresh_background()
         self._layout_scene()
-        self._apply_content_minsize()
 
     def _apply_content_minsize(self):
-        _fit_window_to_canvas_content(
-            self,
-            self._canvas,
-            exclude_items={self._bg_canvas_item} if self._bg_canvas_item else None,
-            pad_x=self._s(24),
-            pad_y=self._s(24),
-            floor_w=self._s(420),
-            floor_h=self._s(340),
-        )
+        # Calibration window uses fixed geometry to avoid feedback loops
+        # between dynamic content fitting and configure-driven relayout.
+        return
 
     def _refresh_background(self):
         if self._bg_source_image is None:
@@ -743,74 +755,137 @@ class CalibrationWindow(tk.Toplevel):
     def _layout_scene(self):
         if not self._canvas or not self._canvas.winfo_exists():
             return
+        
         s = self._s
-        cw = max(2, int(self._canvas.winfo_width()))
-        self._canvas.coords(self._title_item, cw // 2, 26)
+        # Get actual dimensions or fallback to expected scaled values
+        cw = max(int(self._s(640)), int(self._canvas.winfo_width()))
+        ch = max(int(self._s(680)), int(self._canvas.winfo_height()))
+        
+        scene_top = s(72)
+        footer_h = s(80)
+        footer_y = ch - footer_h
+        scene_bottom = footer_y - s(20)
+        panel_gap = s(32)
 
-        row1_y = s(108)
-        row2_y = s(324)
-        label_x = s(42)
-        dropdown_x = s(170)
-        dropdown_w = int(self.dropdown.winfo_width()) if self.dropdown.winfo_width() > 10 else int(self.dropdown.winfo_reqwidth())
-        test_dropdown_w = int(self.test_dropdown.winfo_width()) if self.test_dropdown.winfo_width() > 10 else int(self.test_dropdown.winfo_reqwidth())
-        btn_gap = s(12)
+        divider_x = cw // 2
+        left_x = s(40)
+        right_x = divider_x + s(24)
+        left_w = max(s(220), divider_x - left_x - s(24))
+        right_w = max(s(220), cw - right_x - s(40))
 
-        self._canvas.coords(self._select_label_item, label_x, row1_y + 18)
-        self._canvas.coords(self._dropdown_window, dropdown_x, row1_y)
+        # Position divider
+        if getattr(self, "_divider_item", None):
+            self._canvas.coords(self._divider_item, divider_x, scene_top, divider_x, scene_bottom)
+        if getattr(self, "_divider_glow_item", None):
+            self._canvas.coords(self._divider_glow_item, divider_x - 1, scene_top, divider_x - 1, scene_bottom)
 
+        # 1. CAPTURE Header
+        capture_title_y = scene_top + s(8)
+        if getattr(self, "_capture_title_item", None):
+            self._canvas.coords(self._capture_title_item, left_x, capture_title_y)
+        if getattr(self, "_capture_underline_item", None):
+            u_y = capture_title_y + s(34)
+            self._canvas.coords(self._capture_underline_item, left_x, u_y, left_x + s(110), u_y)
+
+        # 2. VERIFY Header
+        if getattr(self, "_verify_title_item", None):
+            self._canvas.coords(self._verify_title_item, right_x, capture_title_y)
+        if getattr(self, "_verify_underline_item", None):
+            u_y = capture_title_y + s(34)
+            self._canvas.coords(self._verify_underline_item, right_x, u_y, right_x + s(100), u_y)
+
+        # Dropdowns (labels removed)
+        dropdown_y = capture_title_y + s(52)
+        if getattr(self, "_dropdown_window", None):
+            self._canvas.coords(self._dropdown_window, left_x, dropdown_y)
+
+        # Calibrate Button
         cal_btn = self._canvas_buttons.get(self._calibrate_button_name)
-        if cal_btn:
-            cal_x = dropdown_x + dropdown_w + btn_gap
-            self._canvas.coords(cal_btn["bg_item"], cal_x, row1_y)
-            self._canvas.coords(cal_btn["text_item"], cal_x + cal_btn["width"] // 2, row1_y + cal_btn["height"] // 2 - 2)
-
-        self._canvas.coords(self._x_label_item, s(62), s(194))
-        self._canvas.coords(self._x_value_item, s(108), s(194))
-        self._canvas.coords(self._y_label_item, s(62), s(236))
-        self._canvas.coords(self._y_value_item, s(108), s(236))
-        self._canvas.coords(self._instruction_item, cw // 2, s(280))
-
-        self._canvas.coords(self._test_label_item, label_x, row2_y + 18)
-        self._canvas.coords(self._test_dropdown_window, dropdown_x, row2_y)
-
         test_btn = self._canvas_buttons.get(self._test_button_name)
-        if test_btn:
-            test_x = dropdown_x + test_dropdown_w + btn_gap
-            self._canvas.coords(test_btn["bg_item"], test_x, row2_y)
-            self._canvas.coords(test_btn["text_item"], test_x + test_btn["width"] // 2, row2_y + test_btn["height"] // 2 - 2)
+        cal_y = dropdown_y + s(60)
+        cal_btn_h = s(32)
+        top_pair_gap = s(20)
+        cal_x = left_x
+        test_x = right_x
+        if cal_btn and test_btn:
+            top_pair_w = int(cal_btn["width"]) + int(test_btn["width"]) + top_pair_gap
+            top_pair_x = (cw - top_pair_w) // 2
+            cal_x = top_pair_x
+            test_x = top_pair_x + int(cal_btn["width"]) + top_pair_gap
+        if cal_btn:
+            cal_btn_h = int(cal_btn["height"])
+            self._canvas.coords(cal_btn["bg_item"], cal_x, cal_y)
+            self._canvas.coords(cal_btn["text_item"], cal_x + cal_btn["width"] // 2, cal_y + cal_btn["height"] // 2 - 2)
 
         save_btn = self._canvas_buttons.get("saved")
         back_btn = self._canvas_buttons.get("back")
         if save_btn:
-            action_y = s(404)
-            if back_btn:
-                total_w = save_btn["width"] + back_btn["width"] + s(14)
-                start_x = max(s(14), (cw - total_w) // 2)
-                self._canvas.coords(save_btn["bg_item"], start_x, action_y)
-                self._canvas.coords(
-                    save_btn["text_item"],
-                    start_x + save_btn["width"] // 2,
-                    action_y + save_btn["height"] // 2 - 2,
-                )
-                back_x = start_x + save_btn["width"] + s(14)
-                self._canvas.coords(back_btn["bg_item"], back_x, action_y)
-                self._canvas.coords(
-                    back_btn["text_item"],
-                    back_x + back_btn["width"] // 2,
-                    action_y + back_btn["height"] // 2 - 2,
-                )
-            else:
-                save_x = max(s(14), (cw - save_btn["width"]) // 2)
-                self._canvas.coords(save_btn["bg_item"], save_x, action_y)
-                self._canvas.coords(
-                    save_btn["text_item"],
-                    save_x + save_btn["width"] // 2,
-                    action_y + save_btn["height"] // 2 - 2,
-                )
+            btn_y = footer_y + (footer_h - save_btn["height"]) // 2
+        elif back_btn:
+            btn_y = footer_y + (footer_h - back_btn["height"]) // 2
+        else:
+            btn_y = footer_y + s(24)
+
+        # Panels: equal spacing above and below
+        box_y = cal_y + cal_btn_h + panel_gap
+        box_bottom = btn_y - panel_gap
+        box_h = max(s(80), box_bottom - box_y)
+        if getattr(self, "_capture_panel_item", None):
+            self._canvas.coords(self._capture_panel_item, left_x, box_y, left_x + left_w, box_y + box_h)
+        if getattr(self, "_capture_panel_title_item", None):
+            self._canvas.coords(self._capture_panel_title_item, left_x + s(12), box_y + s(12))
+        
+        # X/Y Labels
+        val_y = box_y + s(60)
+        if getattr(self, "_x_label_item", None):
+            self._canvas.coords(self._x_label_item, left_x + s(16), val_y)
+        if getattr(self, "_x_value_item", None):
+            self._canvas.coords(self._x_value_item, left_x + s(42), val_y)
+        if getattr(self, "_y_label_item", None):
+            self._canvas.coords(self._y_label_item, left_x + left_w // 2 + s(12), val_y)
+        if getattr(self, "_y_value_item", None):
+            self._canvas.coords(self._y_value_item, left_x + left_w // 2 + s(38), val_y)
+
+        # Verify side dropdown
+        if getattr(self, "_test_dropdown_window", None):
+            self._canvas.coords(self._test_dropdown_window, right_x, dropdown_y)
+        
+        if test_btn:
+            self._canvas.coords(test_btn["bg_item"], test_x, cal_y)
+            self._canvas.coords(test_btn["text_item"], test_x + test_btn["width"] // 2, cal_y + test_btn["height"] // 2 - 2)
+
+        if getattr(self, "_status_panel_item", None):
+            self._canvas.coords(self._status_panel_item, right_x, box_y, right_x + right_w, box_y + box_h)
+        if getattr(self, "_status_panel_title_item", None):
+            self._canvas.coords(self._status_panel_title_item, right_x + s(12), box_y + s(12))
+        if getattr(self, "_instruction_item", None):
+            self._canvas.coords(self._instruction_item, right_x + s(12), box_y + s(48))
+            self._canvas.itemconfigure(self._instruction_item, width=max(s(140), right_w - s(24)))
+
+        # Footer Buttons
+        if save_btn and back_btn:
+            total_bw = save_btn["width"] + back_btn["width"] + s(20)
+            bx = (cw - total_bw) // 2
+            self._canvas.coords(save_btn["bg_item"], bx, btn_y)
+            self._canvas.coords(save_btn["text_item"], bx + save_btn["width"] // 2, btn_y + save_btn["height"] // 2 - 2)
+            bx += save_btn["width"] + s(20)
+            self._canvas.coords(back_btn["bg_item"], bx, btn_y)
+            self._canvas.coords(back_btn["text_item"], bx + back_btn["width"] // 2, btn_y + back_btn["height"] // 2 - 2)
+            
+            # Raise items
+            self._canvas.tag_raise(save_btn["bg_item"])
+            self._canvas.tag_raise(save_btn["text_item"])
+            self._canvas.tag_raise(back_btn["bg_item"])
+            self._canvas.tag_raise(back_btn["text_item"])
+
+        if getattr(self, "_footer_item", None):
+            self._canvas.coords(self._footer_item, 0, footer_y, cw, ch)
+            self._canvas.tag_lower(self._footer_item)
 
     def _setup_ui(self):
         c = self._theme
         self._setup_calibrate_combobox_style()
+        self._canvas.itemconfigure(self._title_item, text="", state="hidden")
 
         self.button_options = [
             "keep_hand",
@@ -825,13 +900,34 @@ class CalibrationWindow(tk.Toplevel):
             "log_out_btn",
             "log_out_ok_btn"
         ]
+        self._divider_item = self._canvas.create_line(0, 0, 0, 0, fill=c["border"], width=max(1, self._s(2)))
+        self._divider_glow_item = self._canvas.create_line(0, 0, 0, 0, fill="#A96673", width=1)
+        self._capture_title_item = self._canvas.create_text(
+            0,
+            0,
+            text="1. CAPTURE",
+            fill=c["warn"],
+            font=("Segoe UI", max(10, self._s(12)), "bold"),
+            anchor="nw",
+        )
+        self._capture_underline_item = self._canvas.create_line(0, 0, 0, 0, fill=c["warn"], width=max(1, self._s(1)))
+        self._verify_title_item = self._canvas.create_text(
+            0,
+            0,
+            text="2. VERIFY",
+            fill=c["ok"],
+            font=("Segoe UI", max(10, self._s(12)), "bold"),
+            anchor="nw",
+        )
+        self._verify_underline_item = self._canvas.create_line(0, 0, 0, 0, fill=c["ok"], width=max(1, self._s(1)))
         self._select_label_item = self._canvas.create_text(
             0,
             0,
-            text="Select Button:",
+            text="",
             fill=c["text"],
-            font=("Segoe UI", 12),
-            anchor="w",
+            font=("Segoe UI", max(10, self._s(12))),
+            anchor="nw",
+            state="hidden",
         )
 
         self.selected_button = tk.StringVar(value=self.button_options[0])
@@ -857,19 +953,35 @@ class CalibrationWindow(tk.Toplevel):
             button_width=btn_body_w,
             button_height=btn_body_h,
         )
-
-        self._x_label_item = self._canvas.create_text(0, 0, text="X:", fill=c["text"], font=("Segoe UI", 14, "bold"), anchor="w")
-        self._x_value_item = self._canvas.create_text(0, 0, text="0", fill=c["value"], font=("Consolas", 16), anchor="w")
-        self._y_label_item = self._canvas.create_text(0, 0, text="Y:", fill=c["text"], font=("Segoe UI", 14, "bold"), anchor="w")
-        self._y_value_item = self._canvas.create_text(0, 0, text="0", fill=c["value"], font=("Consolas", 16), anchor="w")
+        self._capture_panel_item = self._canvas.create_rectangle(
+            0,
+            0,
+            0,
+            0,
+            fill=c["panel_alt"],
+            outline=c["border"],
+            stipple="gray50",
+        )
+        self._capture_panel_title_item = self._canvas.create_text(
+            0,
+            0,
+            text="LAST CAPTURED:",
+            fill=c["text_muted"],
+            font=("Segoe UI", max(8, self._s(9)), "bold"),
+            anchor="nw",
+        )
+        self._x_label_item = self._canvas.create_text(0, 0, text="X:", fill=c["text"], font=("Segoe UI", max(11, self._s(13)), "bold"), anchor="w")
+        self._x_value_item = self._canvas.create_text(0, 0, text="0", fill=c["value"], font=("Consolas", max(12, self._s(14))), anchor="w")
+        self._y_label_item = self._canvas.create_text(0, 0, text="Y:", fill=c["text"], font=("Segoe UI", max(11, self._s(13)), "bold"), anchor="w")
+        self._y_value_item = self._canvas.create_text(0, 0, text="0", fill=c["value"], font=("Consolas", max(12, self._s(14))), anchor="w")
 
         self._instruction_item = self._canvas.create_text(
             0,
             0,
             text="Select a button and click 'Calibrate'",
             fill=c["text_muted"],
-            font=("Segoe UI", 11),
-            anchor="center",
+            font=("Segoe UI", max(9, self._s(11))),
+            anchor="nw",
         )
 
         self._create_canvas_button(
@@ -889,7 +1001,7 @@ class CalibrationWindow(tk.Toplevel):
             button_height=btn_body_h,
         )
 
-        self._test_label_item = self._canvas.create_text(0, 0, text="Test Button:", fill=c["text"], font=("Segoe UI", 12), anchor="w")
+        self._test_label_item = self._canvas.create_text(0, 0, text="", fill=c["text"], font=("Segoe UI", max(10, self._s(12))), anchor="nw", state="hidden")
 
         self.test_button_var = tk.StringVar(value=self.button_options[0])
         self.test_dropdown = ttk.Combobox(
@@ -909,6 +1021,25 @@ class CalibrationWindow(tk.Toplevel):
             button_width=btn_body_w,
             button_height=btn_body_h,
         )
+        self._status_panel_item = self._canvas.create_rectangle(
+            0,
+            0,
+            0,
+            0,
+            fill=c["panel_alt"],
+            outline=c["border"],
+            stipple="gray50",
+        )
+        self._status_panel_title_item = self._canvas.create_text(
+            0,
+            0,
+            text="STATUS:",
+            fill=c["text_muted"],
+            font=("Segoe UI", max(8, self._s(9)), "bold"),
+            anchor="nw",
+        )
+        # self._footer_item = self._canvas.create_rectangle(0, 0, 0, 0, fill="#0B0E13", outline="")
+        self._footer_item = None
         self._layout_scene()
 
     def _update_calibration_capabilities(self):
