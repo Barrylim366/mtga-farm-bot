@@ -1,5 +1,5 @@
 {
-    "log_path": "/home/barrylim/Dokumente/player.log",
+    "log_path": "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
     "screen_bounds": [
         [
             0,
@@ -12,31 +12,31 @@
     ],
     "click_targets": {
         "keep_hand": {
-            "x": 881,
-            "y": 719
+            "x": 1896,
+            "y": 1066
         },
         "queue_button": {
-            "x": 1280,
-            "y": 805
+            "x": 2477,
+            "y": 1190
         },
         "next": {
-            "x": 1300,
-            "y": 763
+            "x": 2538,
+            "y": 1135
         },
         "concede": {
             "x": 1714,
             "y": 814
         },
         "attack_all": {
-            "x": 1303,
-            "y": 765
+            "x": 2521,
+            "y": 1138
         },
         "opponent_avatar": {
-            "x": 764,
-            "y": 209
+            "x": 1715,
+            "y": 296
         },
         "assign_damage_done": {
-            "x": 1721,
+            "x": 1717,
             "y": 1064
         },
         "hand_scan_points": {
@@ -50,26 +50,26 @@
             }
         },
         "log_out_btn": {
-            "x": 1727,
-            "y": 854
+            "x": 1714,
+            "y": 853
         },
         "logout_ok_btn": {
             "x": 1878,
             "y": 809
         },
         "log_out_ok_btn": {
-            "x": 1874,
-            "y": 811
+            "x": 1881,
+            "y": 813
         }
     },
     "input_backend": "auto",
     "account_switch_minutes": 35,
     "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
-    "account_cycle_index": 2,
+    "account_cycle_index": 0,
     "account_play_order": [
+        "TEUBAT",
         "Ayaylll",
-        "Affinity2004",
-        "TEUBAT"
+        "Affinity2004"
     ],
     "managed_accounts": [
         {
@@ -92,5 +92,5 @@
         }
     ],
     "ui_windows_topmost": true,
-    "ui_scale_percent": 50
+    "ui_scale_percent": 60
 }

@@ -750,7 +750,13 @@ class CalibrationWindow(tk.Toplevel):
     def _set_instruction(self, text: str, color: str):
         if self._instruction_item is None:
             return
-        self._canvas.itemconfigure(self._instruction_item, text=text, fill=color)
+        # Keep calibration status text visually aligned with coordinate labels.
+        self._canvas.itemconfigure(self._instruction_item, text=text, fill=self._theme["text"])
+
+    def _set_test_status(self, text: str, color: str):
+        if self._test_label_item is None:
+            return
+        self._canvas.itemconfigure(self._test_label_item, text=text, fill="#ffffff", state="normal")
 
     def _layout_scene(self):
         if not self._canvas or not self._canvas.winfo_exists():
@@ -804,14 +810,8 @@ class CalibrationWindow(tk.Toplevel):
         test_btn = self._canvas_buttons.get(self._test_button_name)
         cal_y = dropdown_y + s(60)
         cal_btn_h = s(32)
-        top_pair_gap = s(20)
         cal_x = left_x
         test_x = right_x
-        if cal_btn and test_btn:
-            top_pair_w = int(cal_btn["width"]) + int(test_btn["width"]) + top_pair_gap
-            top_pair_x = (cw - top_pair_w) // 2
-            cal_x = top_pair_x
-            test_x = top_pair_x + int(cal_btn["width"]) + top_pair_gap
         if cal_btn:
             cal_btn_h = int(cal_btn["height"])
             self._canvas.coords(cal_btn["bg_item"], cal_x, cal_y)
@@ -836,7 +836,8 @@ class CalibrationWindow(tk.Toplevel):
             self._canvas.coords(self._capture_panel_title_item, left_x + s(12), box_y + s(12))
         
         # X/Y Labels
-        val_y = box_y + s(60)
+        val_y = box_y + int(box_h * 0.42)
+        status_y = box_y + int(box_h * 0.72)
         if getattr(self, "_x_label_item", None):
             self._canvas.coords(self._x_label_item, left_x + s(16), val_y)
         if getattr(self, "_x_value_item", None):
@@ -857,20 +858,29 @@ class CalibrationWindow(tk.Toplevel):
         if getattr(self, "_status_panel_item", None):
             self._canvas.coords(self._status_panel_item, right_x, box_y, right_x + right_w, box_y + box_h)
         if getattr(self, "_status_panel_title_item", None):
-            self._canvas.coords(self._status_panel_title_item, right_x + s(12), box_y + s(12))
+            self._canvas.itemconfigure(self._status_panel_title_item, state="hidden")
         if getattr(self, "_instruction_item", None):
-            self._canvas.coords(self._instruction_item, right_x + s(12), box_y + s(48))
-            self._canvas.itemconfigure(self._instruction_item, width=max(s(140), right_w - s(24)))
+            self._canvas.coords(self._instruction_item, left_x + s(12), status_y)
+            self._canvas.itemconfigure(self._instruction_item, width=max(s(140), left_w - s(24)))
+        if getattr(self, "_test_label_item", None):
+            self._canvas.coords(self._test_label_item, right_x + s(12), box_y + s(12))
+            self._canvas.itemconfigure(self._test_label_item, width=max(s(140), right_w - s(24)))
+            self._canvas.tag_raise(self._test_label_item)
 
         # Footer Buttons
         if save_btn and back_btn:
-            total_bw = save_btn["width"] + back_btn["width"] + s(20)
-            bx = (cw - total_bw) // 2
-            self._canvas.coords(save_btn["bg_item"], bx, btn_y)
-            self._canvas.coords(save_btn["text_item"], bx + save_btn["width"] // 2, btn_y + save_btn["height"] // 2 - 2)
-            bx += save_btn["width"] + s(20)
-            self._canvas.coords(back_btn["bg_item"], bx, btn_y)
-            self._canvas.coords(back_btn["text_item"], bx + back_btn["width"] // 2, btn_y + back_btn["height"] // 2 - 2)
+            self._canvas.coords(save_btn["bg_item"], left_x, btn_y)
+            self._canvas.coords(
+                save_btn["text_item"],
+                left_x + save_btn["width"] // 2,
+                btn_y + save_btn["height"] // 2 - 2,
+            )
+            self._canvas.coords(back_btn["bg_item"], right_x, btn_y)
+            self._canvas.coords(
+                back_btn["text_item"],
+                right_x + back_btn["width"] // 2,
+                btn_y + back_btn["height"] // 2 - 2,
+            )
             
             # Raise items
             self._canvas.tag_raise(save_btn["bg_item"])
@@ -965,8 +975,8 @@ class CalibrationWindow(tk.Toplevel):
         self._capture_panel_title_item = self._canvas.create_text(
             0,
             0,
-            text="LAST CAPTURED:",
-            fill=c["text_muted"],
+            text="COORDINATES:",
+            fill=c["text"],
             font=("Segoe UI", max(8, self._s(9)), "bold"),
             anchor="nw",
         )
@@ -1001,7 +1011,15 @@ class CalibrationWindow(tk.Toplevel):
             button_height=btn_body_h,
         )
 
-        self._test_label_item = self._canvas.create_text(0, 0, text="", fill=c["text"], font=("Segoe UI", max(10, self._s(12))), anchor="nw", state="hidden")
+        self._test_label_item = self._canvas.create_text(
+            0,
+            0,
+            text="",
+            fill="#ffffff",
+            font=("Segoe UI", max(10, self._s(12)), "bold"),
+            anchor="nw",
+            state="hidden",
+        )
 
         self.test_button_var = tk.StringVar(value=self.button_options[0])
         self.test_dropdown = ttk.Combobox(
@@ -1033,10 +1051,11 @@ class CalibrationWindow(tk.Toplevel):
         self._status_panel_title_item = self._canvas.create_text(
             0,
             0,
-            text="STATUS:",
-            fill=c["text_muted"],
+            text="",
+            fill=c["text"],
             font=("Segoe UI", max(8, self._s(9)), "bold"),
             anchor="nw",
+            state="hidden",
         )
         # self._footer_item = self._canvas.create_rectangle(0, 0, 0, 0, fill="#0B0E13", outline="")
         self._footer_item = None
@@ -1204,7 +1223,7 @@ class CalibrationWindow(tk.Toplevel):
         coords = self.config_manager.get_all_coordinates()
         coord = coords.get(button_name)
         if not isinstance(coord, dict) or "x" not in coord or "y" not in coord:
-            self._set_instruction(f"No saved point for '{button_name}'.", c["warn"])
+            self._set_test_status(f"No saved point for '{button_name}'.", c["warn"])
             return
 
         x, y = int(coord["x"]), int(coord["y"])
@@ -1216,11 +1235,11 @@ class CalibrationWindow(tk.Toplevel):
             input_controller.configure_screen_bounds(screen_bounds)
             input_controller.move_abs(x, y)
             input_controller.left_click(1)
-            self._set_instruction(f"Test click: {button_name} ({x}, {y})", c["ok"])
+            self._set_test_status(f"Test click: {button_name} ({x}, {y})", c["ok"])
         except InputControllerError as e:
-            self._set_instruction(f"Test failed: {e}", c["error"])
+            self._set_test_status(f"Test failed: {e}", c["error"])
         except Exception as e:
-            self._set_instruction(f"Test failed: {e}", c["error"])
+            self._set_test_status(f"Test failed: {e}", c["error"])
 
     def _show_saved_buttons(self):
         SavedButtonsWindow(self, self.config_manager)
