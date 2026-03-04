@@ -112,6 +112,7 @@ class Controller(ControllerSecondary):
 
         self.log_out_btn_coors = None
         self.log_out_ok_btn_coors = None
+        self.log_out_focus_coors = None
         
         self.hand_scan_p1 = (0, 1050)
         self.hand_scan_p2 = (1920, 1050)
@@ -147,6 +148,7 @@ class Controller(ControllerSecondary):
             "stack_scan_p2": self.stack_scan_p2,
             "stack_scan_fallback_p1": self.stack_scan_fallback_p1,
             "stack_scan_fallback_p2": self.stack_scan_fallback_p2,
+            "log_out_focus_coors": self.home_play_button_coors,
             "log_out_btn_coors": (1716, 851),
             "log_out_ok_btn_coors": (1875, 809),
         }
@@ -196,10 +198,13 @@ class Controller(ControllerSecondary):
                     pass
             if "log_out_btn" in click_targets:
                 self.log_out_btn_coors = (click_targets["log_out_btn"]["x"], click_targets["log_out_btn"]["y"])
+            if "log_out_focus" in click_targets:
+                self.log_out_focus_coors = (click_targets["log_out_focus"]["x"], click_targets["log_out_focus"]["y"])
             if "log_out_ok_btn" in click_targets:
                 self.log_out_ok_btn_coors = (click_targets["log_out_ok_btn"]["x"], click_targets["log_out_ok_btn"]["y"])
             elif "logout_ok_btn" in click_targets:
                 self.log_out_ok_btn_coors = (click_targets["logout_ok_btn"]["x"], click_targets["logout_ok_btn"]["y"])
+        self._seed_logout_points_from_record_once()
         self._normalize_loaded_click_targets_to_1920()
         self._legacy_origin_hint = self._infer_legacy_origin_from_loaded_targets()
         if self._legacy_origin_hint is not None:
@@ -256,6 +261,7 @@ class Controller(ControllerSecondary):
         )
         self._arena_region: tuple[int, int, int, int] | None = None
         self._arena_correction_xy: tuple[int, int] = (0, 0)
+        self._logout_play_origin: tuple[int, int] | None = None
         self._navigation_verify_failures = 0
         self._queue_button_rel = (
             int(self.home_play_button_coors[0]),
@@ -263,9 +269,13 @@ class Controller(ControllerSecondary):
         )
         # Fixed timing for login phase
         self._login_delete_delay_sec = 5.0
-        # Fallback coords if recorded playback isn't available
-        self.log_out_btn_coors = (1716, 851)
-        self.log_out_ok_btn_coors = (1875, 809)
+        # Keep loaded/seeded logout points; only fallback if still missing.
+        if self.log_out_btn_coors is None:
+            self.log_out_btn_coors = (1716, 851)
+        if self.log_out_ok_btn_coors is None:
+            self.log_out_ok_btn_coors = (1875, 809)
+        if self.log_out_focus_coors is None:
+            self.log_out_focus_coors = self.home_play_button_coors
 
     def _resource_root_dir(self) -> str:
         if getattr(sys, "frozen", False):
@@ -314,6 +324,7 @@ class Controller(ControllerSecondary):
             ("stack_scan_p2", "stack_scan_p2"),
             ("stack_scan_fallback_p1", "stack_scan_fallback_p1"),
             ("stack_scan_fallback_p2", "stack_scan_fallback_p2"),
+            ("log_out_focus_coors", "log_out_focus"),
             ("log_out_btn_coors", "log_out_btn"),
             ("log_out_ok_btn_coors", "log_out_ok_btn"),
         ]
@@ -661,43 +672,107 @@ class Controller(ControllerSecondary):
             pass
         bot_logger.log_info(f"KEEP_HAND debug bundle saved: {debug_dir}")
 
-    def _write_avatar_click_debug_bundle(
+    def _resolve_target_from_queue_anchor_rebase(
         self,
         *,
-        tag: str,
-        raw_base: tuple[int, int],
-        mapped_base: tuple[int, int],
-        final_point: tuple[int, int],
-        offset: tuple[int, int],
+        config_key: str,
+        raw_point: tuple[int, int],
+        label: str,
+        force_reacquire: bool = True,
+    ) -> tuple[tuple[int, int], str]:
+        arena = self._ensure_arena_region(force_reacquire=force_reacquire)
+        if arena is None:
+            return (int(raw_point[0]), int(raw_point[1])), f"{label}_no_arena"
+        ct = self._loaded_click_targets or {}
+        raw_target_cfg = ct.get(config_key)
+        raw_queue_cfg = ct.get("queue_button")
+        queue_rel_default = self._default_points_1920.get("home_play_button_coors")
+
+        # Prefer direct 1920-relative mapping when the configured target already
+        # looks like a normalized session point. This avoids mixed-space rebasing
+        # (legacy absolute queue anchor + relative target), which can drift.
+        try:
+            if isinstance(raw_target_cfg, dict):
+                tx_cfg = int(raw_target_cfg.get("x"))
+                ty_cfg = int(raw_target_cfg.get("y"))
+                if 0 <= tx_cfg <= 1920 and 0 <= ty_cfg <= 1080:
+                    mapped = (int(arena[0] + tx_cfg), int(arena[1] + ty_cfg))
+                    self._loaded_click_targets[config_key] = {"x": tx_cfg, "y": ty_cfg}
+                    if config_key == "log_out_focus":
+                        self.log_out_focus_coors = (tx_cfg, ty_cfg)
+                    elif config_key == "log_out_btn":
+                        self.log_out_btn_coors = (tx_cfg, ty_cfg)
+                    elif config_key == "log_out_ok_btn":
+                        self.log_out_ok_btn_coors = (tx_cfg, ty_cfg)
+                    return mapped, f"{label}_relative_1920_from_config"
+        except Exception:
+            pass
+
+        if (
+            isinstance(raw_target_cfg, dict)
+            and isinstance(raw_queue_cfg, dict)
+            and queue_rel_default is not None
+        ):
+            try:
+                tx = int(raw_target_cfg.get("x"))
+                ty = int(raw_target_cfg.get("y"))
+                qx = int(raw_queue_cfg.get("x"))
+                qy = int(raw_queue_cfg.get("y"))
+                # Rebase only when queue anchor is clearly in legacy absolute space.
+                if not (qx > 1920 or qy > 1080):
+                    raise ValueError("queue anchor not legacy-absolute")
+                qrelx = int(queue_rel_default[0])
+                qrely = int(queue_rel_default[1])
+                old_origin_x = int(qx - qrelx)
+                old_origin_y = int(qy - qrely)
+                relx = int(tx - old_origin_x)
+                rely = int(ty - old_origin_y)
+                if 0 <= relx <= 1920 and 0 <= rely <= 1080:
+                    mapped = (int(arena[0] + relx), int(arena[1] + rely))
+                    # Align with opponent-avatar behavior: persist resolved 1920-relative
+                    # point for the current session so repeated clicks stay consistent.
+                    self._loaded_click_targets[config_key] = {"x": relx, "y": rely}
+                    if config_key == "log_out_focus":
+                        self.log_out_focus_coors = (relx, rely)
+                    elif config_key == "log_out_btn":
+                        self.log_out_btn_coors = (relx, rely)
+                    elif config_key == "log_out_ok_btn":
+                        self.log_out_ok_btn_coors = (relx, rely)
+                    return mapped, f"{label}_rebased_from_queue_anchor"
+            except Exception:
+                pass
+        mapped, src = self._map_abs_point_to_arena(
+            raw_point,
+            label=label,
+            force_reacquire=False,
+            apply_correction=False,
+        )
+        return mapped, f"{label}_{src}"
+
+    def _write_logout_click_debug_bundle(
+        self,
+        *,
+        click_label: str,
+        raw_point: tuple[int, int],
+        mapped_point: tuple[int, int],
         source: str,
     ) -> None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        debug_dir = Path(bot_logger.ensure_debug_dir(f"avatar-click-{stamp}"))
+        debug_dir = Path(bot_logger.ensure_debug_dir(f"logout-click-{stamp}"))
         try:
             payload = {
-                "reason": "opponent_avatar_click_debug",
-                "tag": tag,
+                "reason": "logout_click_debug",
+                "click_label": click_label,
                 "state": str(self._get_state_from_log()),
                 "arena_region": self._arena_region,
                 "screen_bounds": self.screen_bounds,
-                "raw_base": [int(raw_base[0]), int(raw_base[1])],
-                "mapped_base": [int(mapped_base[0]), int(mapped_base[1])],
-                "offset": [int(offset[0]), int(offset[1])],
-                "final_point": [int(final_point[0]), int(final_point[1])],
+                "raw_point": [int(raw_point[0]), int(raw_point[1])],
+                "mapped_point": [int(mapped_point[0]), int(mapped_point[1])],
                 "source": source,
-                "pending_target_select": self.__pending_target_select,
                 "log_path": self._log_path,
             }
-            with open(debug_dir / "avatar_click_state.json", "w", encoding="utf-8") as f:
+            with open(debug_dir / "logout_click_state.json", "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
-        except Exception:
-            pass
-        try:
-            tail = self._state_tracker.get_tail(220)
-            if not tail:
-                tail = self._read_log_tail(self._log_path, max_bytes=150000)
-            with open(debug_dir / "log_tail.txt", "w", encoding="utf-8") as f:
-                f.write(tail or "")
         except Exception:
             pass
         try:
@@ -708,16 +783,110 @@ class Controller(ControllerSecondary):
                 arena_img = self._vision.capture(self._arena_region)
                 self._vision.save_image(arena_img, str(debug_dir / "arena_region_after_click.png"))
             focus_region = (
-                int(final_point[0] - 260),
-                int(final_point[1] - 170),
-                520,
-                340,
+                int(mapped_point[0] - 240),
+                int(mapped_point[1] - 150),
+                480,
+                300,
             )
             focus_img = self._vision.capture(focus_region)
-            self._vision.save_image(focus_img, str(debug_dir / "avatar_focus_after_click.png"))
+            self._vision.save_image(focus_img, str(debug_dir / "logout_focus_after_click.png"))
         except Exception:
             pass
-        bot_logger.log_info(f"OPPONENT_AVATAR debug bundle saved: {debug_dir}")
+        bot_logger.log_info(f"{click_label} debug bundle saved: {debug_dir}")
+
+    def _click_logout_target(self, raw_point: tuple[int, int], config_key: str, click_label: str) -> None:
+        mapped = None
+        source = ""
+        play_origin = getattr(self, "_logout_play_origin", None)
+        if isinstance(play_origin, tuple) and len(play_origin) == 2:
+            rel = self._get_logout_target_relative_1920(config_key=config_key, raw_point=raw_point)
+            if rel is not None:
+                mapped = (int(play_origin[0] + rel[0]), int(play_origin[1] + rel[1]))
+                source = f"{click_label}_mapped_from_play_button_origin"
+        if mapped is None:
+            mapped, source = self._resolve_target_from_queue_anchor_rebase(
+                config_key=config_key,
+                raw_point=raw_point,
+                label=click_label,
+                force_reacquire=True,
+            )
+        bot_logger.log_info(
+            "{} target: source={} arena={} raw={} mapped={}".format(
+                click_label,
+                source,
+                self._arena_region,
+                raw_point,
+                mapped,
+            )
+        )
+        # Mirror record-playback click behavior for logout reliability.
+        bot_logger.log_click(mapped[0], mapped[1], click_label)
+        self.input.move_abs(mapped[0], mapped[1])
+        time.sleep(0.05)
+        self.input.left_down()
+        time.sleep(0.05)
+        self.input.left_up()
+        self._write_logout_click_debug_bundle(
+            click_label=click_label,
+            raw_point=raw_point,
+            mapped_point=mapped,
+            source=source,
+        )
+
+    def _get_logout_target_relative_1920(
+        self,
+        *,
+        config_key: str,
+        raw_point: tuple[int, int],
+    ) -> tuple[int, int] | None:
+        ct = self._loaded_click_targets or {}
+        cfg = ct.get(config_key)
+        if isinstance(cfg, dict):
+            try:
+                x = int(cfg.get("x"))
+                y = int(cfg.get("y"))
+                if 0 <= x <= 1920 and 0 <= y <= 1080:
+                    return (x, y)
+            except Exception:
+                pass
+        try:
+            rx = int(raw_point[0])
+            ry = int(raw_point[1])
+            if 0 <= rx <= 1920 and 0 <= ry <= 1080:
+                return (rx, ry)
+        except Exception:
+            pass
+        return None
+
+    def _resolve_logout_play_button_origin(self) -> tuple[int, int] | None:
+        template = os.path.join(self._buttons_dir(), "play_btn.png")
+        if not os.path.exists(template):
+            return None
+        try:
+            self._vision.begin_tick()
+            full = self._vision.capture(None)
+            if full is None:
+                return None
+            match = self._vision.find_template(full, template, threshold=0.80)
+            if match is None:
+                return None
+            qrel = self._get_logout_target_relative_1920(
+                config_key="queue_button",
+                raw_point=self.home_play_button_coors,
+            )
+            if qrel is None:
+                default_q = self._default_points_1920.get("home_play_button_coors")
+                if default_q is None:
+                    return None
+                qrel = (int(default_q[0]), int(default_q[1]))
+            origin = (int(match.x - qrel[0]), int(match.y - qrel[1]))
+            bot_logger.log_info(
+                f"Logout mapping: play_btn template origin={origin} match=({match.x},{match.y}) qrel={qrel} score={match.score:.3f}"
+            )
+            return origin
+        except Exception as e:
+            bot_logger.log_info(f"Logout mapping: play_btn origin detect failed: {e}")
+            return None
 
     def _get_hand_scan_points_mapped(
         self,
@@ -2119,6 +2288,136 @@ class Controller(ControllerSecondary):
     def _replay_recorded_logout(self) -> bool:
         return self._replay_named_record("Account Switch", tag_prefix="LOGOUT", allow_keys={"esc"})
 
+    def _load_logout_click_points_from_record(
+        self,
+    ) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]] | None:
+        path = self._app_path("recorded_actions_records.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        records = data.get("records", [])
+        if not records:
+            return None
+        record = None
+        for rec in reversed(records):
+            if rec.get("name") in {"Logout", "logout", "Account Switch"}:
+                record = rec
+                break
+        if record is None:
+            return None
+        actions = record.get("actions", [])
+        clicks: list[tuple[int, int]] = []
+        for ev in actions:
+            if ev.get("type") != "click":
+                continue
+            try:
+                x = int(float(ev.get("x", 0)))
+                y = int(float(ev.get("y", 0)))
+            except Exception:
+                continue
+            if x > 0 and y > 0:
+                clicks.append((x, y))
+        if len(clicks) < 3:
+            return None
+        # Recorded logout flows are typically:
+        # [focus, focus, esc, LOG_OUT_BTN, LOG_OUT_OK_BTN].
+        return clicks[0], clicks[-2], clicks[-1]
+
+    def _seed_logout_points_from_record_once(self) -> None:
+        points = self._load_logout_click_points_from_record()
+        if points is None:
+            return
+        focus_pt_raw, log_out_pt_raw, log_out_ok_pt_raw = points
+        focus_pt = self._convert_record_click_to_1920_relative(focus_pt_raw)
+        log_out_pt = self._convert_record_click_to_1920_relative(log_out_pt_raw)
+        log_out_ok_pt = self._convert_record_click_to_1920_relative(log_out_ok_pt_raw)
+        self.log_out_focus_coors = focus_pt
+        self.log_out_btn_coors = log_out_pt
+        self.log_out_ok_btn_coors = log_out_ok_pt
+        self._loaded_click_targets["log_out_focus"] = {"x": int(focus_pt[0]), "y": int(focus_pt[1])}
+        self._loaded_click_targets["log_out_btn"] = {"x": int(log_out_pt[0]), "y": int(log_out_pt[1])}
+        self._loaded_click_targets["log_out_ok_btn"] = {"x": int(log_out_ok_pt[0]), "y": int(log_out_ok_pt[1])}
+        self._persist_logout_points_to_calibration_config(focus_pt, log_out_pt, log_out_ok_pt)
+        bot_logger.log_info(
+            "Seeded logout baseline points from record: "
+            f"focus_raw={focus_pt_raw} focus={focus_pt}, "
+            f"log_out_raw={log_out_pt_raw} log_out={log_out_pt}, "
+            f"log_out_ok_raw={log_out_ok_pt_raw} log_out_ok={log_out_ok_pt}"
+        )
+
+    def _convert_record_click_to_1920_relative(self, point: tuple[int, int]) -> tuple[int, int]:
+        """
+        Convert a recorded absolute desktop click into 1920-relative window space when possible.
+        If conversion cannot be safely inferred, keep the original point.
+        """
+        try:
+            px = int(point[0])
+            py = int(point[1])
+        except Exception:
+            return point
+
+        ct = self._loaded_click_targets or {}
+        queue_cfg = ct.get("queue_button")
+        qrel = self._default_points_1920.get("home_play_button_coors")
+        if isinstance(queue_cfg, dict) and qrel is not None:
+            try:
+                qx = int(queue_cfg.get("x"))
+                qy = int(queue_cfg.get("y"))
+                # Legacy absolute calibration profile: reconstruct old window origin.
+                if qx > 1920 or qy > 1080:
+                    ox = int(qx - int(qrel[0]))
+                    oy = int(qy - int(qrel[1]))
+                    rx = int(px - ox)
+                    ry = int(py - oy)
+                    if 0 <= rx <= 1920 and 0 <= ry <= 1080:
+                        return (rx, ry)
+            except Exception:
+                pass
+
+        # Already normalized.
+        if 0 <= px <= 1920 and 0 <= py <= 1080:
+            return (px, py)
+        return (px, py)
+
+    def _persist_logout_points_to_calibration_config(
+        self,
+        focus_pt: tuple[int, int],
+        log_out_pt: tuple[int, int],
+        log_out_ok_pt: tuple[int, int],
+    ) -> None:
+        config_path = self._app_path("calibration_config.json")
+        if not os.path.exists(config_path):
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            return
+        click_targets = cfg.get("click_targets", {})
+        if not isinstance(click_targets, dict):
+            click_targets = {}
+        current_focus = click_targets.get("log_out_focus")
+        current_a = click_targets.get("log_out_btn")
+        current_b = click_targets.get("log_out_ok_btn")
+        desired_focus = {"x": int(focus_pt[0]), "y": int(focus_pt[1])}
+        desired_a = {"x": int(log_out_pt[0]), "y": int(log_out_pt[1])}
+        desired_b = {"x": int(log_out_ok_pt[0]), "y": int(log_out_ok_pt[1])}
+        if current_focus == desired_focus and current_a == desired_a and current_b == desired_b:
+            return
+        click_targets["log_out_focus"] = desired_focus
+        click_targets["log_out_btn"] = desired_a
+        click_targets["log_out_ok_btn"] = desired_b
+        cfg["click_targets"] = click_targets
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
+
     def _replay_named_record(self, name: str, tag_prefix: str = "REPLAY", allow_keys: set[str] | None = None) -> bool:
         path = self._app_path("recorded_actions_records.json")
         if not os.path.exists(path):
@@ -2333,32 +2632,7 @@ class Controller(ControllerSecondary):
             else:
                 bot_logger.log_info(f"Account cycle index: {self._account_cycle_index} -> {next_index}")
             self._post_login_action_done = False
-            if not self._replay_recorded_logout():
-                bot_logger.log_info("Recorded logout replay unavailable; falling back to fixed logout clicks.")
-                bot_logger.log_info("Account switch: pressing ESC to open options menu.")
-                self.input.tap_escape()
-                time.sleep(1.0)
-                last_scene = self._get_last_scene_name()
-                bot_logger.log_info(f"Account switch: last scene before fallback logout = {last_scene or 'unknown'}.")
-                if last_scene == "Store":
-                    bot_logger.log_info("Account switch: Store scene detected; pressing ESC again for options menu.")
-                    self.input.tap_escape()
-                    time.sleep(1.0)
-                else:
-                    time.sleep(1.0)
-                bot_logger.log_info(
-                    f"Account switch: clicking LOG_OUT_BTN at ({self.log_out_btn_coors[0]}, {self.log_out_btn_coors[1]})."
-                )
-                self._click(self.log_out_btn_coors, "LOG_OUT_BTN")
-                time.sleep(0.15)
-                self._click(self.log_out_btn_coors, "LOG_OUT_BTN")
-                time.sleep(1.7)
-                bot_logger.log_info(
-                    f"Account switch: clicking LOG_OUT_OK_BTN at ({self.log_out_ok_btn_coors[0]}, {self.log_out_ok_btn_coors[1]})."
-                )
-                self._click(self.log_out_ok_btn_coors, "LOG_OUT_OK_BTN")
-                time.sleep(0.15)
-                self._click(self.log_out_ok_btn_coors, "LOG_OUT_OK_BTN")
+            self._run_mapped_logout_sequence()
             if self._stop_requested:
                 bot_logger.log_info("Account switch aborted after logout: stop requested.")
                 return
@@ -2424,6 +2698,42 @@ class Controller(ControllerSecondary):
             bot_logger.log_error(f"Account switch failed: {e}")
         finally:
             self._account_switch_in_progress = False
+
+    def _run_mapped_logout_sequence(self) -> None:
+        bot_logger.log_info("Account switch: using built-in mapped logout sequence.")
+        self._logout_play_origin = self._resolve_logout_play_button_origin()
+        focus_raw = self.log_out_focus_coors or self.home_play_button_coors
+        focus_target, _ = self._resolve_target_from_queue_anchor_rebase(
+            config_key="log_out_focus",
+            raw_point=focus_raw,
+            label="ACCOUNT_SWITCH_FOCUS",
+            force_reacquire=True,
+        )
+        bot_logger.log_info(f"Account switch: focus clicks before ESC at {focus_target}.")
+        self._click(focus_target, "ACCOUNT_SWITCH_FOCUS")
+        time.sleep(0.30)
+        self._click(focus_target, "ACCOUNT_SWITCH_FOCUS")
+        time.sleep(0.74)
+        bot_logger.log_info("Account switch: pressing ESC to open options menu.")
+        self.input.tap_escape()
+        time.sleep(1.62)
+        last_scene = self._get_last_scene_name()
+        bot_logger.log_info(f"Account switch: last scene before logout click = {last_scene or 'unknown'}.")
+        bot_logger.log_info("Account switch: clicking LOG_OUT_BTN (mapped).")
+        self._click_logout_target(self.log_out_btn_coors, "log_out_btn", "LOG_OUT_BTN")
+        time.sleep(3.08)
+        bot_logger.log_info("Account switch: clicking LOG_OUT_OK_BTN (mapped).")
+        self._click_logout_target(self.log_out_ok_btn_coors, "log_out_ok_btn", "LOG_OUT_OK_BTN")
+        self._logout_play_origin = None
+
+    def run_mapped_logout_sequence_for_test(self) -> bool:
+        """Run only the built-in mapped logout sequence (no account/login steps)."""
+        try:
+            self._run_mapped_logout_sequence()
+            return True
+        except Exception as e:
+            bot_logger.log_error(f"Mapped logout test sequence failed: {e}")
+            return False
 
     def _resolve_account_play_order(self, accounts: list[dict]) -> list[int]:
         if not self._account_play_order:
@@ -3177,17 +3487,6 @@ class Controller(ControllerSecondary):
         time.sleep(0.4)
         self.input.left_click(1)
         time.sleep(0.3)
-        try:
-            self._write_avatar_click_debug_bundle(
-                tag=tag,
-                raw_base=self.opponent_avatar_coors,
-                mapped_base=base_target,
-                final_point=(x, y),
-                offset=offset,
-                source=source,
-            )
-        except Exception as e:
-            bot_logger.log_error(f"Failed to write OPPONENT_AVATAR debug bundle: {e}")
 
     def __schedule_target_selection(self, source_id: int | None, reason: str) -> None:
         now = time.time()

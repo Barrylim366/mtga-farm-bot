@@ -46,6 +46,11 @@ macOS one-click start:
 You can also double-click `start_ui.command` in Finder.
 The script creates `.venv-macos` automatically (if missing) and installs required packages on first run.
 
+Windows quick test for built-in account switch flow (without starting a full match loop manually):
+- Double-click `test_logout_record.bat` in the repo root.
+- It runs the current built-in full account-switch path from code (logout + login + post-login handling).
+- For logout-only testing, run: `python tools/test_builtin_logout.py`
+
 UI assets are loaded from `images/`:
 - `images/ui_symbol.png`
 - `images/background`
@@ -93,6 +98,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - Record Actions window now matches Settings layout more closely: title/buttons are rendered directly on the background scene (no outer dark container), using the same canvas glow-button skins as the main/settings UI
 - Record Actions background now refreshes on canvas resize to prevent bottom strip artifacts during first paint
 - Record Actions now opens to the right of Settings with ~0.4 cm gap and the same window size (`460x430`), while still clamping to visible screen bounds
+- `Show Records` window is now larger and resizable so per-record action buttons (`Test Action`, `Delete`) remain visible across UI scales.
 - **Manage Accounts** was rebuilt to match the provided reference design (fire/red split layout)
 - Manage Accounts now opens aligned below Settings and uses tuned action-button border styling consistent with the updated submenu look
 - Manage Accounts outer shell frames were removed for the switch row, accounts wrapper, and play-order wrapper; only inner functional/table/widget frames remain
@@ -515,7 +521,13 @@ python -m unittest tests/test_licensing.py
   - Mulligan clicks (`KEEP_HAND` / `MULLIGAN`) now log raw vs mapped target and are mapped relative to detected `arena_region`.
   - Opponent avatar targeting (`select_target` + retry offsets) now always maps calibrated `opponent_avatar` relative to detected `arena_region` (no absolute desktop click).
   - Opponent avatar targeting now first rebases legacy absolute coordinates via the calibrated `queue_button` anchor (reconstruct old window origin, then map to current arena), which matches the same relative-conversion principle used for other controls.
-  - Each opponent-avatar click now writes a debug bundle (`avatar-click-*`) with `full_screen_after_click.png`, `arena_region_after_click.png`, `avatar_focus_after_click.png`, and `avatar_click_state.json`.
+  - Logout fallback clicks (`LOG_OUT_BTN`, `LOG_OUT_OK_BTN`) now prefer mapping from a runtime `Play`-button template origin (detected before `ESC`), then fall back to queue-anchor/arena mapping.
+  - Account-switch logout now uses a built-in mapped sequence (independent from recorded-action replay): two short focus clicks, one `ESC`, mapped `LOG_OUT_BTN`, then mapped `LOG_OUT_OK_BTN` with tuned delays.
+  - If a `Logout` record exists, its first click (`log_out_focus`) and last two clicks (`log_out_btn`, `log_out_ok_btn`) are seeded once as baseline logout coordinates (and written to `calibration_config.json`), then normal mapped clicking is used afterward.
+  - Seeded logout clicks from recorded actions are converted into 1920-relative window coordinates (using legacy `queue_button` origin reconstruction when needed) before runtime mapping.
+  - For logout targets, 1920-relative values are mapped directly to current `arena_region`; queue-anchor rebase is only used for true legacy absolute targets to avoid mixed-space drift.
+  - Fixed init-order bug: loaded/seeded logout coordinates are no longer overwritten by hardcoded defaults later in `Controller` startup.
+  - Logout click injection now mirrors Record Action playback style (explicit `left_down`/`left_up`) for better consistency with `Test Action`.
   - Hand scan points (`hand_scan_p1/p2`) are treated as direct 1920-space targets; if loaded values are outside 1920x1080 they are replaced with 1920 defaults before runtime mapping.
   - Bottom-right actions (`RESOLVE` / `SUBMIT_SELECTION` / `ATTACK_ALL`) and `ASSIGN_DAMAGE_DONE` now also use mapped coordinates instead of fixed desktop absolute points.
   - `KEEP_HAND` uses only the configured keep-hand coordinate and maps it relative to detected `arena_region` (no template matching).
@@ -524,6 +536,11 @@ python -m unittest tests/test_licensing.py
     - `full_screen_after_click.png`
     - `arena_region_after_click.png` (if arena window was detected)
     - `click_focus_after_click.png` (crop around clicked position)
+  - During account-switch fallback logout, each logout click saves a debug bundle under `debug/logout-click-<timestamp>/` with:
+    - `logout_click_state.json` (raw/mapped points, source, arena region, state)
+    - `full_screen_after_click.png`
+    - `arena_region_after_click.png` (if arena window was detected)
+    - `logout_focus_after_click.png` (crop around clicked position)
 
 ### Navigation Debug Artifacts
 
