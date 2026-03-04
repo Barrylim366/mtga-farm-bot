@@ -163,6 +163,7 @@ The runtime tries to locate MTGA dynamically:
 - First via OS window rectangle detection
 - Then verifies/fallbacks with visual anchor checks
 - Stores a session `arena_region` and re-acquires it on repeated verification failures
+- Opponent avatar target selection uses the same direct 1920-relative mapping path as other calibrated points (`_map_abs_point_to_arena`), without avatar-specific fallback heuristics
 
 
 2) Calibrate buttons via **Calibrate**:
@@ -513,6 +514,8 @@ python -m unittest tests/test_licensing.py
   - Coordinate mapping is now direct 1920-relative inside `arena_region` (no legacy `screen_bounds` scaling and no queue-offset translation).
   - Mulligan clicks (`KEEP_HAND` / `MULLIGAN`) now log raw vs mapped target and are mapped relative to detected `arena_region`.
   - Opponent avatar targeting (`select_target` + retry offsets) now always maps calibrated `opponent_avatar` relative to detected `arena_region` (no absolute desktop click).
+  - Opponent avatar targeting now first rebases legacy absolute coordinates via the calibrated `queue_button` anchor (reconstruct old window origin, then map to current arena), which matches the same relative-conversion principle used for other controls.
+  - Each opponent-avatar click now writes a debug bundle (`avatar-click-*`) with `full_screen_after_click.png`, `arena_region_after_click.png`, `avatar_focus_after_click.png`, and `avatar_click_state.json`.
   - Hand scan points (`hand_scan_p1/p2`) are treated as direct 1920-space targets; if loaded values are outside 1920x1080 they are replaced with 1920 defaults before runtime mapping.
   - Bottom-right actions (`RESOLVE` / `SUBMIT_SELECTION` / `ATTACK_ALL`) and `ASSIGN_DAMAGE_DONE` now also use mapped coordinates instead of fixed desktop absolute points.
   - `KEEP_HAND` uses only the configured keep-hand coordinate and maps it relative to detected `arena_region` (no template matching).

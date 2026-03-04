@@ -102,7 +102,8 @@ class Controller(ControllerSecondary):
         self.player_button_coors = (1699, 996)
         self.home_play_button_coors = (1699, 996)
         self.assign_damage_done_coors = (1280, 720)
-        self.opponent_avatar_coors = (int(1920 * 0.67), int(1080 * 0.2))
+        self._default_opponent_avatar_coors = (int(1920 * 0.67), int(1080 * 0.2))
+        self.opponent_avatar_coors = self._default_opponent_avatar_coors
         self.cast_card_dist = 10
         self.main_br_button_coordinates = (
             1920 - self.main_br_button_offset[0],
@@ -139,7 +140,7 @@ class Controller(ControllerSecondary):
             "home_play_button_coors": self.home_play_button_coors,
             "main_br_button_coordinates": self.main_br_button_coordinates,
             "assign_damage_done_coors": self.assign_damage_done_coors,
-            "opponent_avatar_coors": self.opponent_avatar_coors,
+            "opponent_avatar_coors": self._default_opponent_avatar_coors,
             "hand_scan_p1": self.hand_scan_p1,
             "hand_scan_p2": self.hand_scan_p2,
             "stack_scan_p1": self.stack_scan_p1,
@@ -149,8 +150,14 @@ class Controller(ControllerSecondary):
             "log_out_btn_coors": (1716, 851),
             "log_out_ok_btn_coors": (1875, 809),
         }
+        self._loaded_click_targets = {}
+        self._legacy_origin_hint: tuple[int, int] | None = None
         
         if click_targets:
+            try:
+                self._loaded_click_targets = dict(click_targets)
+            except Exception:
+                self._loaded_click_targets = {}
             if "keep_hand" in click_targets:
                 self.mulligan_keep_coors = (click_targets["keep_hand"]["x"], click_targets["keep_hand"]["y"])
             if "queue_button" in click_targets:
@@ -194,6 +201,9 @@ class Controller(ControllerSecondary):
             elif "logout_ok_btn" in click_targets:
                 self.log_out_ok_btn_coors = (click_targets["logout_ok_btn"]["x"], click_targets["logout_ok_btn"]["y"])
         self._normalize_loaded_click_targets_to_1920()
+        self._legacy_origin_hint = self._infer_legacy_origin_from_loaded_targets()
+        if self._legacy_origin_hint is not None:
+            bot_logger.log_info(f"Inferred legacy window origin from loaded calibration: {self._legacy_origin_hint}")
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
@@ -291,6 +301,7 @@ class Controller(ControllerSecondary):
         return (px, py), "outside_1920"
 
     def _normalize_loaded_click_targets_to_1920(self) -> None:
+        self._legacy_absolute_click_profile = False
         points_to_normalize = [
             ("mulligan_keep_coors", "keep_hand"),
             ("mulligan_mull_coors", "mulligan"),
@@ -310,6 +321,13 @@ class Controller(ControllerSecondary):
             raw = getattr(self, attr, None)
             if raw is None:
                 continue
+            try:
+                rx = int(raw[0])
+                ry = int(raw[1])
+                if rx > 1920 or ry > 1080:
+                    self._legacy_absolute_click_profile = True
+            except Exception:
+                pass
             normalized, source = self._normalize_point_to_1920(raw)
             if source == "already_1920":
                 setattr(self, attr, normalized)
@@ -339,6 +357,171 @@ class Controller(ControllerSecondary):
             bot_logger.log_info(
                 f"Hand scan points fallback to 1920 defaults: p1={self.hand_scan_p1} p2={self.hand_scan_p2}"
             )
+        try:
+            hsx1 = int(self.hand_scan_p1[0])
+            hsy1 = int(self.hand_scan_p1[1])
+            hsx2 = int(self.hand_scan_p2[0])
+            hsy2 = int(self.hand_scan_p2[1])
+            if hsx1 > 1920 or hsy1 > 1080 or hsx2 > 1920 or hsy2 > 1080:
+                self._legacy_absolute_click_profile = True
+        except Exception:
+            pass
+        if self._legacy_absolute_click_profile:
+            bot_logger.log_info("Detected legacy absolute click profile from loaded calibration values.")
+
+    def _infer_legacy_origin_from_loaded_targets(self) -> tuple[int, int] | None:
+        ct = self._loaded_click_targets or {}
+        anchors = [
+            ("queue_button", self._default_points_1920.get("home_play_button_coors")),
+            ("keep_hand", self._default_points_1920.get("mulligan_keep_coors")),
+            ("next", self._default_points_1920.get("main_br_button_coordinates")),
+            ("assign_damage_done", self._default_points_1920.get("assign_damage_done_coors")),
+        ]
+        origins: list[tuple[int, int]] = []
+        for key, rel in anchors:
+            if rel is None:
+                continue
+            raw = ct.get(key)
+            if not isinstance(raw, dict):
+                continue
+            try:
+                rx = int(raw.get("x"))
+                ry = int(raw.get("y"))
+                if rx > 1920 or ry > 1080:
+                    origins.append((int(rx - rel[0]), int(ry - rel[1])))
+            except Exception:
+                continue
+        if not origins:
+            return None
+        xs = sorted(o[0] for o in origins)
+        ys = sorted(o[1] for o in origins)
+        return (xs[len(xs) // 2], ys[len(ys) // 2])
+
+    def _resolve_opponent_avatar_base(self, *, force_reacquire: bool = True) -> tuple[tuple[int, int], str]:
+        arena = self._ensure_arena_region(force_reacquire=force_reacquire)
+        raw = self.opponent_avatar_coors
+        if arena is None:
+            return self._map_abs_point_to_arena(
+                raw,
+                label="OPPONENT_AVATAR_BASE",
+                force_reacquire=False,
+                apply_correction=False,
+            )
+        try:
+            px = int(raw[0])
+            py = int(raw[1])
+        except Exception:
+            return self._map_abs_point_to_arena(
+                raw,
+                label="OPPONENT_AVATAR_BASE",
+                force_reacquire=False,
+                apply_correction=False,
+            )
+
+        # Preferred: legacy absolute -> relative conversion using queue anchor from loaded calibration.
+        ct = self._loaded_click_targets or {}
+        raw_avatar_cfg = ct.get("opponent_avatar")
+        raw_queue_cfg = ct.get("queue_button")
+        queue_rel_default = self._default_points_1920.get("home_play_button_coors")
+        if (
+            isinstance(raw_avatar_cfg, dict)
+            and isinstance(raw_queue_cfg, dict)
+            and queue_rel_default is not None
+        ):
+            try:
+                avx = int(raw_avatar_cfg.get("x"))
+                avy = int(raw_avatar_cfg.get("y"))
+                qx = int(raw_queue_cfg.get("x"))
+                qy = int(raw_queue_cfg.get("y"))
+                qrelx = int(queue_rel_default[0])
+                qrely = int(queue_rel_default[1])
+                # Reconstruct old window origin from queue anchor, then rebase avatar.
+                old_origin_x = int(qx - qrelx)
+                old_origin_y = int(qy - qrely)
+                relx = int(avx - old_origin_x)
+                rely = int(avy - old_origin_y)
+                if 0 <= relx <= 1920 and 0 <= rely <= 1080:
+                    mapped = (int(arena[0] + relx), int(arena[1] + rely))
+                    self.opponent_avatar_coors = (relx, rely)
+                    bot_logger.log_info(
+                        "OPPONENT_AVATAR rebased via queue anchor: raw_avatar_cfg={} raw_queue_cfg={} "
+                        "old_origin=({}, {}) relative=({}, {}) mapped={} arena={}".format(
+                            (avx, avy),
+                            (qx, qy),
+                            old_origin_x,
+                            old_origin_y,
+                            relx,
+                            rely,
+                            mapped,
+                            arena,
+                        )
+                    )
+                    return mapped, "opponent_avatar_rebased_from_queue_anchor"
+            except Exception:
+                pass
+
+        candidates: list[tuple[tuple[int, int], str]] = []
+        # Candidate A: interpret configured point as 1920-relative (new mode).
+        if 0 <= px <= 1920 and 0 <= py <= 1080:
+            candidates.append(((int(arena[0] + px), int(arena[1] + py)), "relative_1920"))
+        # Candidate B: interpret configured point as absolute desktop coordinate (legacy calibration mode).
+        if arena[0] <= px <= arena[0] + arena[2] and arena[1] <= py <= arena[1] + arena[3]:
+            candidates.append(((px, py), "absolute_legacy"))
+        # Candidate C: rebase legacy absolute coordinate via inferred old window origin.
+        if self._legacy_origin_hint is not None:
+            try:
+                relx = int(px - self._legacy_origin_hint[0])
+                rely = int(py - self._legacy_origin_hint[1])
+                if 0 <= relx <= 1920 and 0 <= rely <= 1080:
+                    candidates.append(((int(arena[0] + relx), int(arena[1] + rely)), "legacy_rebased_relative"))
+            except Exception:
+                pass
+
+        if not candidates:
+            return self._map_abs_point_to_arena(
+                raw,
+                label="OPPONENT_AVATAR_BASE",
+                force_reacquire=False,
+                apply_correction=False,
+            )
+        if len(candidates) == 1:
+            return candidates[0][0], f"opponent_avatar_{candidates[0][1]}"
+
+        for pt, lbl in candidates:
+            if lbl == "legacy_rebased_relative":
+                bot_logger.log_info(
+                    "OPPONENT_AVATAR resolve: raw={} candidates={} selected={} arena={} (legacy-rebased preferred)".format(
+                        raw,
+                        [{"mode": l, "pt": p} for p, l in candidates],
+                        {"mode": lbl, "pt": pt},
+                        arena,
+                    )
+                )
+                return pt, "opponent_avatar_legacy_rebased"
+
+        # Ambiguous case: pick the candidate that lands in the plausible enemy avatar area.
+        # Enemy avatar/face target is expected in upper-middle area of arena.
+        def _score(pt: tuple[int, int]) -> float:
+            lx = float(pt[0] - arena[0])
+            ly = float(pt[1] - arena[1])
+            rx = lx / float(arena[2] or 1)
+            ry = ly / float(arena[3] or 1)
+            cx, cy = 0.50, 0.18
+            dist = ((rx - cx) ** 2 + (ry - cy) ** 2) ** 0.5
+            zone_bonus = 2.0 if (0.28 <= rx <= 0.72 and 0.05 <= ry <= 0.40) else 0.0
+            top_bonus = 0.5 if ry <= 0.45 else 0.0
+            return zone_bonus + top_bonus - dist
+
+        best_target, best_label = max(candidates, key=lambda c: _score(c[0]))
+        bot_logger.log_info(
+            "OPPONENT_AVATAR resolve: raw={} candidates={} selected={} arena={}".format(
+                raw,
+                [{"mode": lbl, "pt": pt} for pt, lbl in candidates],
+                {"mode": best_label, "pt": best_target},
+                arena,
+            )
+        )
+        return best_target, f"opponent_avatar_{best_label}_auto"
 
     def _get_state_from_log(self) -> BotState:
         state = self._state_tracker.get_state()
@@ -477,6 +660,64 @@ class Controller(ControllerSecondary):
         except Exception:
             pass
         bot_logger.log_info(f"KEEP_HAND debug bundle saved: {debug_dir}")
+
+    def _write_avatar_click_debug_bundle(
+        self,
+        *,
+        tag: str,
+        raw_base: tuple[int, int],
+        mapped_base: tuple[int, int],
+        final_point: tuple[int, int],
+        offset: tuple[int, int],
+        source: str,
+    ) -> None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        debug_dir = Path(bot_logger.ensure_debug_dir(f"avatar-click-{stamp}"))
+        try:
+            payload = {
+                "reason": "opponent_avatar_click_debug",
+                "tag": tag,
+                "state": str(self._get_state_from_log()),
+                "arena_region": self._arena_region,
+                "screen_bounds": self.screen_bounds,
+                "raw_base": [int(raw_base[0]), int(raw_base[1])],
+                "mapped_base": [int(mapped_base[0]), int(mapped_base[1])],
+                "offset": [int(offset[0]), int(offset[1])],
+                "final_point": [int(final_point[0]), int(final_point[1])],
+                "source": source,
+                "pending_target_select": self.__pending_target_select,
+                "log_path": self._log_path,
+            }
+            with open(debug_dir / "avatar_click_state.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
+        try:
+            tail = self._state_tracker.get_tail(220)
+            if not tail:
+                tail = self._read_log_tail(self._log_path, max_bytes=150000)
+            with open(debug_dir / "log_tail.txt", "w", encoding="utf-8") as f:
+                f.write(tail or "")
+        except Exception:
+            pass
+        try:
+            self._vision.begin_tick()
+            full = self._vision.capture(None)
+            self._vision.save_image(full, str(debug_dir / "full_screen_after_click.png"))
+            if self._arena_region:
+                arena_img = self._vision.capture(self._arena_region)
+                self._vision.save_image(arena_img, str(debug_dir / "arena_region_after_click.png"))
+            focus_region = (
+                int(final_point[0] - 260),
+                int(final_point[1] - 170),
+                520,
+                340,
+            )
+            focus_img = self._vision.capture(focus_region)
+            self._vision.save_image(focus_img, str(debug_dir / "avatar_focus_after_click.png"))
+        except Exception:
+            pass
+        bot_logger.log_info(f"OPPONENT_AVATAR debug bundle saved: {debug_dir}")
 
     def _get_hand_scan_points_mapped(
         self,
@@ -1158,12 +1399,7 @@ class Controller(ControllerSecondary):
             self.select_target(-1)
 
     def select_target(self, target_id: int) -> None:
-        target, source = self._map_abs_point_to_arena(
-            self.opponent_avatar_coors,
-            label="SELECT_OPPONENT_AVATAR",
-            force_reacquire=True,
-            apply_correction=False,
-        )
+        target, source = self._resolve_opponent_avatar_base(force_reacquire=True)
         bot_logger.log_info(
             "SELECT_OPPONENT_AVATAR target: source={} arena={} raw={} mapped={} target_id={}".format(
                 source,
@@ -2921,12 +3157,7 @@ class Controller(ControllerSecondary):
         ]
 
     def __click_opponent_avatar_with_offset(self, offset: tuple[int, int], tag: str) -> None:
-        base_target, source = self._map_abs_point_to_arena(
-            self.opponent_avatar_coors,
-            label="OPPONENT_AVATAR_BASE",
-            force_reacquire=True,
-            apply_correction=False,
-        )
+        base_target, source = self._resolve_opponent_avatar_base(force_reacquire=True)
         x = int(base_target[0] + offset[0])
         y = int(base_target[1] + offset[1])
         bot_logger.log_info(
@@ -2946,6 +3177,17 @@ class Controller(ControllerSecondary):
         time.sleep(0.4)
         self.input.left_click(1)
         time.sleep(0.3)
+        try:
+            self._write_avatar_click_debug_bundle(
+                tag=tag,
+                raw_base=self.opponent_avatar_coors,
+                mapped_base=base_target,
+                final_point=(x, y),
+                offset=offset,
+                source=source,
+            )
+        except Exception as e:
+            bot_logger.log_error(f"Failed to write OPPONENT_AVATAR debug bundle: {e}")
 
     def __schedule_target_selection(self, source_id: int | None, reason: str) -> None:
         now = time.time()
