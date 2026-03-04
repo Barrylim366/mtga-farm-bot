@@ -5,11 +5,18 @@ import threading
 import time
 import os
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from Controller.ControllerInterface import ControllerSecondary
 from Controller.MTGAController.LogReader import LogReader
 from Controller.Utilities.GameState import GameState
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
+from actions.actions import run_action
+from actions.navigation_flow import build_post_login_navigation_actions
+from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
+from vision.vision import VisionEngine
+from vision.window_locator import ArenaRegionProvider
 import bot_logger
 
 _TARGET_FIELD_UNSET = object()
@@ -68,6 +75,11 @@ class Controller(ControllerSecondary):
             'main_nav_loaded': 'MainNav load in',
             'queue_ready_marker': 'Unloading 1 Unused Serialized files (Serialized files now loaded:',
         }
+        if not log_path or not os.path.isfile(log_path):
+            raise FileNotFoundError(
+                f"Player.log not found at configured path: {log_path!r}. "
+                "Set a valid path before starting the bot."
+            )
         self.log_reader = LogReader(self.patterns.values(), log_path=log_path, callback=self.__log_callback)
         self._log_path = log_path
         try:
@@ -83,44 +95,60 @@ class Controller(ControllerSecondary):
         self.cast_height = 30
         # Offset of the resolve button from the bottom right
         self.main_br_button_offset = (165, 136)
-        self.mulligan_keep_coors = (1101, 870)
-        self.mulligan_mull_coors = (801, 870)
+        self._default_mulligan_keep_coors = (1101, 870)
+        self._default_mulligan_mull_coors = (801, 870)
+        self.mulligan_keep_coors = self._default_mulligan_keep_coors
+        self.mulligan_mull_coors = self._default_mulligan_mull_coors
         self.player_button_coors = (1699, 996)
         self.home_play_button_coors = (1699, 996)
         self.assign_damage_done_coors = (1280, 720)
-        self.opponent_avatar_coors = (
-            int(self.screen_bounds[1][0] * 0.67),
-            int(self.screen_bounds[1][1] * 0.2),
-        )
+        self.opponent_avatar_coors = (int(1920 * 0.67), int(1080 * 0.2))
         self.cast_card_dist = 10
         self.main_br_button_coordinates = (
-            self.screen_bounds[1][0] - self.main_br_button_offset[0],
-            self.screen_bounds[1][1] - self.main_br_button_offset[1],
+            1920 - self.main_br_button_offset[0],
+            1080 - self.main_br_button_offset[1],
         )
 
         self.log_out_btn_coors = None
         self.log_out_ok_btn_coors = None
         
-        self.hand_scan_p1 = (self.screen_bounds[0][0], self.screen_bounds[1][1] - 30)
-        self.hand_scan_p2 = (self.screen_bounds[1][0], self.screen_bounds[1][1] - 30)
+        self.hand_scan_p1 = (0, 1050)
+        self.hand_scan_p2 = (1920, 1050)
         self.stack_scan_p1 = (
-            int(self.screen_bounds[1][0] * 0.65),
-            int(self.screen_bounds[1][1] * 0.25),
+            int(1920 * 0.65),
+            int(1080 * 0.25),
         )
         self.stack_scan_p2 = (
-            int(self.screen_bounds[1][0] * 0.95),
-            int(self.screen_bounds[1][1] * 0.6),
+            int(1920 * 0.95),
+            int(1080 * 0.6),
         )
         self.stack_scan_step = 80
         self.stack_scan_fallback_p1 = (
-            int(self.screen_bounds[1][0] * 0.35),
-            int(self.screen_bounds[1][1] * 0.2),
+            int(1920 * 0.35),
+            int(1080 * 0.2),
         )
         self.stack_scan_fallback_p2 = (
-            int(self.screen_bounds[1][0] * 0.8),
-            int(self.screen_bounds[1][1] * 0.75),
+            int(1920 * 0.8),
+            int(1080 * 0.75),
         )
         self.stack_scan_fallback_step = 50
+        self._default_points_1920 = {
+            "mulligan_keep_coors": self.mulligan_keep_coors,
+            "mulligan_mull_coors": self.mulligan_mull_coors,
+            "player_button_coors": self.player_button_coors,
+            "home_play_button_coors": self.home_play_button_coors,
+            "main_br_button_coordinates": self.main_br_button_coordinates,
+            "assign_damage_done_coors": self.assign_damage_done_coors,
+            "opponent_avatar_coors": self.opponent_avatar_coors,
+            "hand_scan_p1": self.hand_scan_p1,
+            "hand_scan_p2": self.hand_scan_p2,
+            "stack_scan_p1": self.stack_scan_p1,
+            "stack_scan_p2": self.stack_scan_p2,
+            "stack_scan_fallback_p1": self.stack_scan_fallback_p1,
+            "stack_scan_fallback_p2": self.stack_scan_fallback_p2,
+            "log_out_btn_coors": (1716, 851),
+            "log_out_ok_btn_coors": (1875, 809),
+        }
         
         if click_targets:
             if "keep_hand" in click_targets:
@@ -165,6 +193,7 @@ class Controller(ControllerSecondary):
                 self.log_out_ok_btn_coors = (click_targets["log_out_ok_btn"]["x"], click_targets["log_out_ok_btn"]["y"])
             elif "logout_ok_btn" in click_targets:
                 self.log_out_ok_btn_coors = (click_targets["logout_ok_btn"]["x"], click_targets["logout_ok_btn"]["y"])
+        self._normalize_loaded_click_targets_to_1920()
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
@@ -209,6 +238,19 @@ class Controller(ControllerSecondary):
         self._stop_requested = False
         self._post_login_action_done = False
         self._suppress_selections = False
+        self._state_tracker = PlayerLogStateTracker(max_lines=500)
+        self._vision = VisionEngine()
+        self._arena_region_provider = ArenaRegionProvider(
+            vision=self._vision,
+            assets_dir=self._app_path("assets", "assert"),
+        )
+        self._arena_region: tuple[int, int, int, int] | None = None
+        self._arena_correction_xy: tuple[int, int] = (0, 0)
+        self._navigation_verify_failures = 0
+        self._queue_button_rel = (
+            int(self.home_play_button_coors[0]),
+            int(self.home_play_button_coors[1]),
+        )
         # Fixed timing for login phase
         self._login_delete_delay_sec = 5.0
         # Fallback coords if recorded playback isn't available
@@ -236,6 +278,235 @@ class Controller(ControllerSecondary):
 
     def _app_path(self, *parts: str) -> str:
         return os.path.join(self._app_root_dir(), *parts)
+
+    def _normalize_point_to_1920(self, point: tuple[int, int]) -> tuple[tuple[int, int], str]:
+        try:
+            px = int(point[0])
+            py = int(point[1])
+        except Exception:
+            return point, "invalid"
+
+        if 0 <= px <= 1920 and 0 <= py <= 1080:
+            return (px, py), "already_1920"
+        return (px, py), "outside_1920"
+
+    def _normalize_loaded_click_targets_to_1920(self) -> None:
+        points_to_normalize = [
+            ("mulligan_keep_coors", "keep_hand"),
+            ("mulligan_mull_coors", "mulligan"),
+            ("player_button_coors", "queue_player_button"),
+            ("home_play_button_coors", "queue_button"),
+            ("main_br_button_coordinates", "next_resolve"),
+            ("assign_damage_done_coors", "assign_damage_done"),
+            ("opponent_avatar_coors", "opponent_avatar"),
+            ("stack_scan_p1", "stack_scan_p1"),
+            ("stack_scan_p2", "stack_scan_p2"),
+            ("stack_scan_fallback_p1", "stack_scan_fallback_p1"),
+            ("stack_scan_fallback_p2", "stack_scan_fallback_p2"),
+            ("log_out_btn_coors", "log_out_btn"),
+            ("log_out_ok_btn_coors", "log_out_ok_btn"),
+        ]
+        for attr, label in points_to_normalize:
+            raw = getattr(self, attr, None)
+            if raw is None:
+                continue
+            normalized, source = self._normalize_point_to_1920(raw)
+            if source == "already_1920":
+                setattr(self, attr, normalized)
+            else:
+                fallback = self._default_points_1920.get(attr)
+                if fallback is not None:
+                    setattr(self, attr, fallback)
+                bot_logger.log_info(
+                    f"Ignoring non-1920 {label}: raw={raw} source={source}. Using default={getattr(self, attr)}; recalibrate in 1920."
+                )
+            if tuple(getattr(self, attr)) != tuple(raw):
+                bot_logger.log_info(
+                    f"Using {label}: raw={raw} active={getattr(self, attr)}"
+                )
+
+        # Hand scan must be direct 1920-space (same philosophy as keep-hand fallback):
+        # if loaded values are not valid 1920 coordinates, use robust defaults.
+        hs_p1 = getattr(self, "hand_scan_p1", (0, 1050))
+        hs_p2 = getattr(self, "hand_scan_p2", (1920, 1050))
+        hand_valid = (
+            0 <= int(hs_p1[0]) <= 1920 and 0 <= int(hs_p1[1]) <= 1080
+            and 0 <= int(hs_p2[0]) <= 1920 and 0 <= int(hs_p2[1]) <= 1080
+        )
+        if not hand_valid:
+            self.hand_scan_p1 = (0, 1050)
+            self.hand_scan_p2 = (1920, 1050)
+            bot_logger.log_info(
+                f"Hand scan points fallback to 1920 defaults: p1={self.hand_scan_p1} p2={self.hand_scan_p2}"
+            )
+
+    def _get_state_from_log(self) -> BotState:
+        state = self._state_tracker.get_state()
+        if state != BotState.UNKNOWN:
+            return state
+        tail = self._read_log_tail(self._log_path, max_bytes=250000)
+        return get_state_from_playerlog(tail)
+
+    def _ensure_arena_region(self, force_reacquire: bool = False) -> tuple[int, int, int, int] | None:
+        if force_reacquire:
+            self._arena_region = self._arena_region_provider.reacquire()
+        elif self._arena_region is None:
+            self._arena_region = self._arena_region_provider.acquire()
+        return self._arena_region
+
+    def _click_abs(self, x: int, y: int, tag: str) -> None:
+        bot_logger.log_click(int(x), int(y), tag)
+        self.input.move_abs(int(x), int(y))
+        time.sleep(0.1)
+        self.input.left_down()
+        time.sleep(0.06)
+        self.input.left_up()
+
+    def _map_abs_point_to_arena(
+        self,
+        point: tuple[int, int],
+        *,
+        label: str = "point",
+        force_reacquire: bool = False,
+        apply_correction: bool = True,
+    ) -> tuple[tuple[int, int], str]:
+        arena = self._ensure_arena_region(force_reacquire=force_reacquire)
+        if arena is None:
+            return (int(point[0]), int(point[1])), "absolute_no_arena"
+        try:
+            px = int(point[0])
+            py = int(point[1])
+
+            # 1) 1920-relative coordinate inside arena.
+            if 0 <= px <= 1920 and 0 <= py <= 1080:
+                return (int(arena[0] + px), int(arena[1] + py)), "arena_relative_1920_direct"
+
+            # 2) Absolute point already inside arena extents.
+            local_x = int(px - arena[0])
+            local_y = int(py - arena[1])
+            if 0 <= local_x <= arena[2] and 0 <= local_y <= arena[3]:
+                return (px, py), "arena_absolute_inside"
+
+            # 3) Non-1920/outside point should not be used in 1920-only mode.
+            bot_logger.log_error(
+                f"{label}: point outside 1920-space and arena bounds: raw={point}, arena={arena}. Using absolute fallback."
+            )
+        except Exception as e:
+            bot_logger.log_error(f"{label}: point map failed, using absolute. err={e}")
+        return (int(point[0]), int(point[1])), "absolute_fallback"
+
+    def _write_nav_debug_bundle(self, reason: str) -> None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        debug_dir = Path(bot_logger.ensure_debug_dir(stamp))
+        try:
+            state_payload = {
+                "reason": reason,
+                "state": str(self._get_state_from_log()),
+                "arena_region": self._arena_region,
+                "log_path": self._log_path,
+            }
+            with open(debug_dir / "state.json", "w", encoding="utf-8") as f:
+                json.dump(state_payload, f, indent=2)
+        except Exception:
+            pass
+        try:
+            tail = self._state_tracker.get_tail(180)
+            if not tail:
+                tail = self._read_log_tail(self._log_path, max_bytes=150000)
+            with open(debug_dir / "log_tail.txt", "w", encoding="utf-8") as f:
+                f.write(tail or "")
+        except Exception:
+            pass
+        try:
+            self._vision.begin_tick()
+            if self._arena_region:
+                arena_img = self._vision.capture(self._arena_region)
+                self._vision.save_image(arena_img, str(debug_dir / "arena_region.png"))
+            full = self._vision.capture(None)
+            self._vision.save_image(full, str(debug_dir / "full_screen.png"))
+        except Exception:
+            pass
+        bot_logger.log_error(f"Navigation debug bundle saved: {debug_dir}")
+
+    def _write_keep_click_debug_bundle(
+        self,
+        *,
+        decision: str,
+        raw_point: tuple[int, int],
+        mapped_point: tuple[int, int],
+        source: str,
+    ) -> None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        debug_dir = Path(bot_logger.ensure_debug_dir(f"keep-click-{stamp}"))
+        try:
+            payload = {
+                "reason": "mulligan_click_debug",
+                "decision": decision,
+                "state": str(self._get_state_from_log()),
+                "arena_region": self._arena_region,
+                "screen_bounds": self.screen_bounds,
+                "raw_point": [int(raw_point[0]), int(raw_point[1])],
+                "mapped_point": [int(mapped_point[0]), int(mapped_point[1])],
+                "source": source,
+                "arena_correction_xy": [
+                    int(self._arena_correction_xy[0]),
+                    int(self._arena_correction_xy[1]),
+                ],
+                "log_path": self._log_path,
+            }
+            with open(debug_dir / "keep_click_state.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
+        try:
+            self._vision.begin_tick()
+            full = self._vision.capture(None)
+            self._vision.save_image(full, str(debug_dir / "full_screen_after_click.png"))
+            if self._arena_region:
+                arena_img = self._vision.capture(self._arena_region)
+                self._vision.save_image(arena_img, str(debug_dir / "arena_region_after_click.png"))
+            # Small focus crop around clicked point for quick inspection.
+            focus_region = (
+                int(mapped_point[0] - 220),
+                int(mapped_point[1] - 140),
+                440,
+                280,
+            )
+            focus_img = self._vision.capture(focus_region)
+            self._vision.save_image(focus_img, str(debug_dir / "click_focus_after_click.png"))
+        except Exception:
+            pass
+        bot_logger.log_info(f"KEEP_HAND debug bundle saved: {debug_dir}")
+
+    def _get_hand_scan_points_mapped(
+        self,
+        *,
+        force_reacquire: bool = False,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        p1, s1 = self._map_abs_point_to_arena(
+            self.hand_scan_p1,
+            label="HAND_SCAN_P1",
+            force_reacquire=force_reacquire,
+            apply_correction=False,
+        )
+        p2, s2 = self._map_abs_point_to_arena(
+            self.hand_scan_p2,
+            label="HAND_SCAN_P2",
+            force_reacquire=False,
+            apply_correction=False,
+        )
+        bot_logger.log_info(
+            "HAND_SCAN mapped: arena={} raw_p1={} raw_p2={} mapped_p1={} mapped_p2={} src_p1={} src_p2={}".format(
+                self._arena_region,
+                self.hand_scan_p1,
+                self.hand_scan_p2,
+                p1,
+                p2,
+                s1,
+                s2,
+            )
+        )
+        return p1, p2
 
     def _click_image(self, image_path: str, label: str, confidence: float = 0.82, timeout: float = 20.0) -> bool:
         try:
@@ -466,6 +737,48 @@ class Controller(ControllerSecondary):
         )
         return os.path.join(account_dir, best)
 
+    def _run_post_login_navigation_oob(self) -> bool:
+        arena = self._ensure_arena_region(force_reacquire=False)
+        if arena is None:
+            bot_logger.log_error("Post-login navigation: failed to acquire MTGA window region.")
+            self._write_nav_debug_bundle("arena_region_not_found")
+            return False
+
+        assets_dir = self._app_path("assets", "assert")
+        buttons_dir = self._buttons_dir()
+        actions = build_post_login_navigation_actions(assets_dir=assets_dir, buttons_dir=buttons_dir)
+
+        def _recover(action_name: str, attempt: int) -> None:
+            bot_logger.log_info(
+                f"Post-login navigation recover: action={action_name} attempt={attempt} (ESC + reacquire)."
+            )
+            try:
+                self.input.tap_escape()
+            except Exception:
+                pass
+            time.sleep(0.5)
+            self._ensure_arena_region(force_reacquire=True)
+
+        for spec in actions:
+            result = run_action(
+                spec,
+                state_getter=self._get_state_from_log,
+                vision=self._vision,
+                arena_region_getter=lambda: self._ensure_arena_region(force_reacquire=False),
+                click_abs=self._click_abs,
+                recover_once=_recover,
+            )
+            if not result.ok:
+                self._navigation_verify_failures += 1
+                bot_logger.log_error(
+                    f"Post-login navigation action failed: {spec.name} reason={result.reason}"
+                )
+                self._write_nav_debug_bundle(result.reason)
+                return False
+
+        self._navigation_verify_failures = 0
+        return True
+
     def _run_post_login_routine(self, account: dict, all_accounts: list[dict]) -> bool:
         if self._stop_requested:
             return False
@@ -498,23 +811,25 @@ class Controller(ControllerSecondary):
 
         buttons_dir = self._buttons_dir()
         play_btn = os.path.join(buttons_dir, "play_btn.png")
-        find_btn = os.path.join(buttons_dir, "find_match_btn.png")
-        hist_btn = os.path.join(buttons_dir, "hist_play_btn.png")
-        decks_btn = os.path.join(buttons_dir, "my_decks.png")
 
         bot_logger.log_info("Post-login: navigating Play > Find Match > Historic Play > My Decks.")
-        if not self._click_image(play_btn, "POST_LOGIN_PLAY"):
-            return False
-        time.sleep(1.0)
-        if not self._click_image(find_btn, "POST_LOGIN_FIND_MATCH"):
-            return False
-        time.sleep(1.0)
-        if not self._click_image(hist_btn, "POST_LOGIN_HIST_PLAY"):
-            return False
-        time.sleep(1.0)
-        if not self._click_image(decks_btn, "POST_LOGIN_MY_DECKS"):
-            return False
-        time.sleep(1.0)
+        if not self._run_post_login_navigation_oob():
+            bot_logger.log_info("Post-login: oob navigation failed, falling back to legacy full-screen image search.")
+            find_btn = os.path.join(buttons_dir, "find_match_btn.png")
+            hist_btn = os.path.join(buttons_dir, "hist_play_btn.png")
+            decks_btn = os.path.join(buttons_dir, "my_decks.png")
+            if not self._click_image(play_btn, "POST_LOGIN_PLAY"):
+                return False
+            time.sleep(1.0)
+            if not self._click_image(find_btn, "POST_LOGIN_FIND_MATCH"):
+                return False
+            time.sleep(1.0)
+            if not self._click_image(hist_btn, "POST_LOGIN_HIST_PLAY"):
+                return False
+            time.sleep(1.0)
+            if not self._click_image(decks_btn, "POST_LOGIN_MY_DECKS"):
+                return False
+            time.sleep(1.0)
 
         # Primary attempt uses the planned account folder; if mismatch occurred during login,
         # automatically try other account folders before failing.
@@ -558,9 +873,67 @@ class Controller(ControllerSecondary):
             self._account_switch_pending = True
             bot_logger.log_info("Account switch pending; skipping queue click.")
             return
+        current_state = self._get_state_from_log()
+        bot_logger.log_info(f"Queue pre-check state={current_state}")
+        if current_state == BotState.STORE:
+            bot_logger.log_info("Queue pre-check: Store detected, pressing ESC before queue click.")
+            try:
+                self.input.tap_escape()
+                time.sleep(0.6)
+            except Exception:
+                pass
+        target = self.home_play_button_coors
+        source = "absolute_click_target"
+        arena = self._ensure_arena_region(force_reacquire=False)
+        if arena is not None:
+            queue_template = os.path.join(self._buttons_dir(), "play_btn.png")
+            if os.path.exists(queue_template):
+                template_roi = (
+                    int(arena[0] + 1160),
+                    int(arena[1] + 680),
+                    740,
+                    360,
+                )
+                self._vision.begin_tick()
+                roi_img = self._vision.capture(template_roi)
+                if roi_img is not None:
+                    match = self._vision.find_template(roi_img, queue_template, threshold=0.80)
+                    if match is not None:
+                        target = (int(template_roi[0] + match.x), int(template_roi[1] + match.y))
+                        source = f"arena_template_play_btn score={match.score:.3f}"
+                        bot_logger.log_info(f"Queue template hit: click={target} source={source}")
+            try:
+                if source == "absolute_click_target":
+                    mapped, mapped_source = self._map_abs_point_to_arena(
+                        self.home_play_button_coors,
+                        label="QUEUE_BUTTON_CONFIG",
+                        force_reacquire=False,
+                        apply_correction=False,
+                    )
+                    if mapped_source != "absolute_fallback":
+                        target = mapped
+                        source = mapped_source
+                    else:
+                        fallback_rel_x, fallback_rel_y = self._queue_button_rel
+                        if 0 <= fallback_rel_x <= arena[2] and 0 <= fallback_rel_y <= arena[3]:
+                            target = (int(arena[0] + fallback_rel_x), int(arena[1] + fallback_rel_y))
+                            source = "arena_rel_click_target"
+            except Exception as e:
+                bot_logger.log_error(f"Queue target compute failed; using absolute target. err={e}")
+        if arena is None:
+            bot_logger.log_info("Queue target: arena_region unavailable, using absolute coordinates.")
+        else:
+            bot_logger.log_info(
+                "Queue target details: source={} arena={} screen_bounds={} click_target={}".format(
+                    source,
+                    arena,
+                    self.screen_bounds,
+                    self.home_play_button_coors,
+                )
+            )
         bot_logger.log_info("Queue attempt: clicking queue button.")
-        bot_logger.log_click(self.home_play_button_coors[0], self.home_play_button_coors[1], "QUEUE_BUTTON")
-        self.input.move_abs(self.home_play_button_coors[0], self.home_play_button_coors[1])
+        bot_logger.log_click(target[0], target[1], "QUEUE_BUTTON")
+        self.input.move_abs(target[0], target[1])
         self.input.left_down()
         time.sleep(0.2)
         self.input.left_up()
@@ -673,11 +1046,12 @@ class Controller(ControllerSecondary):
     def cast(self, card_id: int) -> None:
         bot_logger.set_hover_logging(True)
         try:
+            hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
             # Clear any stale hover events from previous scans
             self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
 
             # Move above start point first to reset any hover states
-            reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+            reset_pos = (hand_p1[0], hand_p1[1] - 100)
             bot_logger.log_move(
                 reset_pos[0],
                 reset_pos[1],
@@ -687,18 +1061,18 @@ class Controller(ControllerSecondary):
             time.sleep(0.5)
 
             # Move to start of hand scan
-            bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SCAN")
-            self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
+            bot_logger.log_move(hand_p1[0], hand_p1[1], "START_HAND_SCAN")
+            self.input.move_abs(hand_p1[0], hand_p1[1])
 
             current_hovered_id = None
-            start_x = self.hand_scan_p1[0]
-            end_x = self.hand_scan_p2[0]
+            start_x = hand_p1[0]
+            end_x = hand_p2[0]
 
             # Ensure we are scanning in the correct direction (left to right usually)
             direction = 1 if end_x > start_x else -1
             total_dx = (end_x - start_x) if end_x != start_x else 1
-            start_y = self.hand_scan_p1[1]
-            end_y = self.hand_scan_p2[1]
+            start_y = hand_p1[1]
+            end_y = hand_p2[1]
 
             while current_hovered_id != card_id:
                 # Check if we have exceeded the scan area
@@ -757,15 +1131,24 @@ class Controller(ControllerSecondary):
                 time.sleep(0.7)
 
             # Final reset position
-            reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+            reset_pos = (hand_p1[0], hand_p1[1] - 100)
             bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
             self.input.move_abs(reset_pos[0], reset_pos[1])
         finally:
             bot_logger.set_hover_logging(False)
 
     def all_attack(self) -> None:
-        bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "ATTACK_ALL")
-        self.input.move_abs(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1])
+        target, source = self._map_abs_point_to_arena(
+            self.main_br_button_coordinates,
+            label="ATTACK_ALL",
+            force_reacquire=True,
+            apply_correction=False,
+        )
+        bot_logger.log_info(
+            f"ATTACK_ALL target: source={source} arena={self._arena_region} raw={self.main_br_button_coordinates} mapped={target}"
+        )
+        bot_logger.log_click(target[0], target[1], "ATTACK_ALL")
+        self.input.move_abs(target[0], target[1])
         self.input.left_click(1)
         time.sleep(1)
         self.input.left_click(1)
@@ -775,12 +1158,23 @@ class Controller(ControllerSecondary):
             self.select_target(-1)
 
     def select_target(self, target_id: int) -> None:
-        bot_logger.log_click(
-            self.opponent_avatar_coors[0],
-            self.opponent_avatar_coors[1],
-            f"SELECT_OPPONENT_AVATAR (target_id={target_id})",
+        target, source = self._map_abs_point_to_arena(
+            self.opponent_avatar_coors,
+            label="SELECT_OPPONENT_AVATAR",
+            force_reacquire=True,
+            apply_correction=False,
         )
-        self.input.move_abs(self.opponent_avatar_coors[0], self.opponent_avatar_coors[1])
+        bot_logger.log_info(
+            "SELECT_OPPONENT_AVATAR target: source={} arena={} raw={} mapped={} target_id={}".format(
+                source,
+                self._arena_region,
+                self.opponent_avatar_coors,
+                target,
+                target_id,
+            )
+        )
+        bot_logger.log_click(target[0], target[1], f"SELECT_OPPONENT_AVATAR (target_id={target_id})")
+        self.input.move_abs(target[0], target[1])
         time.sleep(0.2)
         self.input.left_click(1)
         time.sleep(0.2)
@@ -876,28 +1270,29 @@ class Controller(ControllerSecondary):
         """Select a card in hand by hovering until objectId matches, then click."""
         bot_logger.set_hover_logging(True)
         try:
+            hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
             # Clear any stale hover events from previous scans
             self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
 
             # Move above start point first to reset any hover states
-            reset_pos = (self.hand_scan_p1[0], self.hand_scan_p1[1] - 100)
+            reset_pos = (hand_p1[0], hand_p1[1] - 100)
             bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_HAND_SELECT (target card_id={card_id})")
             self.input.move_abs(reset_pos[0], reset_pos[1])
             time.sleep(0.3)
 
             # Move to start of hand scan
-            bot_logger.log_move(self.hand_scan_p1[0], self.hand_scan_p1[1], "START_HAND_SELECT_SCAN")
-            self.input.move_abs(self.hand_scan_p1[0], self.hand_scan_p1[1])
+            bot_logger.log_move(hand_p1[0], hand_p1[1], "START_HAND_SELECT_SCAN")
+            self.input.move_abs(hand_p1[0], hand_p1[1])
 
             current_hovered_id = None
-            start_x = self.hand_scan_p1[0]
-            end_x = self.hand_scan_p2[0]
+            start_x = hand_p1[0]
+            end_x = hand_p2[0]
 
             # Ensure we are scanning in the correct direction (left to right usually)
             direction = 1 if end_x > start_x else -1
             total_dx = (end_x - start_x) if end_x != start_x else 1
-            start_y = self.hand_scan_p1[1]
-            end_y = self.hand_scan_p2[1]
+            start_y = hand_p1[1]
+            end_y = hand_p2[1]
 
             while current_hovered_id != card_id:
                 current_x = self.input.position().x
@@ -952,10 +1347,15 @@ class Controller(ControllerSecondary):
         """Select a hand card using a vertical offset scan (useful for SelectN prompts)."""
         bot_logger.set_hover_logging(True)
         try:
-            p1 = (self.hand_scan_p1[0], self.hand_scan_p1[1] + y_offset)
-            p2 = (self.hand_scan_p2[0], self.hand_scan_p2[1] + y_offset)
-            min_y = self.screen_bounds[0][1]
-            max_y = self.screen_bounds[1][1]
+            hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
+            p1 = (hand_p1[0], hand_p1[1] + y_offset)
+            p2 = (hand_p2[0], hand_p2[1] + y_offset)
+            if self._arena_region is not None:
+                min_y = int(self._arena_region[1])
+                max_y = int(self._arena_region[1] + self._arena_region[3])
+            else:
+                min_y = self.screen_bounds[0][1]
+                max_y = self.screen_bounds[1][1]
             p1 = (p1[0], max(min_y, min(max_y, p1[1])))
             p2 = (p2[0], max(min_y, min(max_y, p2[1])))
             return self.__select_object_in_region(
@@ -1022,8 +1422,17 @@ class Controller(ControllerSecondary):
             if self._click_image(submit_img, "SUBMIT_SELECTION_IMG", confidence=0.82, timeout=1.5):
                 self.__last_submit_selection_ts = time.time()
                 return True
-        bot_logger.log_click(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1], "SUBMIT_SELECTION")
-        self.input.move_abs(self.main_br_button_coordinates[0], self.main_br_button_coordinates[1])
+        target, source = self._map_abs_point_to_arena(
+            self.main_br_button_coordinates,
+            label="SUBMIT_SELECTION",
+            force_reacquire=True,
+            apply_correction=False,
+        )
+        bot_logger.log_info(
+            f"SUBMIT_SELECTION target: source={source} arena={self._arena_region} raw={self.main_br_button_coordinates} mapped={target}"
+        )
+        bot_logger.log_click(target[0], target[1], "SUBMIT_SELECTION")
+        self.input.move_abs(target[0], target[1])
         time.sleep(0.1)
         self.input.left_click(1)
         self.__last_submit_selection_ts = time.time()
@@ -1037,11 +1446,24 @@ class Controller(ControllerSecondary):
         # opponent DeclareAttack. Historically we clicked slightly above to compensate, but that can
         # miss depending on UI scale/layout. Use the calibrated button position first, then a small
         # upward fallback only for that specific case.
-        positions = [self.main_br_button_coordinates]
+        base_target, source = self._map_abs_point_to_arena(
+            self.main_br_button_coordinates,
+            label="RESOLVE",
+            force_reacquire=True,
+            apply_correction=False,
+        )
+        positions = [base_target]
         if turn_info.get('step') == 'Step_DeclareAttack' and turn_info.get('activePlayer') != my_seat:
-            fallback_y = self.main_br_button_coordinates[1] - 50
-            min_y = self.screen_bounds[0][1]
-            positions.append((self.main_br_button_coordinates[0], max(min_y, fallback_y)))
+            fallback_y = base_target[1] - 50
+            if self._arena_region is not None:
+                min_y = int(self._arena_region[1])
+            else:
+                min_y = self.screen_bounds[0][1]
+            positions.append((base_target[0], max(min_y, fallback_y)))
+
+        bot_logger.log_info(
+            f"RESOLVE target: source={source} arena={self._arena_region} raw={self.main_br_button_coordinates} positions={positions}"
+        )
 
         for pos in positions:
             bot_logger.log_click(pos[0], pos[1], "RESOLVE")
@@ -1118,17 +1540,76 @@ class Controller(ControllerSecondary):
 
     def keep(self, keep: bool):
         if keep:
-            bot_logger.log_click(self.mulligan_keep_coors[0], self.mulligan_keep_coors[1], "KEEP_HAND")
-            self.input.move_abs(self.mulligan_keep_coors[0], self.mulligan_keep_coors[1])
+            used_raw = self.mulligan_keep_coors
+            target, source = self._map_abs_point_to_arena(
+                self.mulligan_keep_coors,
+                label="KEEP_HAND_CONFIG",
+                force_reacquire=True,
+                apply_correction=False,
+            )
+            arena = self._arena_region
+            if arena is not None:
+                local_x = int(target[0] - arena[0])
+                local_y = int(target[1] - arena[1])
+                # Keep button is expected near bottom-center/right, not at extreme bottom-right.
+                if not (760 <= local_x <= 1550 and 700 <= local_y <= 980):
+                    fallback_target, fallback_source = self._map_abs_point_to_arena(
+                        self._default_mulligan_keep_coors,
+                        label="KEEP_HAND_DEFAULT",
+                        force_reacquire=False,
+                        apply_correction=False,
+                    )
+                    bot_logger.log_error(
+                        "KEEP_HAND config appears invalid for mulligan screen: "
+                        f"local=({local_x}, {local_y}) raw={self.mulligan_keep_coors}. "
+                        f"Using fallback raw={self._default_mulligan_keep_coors} mapped={fallback_target}."
+                    )
+                    target = fallback_target
+                    used_raw = self._default_mulligan_keep_coors
+                    source = f"{fallback_source}_fallback_default_keep"
+            source = f"{source}_configured_keep"
+            bot_logger.log_info(
+                f"KEEP_HAND target: source={source} arena={self._arena_region} raw={used_raw} mapped={target}"
+            )
+            bot_logger.log_click(target[0], target[1], "KEEP_HAND")
+            self.input.move_abs(target[0], target[1])
         else:
-            bot_logger.log_click(self.mulligan_mull_coors[0], self.mulligan_mull_coors[1], "MULLIGAN")
-            self.input.move_abs(self.mulligan_mull_coors[0], self.mulligan_mull_coors[1])
+            target, source = self._map_abs_point_to_arena(
+                self.mulligan_mull_coors,
+                label="MULLIGAN",
+                force_reacquire=True,
+                apply_correction=False,
+            )
+            bot_logger.log_info(
+                f"MULLIGAN target: source={source} arena={self._arena_region} raw={self.mulligan_mull_coors} mapped={target}"
+            )
+            bot_logger.log_click(target[0], target[1], "MULLIGAN")
+            self.input.move_abs(target[0], target[1])
         self.input.left_click(1)
+        time.sleep(0.08)
+        try:
+            self._write_keep_click_debug_bundle(
+                decision="KEEP_HAND" if keep else "MULLIGAN",
+                raw_point=self.mulligan_keep_coors if keep else self.mulligan_mull_coors,
+                mapped_point=target,
+                source=source,
+            )
+        except Exception as e:
+            bot_logger.log_error(f"Failed to write mulligan click debug bundle: {e}")
 
     def click_assign_damage_done(self):
         """Click the Done button during damage assignment"""
-        bot_logger.log_click(self.assign_damage_done_coors[0], self.assign_damage_done_coors[1], "ASSIGN_DAMAGE_DONE")
-        self.input.move_abs(self.assign_damage_done_coors[0], self.assign_damage_done_coors[1])
+        target, source = self._map_abs_point_to_arena(
+            self.assign_damage_done_coors,
+            label="ASSIGN_DAMAGE_DONE",
+            force_reacquire=True,
+            apply_correction=False,
+        )
+        bot_logger.log_info(
+            f"ASSIGN_DAMAGE_DONE target: source={source} arena={self._arena_region} raw={self.assign_damage_done_coors} mapped={target}"
+        )
+        bot_logger.log_click(target[0], target[1], "ASSIGN_DAMAGE_DONE")
+        self.input.move_abs(target[0], target[1])
         time.sleep(0.5)
         self.input.left_click(1)
         time.sleep(0.2)
@@ -1324,6 +1805,7 @@ class Controller(ControllerSecondary):
         )
 
     def __log_callback(self, pattern: str, line_containing_pattern: str):
+        self._state_tracker.push_line(line_containing_pattern)
         if pattern == self.patterns["game_state"]:
             self.__update_game_state(json.loads(line_containing_pattern))
             if self._queue_spam_thread and self._queue_spam_thread.is_alive():
@@ -2439,8 +2921,26 @@ class Controller(ControllerSecondary):
         ]
 
     def __click_opponent_avatar_with_offset(self, offset: tuple[int, int], tag: str) -> None:
-        x = self.opponent_avatar_coors[0] + offset[0]
-        y = self.opponent_avatar_coors[1] + offset[1]
+        base_target, source = self._map_abs_point_to_arena(
+            self.opponent_avatar_coors,
+            label="OPPONENT_AVATAR_BASE",
+            force_reacquire=True,
+            apply_correction=False,
+        )
+        x = int(base_target[0] + offset[0])
+        y = int(base_target[1] + offset[1])
+        bot_logger.log_info(
+            "OPPONENT_AVATAR click: source={} arena={} raw_base={} mapped_base={} offset={} final=({}, {}) tag={}".format(
+                source,
+                self._arena_region,
+                self.opponent_avatar_coors,
+                base_target,
+                offset,
+                x,
+                y,
+                tag,
+            )
+        )
         bot_logger.log_click(x, y, tag)
         self.input.move_abs(x, y)
         time.sleep(0.4)

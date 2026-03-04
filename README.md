@@ -1,4 +1,4 @@
-﻿# Burning Lotus Bot
+# Burning Lotus Bot
 
 Automated MTGA bot with UI, calibration, account switching, and quest-based deck selection.
 
@@ -144,8 +144,30 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 
 Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
 
+### First Start Requirements (Out-of-the-Box Mode)
+
+On first launch, the UI asks you to confirm these required settings:
+
+- MTGA language: **English**
+- MTGA display mode: **Windowed**
+- MTGA resolution: **1920x1080**
+- OS display scaling: **100%**
+
+The bot now runs in an out-of-the-box mode using:
+
+- **Player.log as primary state source** (`Log = State`)
+- **Vision checks only as verification gates** (`Vision = Verify`)
+
+The runtime tries to locate MTGA dynamically:
+
+- First via OS window rectangle detection
+- Then verifies/fallbacks with visual anchor checks
+- Stores a session `arena_region` and re-acquires it on repeated verification failures
+
 
 2) Calibrate buttons via **Calibrate**:
+   - **Optional** for normal usage.
+   - Use this only as advanced/support fallback when repeated button verification fails.
    - Windows/Linux: calibration uses `pynput`.
    - macOS: calibration uses stable polling mode (no global `pynput` hook) with `Enter` to save and `Esc` to cancel.
    - Required: keep_hand, queue_button, next, concede, attack_all, opponent_avatar, hand_scan_p1, hand_scan_p2, assign_damage_done
@@ -460,12 +482,71 @@ python -m unittest tests/test_licensing.py
 ## Logs
 
 - `bot.log` - main bot debug
+  - Stored in a per-user writable app folder:
+    - Windows: `%LOCALAPPDATA%/BurningLotusBot/bot.log`
+    - macOS: `~/Library/Application Support/BurningLotusBot/bot.log`
+    - Linux: `~/.config/burninglotusbot/bot.log`
+  - If writing there fails, logger falls back to local `./bot.log` without stopping the bot.
 - `human.log` - high-level actions
+  - Stored in a per-user writable app folder:
+    - Windows: `%LOCALAPPDATA%/BurningLotusBot/human.log`
+    - macOS: `~/Library/Application Support/BurningLotusBot/human.log`
+    - Linux: `~/.config/burninglotusbot/human.log`
+  - If writing there fails, logger falls back to local `./human.log` without stopping the bot.
 - `bot_gui_subprocess.log` - UI subprocess log (if used)
 - `Player.log` default path (auto-detected):
   - macOS: `~/Library/Logs/Wizards Of The Coast/MTGA/Player.log`
   - Windows: `C:/Users/<YourUser>/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
   - Linux/Proton: `~/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
+- Startup validation now requires an existing `Player.log`:
+  - UI startup prompts for manual file selection if auto-detection fails.
+  - CLI startup (`run_bot.py`) exits early with a clear error if the file does not exist.
 - Windows fork preset: `calibration_config.json` keeps `log_path` at `C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`.
 - Hover logs are suppressed by default and only enabled during selection scans.
 - A one-line match summary is logged at match completion.
+- Startup diagnostics now include:
+  - `UI start: init controller ...`
+  - `UI start: game.start() begin/completed`
+  - `Queue target details` including target source, detected `arena_region`, configured `screen_bounds`, and configured click target.
+  - Queue click selection is now template-first (`Buttons/play_btn.png` in MTGA ROI), then coordinate fallback.
+  - 1920-only mode: loaded click targets must be 1920x1080 coordinates; non-1920 values are ignored and replaced with defaults.
+  - Coordinate mapping is now direct 1920-relative inside `arena_region` (no legacy `screen_bounds` scaling and no queue-offset translation).
+  - Mulligan clicks (`KEEP_HAND` / `MULLIGAN`) now log raw vs mapped target and are mapped relative to detected `arena_region`.
+  - Opponent avatar targeting (`select_target` + retry offsets) now always maps calibrated `opponent_avatar` relative to detected `arena_region` (no absolute desktop click).
+  - Hand scan points (`hand_scan_p1/p2`) are treated as direct 1920-space targets; if loaded values are outside 1920x1080 they are replaced with 1920 defaults before runtime mapping.
+  - Bottom-right actions (`RESOLVE` / `SUBMIT_SELECTION` / `ATTACK_ALL`) and `ASSIGN_DAMAGE_DONE` now also use mapped coordinates instead of fixed desktop absolute points.
+  - `KEEP_HAND` uses only the configured keep-hand coordinate and maps it relative to detected `arena_region` (no template matching).
+  - After each mulligan click, a keep-click debug bundle is saved under `debug/keep-click-<timestamp>/` with:
+    - `keep_click_state.json` (raw/mapped points, source, arena region, correction, state)
+    - `full_screen_after_click.png`
+    - `arena_region_after_click.png` (if arena window was detected)
+    - `click_focus_after_click.png` (crop around clicked position)
+
+### Navigation Debug Artifacts
+
+When post-login navigation verification repeatedly fails, the bot saves a debug bundle in:
+
+- Windows: `%LOCALAPPDATA%/BurningLotusBot/debug/<timestamp>/`
+- macOS: `~/Library/Application Support/BurningLotusBot/debug/<timestamp>/`
+- Linux: `~/.config/burninglotusbot/debug/<timestamp>/`
+
+Bundle contents:
+
+- `state.json` (reason, parsed bot state, arena region)
+- `log_tail.txt` (latest log lines)
+- `arena_region.png` (captured MTGA window region)
+- `full_screen.png` (full-screen capture)
+
+## Verify Template Assets
+
+For `Log = State, Vision = Verify`, add these templates under `assets/assert/`:
+
+- `home_anchor.png`
+- `play_menu_anchor.png`
+- `find_match_anchor.png`
+- `historic_anchor.png`
+- `my_decks_anchor.png`
+- `ingame_anchor.png`
+- `options_anchor.png`
+- `store_anchor.png`
+- `global_anchor.png`

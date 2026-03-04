@@ -20,3 +20,7 @@ When the user asks to compare `bot.log` and `Player.log`, the default location f
 ## User Corrections
 
 If the user states something factually incorrect, the agent should correct it clearly and directly, with brief reasoning when needed.
+
+## Session Learnings
+
+Whenever the agent learns something relevant during a session (e.g., root cause, stable workaround, configuration caveat), it must append a short entry to `learning.md`.
