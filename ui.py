@@ -1768,7 +1768,8 @@ class MTGBotUI(tk.Tk):
         self._suppress_tk_default_icon()
         self._ui_scale = self._compute_ui_scale()
         width = self._scale_value(460)
-        extra_h = self._scale_value(96)
+        # Reserve extra space at the bottom for the global topmost toggle.
+        extra_h = self._scale_value(134)
         x, y = 18, 24
         height = self._scale_value(780) + extra_h
         self.geometry(f"{width}x{height}+{x}+{y}")
@@ -1983,7 +1984,7 @@ class MTGBotUI(tk.Tk):
         y = int(self.winfo_y())
         self._ui_scale = self._compute_ui_scale()
         width = self._scale_value(460)
-        extra_h = self._scale_value(96)
+        extra_h = self._scale_value(134)
         height = self._scale_value(780) + extra_h
         self.geometry(f"{width}x{height}+{x}+{y}")
 
@@ -2597,6 +2598,46 @@ class MTGBotUI(tk.Tk):
             font=self.ui_theme["font"]["body"],
             anchor="n",
         )
+        self._main_topmost_var = tk.BooleanVar(value=bool(self.config_manager.get_ui_windows_topmost()))
+        self._main_topmost_panel_item = self._card_canvas.create_rectangle(
+            0,
+            0,
+            0,
+            0,
+            fill="#320a02",
+            outline="",
+            width=0,
+        )
+        self._main_topmost_box_item = self._card_canvas.create_rectangle(
+            0,
+            0,
+            0,
+            0,
+            fill="#320a02",
+            outline="#ffb841",
+            width=max(1, self._scale_value(1)),
+        )
+        self._main_topmost_tick_item = self._card_canvas.create_text(
+            0,
+            0,
+            text="X",
+            fill="#ffb841",
+            font=("Segoe UI", max(10, self._scale_value(11)), "bold"),
+            anchor="center",
+        )
+        self._main_topmost_label_item = self._card_canvas.create_text(
+            0,
+            0,
+            text="Keep Window on Top",
+            fill="#ffb841",
+            font=("Segoe UI", max(9, self._scale_value(10))),
+            anchor="w",
+        )
+        for item in (self._main_topmost_box_item, self._main_topmost_tick_item, self._main_topmost_label_item):
+            self._card_canvas.tag_bind(item, "<Button-1>", self._toggle_main_topmost)
+            self._card_canvas.tag_bind(item, "<Enter>", lambda _e: self._card_canvas.configure(cursor="hand2"))
+            self._card_canvas.tag_bind(item, "<Leave>", lambda _e: self._card_canvas.configure(cursor=""))
+        self._refresh_main_topmost_state()
 
         self._card_canvas.bind("<Configure>", lambda _e: self._refresh_card_layout())
         self.after(0, self._refresh_card_layout)
@@ -2631,14 +2672,16 @@ class MTGBotUI(tk.Tk):
         body_h = body_font.metrics("linespace")
         logo_h = size["logo"] if self._logo_item is not None else title_h
         loading_bar_h = self.loading_bar.winfo_reqheight()
+        footer_gap = self._scale_value(16)
+        footer_h = self._scale_value(56)
 
         total_h = logo_h + 6 + title_h + sp["lg"]
         total_h += (btn_h * len(menu_buttons)) + (button_gap * max(0, len(menu_buttons) - 1))
         if self._loading_visible:
             total_h += body_h + sp["xs"] + loading_bar_h + sp["md"]
         total_h += sp["lg"] + body_h
-
-        y = max(sp["outer_margin"], (canvas_h - total_h) // 2)
+        max_content_y = (canvas_h - footer_h) - footer_gap - total_h
+        y = max(sp["outer_margin"], min((canvas_h - total_h) // 2, max_content_y))
 
         if self._logo_item is not None:
             self._card_canvas.coords(self._logo_item, center_x, y)
@@ -2675,6 +2718,27 @@ class MTGBotUI(tk.Tk):
             self._card_canvas.itemconfigure(self._loading_bar_window, state="hidden")
 
         self._card_canvas.coords(self._status_text_item, center_x, y)
+        footer_y1 = canvas_h - footer_h
+        self._card_canvas.coords(self._main_topmost_panel_item, 0, footer_y1, canvas_w, canvas_h)
+        box_size = self._scale_value(18)
+        footer_center_y = footer_y1 + (footer_h // 2)
+        label_font = tkfont.Font(font=("Segoe UI", max(9, self._scale_value(10))))
+        label_text = "Keep Window on Top"
+        label_w = max(1, label_font.measure(label_text))
+        gap = self._scale_value(10)
+        group_w = box_size + gap + label_w
+        group_x = center_x - (group_w // 2)
+        box_x1 = group_x
+        box_y1 = footer_center_y - (box_size // 2)
+        box_x2 = box_x1 + box_size
+        box_y2 = box_y1 + box_size
+        self._card_canvas.coords(self._main_topmost_box_item, box_x1, box_y1, box_x2, box_y2)
+        self._card_canvas.coords(self._main_topmost_tick_item, box_x1 + (box_size // 2), box_y1 + (box_size // 2))
+        self._card_canvas.coords(self._main_topmost_label_item, box_x2 + gap, footer_center_y)
+        self._card_canvas.tag_raise(self._main_topmost_panel_item)
+        self._card_canvas.tag_raise(self._main_topmost_box_item)
+        self._card_canvas.tag_raise(self._main_topmost_tick_item)
+        self._card_canvas.tag_raise(self._main_topmost_label_item)
 
     def _set_running_state(self, running: bool):
         c = self.ui_theme["colors"]
@@ -2721,6 +2785,19 @@ class MTGBotUI(tk.Tk):
         self._loading_visible = False
         self.loading_bar.stop()
         self._refresh_card_layout()
+
+    def _toggle_main_topmost(self, _event=None) -> None:
+        enabled = not bool(self._main_topmost_var.get())
+        self._main_topmost_var.set(enabled)
+        self.config_manager.set_ui_windows_topmost(enabled)
+        self.apply_window_topmost_mode(enabled)
+        self._refresh_main_topmost_state()
+        self._card_canvas.configure(cursor="")
+
+    def _refresh_main_topmost_state(self) -> None:
+        is_enabled = bool(self._main_topmost_var.get())
+        tick_state = "normal" if is_enabled else "hidden"
+        self._card_canvas.itemconfigure(self._main_topmost_tick_item, state=tick_state)
 
     def _start_bot(self):
         if self.bot_running:
@@ -3966,7 +4043,6 @@ class UISettingsWindow(tk.Toplevel):
 
         self._scale_var = tk.IntVar(value=self._config_manager.get_ui_scale_percent())
         self._scale_text_var = tk.StringVar(value=f"{self._scale_var.get()}%")
-        self._topmost_var = tk.BooleanVar(value=bool(self._config_manager.get_ui_windows_topmost()))
 
         self._settings_panel_item = self._canvas.create_rectangle(
             0, 0, 0, 0, fill=self._theme["card_bg"], outline=self._theme["card_border"], width=3
@@ -4005,24 +4081,6 @@ class UISettingsWindow(tk.Toplevel):
             length=self._s(320),
         )
         self._slider_window = self._canvas.create_window(0, 0, anchor="w", window=self._slider)
-
-        self._topmost_check = tk.Checkbutton(
-            self._canvas,
-            text="Keep UI windows on top",
-            variable=self._topmost_var,
-            onvalue=True,
-            offvalue=False,
-            bg=self._theme["card_bg"],
-            fg=self._theme["card_body"],
-            activebackground=self._theme["card_bg"],
-            activeforeground="#FFFFFF",
-            selectcolor="#8A4B13",
-            highlightthickness=0,
-            bd=0,
-            font=("Segoe UI", max(9, self._s(10))),
-            anchor="w",
-        )
-        self._topmost_window = self._canvas.create_window(0, 0, anchor="w", window=self._topmost_check)
 
         self._buttons = {}
         self._button_order = []
@@ -4194,18 +4252,16 @@ class UISettingsWindow(tk.Toplevel):
         panel_x1 = (cw - panel_w) // 2
         panel_x2 = panel_x1 + panel_w
 
-        panel_y1 = s(44)
-        panel_h = s(190)
+        panel_y1 = s(72)
+        panel_h = s(152)
         panel_y2 = panel_y1 + panel_h
         self._canvas.coords(self._settings_panel_item, panel_x1, panel_y1, panel_x2, panel_y2)
-        self._canvas.coords(self._scale_label_item, panel_x1 + s(20), panel_y1 + s(20))
-        self._canvas.coords(self._scale_value_item, panel_x2 - s(20), panel_y1 + s(20))
-        self._canvas.coords(self._slider_window, panel_x1 + s(18), panel_y1 + s(54))
+        self._canvas.coords(self._scale_label_item, panel_x1 + s(20), panel_y1 + s(42))
+        self._canvas.coords(self._scale_value_item, panel_x2 - s(20), panel_y1 + s(42))
+        self._canvas.coords(self._slider_window, panel_x1 + s(18), panel_y1 + s(78))
         self._canvas.itemconfigure(self._slider_window, width=panel_w - s(36), height=s(36))
-        self._canvas.coords(self._topmost_window, panel_x1 + s(16), panel_y1 + s(120))
-        self._canvas.itemconfigure(self._topmost_window, width=panel_w - s(32), height=s(34))
 
-        y = panel_y2 + s(14)
+        y = panel_y2 + s(26)
         gap = s(70)
         for name in self._button_order:
             btn = self._buttons.get(name)
@@ -4217,13 +4273,7 @@ class UISettingsWindow(tk.Toplevel):
 
     def _save_ui_settings(self):
         self._config_manager.set_ui_scale_percent(int(self._scale_var.get()))
-        self._config_manager.set_ui_windows_topmost(bool(self._topmost_var.get()))
         parent_ui = getattr(self, "master", None)
-        if parent_ui is not None and hasattr(parent_ui, "apply_window_topmost_mode"):
-            try:
-                parent_ui.apply_window_topmost_mode(bool(self._topmost_var.get()))
-            except Exception:
-                pass
         if parent_ui is not None and hasattr(parent_ui, "apply_ui_scale_live"):
             try:
                 parent_ui.apply_ui_scale_live(reopen_ui_settings=True)
