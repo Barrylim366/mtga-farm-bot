@@ -139,6 +139,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - During bot startup, the UI shows an indeterminate loading bar with the label `Loading Carddata` until initialization finishes
 - Fixed a startup regression in `ui.py` caused by a mismatched theme token in the loading bar style
 - `Status: Stopped` now uses `#ffb02a`
+- Main UI now includes a bottom footer bar with the `Keep Window on Top` checkbox; the bar is flush to the left/right/bottom edges, the checkbox is centered with a yellow `X` indicator, and it does not overlap with the startup `Loading Carddata` area
 
 Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
 
@@ -166,8 +167,8 @@ Standalone runnable UI example (single file): `burning_lotus_ui_example.py`.
   - Opening any Settings subwindow (**Manage Accounts**, **Record Action**, **User Interface**) temporarily replaces the Settings window at the same screen position.
   - **User Interface** opens a settings window with:
     - `UI Scale` slider (50%..120%)
-    - `Keep UI windows on top` toggle
-    - both options styled in one highlighted yellow framed card (matching Current Session style)
+    - `UI Scale` control is vertically centered/lower in the panel for clearer spacing
+    - scale controls remain inside the highlighted yellow framed card (matching Current Session style)
   - On `Save`, UI scale is applied immediately in-app (no restart required).
   - Subwindow minimum sizes are now derived from actual visible content bounds to avoid clipping without forcing oversized windows.
 
