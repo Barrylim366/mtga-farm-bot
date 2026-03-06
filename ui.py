@@ -1457,25 +1457,27 @@ class ConfigManager:
         detected_log = self._detect_player_log_path()
         return {
             "log_path": detected_log or _default_player_log_path(),
-            "screen_bounds": [[0, 0], [2560, 1440]],
+            "screen_bounds": [[0, 0], [1920, 1080]],
             "input_backend": "auto",
             "ui_windows_topmost": True,
             "ui_scale_percent": 50,
+            "first_run_prereq_ack": False,
+            "first_run_prereq_ack_version": 1,
             "account_switch_minutes": 0,
             "managed_accounts": [],
             "account_cycle_index": 0,
             "account_play_order": [],
             "click_targets": {
-                "keep_hand": {"x": 1876, "y": 1060},
-                "queue_button": {"x": 2485, "y": 1194},
-                "next": {"x": 2546, "y": 1137},
-                "concede": {"x": 1714, "y": 814},
-                "attack_all": {"x": 2529, "y": 1131},
-                "opponent_avatar": {"x": 1720, "y": 295},
-                "assign_damage_done": {"x": 1280, "y": 720},
+                "keep_hand": {"x": 1407, "y": 795},
+                "queue_button": {"x": 1864, "y": 896},
+                "next": {"x": 1909, "y": 853},
+                "concede": {"x": 1286, "y": 611},
+                "attack_all": {"x": 1897, "y": 848},
+                "opponent_avatar": {"x": 1290, "y": 221},
+                "assign_damage_done": {"x": 960, "y": 540},
                 "hand_scan_points": {
-                    "p1": {"x": 994, "y": 1255},
-                    "p2": {"x": 2421, "y": 1253}
+                    "p1": {"x": 746, "y": 941},
+                    "p2": {"x": 1816, "y": 940}
                 }
             }
         }
@@ -1587,6 +1589,14 @@ class ConfigManager:
         except (TypeError, ValueError):
             return
         self.config["ui_scale_percent"] = max(50, min(120, value))
+        self._save_config()
+
+    def get_first_run_prereq_ack(self) -> bool:
+        return bool(self.config.get("first_run_prereq_ack", False))
+
+    def set_first_run_prereq_ack(self, acknowledged: bool, version: int = 1) -> None:
+        self.config["first_run_prereq_ack"] = bool(acknowledged)
+        self.config["first_run_prereq_ack_version"] = int(version)
         self._save_config()
 
     def set_account_switch_minutes(self, minutes: int) -> None:
@@ -1764,6 +1774,9 @@ class MTGBotUI(tk.Tk):
         if not self._ensure_player_log_path_configured():
             self.after(0, self.destroy)
             return
+        if not self._ensure_runtime_prerequisites_confirmed():
+            self.after(0, self.destroy)
+            return
         self.title("Burning Lotus")
         self._suppress_tk_default_icon()
         self._ui_scale = self._compute_ui_scale()
@@ -1923,6 +1936,27 @@ class MTGBotUI(tk.Tk):
             )
             if not retry:
                 return False
+
+    def _ensure_runtime_prerequisites_confirmed(self) -> bool:
+        if self.config_manager.get_first_run_prereq_ack():
+            return True
+        text = (
+            "Before first start, please apply these required settings in MTGA and your OS:\\n\\n"
+            "1) MTGA language: English\\n"
+            "2) Display mode: Windowed\\n"
+            "3) MTGA resolution: 1920x1080\\n"
+            "4) OS display scaling: 100%\\n\\n"
+            "Click OK only after these settings are applied."
+        )
+        acknowledged = messagebox.askokcancel(
+            "First Start Requirements",
+            text,
+            parent=self,
+        )
+        if acknowledged:
+            self.config_manager.set_first_run_prereq_ack(True, version=1)
+            return True
+        return False
 
     def _compute_ui_scale(self) -> float:
         ref_w, ref_h = 2560.0, 1440.0
@@ -2874,6 +2908,7 @@ class MTGBotUI(tk.Tk):
 
     def _run_bot(self):
         try:
+            import bot_logger
             log_path = self.config_manager.get_log_path()
             click_targets = self.config_manager.get_click_targets()
             screen_bounds = self.config_manager.get_screen_bounds()
@@ -2881,6 +2916,14 @@ class MTGBotUI(tk.Tk):
             account_switch_minutes = self.config_manager.get_account_switch_minutes()
             account_cycle_index = self.config_manager.get_account_cycle_index()
             account_play_order = self.config_manager.get_account_play_order()
+            bot_logger.log_info(
+                "UI start: init controller log_path={} screen_bounds={} input_backend={} account_switch_minutes={}".format(
+                    log_path,
+                    screen_bounds,
+                    input_backend,
+                    account_switch_minutes,
+                )
+            )
             controller = Controller(log_path=log_path, screen_bounds=screen_bounds,
                                    click_targets=click_targets, input_backend=input_backend,
                                    account_switch_minutes=account_switch_minutes,
@@ -2889,7 +2932,9 @@ class MTGBotUI(tk.Tk):
             self._controller = controller
             ai = DummyAI()
             self.game = Game(controller, ai)
+            bot_logger.log_info("UI start: game.start() begin")
             self.game.start()
+            bot_logger.log_info("UI start: game.start() completed")
             self.after(0, lambda: self._set_startup_loading(False))
 
             # Wrap match end callback so we can update session stats and still restart games.
@@ -2914,6 +2959,11 @@ class MTGBotUI(tk.Tk):
 
         except Exception as e:
             err_msg = str(e)
+            try:
+                import bot_logger
+                bot_logger.log_error(f"UI start failed: {err_msg}")
+            except Exception:
+                pass
             self.after(0, lambda msg=err_msg: self._handle_bot_error(msg))
 
     def _handle_bot_error(self, error_msg):
@@ -5333,8 +5383,9 @@ class RecordsWindow(tk.Toplevel):
         super().__init__(parent)
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self.title("Show Records")
-        self.geometry(f"{self._s(560)}x{self._s(420)}")
-        self.resizable(False, False)
+        self.geometry(f"{self._s(760)}x{self._s(560)}")
+        self.minsize(self._s(700), self._s(500))
+        self.resizable(True, True)
         self.configure(bg="#2b2b2b")
         _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
         self._records_path = records_path

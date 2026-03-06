@@ -1,8 +1,8 @@
 from AI.AIInterface import AIKernel
 from Controller.Utilities.GameState import GameState
 import AI.Utilities.CardInfo as CardInfo
-from datetime import datetime
 import traceback
+import bot_logger
 
 
 class DummyAI(AIKernel):
@@ -10,7 +10,6 @@ class DummyAI(AIKernel):
     def __init__(self):
         self.__current_turn_num = 0
         self.__has_land_been_played_this_turn = False
-        self.__bot_log_file = "bot.log"
 
     def reset(self):
         """Reset AI state for a new game"""
@@ -21,10 +20,8 @@ class DummyAI(AIKernel):
 
     def _debug(self, message):
         """Debug log for AI decisions"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         try:
-            with open(self.__bot_log_file, 'a') as f:
-                f.write(f"[{timestamp}] [AI] {message}\n")
+            bot_logger.log_ai(message)
         except Exception:
             pass
 

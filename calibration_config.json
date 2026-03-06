@@ -1,5 +1,5 @@
 {
-    "log_path": "C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log",
+    "log_path": "C:\\Users\\giaco\\AppData\\LocalLow\\Wizards Of The Coast\\MTGA\\Player.log",
     "screen_bounds": [
         [
             0,
@@ -12,32 +12,32 @@
     ],
     "click_targets": {
         "keep_hand": {
-            "x": 1896,
-            "y": 1066
+            "x": 1889,
+            "y": 1068
         },
         "queue_button": {
-            "x": 2477,
-            "y": 1190
+            "x": 2494,
+            "y": 1200
         },
         "next": {
-            "x": 2538,
-            "y": 1135
+            "x": 2537,
+            "y": 1141
         },
         "concede": {
             "x": 1714,
             "y": 814
         },
         "attack_all": {
-            "x": 2521,
-            "y": 1138
+            "x": 2519,
+            "y": 1139
         },
         "opponent_avatar": {
-            "x": 1715,
-            "y": 296
+            "x": 1716,
+            "y": 299
         },
         "assign_damage_done": {
-            "x": 1717,
-            "y": 1064
+            "x": 1718,
+            "y": 1061
         },
         "hand_scan_points": {
             "p1": {
@@ -50,26 +50,30 @@
             }
         },
         "log_out_btn": {
-            "x": 1714,
-            "y": 853
+            "x": 903,
+            "y": 651
         },
         "logout_ok_btn": {
             "x": 1878,
             "y": 809
         },
         "log_out_ok_btn": {
-            "x": 1881,
-            "y": 813
+            "x": 1097,
+            "y": 609
+        },
+        "log_out_focus": {
+            "x": 806,
+            "y": 953
         }
     },
     "input_backend": "auto",
-    "account_switch_minutes": 35,
+    "account_switch_minutes": 1,
     "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
     "account_cycle_index": 0,
     "account_play_order": [
-        "AccountOne",
         "AccountThree",
-        "AccountTwo"
+        "AccountTwo",
+        "AccountOne"
     ],
     "managed_accounts": [
         {
@@ -92,5 +96,7 @@
         }
     ],
     "ui_windows_topmost": true,
-    "ui_scale_percent": 60
+    "ui_scale_percent": 60,
+    "first_run_prereq_ack": true,
+    "first_run_prereq_ack_version": 1
 }

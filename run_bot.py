@@ -93,6 +93,13 @@ def main():
     log_path = os.environ.get("MTGA_BOT_LOG_PATH", "")
     if not log_path:
         log_path = _detect_player_log_path()
+    if not os.path.isfile(log_path):
+        print(f"Player.log not found: {log_path}")
+        print(
+            "Start MTGA once and verify detailed logs are enabled, "
+            "or set MTGA_BOT_LOG_PATH to the correct Player.log path."
+        )
+        return
     
     click_targets = {
         "keep_hand": {

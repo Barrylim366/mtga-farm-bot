@@ -5,6 +5,8 @@ import AI.Utilities.CardInfo as CardInfo
 from datetime import datetime
 import time
 import os
+from pathlib import Path
+import sys
 import traceback
 import threading
 import bot_logger
@@ -15,8 +17,9 @@ class Game:
     def __init__(self, controller: ControllerSecondary, ai: AIKernel):
         self.ai = ai
         self.controller = controller
-        self.human_log_file = "human.log"
+        self.human_log_file = self._resolve_human_log_path()
         self.bot_log_file = "bot.log"
+        self._human_log_fallback_warned = False
         self.last_logged_turn = -1
         self.game_started = False
         self.starting_hand_logged = False
@@ -25,12 +28,60 @@ class Game:
         self._last_action_delay_turn = -1
 
         # Clear log files on start
-        with open(self.human_log_file, 'w') as f:
-            f.write("=== MTGA Bot Session Started ===\n")
-            f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 35 + "\n\n")
+        self._init_human_log()
         # Initialize bot.log with centralized logger
         bot_logger.init_bot_log()
+
+    def _resolve_human_log_path(self) -> str:
+        """Resolve a writable per-user human.log location."""
+        try:
+            if os.name == "nt":
+                base = os.environ.get("LOCALAPPDATA")
+                if base:
+                    target_dir = Path(base) / "BurningLotusBot"
+                else:
+                    target_dir = Path.home() / "AppData" / "Local" / "BurningLotusBot"
+            elif sys.platform == "darwin":
+                target_dir = Path.home() / "Library" / "Application Support" / "BurningLotusBot"
+            else:
+                target_dir = Path.home() / ".config" / "burninglotusbot"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            return str(target_dir / "human.log")
+        except Exception:
+            return "human.log"
+
+    def _write_human_lines(self, mode: str, lines: list[str]) -> None:
+        """Write human logs with fallback; never crash the game loop."""
+        try:
+            with open(self.human_log_file, mode, encoding="utf-8") as f:
+                for line in lines:
+                    f.write(line)
+            return
+        except Exception:
+            pass
+
+        try:
+            with open("human.log", mode, encoding="utf-8") as f:
+                for line in lines:
+                    f.write(line)
+            if not self._human_log_fallback_warned:
+                self._human_log_fallback_warned = True
+                self._debug(
+                    f"Warning: failed writing '{self.human_log_file}', using local 'human.log' fallback."
+                )
+        except Exception:
+            pass
+
+    def _init_human_log(self):
+        started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self._write_human_lines(
+            'w',
+            [
+                "=== MTGA Bot Session Started ===\n",
+                f"Started at: {started_at}\n",
+                "=" * 35 + "\n\n",
+            ],
+        )
 
     def start(self):
         self._debug("Game.start() called")
@@ -138,8 +189,7 @@ class Game:
     def _human_log(self, message):
         """Human-readable log - clean, simple messages"""
         timestamp = datetime.now().strftime("%H:%M:%S")
-        with open(self.human_log_file, 'a') as f:
-            f.write(f"[{timestamp}] {message}\n")
+        self._write_human_lines('a', [f"[{timestamp}] {message}\n"])
 
     def _debug(self, message):
         """Debug log - detailed technical information"""
