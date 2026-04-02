@@ -1,8 +1,9 @@
 from AI.AIInterface import AIKernel
 from Controller.Utilities.GameState import GameState
+from Controller.Utilities.GameStateInterface import GameStateSecondary
 import AI.Utilities.CardInfo as CardInfo
 import traceback
-import bot_logger
+from datetime import datetime
 
 
 class DummyAI(AIKernel):
@@ -20,8 +21,10 @@ class DummyAI(AIKernel):
 
     def _debug(self, message):
         """Debug log for AI decisions"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         try:
-            bot_logger.log_ai(message)
+            with open(self.__bot_log_file, 'a') as f:
+                f.write(f"[{timestamp}] [AI] {message}\n")
         except Exception:
             pass
 
@@ -292,6 +295,8 @@ class DummyAI(AIKernel):
                 if obj.get("isTapped"):
                     continue
                 grp_id = obj.get("grpId")
+                if grp_id is None:
+                    continue
                 card_info = CardInfo.get_card_info(grp_id)
                 card_colors = card_info.get("colors", []) if card_info else []
                 source_colors = {color_map.get(c, c) for c in card_colors if c in color_map}
@@ -338,7 +343,7 @@ class DummyAI(AIKernel):
             if best and spent + cmc_suffix[idx] < best[0]:
                 return
             if count > 0 and not self._can_cast_with_mana_costs(
-                combined_costs, available_colors, total_mana, sources
+                list(combined_costs), available_colors, total_mana, sources
             ):
                 return
             if count > 0:
@@ -349,13 +354,14 @@ class DummyAI(AIKernel):
                 return
 
             paid_cost, _instance_id, _card_name, _mana_cost_str, action_mana_cost, _uses_convoke, _type_priority, _nominal_cmc, _is_discounted = actions[idx]
+            safe_action_mana_cost = list(action_mana_cost) if isinstance(action_mana_cost, list) else []
             _dfs(
                 idx + 1,
                 spent + paid_cost,
                 count + 1,
                 max(max_cmc, paid_cost),
                 indices + [idx],
-                combined_costs + list(action_mana_cost or []),
+                combined_costs + safe_action_mana_cost,
             )
             _dfs(idx + 1, spent, count, max_cmc, indices, combined_costs)
 
@@ -412,7 +418,7 @@ class DummyAI(AIKernel):
             return 2
         return 1
 
-    def generate_move(self, game_state: GameState, inst_id_grp_id_dict):
+    def generate_move(self, game_state: GameStateSecondary, inst_id_grp_id_dict) -> dict[str, list[int]]:
         move = {'resolve': []}
 
         try:

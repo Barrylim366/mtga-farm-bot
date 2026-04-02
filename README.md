@@ -51,9 +51,8 @@ Windows quick test for built-in account switch flow (without starting a full mat
 - It runs the current built-in full account-switch path from code (logout + login + post-login handling).
 - For logout-only testing, run: `python tools/test_builtin_logout.py`
 
-UI assets are loaded from `images/`:
-- `images/ui_symbol.png`
-- `images/background`
+## UI Updates
+
 The main window now uses a ttk-based dark theme with centralized design tokens in `MTGBotUI._build_ui_theme()`:
 - Start page uses a full-canvas background image loaded from `images/background`
 - Single accent color (`#C8141E`)

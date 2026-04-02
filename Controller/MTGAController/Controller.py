@@ -224,7 +224,6 @@ class Controller(ControllerSecondary):
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
-        self.__last_submit_selection_ts = 0.0
         self.__select_n_token_counter = 0
         self.__select_n_stack_wait_timeout_sec = 8.0
         self.__target_submit_cooldown_sec = 1.0

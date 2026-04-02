@@ -15,7 +15,7 @@ After every change to code or UI, the README.md must be updated to reflect the c
 ## Logs
 
 When the user asks to compare `bot.log` and `Player.log`, the default location for `Player.log` is:
-`/home/barrylim/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
+`C:/Users/giaco/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
 
 ## User Corrections
 

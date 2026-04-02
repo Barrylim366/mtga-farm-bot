@@ -75,28 +75,9 @@
         "AccountTwo",
         "AccountOne"
     ],
-    "managed_accounts": [
-        {
-            "name": "AccountOne",
-            "email": "***REMOVED***",
-            "pw": "***REMOVED***",
-            "folder": "AccountOne"
-        },
-        {
-            "name": "AccountTwo",
-            "email": "***REMOVED***",
-            "pw": "***REMOVED***",
-            "folder": "AccountTwo"
-        },
-        {
-            "name": "AccountThree",
-            "email": "***REMOVED***",
-            "pw": "***REMOVED***",
-            "folder": "AccountThree"
-        }
-    ],
+    "managed_accounts": [],
     "ui_windows_topmost": true,
-    "ui_scale_percent": 60,
+    "ui_scale_percent": 80,
     "first_run_prereq_ack": true,
     "first_run_prereq_ack_version": 1
 }

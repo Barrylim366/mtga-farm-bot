@@ -5,8 +5,6 @@ import AI.Utilities.CardInfo as CardInfo
 from datetime import datetime
 import time
 import os
-from pathlib import Path
-import sys
 import traceback
 import threading
 import bot_logger
@@ -17,7 +15,7 @@ class Game:
     def __init__(self, controller: ControllerSecondary, ai: AIKernel):
         self.ai = ai
         self.controller = controller
-        self.human_log_file = self._resolve_human_log_path()
+        self.human_log_file = "human.log"
         self.bot_log_file = "bot.log"
         self._human_log_fallback_warned = False
         self.last_logged_turn = -1
