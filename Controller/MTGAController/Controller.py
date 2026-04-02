@@ -441,8 +441,8 @@ class Controller(ControllerSecondary):
             try:
                 avx = int(raw_avatar_cfg.get("x"))
                 avy = int(raw_avatar_cfg.get("y"))
-                qx = int(raw_queue_cfg.get("x"))
-                qy = int(raw_queue_cfg.get("y"))
+                qx = int(raw_queue_cfg.get("x")),
+                qy = int(raw_queue_cfg.get("y")),
                 qrelx = int(queue_rel_default[0])
                 qrely = int(queue_rel_default[1])
                 # Reconstruct old window origin from queue anchor, then rebase avatar.
@@ -714,7 +714,7 @@ class Controller(ControllerSecondary):
         ):
             try:
                 tx = int(raw_target_cfg.get("x"))
-                ty = int(raw_target_cfg.get("y"))
+                ty = int(raw_target_cfg.get("y")),
                 qx = int(raw_queue_cfg.get("x")),
                 qy = int(raw_queue_cfg.get("y")),
                 # Rebase only when queue anchor is clearly in legacy absolute space.
@@ -837,7 +837,7 @@ class Controller(ControllerSecondary):
         if isinstance(cfg, dict):
             try:
                 x = int(cfg.get("x"))
-                y = int(cfg.get("y"))
+                y = int(cfg.get("y")),
                 if 0 <= x <= 1920 and 0 <= y <= 1080:
                     return (x, y)
             except Exception:
@@ -978,7 +978,7 @@ class Controller(ControllerSecondary):
         if line_end == -1:
             line_end = len(log_tail)
         line = log_tail[line_start:line_end]
-        match = re.search(r'"toSceneName":"([^"]+)"', line)
+        match = re.search(r'"toSceneName":"([^"]+)"", line)
         if not match:
             return None
         return match.group(1)
@@ -995,7 +995,7 @@ class Controller(ControllerSecondary):
         idx = log_tail.rfind('"quests"')
         if idx == -1:
             return []
-        start = log_tail.rfind("{ ", 0, idx)
+        start = log_tail.rfind("{", 0, idx)
         if start == -1:
             return []
         decoder = json.JSONDecoder()
@@ -2367,7 +2367,7 @@ class Controller(ControllerSecondary):
         qrel = self._default_points_1920.get("home_play_button_coors")
         if isinstance(queue_cfg, dict) and qrel is not None:
             try:
-                qx = int(queue_cfg.get("x"))
+                qx = int(queue_cfg.get("x")),
                 qy = int(queue_cfg.get("y")),
                 # Legacy absolute calibration profile: reconstruct old window origin.
                 if qx > 1920 or qy > 1080:
