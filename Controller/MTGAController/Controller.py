@@ -16,7 +16,7 @@ from actions.actions import run_action
 from actions.navigation_flow import build_post_login_navigation_actions
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
 from vision.vision import VisionEngine
-from vision.window_locator import ArenaRegionProvider
+from vision.window_locator import ArenaRegionProvider, focus_mtga_window
 import bot_logger
 import runtime_status
 
@@ -127,6 +127,15 @@ class Controller(ControllerSecondary):
         
         self.hand_scan_p1 = (0, 1050)
         self.hand_scan_p2 = (1920, 1050)
+        self.battlefield_scan_p1 = (
+            int(1920 * 0.10),
+            int(1080 * 0.50),
+        )
+        self.battlefield_scan_p2 = (
+            int(1920 * 0.92),
+            int(1080 * 0.90),
+        )
+        self.battlefield_scan_step = 55
         self.stack_scan_p1 = (
             int(1920 * 0.65),
             int(1080 * 0.25),
@@ -155,6 +164,8 @@ class Controller(ControllerSecondary):
             "opponent_avatar_coors": self._default_opponent_avatar_coors,
             "hand_scan_p1": self.hand_scan_p1,
             "hand_scan_p2": self.hand_scan_p2,
+            "battlefield_scan_p1": self.battlefield_scan_p1,
+            "battlefield_scan_p2": self.battlefield_scan_p2,
             "stack_scan_p1": self.stack_scan_p1,
             "stack_scan_p2": self.stack_scan_p2,
             "stack_scan_fallback_p1": self.stack_scan_fallback_p1,
@@ -185,6 +196,20 @@ class Controller(ControllerSecondary):
             if "hand_scan_points" in click_targets:
                 self.hand_scan_p1 = (click_targets["hand_scan_points"]["p1"]["x"], click_targets["hand_scan_points"]["p1"]["y"])
                 self.hand_scan_p2 = (click_targets["hand_scan_points"]["p2"]["x"], click_targets["hand_scan_points"]["p2"]["y"])
+            if "battlefield_scan_points" in click_targets:
+                self.battlefield_scan_p1 = (
+                    click_targets["battlefield_scan_points"]["p1"]["x"],
+                    click_targets["battlefield_scan_points"]["p1"]["y"],
+                )
+                self.battlefield_scan_p2 = (
+                    click_targets["battlefield_scan_points"]["p2"]["x"],
+                    click_targets["battlefield_scan_points"]["p2"]["y"],
+                )
+            if "battlefield_scan_step" in click_targets:
+                try:
+                    self.battlefield_scan_step = int(click_targets["battlefield_scan_step"])
+                except Exception:
+                    pass
             if "stack_scan_points" in click_targets:
                 self.stack_scan_p1 = (click_targets["stack_scan_points"]["p1"]["x"], click_targets["stack_scan_points"]["p1"]["y"])
                 self.stack_scan_p2 = (click_targets["stack_scan_points"]["p2"]["x"], click_targets["stack_scan_points"]["p2"]["y"])
@@ -974,6 +999,81 @@ class Controller(ControllerSecondary):
             pass
         bot_logger.log_error(f"Hand select debug bundle saved: {debug_dir}")
 
+    def _write_hand_overlay_debug_bundle(
+        self,
+        *,
+        reason: str,
+        matched_anchor: str | None,
+    ) -> None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        debug_dir = Path(bot_logger.ensure_debug_dir(f"hand-overlay-{stamp}"))
+        try:
+            payload = {
+                "reason": reason,
+                "matched_anchor": matched_anchor,
+                "state": str(self._get_state_from_log()),
+                "arena_region": self._arena_region,
+                "last_good_arena_region": self._last_good_arena_region,
+                "turn_info": self.updated_game_state.get_turn_info() or {},
+                "log_path": self._log_path,
+            }
+            with open(debug_dir / "overlay_state.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
+        try:
+            tail = self._state_tracker.get_tail(180)
+            if not tail:
+                tail = self._read_log_tail(self._log_path, max_bytes=150000)
+            with open(debug_dir / "log_tail.txt", "w", encoding="utf-8") as f:
+                f.write(tail or "")
+        except Exception:
+            pass
+        try:
+            self._vision.begin_tick()
+            full = self._vision.capture(None)
+            self._vision.save_image(full, str(debug_dir / "full_screen.png"))
+            if self._arena_region:
+                arena_img = self._vision.capture(self._arena_region)
+                self._vision.save_image(arena_img, str(debug_dir / "arena_region.png"))
+        except Exception:
+            pass
+        bot_logger.log_error(f"Hand overlay debug bundle saved: {debug_dir}")
+
+    def _ensure_options_overlay_closed(self, *, context: str, max_attempts: int = 2) -> bool:
+        if focus_mtga_window():
+            time.sleep(0.2)
+        last_anchor = None
+        for attempt in range(1, max_attempts + 1):
+            detection = self._arena_region_provider.detect(write_debug_on_fail=False)
+            last_anchor = detection.matched_anchor
+            if detection.ok and detection.region is not None:
+                self._arena_region = detection.region
+                self._last_good_arena_region = detection.region
+                self._last_good_arena_region_ts = time.time()
+            if last_anchor != "options_anchor.png":
+                return True
+            bot_logger.log_error(
+                f"{context}: options overlay detected before interaction; sending ESC (attempt {attempt}/{max_attempts})."
+            )
+            self.input.tap_escape()
+            time.sleep(0.9)
+
+        detection = self._arena_region_provider.detect(write_debug_on_fail=False)
+        last_anchor = detection.matched_anchor
+        if detection.ok and detection.region is not None:
+            self._arena_region = detection.region
+            self._last_good_arena_region = detection.region
+            self._last_good_arena_region_ts = time.time()
+        if last_anchor == "options_anchor.png":
+            bot_logger.log_error(f"{context}: options overlay still visible after ESC retries.")
+            self._write_hand_overlay_debug_bundle(
+                reason="options_overlay_blocking_hand_scan",
+                matched_anchor=last_anchor,
+            )
+            return False
+        return True
+
     def _click_logout_target(self, raw_point: tuple[int, int], config_key: str, click_label: str) -> None:
         mapped = None
         source = ""
@@ -1091,6 +1191,36 @@ class Controller(ControllerSecondary):
                 self._arena_region,
                 self.hand_scan_p1,
                 self.hand_scan_p2,
+                p1,
+                p2,
+                s1,
+                s2,
+            )
+        )
+        return p1, p2
+
+    def _get_battlefield_scan_points_mapped(
+        self,
+        *,
+        force_reacquire: bool = False,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        p1, s1 = self._map_abs_point_to_arena(
+            self.battlefield_scan_p1,
+            label="BATTLEFIELD_SCAN_P1",
+            force_reacquire=force_reacquire,
+            apply_correction=False,
+        )
+        p2, s2 = self._map_abs_point_to_arena(
+            self.battlefield_scan_p2,
+            label="BATTLEFIELD_SCAN_P2",
+            force_reacquire=False,
+            apply_correction=False,
+        )
+        bot_logger.log_info(
+            "BATTLEFIELD_SCAN mapped: arena={} raw_p1={} raw_p2={} mapped_p1={} mapped_p2={} src_p1={} src_p2={}".format(
+                self._arena_region,
+                self.battlefield_scan_p1,
+                self.battlefield_scan_p2,
                 p1,
                 p2,
                 s1,
@@ -1831,6 +1961,8 @@ class Controller(ControllerSecondary):
     def cast(self, card_id: int) -> None:
         bot_logger.set_hover_logging(True)
         try:
+            if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
+                return
             hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
             # Clear any stale hover events from previous scans
             self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
@@ -2220,6 +2352,34 @@ class Controller(ControllerSecondary):
                 label="STACK_ITEM_FALLBACK",
                 max_scan_sec=4.0,
             )
+        finally:
+            bot_logger.set_hover_logging(False)
+
+    def select_battlefield_permanent(self, card_id: int, clicks: int = 1) -> bool:
+        """Select a permanent on our battlefield by scanning the lower arena region for matching hover objectId."""
+        bot_logger.set_hover_logging(True)
+        scan_p1, scan_p2 = self._get_battlefield_scan_points_mapped(force_reacquire=True)
+        try:
+            if self.__select_object_in_region(
+                card_id=card_id,
+                p1=scan_p1,
+                p2=scan_p2,
+                step=self.battlefield_scan_step,
+                clicks=clicks,
+                label="BATTLEFIELD_ITEM",
+                max_scan_sec=4.0,
+            ):
+                return True
+            current_pos = self.input.position()
+            self._write_hand_select_debug_bundle(
+                reason="battlefield_select_failed",
+                card_id=card_id,
+                scan_start=scan_p1,
+                scan_end=scan_p2,
+                current_pos=(current_pos.x, current_pos.y),
+                current_hovered_id=None,
+            )
+            return False
         finally:
             bot_logger.set_hover_logging(False)
 
@@ -2638,6 +2798,9 @@ class Controller(ControllerSecondary):
         if self._stop_requested:
             bot_logger.log_info("Dismiss end screen skipped: stop requested.")
             return
+        if focus_mtga_window():
+            bot_logger.log_info("Dismiss end screen: focused MTGA window before click.")
+            time.sleep(0.25)
         runtime_status.set_mode("post_match", bot_state=str(self._get_state_from_log()))
         self._suppress_selections = False
         arena = self._get_ui_action_arena_region(force_reacquire=True, label="DISMISS_END_SCREEN")
@@ -3552,9 +3715,30 @@ class Controller(ControllerSecondary):
                 ids = list(req.get("ids", []) or [])
                 if not ids:
                     continue
-                self.__select_n_token_counter += 1
-                token = self.__select_n_token_counter
-                self.__pending_select_n = {"ids": ids, "ts": time.time(), "token": token}
+                existing_pending = self.__pending_select_n if isinstance(self.__pending_select_n, dict) else None
+                same_pending = False
+                if existing_pending is not None:
+                    try:
+                        existing_ids = list(existing_pending.get("ids", []) or [])
+                        same_pending = sorted(existing_ids) == sorted(ids)
+                    except Exception:
+                        same_pending = False
+                if same_pending:
+                    token = int(existing_pending.get("token", 0) or 0)
+                    if token <= 0:
+                        self.__select_n_token_counter += 1
+                        token = self.__select_n_token_counter
+                        existing_pending["token"] = token
+                    existing_pending["ids"] = list(ids)
+                    existing_pending["ts"] = time.time()
+                    self.__pending_select_n = existing_pending
+                    bot_logger.log_info(
+                        f"SelectN reusing pending request token={token} ids={ids}"
+                    )
+                else:
+                    self.__select_n_token_counter += 1
+                    token = self.__select_n_token_counter
+                    self.__pending_select_n = {"ids": list(ids), "ts": time.time(), "token": token}
                 min_sel = int(req.get("minSel", 1))
                 if min_sel < 1:
                     min_sel = 1
@@ -3566,6 +3750,7 @@ class Controller(ControllerSecondary):
                     self.__select_n_in_progress = False
                     self.__select_n_in_progress_since = 0.0
                     bot_logger.log_info("SelectN cleared: decisions may resume.")
+                    self.__clear_target_wait_if_unblocked()
 
                 context = req.get("context")
                 option_context = req.get("optionContext")
@@ -3586,11 +3771,54 @@ class Controller(ControllerSecondary):
                     discard_context = False
                 if discard_context:
                     bot_logger.log_info("SelectN context: discard detected.")
+                sacrifice_context = False
+                try:
+                    sacrifice_context = any(
+                        isinstance(val, str) and "sacrif" in val.lower()
+                        for val in context_candidates
+                    )
+                except Exception:
+                    sacrifice_context = False
+                if sacrifice_context:
+                    bot_logger.log_info("SelectN context: sacrifice detected.")
                 resolution_context = (
                     context == "SelectionContext_Resolution"
                     or option_context == "OptionContext_Resolution"
                 )
-                if resolution_context and stack_count > 0:
+                use_stack_selection = False
+                use_battlefield_selection = False
+                hand_zone = self.updated_game_state.get_zone("ZoneType_Hand", self.__system_seat_id)
+                hand_ids = set(hand_zone.get("objectInstanceIds", []) or []) if hand_zone else set()
+                ids_in_hand = [cid for cid in ids if cid in hand_ids]
+                use_hand_selection = bool(ids_in_hand)
+                pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
+                pending_ids = set(pending_zone.get("objectInstanceIds", []) or []) if pending_zone else set()
+                stack_zone = self.updated_game_state.get_zone("ZoneType_Stack")
+                stack_ids = set(stack_zone.get("objectInstanceIds", []) or []) if stack_zone else set()
+                battlefield_zone = self.updated_game_state.get_zone("ZoneType_Battlefield")
+                battlefield_zone_ids = set(
+                    battlefield_zone.get("objectInstanceIds", []) or []
+                ) if battlefield_zone else set()
+                game_objects = self.updated_game_state.get_game_objects() or []
+                my_battlefield_ids = {
+                    int(obj.get("instanceId"))
+                    for obj in game_objects
+                    if isinstance(obj, dict)
+                    and obj.get("zoneId") == (battlefield_zone or {}).get("zoneId")
+                    and obj.get("controllerSeatId") == self.__system_seat_id
+                    and isinstance(obj.get("instanceId"), int)
+                }
+                ids_on_my_battlefield = [
+                    cid for cid in ids if cid in battlefield_zone_ids and cid in my_battlefield_ids
+                ]
+                prompt_ids = [cid for cid in ids if cid in pending_ids or cid in stack_ids]
+                if prompt_ids:
+                    use_stack_selection = True
+                elif isinstance(option_context, str) and "stack" in option_context.lower():
+                    bot_logger.log_info("SelectN stack context detected but prompt ids are not active.")
+                if ids_on_my_battlefield:
+                    use_battlefield_selection = True
+                if resolution_context and stack_count > 0 and not (use_hand_selection or use_stack_selection or use_battlefield_selection):
                     wait_ts = self.__pending_select_n.get("stack_wait_ts") if self.__pending_select_n else None
                     if wait_ts is None and self.__pending_select_n is not None:
                         self.__pending_select_n["stack_wait_ts"] = time.time()
@@ -3608,20 +3836,6 @@ class Controller(ControllerSecondary):
                     )
                     threading.Timer(0.6, lambda: self.__handle_select_n_req(line)).start()
                     return
-                use_stack_selection = False
-                hand_zone = self.updated_game_state.get_zone("ZoneType_Hand", self.__system_seat_id)
-                hand_ids = set(hand_zone.get("objectInstanceIds", []) or []) if hand_zone else set()
-                ids_in_hand = [cid for cid in ids if cid in hand_ids]
-                use_hand_selection = bool(ids_in_hand)
-                pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
-                pending_ids = set(pending_zone.get("objectInstanceIds", []) or []) if pending_zone else set()
-                stack_zone = self.updated_game_state.get_zone("ZoneType_Stack")
-                stack_ids = set(stack_zone.get("objectInstanceIds", []) or []) if stack_zone else set()
-                prompt_ids = [cid for cid in ids if cid in pending_ids or cid in stack_ids]
-                if prompt_ids:
-                    use_stack_selection = True
-                elif isinstance(option_context, str) and "stack" in option_context.lower():
-                    bot_logger.log_info("SelectN stack context detected but prompt ids are not active.")
                 if not ids_in_hand:
                     # Hand zone can be missing in this update (e.g., discard prompts from opponent effects).
                     # Fall back to the provided ids and retry selection after a brief delay.
@@ -3640,7 +3854,7 @@ class Controller(ControllerSecondary):
                             )
                             threading.Timer(1.0, lambda: self.__handle_select_n_req(line)).start()
                             return
-                    if not use_hand_selection and not use_stack_selection:
+                    if not use_hand_selection and not use_stack_selection and not use_battlefield_selection:
                         bot_logger.log_info("SelectN aborting: ids not in hand and no prompt candidates found.")
                         _clear_pending_select_n()
                         return
@@ -3652,9 +3866,16 @@ class Controller(ControllerSecondary):
                     bot_logger.log_info(
                         f"SelectN using stack/pending selection for ids={ids}"
                     )
+                elif use_battlefield_selection and not use_hand_selection:
+                    ids = ids_on_my_battlefield
+                    bot_logger.log_info(
+                        f"SelectN using battlefield selection for ids={ids}"
+                    )
                 if self.__pending_select_n is not None:
                     self.__pending_select_n["mode"] = (
-                        "stack" if (use_stack_selection and not use_hand_selection) else "hand"
+                        "stack"
+                        if (use_stack_selection and not use_hand_selection)
+                        else ("battlefield" if (use_battlefield_selection and not use_hand_selection) else "hand")
                     )
 
                 def _select_n_valid() -> bool:
@@ -3692,6 +3913,13 @@ class Controller(ControllerSecondary):
                                     "SelectN stack verify: prompt resolved."
                                 )
                                 return
+                        if use_battlefield_selection and not use_hand_selection:
+                            pending_count = self.updated_game_state.get_pending_message_count()
+                            if pending_count == 0 and (time.time() - self.__last_submit_selection_ts) > 1.0:
+                                _clear_pending_select_n(
+                                    "SelectN battlefield verify: prompt resolved."
+                                )
+                            return
                         if self.__system_seat_id is None:
                             return
                         hand_zone = self.updated_game_state.get_zone("ZoneType_Hand", self.__system_seat_id)
@@ -3824,6 +4052,8 @@ class Controller(ControllerSecondary):
                                         )
                                         continue
                                     selected_ok = self.select_stack_item(card_id, clicks=1)
+                                elif use_battlefield_selection:
+                                    selected_ok = self.select_battlefield_permanent(card_id, clicks=1)
                                 if selected_ok:
                                     selected += 1
                                     selected_ids.append(card_id)
@@ -4113,14 +4343,15 @@ class Controller(ControllerSecondary):
                     bot_logger.log_info(
                         f"MY_TIMER_CRITICAL: timerId={timer_id} type={timer_type} remaining={remaining_sec:.1f}s"
                     )
-                    runtime_status.bump_counter(
-                        "my_timer_critical_count",
-                        1,
-                        my_timer_running=True,
-                        my_timer_type=timer_type,
-                        my_timer_remaining_sec=remaining_sec,
-                        my_timer_last_critical_at_epoch=time.time(),
-                    )
+                    if timer_type == "TimerType_Inactivity":
+                        runtime_status.bump_counter(
+                            "my_timer_critical_count",
+                            1,
+                            my_timer_running=True,
+                            my_timer_type=timer_type,
+                            my_timer_remaining_sec=remaining_sec,
+                            my_timer_last_critical_at_epoch=time.time(),
+                        )
                     critical = True
                 if remaining_sec is not None and remaining_sec > 5.0:
                     critical = False
@@ -4348,11 +4579,19 @@ class Controller(ControllerSecondary):
             return False
         return False
 
+    def __clear_target_wait_if_unblocked(self) -> None:
+        if self.__pending_target_select is not None:
+            return
+        if self.__is_selecting_targets():
+            return
+        runtime_status.clear_intentional_wait()
+
     def __should_pause_for_select_n(self) -> bool:
         if self._suppress_selections:
             self.__pending_select_n = None
             self.__select_n_in_progress = False
             self.__select_n_in_progress_since = 0.0
+            self.__clear_target_wait_if_unblocked()
             return False
         pending_ids = set()
         stack_ids = set()
@@ -4376,6 +4615,7 @@ class Controller(ControllerSecondary):
                     self.__select_n_in_progress = False
                     self.__select_n_in_progress_since = 0.0
                     bot_logger.log_info("SelectN auto-clear: stack prompt resolved.")
+                    self.__clear_target_wait_if_unblocked()
                     return False
             # Hard timeout guard to avoid infinite selection stalls.
             if in_progress_age > 20.0:
@@ -4383,6 +4623,7 @@ class Controller(ControllerSecondary):
                 self.__select_n_in_progress = False
                 self.__select_n_in_progress_since = 0.0
                 bot_logger.log_info("SelectN auto-clear: in-progress timeout.")
+                self.__clear_target_wait_if_unblocked()
                 return False
             bot_logger.log_info("SelectN in progress: pausing other decisions.")
             return True
@@ -4398,6 +4639,7 @@ class Controller(ControllerSecondary):
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
         bot_logger.log_info("SelectN auto-clear: pending window elapsed.")
+        self.__clear_target_wait_if_unblocked()
         return False
 
     def __should_pause_for_targets(self) -> bool:
@@ -4731,6 +4973,7 @@ class Controller(ControllerSecondary):
                         self.__decision_execution_thread = None
                         self.__decision_delay_key = None
                         self.__decision_delay_scheduled_at = 0.0
+                    runtime_status.set_intentional_wait(2.0, "stack_resolution_wait")
                     bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
                     return
             else:
@@ -4739,6 +4982,7 @@ class Controller(ControllerSecondary):
                     self.__decision_execution_thread = None
                     self.__decision_delay_key = None
                     self.__decision_delay_scheduled_at = 0.0
+                runtime_status.set_intentional_wait(2.0, "stack_resolution_wait")
                 bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
                 return
 

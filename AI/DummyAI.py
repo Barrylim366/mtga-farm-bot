@@ -440,6 +440,16 @@ class DummyAI(AIKernel):
                 self._debug("No actions available")
                 return move
 
+            has_land_play_action = any(
+                (action_wrapper.get('action', {}) or {}).get('actionType') == 'ActionType_Play'
+                for action_wrapper in action_list
+            )
+            if has_land_play_action and self.__has_land_been_played_this_turn:
+                self.__has_land_been_played_this_turn = False
+                self._debug(
+                    "ActionType_Play still available; clearing stale land-play flag for this turn"
+                )
+
             # Get available mana colors and total sources
             available_colors, total_mana, sources = self._get_available_mana_colors(action_list, inst_id_grp_id_dict)
             self._debug(f"Actions available: {len(action_list)}")

@@ -391,6 +391,9 @@ Discard (SelectN) prompts allow a single delayed retry when hand zone data is mi
 SelectN pending-state clear is now robustly initialized before early abort branches, avoiding handler crashes during discard/stack prompts.
 SelectN resolution waits for the stack to clear, but has a timeout to avoid indefinite stalls and clears on match end/reset.
 If SelectN IDs are not in hand, the bot can now fall back to pending/stack item scanning.
+Sacrifice-style SelectN prompts can now also select local battlefield permanents by hover-scanning the lower battlefield region instead of aborting when the requested IDs are not in hand.
+Resolution SelectN only waits for stack-clear as a fallback now; if the request already points at concrete hand, prompt, or battlefield candidates, the controller proceeds immediately instead of burning the rope.
+Failed battlefield SelectN scans write the same `debug/hand-select-<timestamp>/` bundle used for hand-scan failures so sacrifice prompts can be debugged from screenshots and state dumps.
 
 Own timer ("sand clock") status is parsed from `Player.log` game-state timer data (only for
 the local player seat, not opponent timers).
@@ -518,6 +521,7 @@ Default behavior:
 
 - Starts `python tools/run_bot_ui_path.py` as a child process with `MTGA_SUPERVISOR_ACTIVE=1`
 - That child uses the same runtime inputs as the UI Start button: `ConfigManager`, configured click targets, configured screen bounds, configured input backend, account-switch settings, license validation, and the Arena setup preflight
+- If the bot is attached into an already-running match or priority window, `Game` now infers `game_started` from the live gameplay state instead of waiting forever for a mulligan callback that will never come on that attach path
 - Ignores stale `runtime/status.json` for a short startup grace window and waits until the status belongs to the newly spawned child PID before it starts classifying incidents
 - Watches `runtime/status.json` for real activity instead of only file mtimes
 - Treats the bot as stuck after 300 seconds without `Player.log`, decision, or input activity unless `intentional_wait_until_epoch` says the bot is in a known wait window
@@ -530,8 +534,9 @@ Default behavior:
   - Legitimate controller wait phases now publish short `intentional_wait` windows too: pending-message, target-selection, pay-costs, and delayed own-priority decision scheduling no longer look like rope-stalls to the supervisor while the bot is intentionally waiting to act
   - The delayed own-priority decision timer is now keyed per turn/phase/step/active-player window, so repeated `GameState` / `TimerStateMessage` updates from the same priority state no longer keep canceling and re-arming the bot's 4-second decision callback forever
   - The in-game `Concede` step now searches `Buttons/concede.png` across the full detected arena first and logs the match score, then retries inside the focused ROI around the calibrated/UI target, and only then falls back to the calibrated coordinate itself
-  - `Assign Damage Done` now keeps and reuses the first matched `assign_damage_done.png` point for repeated low-level clicks; if the saved `assign_damage_done` calibration is outside a plausible lower-center done-button band, the controller now skips that stale coordinate instead of clicking the wrong UI element
+- `Assign Damage Done` now keeps and reuses the first matched `assign_damage_done.png` point for repeated low-level clicks; if the saved `assign_damage_done` calibration is outside a plausible lower-center done-button band, the controller now skips that stale coordinate instead of clicking the wrong UI element
   - The supervisor now reads its default `Concede` fallback from `calibration_config.json` only when that saved point is already a valid 1920-relative in-window target; otherwise it uses the same `1286,611` default as the UI path instead of the older mismatched hardcoded fallback
+  - The in-game `Concede` recovery now retries `ESC` up to three times, captures per-attempt debug screenshots, and only clicks a real `Buttons/concede.png` template match; it no longer sends a blind fallback click when the options menu never became visible
   - Every failed or ambiguous in-game `Concede` attempt now writes targeted debug artifacts into the incident bundle (`concede_debug_after_escape_*`, `concede_debug_template_not_found_*`, `concede_debug_post_concede_wait_*`) so the ESC menu and button region can be inspected directly
   - If anchor-based arena reacquire fails during an in-game recovery, the supervisor now still uses the detected MTGA client window region and does not skip the `Concede` attempt just because no known UI anchor matched
   - After a successful concede, the supervisor now watches `Player.log` for `MatchEndScene` / `MatchCompleted` / `IntermissionReq` markers and clicks the arena center to dismiss the defeat/victory screen before trying `ESC`/`HOME` recovery
@@ -552,6 +557,8 @@ Incident bundle contents:
 - `post_recovery_full_screen.png`
 - `post_recovery_arena_region.png` (if MTGA was still detectable after recovery)
 
+The supervisor now writes placeholder `recovery.json` and `codex_notify.json` immediately after `incident.json` is created, so even a mid-recovery crash leaves a self-describing bundle instead of looking like recovery never started.
+
 Optional flags:
 
 - `--startup-grace-sec 45`
@@ -561,13 +568,20 @@ Optional flags:
   - Number of local-player `MY_TIMER_CRITICAL` events in one match before the supervisor treats the bot as stuck immediately
 - `--my-timer-stall-sec 20`
   - Treat a running local `TimerType_Inactivity` with no bot decision/input for this many seconds as a stuck incident, even if Arena stops sending late timer updates
+  - Active controller `intentional_wait` windows suppress this rope-stall trigger until the rope is in its final few seconds, so the supervisor does not concede in the middle of a legitimate delayed combat/blocking decision
+  - The controller now also rewrites stale `target_selection_wait` into `stack_resolution_wait` whenever a `SelectN` prompt has already cleared but the game is still intentionally waiting on the stack; otherwise old selection waits can survive into the next turn and make a later rope-stall incident look like a targeting hang
+  - `repeated_own_timer_critical` now only uses the real `TimerType_Inactivity` rope; late `TimerType_ActivePlayer` criticals are still logged, but they no longer increment the watchdog counter or trigger an automatic concede by themselves
+  - Recovery now also restores/focuses the MTGA window before `ESC`, `Concede`, and match-end dismiss clicks, because the detected MTGA client region alone is not enough if another desktop window is actually in the foreground
+  - Before hover-based hand casts/selections, the controller now also checks for an open Arena options overlay and dismisses it with `ESC`; otherwise the menu can block the board while the bot keeps scanning and burns rope on a legal move
+  - Repeated `SelectNReq` retries for the same discard/sacrifice prompt now reuse the same pending token/state instead of creating a brand-new pending request each time; this prevents stale discard retries from resetting their retry counters forever and roping out the game
+  - The AI now trusts Arena's live action list over its own cached `has_land_been_played_this_turn` flag: if `ActionType_Play` is still legally available, the flag is cleared and land play is reconsidered instead of incorrectly defaulting to `resolve`
 - `--mtga-launch-cmd "<command>"`
   - Optional hard recovery path for cases where `ESC` is not enough
   - The supervisor kills the configured MTGA process names and relaunches the client before retrying `HOME` recovery
 - `--mtga-process-names "MTGA.exe,MTGALauncher.exe"`
   - Override the Windows process names used for the optional hard client restart
-- `--concede-rel-x 1286 --concede-rel-y 611`
-  - Override the 1920-relative in-game `Concede` button position used after `ESC` opens the options menu; by default the supervisor only trusts a saved `calibration_config.json` `concede` point when it is already a valid 1920-relative target, otherwise it falls back to `1286,611`
+- `--concede-rel-x 962 --concede-rel-y 631`
+  - Override the 1920-relative in-game `Concede` button position used after `ESC` opens the options menu; by default the supervisor only trusts a saved `calibration_config.json` `concede` point when it is already a valid 1920-relative target, otherwise it falls back to `962,631`
 
 Codex notification behavior:
 
@@ -596,6 +610,12 @@ python tools/run_bot_ui_path.py
 - Uses the same configuration and setup path as pressing Start in the UI
 - Unlike `run_bot.py`, it does not use hardcoded fallback click targets/screen bounds
 - This is the default child command used by `tools/bot_supervisor.py`
+- If it exits before `runtime/status.json` switches to the new child PID, check its direct stdout/stderr first; the supervisor depends on this Arena setup preflight completing successfully before telemetry takeover can happen
+
+Incident notes:
+
+- Real supervisor incidents are summarized in `incidents.md`
+- Each entry records the incident folder/timestamp, trigger, whether recovery / Codex notify succeeded, the actual bot-side root cause, and the fix or next debug step
 
 ## Verify Template Assets
 

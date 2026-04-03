@@ -322,6 +322,30 @@ class ArenaRegionProvider:
         return abs(int(w) - int(ew)) <= int(tolerance) and abs(int(h) - int(eh)) <= int(tolerance)
 
 
+def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        candidates = _list_mtga_window_rects_windows()
+        selected = _pick_best_windows_candidate(candidates, expected_size)
+        if selected is None:
+            return False
+        hwnd = int(selected.get("hwnd") or 0)
+        if hwnd <= 0:
+            return False
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+        SW_SHOW = 5
+        user32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
+        user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOW)
+        user32.BringWindowToTop(wintypes.HWND(hwnd))
+        user32.SetForegroundWindow(wintypes.HWND(hwnd))
+        user32.SetActiveWindow(wintypes.HWND(hwnd))
+        return True
+    except Exception:
+        return False
+
+
 def run_arena_setup_check(
     *,
     assets_dir: str,

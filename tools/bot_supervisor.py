@@ -19,11 +19,11 @@ from bot_logger import ensure_debug_dir
 from runtime_status import get_status_path, read_status
 from state.state_machine import BotState, get_state_from_playerlog
 from vision.vision import VisionEngine
-from vision.window_locator import ArenaRegionProvider
+from vision.window_locator import ArenaRegionProvider, focus_mtga_window
 
 
 def load_default_concede_rel() -> tuple[int, int]:
-    default_rel = (1286, 611)
+    default_rel = (962, 631)
     config_path = ROOT_DIR / "calibration_config.json"
     try:
         if not config_path.is_file():
@@ -154,6 +154,8 @@ def main() -> int:
                         provider=provider,
                         reason=trigger_reason,
                     )
+                    write_recovery_result(incident_dir, recovery)
+                    write_codex_result(incident_dir, codex_payload)
                     terminate_child(child)
                     recovery = attempt_recovery(
                         status=status,
@@ -286,14 +288,20 @@ def compute_stale_seconds(status: dict) -> float:
 def detect_stuck_reason(status: dict, args: argparse.Namespace) -> str | None:
     bot_state = str(status.get("bot_state") or "")
     mode = str(status.get("mode") or "")
+    timer_type = str(status.get("my_timer_type") or "")
     try:
         critical_count = int(status.get("my_timer_critical_count") or 0)
     except Exception:
         critical_count = 0
-    if bot_state != str(BotState.HOME) and critical_count >= max(1, int(args.my_timer_critical_threshold)):
+    if (
+        bot_state != str(BotState.HOME)
+        and timer_type == "TimerType_Inactivity"
+        and critical_count >= max(1, int(args.my_timer_critical_threshold))
+    ):
         return "repeated_own_timer_critical"
     if bot_state != str(BotState.HOME) and bool(status.get("my_timer_timeout_seen")):
         return "own_timeout_observed"
+    wait_active = should_skip_due_to_wait(status)
     if (
         bot_state == str(BotState.IN_GAME)
         and mode == "in_game"
@@ -309,6 +317,10 @@ def detect_stuck_reason(status: dict, args: argparse.Namespace) -> str | None:
         except Exception:
             timer_elapsed = 0.0
         try:
+            timer_remaining = float(status.get("my_timer_remaining_sec") or 0.0)
+        except Exception:
+            timer_remaining = 0.0
+        try:
             last_input = float(status.get("last_input_at_epoch") or 0.0)
         except Exception:
             last_input = 0.0
@@ -318,6 +330,8 @@ def detect_stuck_reason(status: dict, args: argparse.Namespace) -> str | None:
             last_decision = 0.0
         action_latest = max(last_input, last_decision)
         action_idle = max(0.0, time.time() - action_latest) if action_latest > 0.0 else 0.0
+        if wait_active and timer_remaining > 8.0:
+            return None
         if timer_elapsed >= stall_threshold and action_idle >= stall_threshold:
             return "own_inactivity_timer_stalled"
     return None
@@ -476,6 +490,9 @@ def recover_to_home(*, input_controller, vision: VisionEngine, provider: ArenaRe
         return True
 
     for _ in range(8):
+        if focus_mtga_window():
+            result["actions"].append("focus_mtga_window")
+            time.sleep(0.3)
         tail = read_tail(playerlog_path, max_bytes=160000)
         state = get_state_from_playerlog(tail)
         result["actions"].append(f"state:{state}")
@@ -508,14 +525,13 @@ def concede_to_home(
     concede_rel: tuple[int, int],
     result: dict,
 ) -> bool:
+    if focus_mtga_window():
+        result["actions"].append("focus_mtga_window")
+        time.sleep(0.3)
     arena = resolve_mtga_region(provider)
     if arena is None:
         result["actions"].append("concede_skipped_no_arena")
         return False
-
-    input_controller.tap_escape()
-    result["actions"].append("concede_tap_escape")
-    time.sleep(1.0)
 
     concede_abs = (int(arena[0] + concede_rel[0]), int(arena[1] + concede_rel[1]))
     concede_region = build_focus_region(
@@ -525,64 +541,73 @@ def concede_to_home(
         height=360,
     )
     concede_template = str(ROOT_DIR / "Buttons" / "concede.png")
-    capture_concede_debug(
-        incident_dir=incident_dir,
-        vision=vision,
-        arena=arena,
-        focus_region=concede_region,
-        stage="after_escape",
-        extra={
-            "concede_abs": [int(concede_abs[0]), int(concede_abs[1])],
-            "concede_region": [int(v) for v in concede_region],
-        },
-    )
-    concede_match = find_template_match_in_region(
-        vision=vision,
-        template_path=concede_template,
-        region=arena,
-        threshold=0.72,
-    )
-    if concede_match is not None:
-        click_low_level(input_controller, concede_match["point"])
-        result["actions"].append(
-            f"concede_template_click_arena:{concede_match['point'][0]},{concede_match['point'][1]} score={concede_match['score']:.3f}"
+    concede_match = None
+    for attempt in range(1, 4):
+        if attempt == 1:
+            result["actions"].append("concede_tap_escape")
+        else:
+            if focus_mtga_window():
+                result["actions"].append(f"focus_mtga_window_retry_{attempt}")
+                time.sleep(0.2)
+            result["actions"].append(f"concede_tap_escape_retry_{attempt}")
+        input_controller.tap_escape()
+        time.sleep(0.9)
+        capture_concede_debug(
+            incident_dir=incident_dir,
+            vision=vision,
+            arena=arena,
+            focus_region=concede_region,
+            stage=f"after_escape_attempt_{attempt}",
+            extra={
+                "concede_abs": [int(concede_abs[0]), int(concede_abs[1])],
+                "concede_region": [int(v) for v in concede_region],
+            },
         )
-        time.sleep(0.3)
-        click_low_level(input_controller, concede_match["point"])
-        result["actions"].append("concede_template_click_arena_retry")
-    else:
         concede_match = find_template_match_in_region(
             vision=vision,
             template_path=concede_template,
-            region=concede_region,
+            region=arena,
             threshold=0.72,
         )
-        if concede_match is not None:
-            click_low_level(input_controller, concede_match["point"])
-            result["actions"].append(
-                f"concede_template_click_focus:{concede_match['point'][0]},{concede_match['point'][1]} score={concede_match['score']:.3f}"
-            )
-            time.sleep(0.3)
-            click_low_level(input_controller, concede_match["point"])
-            result["actions"].append("concede_template_click_focus_retry")
-        else:
-            result["actions"].append("concede_template_not_found")
-            capture_concede_debug(
-                incident_dir=incident_dir,
+        if concede_match is None:
+            concede_match = find_template_match_in_region(
                 vision=vision,
-                arena=arena,
-                focus_region=concede_region,
-                stage="template_not_found",
-                extra={
-                    "concede_abs": [int(concede_abs[0]), int(concede_abs[1])],
-                    "concede_region": [int(v) for v in concede_region],
-                },
+                template_path=concede_template,
+                region=concede_region,
+                threshold=0.60,
             )
-            click_low_level(input_controller, concede_abs)
-            result["actions"].append(f"concede_click_fallback:{concede_abs[0]},{concede_abs[1]}")
-            time.sleep(0.3)
-            click_low_level(input_controller, concede_abs)
-            result["actions"].append("concede_click_fallback_retry")
+        if concede_match is not None:
+            break
+        result["actions"].append(f"concede_template_not_found_attempt_{attempt}")
+
+    if concede_match is not None:
+        click_low_level(input_controller, concede_match["point"])
+        result["actions"].append(
+            f"concede_template_click:{concede_match['point'][0]},{concede_match['point'][1]} score={concede_match['score']:.3f}"
+        )
+        time.sleep(0.3)
+        click_low_level(input_controller, concede_match["point"])
+        result["actions"].append("concede_template_click_retry")
+    else:
+        result["actions"].append("concede_menu_not_visible_or_template_missing")
+        capture_concede_debug(
+            incident_dir=incident_dir,
+            vision=vision,
+            arena=arena,
+            focus_region=concede_region,
+            stage="template_not_found",
+            extra={
+                "concede_abs": [int(concede_abs[0]), int(concede_abs[1])],
+                "concede_region": [int(v) for v in concede_region],
+            },
+        )
+        return recover_to_home(
+            input_controller=input_controller,
+            vision=vision,
+            provider=provider,
+            playerlog_path=playerlog_path,
+            result=result,
+        )
     time.sleep(1.2)
 
     if click_template_in_region(
@@ -751,6 +776,9 @@ def resolve_mtga_region(provider: ArenaRegionProvider) -> tuple[int, int, int, i
 
 
 def dismiss_match_end_screen(*, input_controller, provider: ArenaRegionProvider, result: dict) -> bool:
+    if focus_mtga_window():
+        result["actions"].append("focus_mtga_window")
+        time.sleep(0.3)
     arena = resolve_mtga_region(provider)
     if arena is None:
         result["actions"].append("dismiss_match_end_no_arena")

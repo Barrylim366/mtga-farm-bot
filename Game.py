@@ -280,14 +280,49 @@ class Game:
         except Exception as e:
             self._debug(f"ERROR in on_action_success: {e}")
 
+    def _infer_game_started_from_live_state(self, current_game_state: GameState) -> bool:
+        """Allow direct/supervised starts that attach after mulligan into a live game."""
+        try:
+            turn_info = current_game_state.get_turn_info() or {}
+            actions = current_game_state.get_actions() or []
+            active_player = turn_info.get('activePlayer')
+            priority_player = turn_info.get('priorityPlayer')
+            decision_player = turn_info.get('decisionPlayer')
+            turn_num = int(turn_info.get('turnNumber', 0) or 0)
+            phase = turn_info.get('phase')
+            step = turn_info.get('step')
+
+            if not turn_info:
+                return False
+
+            has_live_priority = any(v is not None for v in (active_player, priority_player, decision_player))
+            has_playable_state = bool(actions) or bool(phase) or bool(step)
+            if not (has_live_priority and has_playable_state):
+                return False
+
+            self.game_started = True
+            if turn_num > 1:
+                self.starting_hand_logged = True
+            self._debug(
+                "Inferred game_started from live gameplay state: "
+                f"turn={turn_num}, phase={phase}, step={step}, "
+                f"active={active_player}, priority={priority_player}, decision={decision_player}, "
+                f"actions={len(actions)}"
+            )
+            return True
+        except Exception as e:
+            self._debug(f"Failed to infer live game_started state: {e}")
+            return False
+
     def decision_method(self, current_game_state: GameState):
         if self._stop_requested:
             return
         runtime_status.clear_intentional_wait()
         # Don't do anything before game has started
         if not self.game_started:
-            self._debug("decision_method called but game not started yet, ignoring")
-            return
+            if not self._infer_game_started_from_live_state(current_game_state):
+                self._debug("decision_method called but game not started yet, ignoring")
+                return
 
         # Reset inactivity timer since we're making a decision
         if hasattr(self.controller, 'reset_inactivity_timer'):
