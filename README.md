@@ -449,6 +449,9 @@ Incident bundle contents:
 - `recovery.json`
 - `codex_notify.json`
 - `supervisor_crash.json` (only when the supervisor itself threw during recovery/notification)
+- `tracking.json`
+- `related_incidents.json`
+- `signature_knowledge.json`
 - `post_recovery_state.json`
 - `post_recovery_full_screen.png`
 - `post_recovery_arena_region.png` (if MTGA was still detectable after recovery)
@@ -526,7 +529,11 @@ Incident notes:
 - Real supervisor incidents are summarized in `supervisor/incidents.md`
 - Each entry now records the incident folder/timestamp, a signature/cluster key, trigger, whether recovery / Codex notify succeeded, the actual bot-side root cause, the fix or next debug step, and a tracking block instead of a binary "fixed" claim
 - Each supervisor incident bundle now also gets a machine-readable `tracking.json`, and repo-wide signature state lives in `runtime/incident_registry.json`
+- If an older install still has `incident_registry.json` in the repo root, the tracking helper now folds that legacy file into `runtime/incident_registry.json` automatically so repeat history and guidance survive the runtime-path migration
 - `tracking.json` now includes a `suggested_signature` plus `signature_basis`, generated from trigger, intentional wait reason, turn phase/step, and dominant log patterns in `bot_tail.txt` / `player_tail.txt`
+- Each new incident bundle also gets `related_incidents.json`, which copies the relevant repeat-context from `runtime/incident_registry.json` into the bundle itself so Codex can immediately see whether the suggested/current signature has already been seen, what the last status was, and the latest evidence summary
+- Each signature record can now also store reusable guidance (`hypothesis`, `applied_fix`, `next_debug_action`); the supervisor copies that into `signature_knowledge.json` for every new bundle so Codex sees the last known fix strategy without re-reading the full registry first
+- `signature_knowledge.source_incident` now stays anchored to the incident that actually introduced or last changed that guidance; later repeats that only update status/evidence do not overwrite the provenance
 - Tracking status is evidence-based:
   - `proposed`: Codex has a plausible diagnosis / fix, but it is not merged yet
   - `applied`: the change is in the repo, but long-run proof does not exist yet
@@ -554,15 +561,18 @@ Tracking helper commands:
 ```powershell
 python tools/incident_tracking.py init --incident-dir "%LOCALAPPDATA%\\BurningLotusBot\\debug\\incident-20260403-220121"
 python tools/incident_tracking.py suggest --incident-dir "%LOCALAPPDATA%\\BurningLotusBot\\debug\\incident-20260403-220121"
-python tools/incident_tracking.py set-status --incident-dir "%LOCALAPPDATA%\\BurningLotusBot\\debug\\incident-20260403-220121" --signature "own_main_phase_decision_delay_wait_dropped" --status applied --confidence 0.3 --evidence "Patch merged after log analysis"
+python tools/incident_tracking.py set-status --incident-dir "%LOCALAPPDATA%\\BurningLotusBot\\debug\\incident-20260403-220121" --signature "own_main_phase_decision_delay_wait_dropped" --status applied --confidence 0.3 --hypothesis "Decision delay callback was dropped on reused priority window" --applied-fix "Republish decision_delay_wait and keep one keyed timer per priority window" --next-debug-action "If it recurs, capture delayed callback state before and after timer fire" --evidence "Patch merged after log analysis"
 python tools/incident_tracking.py record-survival --signature "own_main_phase_decision_delay_wait_dropped" --runs 10 --evidence "10 later comparable runs without recurrence"
+python tools/incident_tracking.py set-guidance --signature "own_main_phase_decision_delay_wait_dropped" --next-debug-action "If it recurs, capture delayed callback state before and after timer fire"
 python tools/incident_tracking.py show --signature "own_main_phase_decision_delay_wait_dropped"
 ```
 
 Notes:
 
 - `set-status` is for the first diagnosis / applied fix state
+- `set-status` can also snapshot the current hypothesis, applied fix, and next targeted debug action for that signature
 - `record-survival` upgrades longitudinal evidence without pretending replay certainty
+- `set-guidance` updates reusable per-signature knowledge without changing status/confidence counters
 - `reproduced_and_passed` and `regressed` should be written with `set-status` when a truly comparable situation is later observed
 
 ## Verify Template Assets

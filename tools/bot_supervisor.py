@@ -19,7 +19,7 @@ from bot_logger import ensure_debug_dir
 from runtime_paths import runtime_file
 from runtime_status import get_status_path, read_status
 from state.state_machine import BotState, get_state_from_playerlog
-from tools.incident_tracking import ensure_tracking_file
+from tools.incident_tracking import build_related_incidents_payload, build_signature_knowledge_payload, ensure_tracking_file
 from vision.vision import VisionEngine
 from vision.window_locator import ArenaRegionProvider, focus_mtga_window
 
@@ -404,11 +404,31 @@ def write_incident_bundle(
     write_text(incident_dir / "player_tail.txt", read_tail(playerlog_path, max_bytes=160000))
     write_text(incident_dir / "status_path.txt", get_status_path())
     try:
-        ensure_tracking_file(
+        tracking = ensure_tracking_file(
             incident_dir,
             created_at=stamp,
             trigger=reason,
         )
+        with (incident_dir / "related_incidents.json").open("w", encoding="utf-8") as handle:
+            json.dump(
+                build_related_incidents_payload(
+                    incident_dir=incident_dir,
+                    created_at=stamp,
+                    trigger=reason,
+                ),
+                handle,
+                indent=2,
+            )
+        with (incident_dir / "signature_knowledge.json").open("w", encoding="utf-8") as handle:
+            json.dump(
+                build_signature_knowledge_payload(
+                    incident_dir=incident_dir,
+                    created_at=stamp,
+                    trigger=reason,
+                ),
+                handle,
+                indent=2,
+            )
     except Exception:
         pass
 
