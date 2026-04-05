@@ -244,3 +244,47 @@ Entries below this point predate the tracking model and remain narrative-only un
   - Status: `applied`
   - Confidence: `0.3`
   - Evidence: patch is merged after the incident timeline showed `Decision delay fired`, then `Active turn delay: waiting 2 seconds before actions`, with the incident status already carrying an empty `intentional_wait_reason`; no later live replay of the same signature has been observed yet.
+
+- `2026-04-04 16:37:32`, manual stop (no supervisor bundle)
+  Signature: `queue_click_outside_window__arena_region_none__absolute_fallback`
+  Trigger: manual user stop (bot clicked outside MTGA window, minimizing it)
+  Supervisor: not running at the time
+  Root cause: Bot started with `state=BotState.IN_GAME` but `arena_region` was `None` (no cached region available). The queue-button click path in `Controller.py:1848` fell back to absolute desktop coordinates `(1699, 996)` instead of window-relative coordinates. Because MTGA was not positioned where those absolute coords assume, the click landed outside the Arena window, causing Windows to minimize it. The key failure is that the queue-button fallback uses raw absolute coordinates without verifying they actually fall within the MTGA window bounds.
+  Fix: proposed — the queue-button absolute fallback should either (a) refuse to click when `arena_region` is `None` (like `ATTACK_ALL` already does at Controller.py:2112), or (b) call `focus_mtga_window()` and re-acquire the arena region before clicking. The safest approach is to skip the click and retry arena detection on the next loop iteration.
+  Tracking:
+  - Status: `proposed`
+  - Confidence: `0.4`
+  - Evidence: single occurrence; bot.log shows `arena_region unavailable, using absolute coordinates` immediately followed by `CLICK (1699, 996) - QUEUE_BUTTON`; user confirmed click landed outside MTGA and window minimized.
+
+- `2026-04-04 17:01:00`, manual stop (no supervisor bundle)
+  Signature: `declare_attackers_paycosts_loop__timer_expired__no_concede`
+  Trigger: manual user stop (timer expired, bot kept playing after auto-pass)
+  Supervisor: not running at the time
+  Root cause: Two linked issues. (1) The bot entered an infinite loop on turn 9, `Phase_Combat / Step_DeclareAttack`: it received `DeclareAttackersReq`, chose `all_attack`, but a `PayCostsReq` immediately followed, which triggered `auto-pay`, which produced another `DeclareAttackersReq` — repeating endlessly. The attack likely required a cost the bot's auto-pay couldn't resolve, so the declare-attack never completed. This consumed the entire timer (CRITICAL at 5s remaining at 17:01:24 and 17:01:54). (2) After the timer expired and Arena auto-passed, the bot resumed playing on turn 11 with no concede. The bot has no built-in logic to concede after a timer expiration event — it only logs `MY_TIMER_CRITICAL` as informational. Without the supervisor running, nothing triggered a concede.
+  Fix: proposed — (a) break the DeclareAttackers → PayCostsReq loop by detecting repeated PayCostsReq cycles for the same DeclareAttackersReq and submitting without further retry after N attempts; (b) add bot-level timer-expiration handling: when `MY_TIMER_CRITICAL` fires with remaining <= 5s and the same request is looping, the bot should abort the current action and pass priority instead of retrying.
+  Tracking:
+  - Status: `proposed`
+  - Confidence: `0.4`
+  - Evidence: single occurrence; bot.log shows DeclareAttackersReq/PayCostsReq cycling from 17:01:00 to 17:01:56 on turn 9 with two CRITICAL timer events at 5s remaining; bot continued to turn 11 after timer expiry without conceding.
+
+- `2026-04-04 17:20:34`, manual stop (no supervisor bundle)
+  Signature: `declare_attackers_on_opponent_turn__combat_recovery_wrong_player__ui_desync`
+  Trigger: manual user stop (bot stuck, timer expired at 0.0s)
+  Supervisor: running but did not trigger (child process still alive)
+  Root cause: The `__handle_declare_attackers_req` handler did not check whether the bot was the active player. On turn 10 at 17:20:34, the opponent (activePlayer=1) entered DeclareAttack phase. The bot (seat 2) received the DeclareAttackersReq, armed COMBAT_RECOVERY (key=req:96), and clicked ATTACK_ALL at (3263, 1088) — on the opponent's turn. This likely caused a UI desync: no further game state updates arrived for ~2 minutes (17:20:35 to 17:22:48), and by the time the game state resumed, the bot's timer was at 0.0s. The bot processed the new state but could not act because the timer had already expired.
+  Fix: applied — added an `activePlayer` check in `__handle_declare_attackers_req`: if `activePlayer != self.__system_seat_id`, the handler logs a message and skips combat recovery entirely. This prevents the bot from clicking ATTACK_ALL on the opponent's combat step.
+  Tracking:
+  - Status: `applied`
+  - Confidence: `0.5`
+  - Evidence: single occurrence; bot.log shows COMBAT_RECOVERY_ARMED key=req:96 cycle=1/5 and CLICK ATTACK_ALL at 17:20:35 while activePlayer=1 (opponent), followed by 2-min gap with no game state updates, then MY_TIMER_CRITICAL remaining=0.0s at 17:22:48.
+
+- `2026-04-04 18:26:45`, `incident-20260404-182645`
+  Signature: `stack_defer_no_pass__inactivity_timer_expired__concede_failed`
+  Trigger: `repeated_own_timer_critical` (TimerType_Inactivity 150s → 0s)
+  Supervisor: recovery attempted but FAILED — concede template scored 0.739, game stayed IN_GAME through 30+ retry cycles
+  Root cause: Bot was decisionPlayer on turn 8, Phase_Main1 with 7 Cast actions available and stack=1. The stack-deferral logic at Controller.py:5559 checked for `ActionType_Pass` — which wasn't in the action list. Without pass, the bot deferred with "stack has 1 object(s)" and set a 2s intentional wait, but every new game state re-triggered the same defer. This loop continued for the full 150s inactivity timer. The bot never made a decision despite having 7 castable cards.
+  Fix: applied — when decisionPlayer==us and no pass action but other actions are available, proceed with the decision instead of deferring. Only defer when there are truly zero actions to take.
+  Tracking:
+  - Status: `applied`
+  - Confidence: `0.5`
+  - Evidence: incident bundle shows MY_TIMER_TIMEOUT_OBSERVED timerId=12 TimerType_Inactivity elapsed=150s, bot_tail.txt shows repeated "Deferring decision: stack has 1 object(s)" with 7 ActionType_Cast actions available; recovery failed with concede_template_click score=0.739.

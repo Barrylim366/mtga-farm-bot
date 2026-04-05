@@ -269,6 +269,9 @@ class Controller(ControllerSecondary):
         self.__pending_pay_costs_ts = 0.0
         self.__combat_recovery_key = None
         self.__combat_recovery_attempts = 0
+        self.__declare_attackers_turn_key = ""
+        self.__declare_attackers_cycle_count = 0
+        self.__declare_attackers_cycle_limit = 5
         self.__combat_recovery_deadline_ts = 0.0
         self.__combat_recovery_timer = None
         self.__last_attack_submit_ts = 0.0
@@ -1845,7 +1848,29 @@ class Controller(ControllerSecondary):
             except Exception as e:
                 bot_logger.log_error(f"Queue target compute failed; using absolute target. err={e}")
         if arena is None:
-            bot_logger.log_info("Queue target: arena_region unavailable, using absolute coordinates.")
+            bot_logger.log_info("Queue target: arena_region unavailable, retrying with force_reacquire.")
+            arena = self._ensure_arena_region(force_reacquire=True)
+            if arena is not None:
+                try:
+                    mapped, mapped_source = self._map_abs_point_to_arena(
+                        self.home_play_button_coors,
+                        label="QUEUE_BUTTON_CONFIG",
+                        force_reacquire=False,
+                        apply_correction=False,
+                    )
+                    if mapped_source != "absolute_fallback":
+                        target = mapped
+                        source = mapped_source
+                    else:
+                        fallback_rel_x, fallback_rel_y = self._queue_button_rel
+                        if 0 <= fallback_rel_x <= arena[2] and 0 <= fallback_rel_y <= arena[3]:
+                            target = (int(arena[0] + fallback_rel_x), int(arena[1] + fallback_rel_y))
+                            source = "arena_rel_click_target"
+                except Exception as e:
+                    bot_logger.log_error(f"Queue target recompute failed after reacquire. err={e}")
+            if arena is None:
+                bot_logger.log_error("Queue click ABORTED: arena_region unavailable after retry, refusing absolute desktop click.")
+                return
         else:
             bot_logger.log_info(
                 "Queue target details: source={} arena={} screen_bounds={} click_target={}".format(
@@ -5153,6 +5178,14 @@ class Controller(ControllerSecondary):
                 seat_ids = message.get("systemSeatIds") or []
                 if self.__system_seat_id is not None and seat_ids and self.__system_seat_id not in seat_ids:
                     continue
+                # Only handle DeclareAttackersReq when we are the active player (our attack phase).
+                turn_info_check = self.updated_game_state.get_turn_info() or {}
+                active_player = turn_info_check.get("activePlayer")
+                if active_player is not None and self.__system_seat_id is not None and active_player != self.__system_seat_id:
+                    bot_logger.log_info(
+                        f"DeclareAttackersReq IGNORED: activePlayer={active_player} is not us (seat={self.__system_seat_id}), skipping combat recovery."
+                    )
+                    continue
                 req = message.get("declareAttackersReq", {})
                 attackers = req.get("attackers", []) or req.get("qualifiedAttackers", [])
                 self.__attack_target_required = False
@@ -5166,6 +5199,24 @@ class Controller(ControllerSecondary):
                     if self.__attack_target_required:
                         break
                 turn_info = self.updated_game_state.get_turn_info() or {}
+                turn_key = "turn:{}:{}:{}".format(
+                    turn_info.get("turnNumber", "?"),
+                    turn_info.get("activePlayer", "?"),
+                    turn_info.get("step", "?"),
+                )
+                if turn_key == self.__declare_attackers_turn_key:
+                    self.__declare_attackers_cycle_count += 1
+                else:
+                    self.__declare_attackers_turn_key = turn_key
+                    self.__declare_attackers_cycle_count = 1
+                if self.__declare_attackers_cycle_count > self.__declare_attackers_cycle_limit:
+                    bot_logger.log_error(
+                        f"DeclareAttackersReq LOOP DETECTED: {self.__declare_attackers_cycle_count} cycles "
+                        f"on {turn_key}, aborting attack and passing priority."
+                    )
+                    self.__clear_combat_recovery("DeclareAttackers loop limit reached.")
+                    self.submit_selection(reason="declare_attackers_loop_break", force=True)
+                    return
                 fallback_key = "combat:{}:{}:{}".format(
                     turn_info.get("turnNumber", "?"),
                     turn_info.get("activePlayer", "?"),
@@ -5173,9 +5224,11 @@ class Controller(ControllerSecondary):
                 )
                 recovery_key = f"req:{request_id}" if request_id is not None else fallback_key
                 bot_logger.log_info(
-                    "COMBAT_RECOVERY_ARMED: key={} canSubmitAttackers={}".format(
+                    "COMBAT_RECOVERY_ARMED: key={} canSubmitAttackers={} cycle={}/{}".format(
                         recovery_key,
                         req.get("canSubmitAttackers"),
+                        self.__declare_attackers_cycle_count,
+                        self.__declare_attackers_cycle_limit,
                     )
                 )
                 self.__preempt_stack_select_n_for_combat(
@@ -5464,8 +5517,6 @@ class Controller(ControllerSecondary):
             self.__mark_has_mulled_keep("Mulligan keep observed from ClientMessageType_MulliganResp.")
         elif not self.__has_mulled_keep and not self.__has_pending_mulligan_state(raw_dict) and self.__infer_keep_from_live_game_state():
             self.__mark_has_mulled_keep("Mulligan keep inferred from live gameplay state.")
-        print(self.updated_game_state)
-
         # Log all parsed game state data to bot.log
         bot_logger.log_game_state_update(self.updated_game_state.get_full_state())
         self.__log_my_timer_status()
@@ -5514,14 +5565,21 @@ class Controller(ControllerSecondary):
                         "Stack present but safe to resolve: decisionPlayer=me, pendingMessageCount=0, pass available."
                     )
                 else:
-                    if self.__decision_execution_thread is not None:
-                        self.__decision_execution_thread.cancel()
-                        self.__decision_execution_thread = None
-                        self.__decision_delay_key = None
-                        self.__decision_delay_scheduled_at = 0.0
-                    runtime_status.set_intentional_wait(2.0, "stack_resolution_wait")
-                    bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
-                    return
+                    # If we have available actions, proceed anyway instead of deferring forever.
+                    action_count = len(self.updated_game_state.get_actions() or [])
+                    if action_count > 0:
+                        bot_logger.log_info(
+                            f"Stack present, no pass action, but {action_count} actions available. Proceeding with decision."
+                        )
+                    else:
+                        if self.__decision_execution_thread is not None:
+                            self.__decision_execution_thread.cancel()
+                            self.__decision_execution_thread = None
+                            self.__decision_delay_key = None
+                            self.__decision_delay_scheduled_at = 0.0
+                        runtime_status.set_intentional_wait(2.0, "stack_resolution_wait")
+                        bot_logger.log_info(f"Deferring decision: stack has {stack_count} object(s)")
+                        return
             else:
                 if self.__decision_execution_thread is not None:
                     self.__decision_execution_thread.cancel()

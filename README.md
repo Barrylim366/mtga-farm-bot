@@ -429,6 +429,7 @@ python -m unittest tests/test_licensing.py
     - macOS: `~/Library/Application Support/BurningLotusBot/bot.log`
     - Linux: `~/.config/burninglotusbot/bot.log`
   - If writing there fails, logger falls back to local `./bot.log` without stopping the bot.
+  - Full parsed game-state snapshots stay in `bot.log`; they are no longer echoed to process `stdout`, so supervisor runs do not spam the terminal/chat with live `Player.log` state dumps.
 - `human.log` - high-level actions
   - Stored in a per-user writable app folder:
     - Windows: `%LOCALAPPDATA%/BurningLotusBot/human.log`

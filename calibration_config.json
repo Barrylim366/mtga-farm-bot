@@ -1,83 +1,83 @@
 {
-    "log_path": "C:\\Users\\giaco\\AppData\\LocalLow\\Wizards Of The Coast\\MTGA\\Player.log",
-    "screen_bounds": [
-        [
-            0,
-            0
-        ],
-        [
-            2560,
-            1440
-        ]
+  "log_path": "C:\\Users\\giaco\\AppData\\LocalLow\\Wizards Of The Coast\\MTGA\\Player.log",
+  "screen_bounds": [
+    [
+      0,
+      0
     ],
-    "click_targets": {
-        "keep_hand": {
-            "x": 1889,
-            "y": 1068
-        },
-        "queue_button": {
-            "x": 2494,
-            "y": 1200
-        },
-        "next": {
-            "x": 2537,
-            "y": 1141
-        },
-        "concede": {
-            "x": 1903,
-            "y": 1252
-        },
-        "attack_all": {
-            "x": 2519,
-            "y": 1139
-        },
-        "opponent_avatar": {
-            "x": 1716,
-            "y": 299
-        },
-        "assign_damage_done": {
-            "x": 1718,
-            "y": 1061
-        },
-        "hand_scan_points": {
-            "p1": {
-                "x": 994,
-                "y": 1255
-            },
-            "p2": {
-                "x": 2421,
-                "y": 1253
-            }
-        },
-        "log_out_btn": {
-            "x": 903,
-            "y": 651
-        },
-        "logout_ok_btn": {
-            "x": 1878,
-            "y": 809
-        },
-        "log_out_ok_btn": {
-            "x": 1097,
-            "y": 609
-        },
-        "log_out_focus": {
-            "x": 806,
-            "y": 953
-        }
+    [
+      2560,
+      1440
+    ]
+  ],
+  "click_targets": {
+    "keep_hand": {
+      "x": 1889,
+      "y": 1068
     },
-    "input_backend": "auto",
-    "account_switch_minutes": 5,
-    "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
-    "account_cycle_index": 1,
-    "account_play_order": [
-        "Ayaylll",
-        "TEUBAT",
-        "Affinity2004"
-    ],
-    "managed_accounts": [],
-    "ui_windows_topmost": true,
-    "ui_scale_percent": 80,
-    "first_run_prereq_ack": true,
-    "first_run_prereq_ack_version": 1
+    "queue_button": {
+      "x": 2494,
+      "y": 1200
+    },
+    "next": {
+      "x": 2537,
+      "y": 1141
+    },
+    "concede": {
+      "x": 1903,
+      "y": 1252
+    },
+    "attack_all": {
+      "x": 2519,
+      "y": 1139
+    },
+    "opponent_avatar": {
+      "x": 1716,
+      "y": 299
+    },
+    "assign_damage_done": {
+      "x": 1718,
+      "y": 1061
+    },
+    "hand_scan_points": {
+      "p1": {
+        "x": 994,
+        "y": 1255
+      },
+      "p2": {
+        "x": 2421,
+        "y": 1253
+      }
+    },
+    "log_out_btn": {
+      "x": 912,
+      "y": 657
+    },
+    "logout_ok_btn": {
+      "x": 1878,
+      "y": 809
+    },
+    "log_out_ok_btn": {
+      "x": 1106,
+      "y": 615
+    },
+    "log_out_focus": {
+      "x": 815,
+      "y": 959
+    }
+  },
+  "input_backend": "auto",
+  "account_switch_minutes": 5,
+  "credentials_path": "C:/Users/giaco/source/repos/MTG_AI_Bot-master/MTG_AI_Bot-master/credentials.txt",
+  "account_cycle_index": 1,
+  "account_play_order": [
+    "Ayaylll",
+    "TEUBAT",
+    "Affinity2004"
+  ],
+  "managed_accounts": [],
+  "ui_windows_topmost": true,
+  "ui_scale_percent": 80,
+  "first_run_prereq_ack": true,
+  "first_run_prereq_ack_version": 1
 }
