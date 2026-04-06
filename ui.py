@@ -4428,7 +4428,7 @@ class SwitchAccountWindow(tk.Toplevel):
         _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
 
         self._max_accounts = 10
-        self._order_slots = 5
+        self._order_slots = 10
 
         self._order_combos = []
         self._order_vars = []
@@ -4455,6 +4455,8 @@ class SwitchAccountWindow(tk.Toplevel):
         self._load_accounts_from_config()
         self._setup_styles()
         self._build_ui()
+        self._canvas.bind("<Delete>", lambda _e: self._clear_selected_account_row())
+        self._canvas.bind("<BackSpace>", lambda _e: self._clear_selected_account_row())
         self._load_manage_background_image()
         self.after(40, self._refresh_manage_background)
         self.after(160, self._refresh_manage_background)
@@ -4877,10 +4879,11 @@ class SwitchAccountWindow(tk.Toplevel):
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
             tag = f"acct_row_{idx}"
-            idx_item = cv.create_text(26, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw", tags=(tag,))
+            bg_item = cv.create_rectangle(22, y - 2, 438, y + 16, fill=c["row_bg"], outline=c["table_border"], tags=(tag,))
+            idx_item = cv.create_text(30, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw", tags=(tag,))
             name_item = cv.create_text(62, y, text="", fill=c["text"], font=("Segoe UI", 9, "bold"), anchor="nw", tags=(tag,))
             email_item = cv.create_text(208, y, text="", fill=c["text"], font=("Segoe UI", 9), anchor="nw", tags=(tag,))
-            self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item})
+            self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item, "bg": bg_item})
             self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, row_idx=idx: self._select_account_row(row_idx))
             self._canvas.tag_bind(tag, "<Enter>", lambda _e: self._canvas.configure(cursor="hand2"))
             self._canvas.tag_bind(tag, "<Leave>", lambda _e: self._canvas.configure(cursor=""))
@@ -4905,42 +4908,61 @@ class SwitchAccountWindow(tk.Toplevel):
             text="Save Row",
             x=26,
             y=498,
-            body_w=140,
-            body_h=34,
+            body_w=104,
+            body_h=30,
             command=self._save_selected_account,
             primary=True,
         )
 
         self._create_manage_canvas_button(
+            name="delete_row",
+            text="Delete Row",
+            x=134,
+            y=498,
+            body_w=104,
+            body_h=30,
+            command=self._clear_selected_account_row,
+            primary=False,
+        )
+
+        self._create_manage_canvas_button(
             name="save_accounts",
             text="Save Accounts",
-            x=214,
+            x=244,
             y=498,
-            body_w=160,
-            body_h=34,
+            body_w=158,
+            body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
         cv.create_text(26, 570, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
+        cv.create_line(22, 587, 438, 587, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
+        # Two columns: slots 1–5 (left) and 6–10 (right)
+        col_x = [(30, 48), (238, 256)]
         for idx in range(self._order_slots):
-            y = 592 + idx * 24
-            cv.create_text(218, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+            col = idx // 5
+            row = idx % 5
+            lx, cx = col_x[col]
+            y = 594 + row * 24
+            cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
                 self,
                 textvariable=var,
                 values=[],
                 state="readonly",
-                width=15,
+                width=11,
             )
             combo.configure(style="ManageFire.TCombobox")
-            cv.create_window(238, y - 2, anchor="nw", window=combo)
+            cv.create_window(cx, y - 2, anchor="nw", window=combo)
             self._order_vars.append(var)
             self._order_combos.append(combo)
+        # vertical divider between columns
+        cv.create_line(230, 590, 230, 716, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
@@ -4974,11 +4996,16 @@ class SwitchAccountWindow(tk.Toplevel):
         for idx, row_widgets in enumerate(self._table_rows):
             account = self._accounts_data[idx]
             selected = idx == self._selected_account_idx
+            bg_fill = c["row_selected_bg"] if selected else c["row_bg"]
+            bg_outline = c["accent"] if selected else c["table_border"]
+            self._canvas.itemconfigure(row_widgets["bg"], fill=bg_fill, outline=bg_outline)
             self._canvas.itemconfigure(row_widgets["idx"], fill=c["accent"] if selected else c["text_muted"])
-            name_fg = c["accent"] if selected else c["text"]
-            email_fg = c["accent"] if selected else c["text"]
-            self._canvas.itemconfigure(row_widgets["name"], fill=name_fg, text=self._truncate_text(account["name"], 14))
-            self._canvas.itemconfigure(row_widgets["email"], fill=email_fg, text=self._truncate_text(account["email"], 22))
+            name_fg = c["accent"] if selected else (c["text"] if account["name"] else c["text_muted"])
+            email_fg = c["accent"] if selected else (c["text"] if account["email"] else c["text_muted"])
+            name_text = self._truncate_text(account["name"], 14) if account["name"] else "click to edit"
+            self._canvas.itemconfigure(row_widgets["name"], fill=name_fg, text=name_text)
+            email_text = self._truncate_text(account["email"], 22) if account["email"] else ""
+            self._canvas.itemconfigure(row_widgets["email"], fill=email_fg, text=email_text)
 
     def _populate_details_fields(self):
         account = self._accounts_data[self._selected_account_idx]
@@ -5015,13 +5042,29 @@ class SwitchAccountWindow(tk.Toplevel):
         self._populate_details_fields()
         self._refresh_accounts_table()
         self._refresh_order_choices()
+        self._canvas.focus_set()
+
+    def _clear_selected_account_row(self):
+        row = self._accounts_data[self._selected_account_idx]
+        row["name"] = ""
+        row["email"] = ""
+        row["pw"] = ""
+        row["folder"] = ""
+        self.account_name_var.set("")
+        self.account_email_var.set("")
+        self.account_pw_var.set("")
+        self._refresh_accounts_table()
+        self._refresh_order_choices()
+        self.lift()
+        self.focus_force()
 
     def _save_selected_account(self):
         if not self._apply_details_to_selected(validate=True, show_error=True):
             return
         self._refresh_accounts_table()
         self._refresh_order_choices()
-        messagebox.showinfo("Saved", f"Account row {self._selected_account_idx + 1} updated.")
+        self.lift()
+        self.focus_force()
 
     def _collect_accounts_for_save(self):
         accounts = []
@@ -5102,7 +5145,8 @@ class SwitchAccountWindow(tk.Toplevel):
 
         self._refresh_order_choices()
         self._refresh_accounts_table()
-        messagebox.showinfo("Saved", f"Saved {len(saved_accounts)} account(s).")
+        self.lift()
+        self.focus_force()
 
     def _save_account_play_order(self):
         self._refresh_order_choices()
@@ -5117,7 +5161,8 @@ class SwitchAccountWindow(tk.Toplevel):
                 parent._controller.set_account_cycle_index(0)
             except Exception:
                 pass
-        messagebox.showinfo("Saved", "Account play order saved.")
+        self.lift()
+        self.focus_force()
 
     def destroy(self):
         callback = getattr(self, "_on_close_callback", None)
