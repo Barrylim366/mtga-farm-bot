@@ -19,10 +19,8 @@ __pycache__/
 *.log
 runtime/
 
-# Keep folders, ignore their contents
-Buttons/*
+# Accounts are user-specific — keep folder structure but ignore contents
 Accounts/*
-!Buttons/.gitkeep
 !Accounts/.gitkeep
 
 # IDE and local tooling

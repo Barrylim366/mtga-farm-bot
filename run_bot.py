@@ -1,6 +1,7 @@
 from Controller.MTGAController.Controller import Controller
 from AI.DummyAI import DummyAI
 from Game import Game
+import json
 import time
 import os
 import pathlib
@@ -85,44 +86,39 @@ def main():
         )
         return
     
-    click_targets = {
-        "keep_hand": {
-            "x": 1876,
-            "y": 1060
-        },
-        "queue_button": {
-            "x": 2485,
-            "y": 1194
-        },
-        "next": {
-            "x": 2546,
-            "y": 1137
-        },
-        "concede": {
-            "x": 962,
-            "y": 631
-        },
-        "attack_all": {
-            "x": 2529,
-            "y": 1131
-        },
-        "opponent_avatar": {
-            "x": 1720,
-            "y": 295
-        },
-        "hand_scan_points": {
-            "p1": {
-                "x": 994,
-                "y": 1255
-            },
-            "p2": {
-                "x": 2421,
-                "y": 1253
-            }
-        }
-    }
+    # Prefer a calibrated config written by the UI (runtime/config/calibration_config.json).
+    # Fall back to 1920-relative defaults that match ui.ConfigManager._default_config()
+    # so run_bot.py works out of the box on a fresh checkout.
+    click_targets: dict = {}
+    try:
+        from runtime_paths import runtime_file  # type: ignore
+        cfg_path = runtime_file("config", "calibration_config.json")
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            loaded_targets = cfg.get("click_targets")
+            if isinstance(loaded_targets, dict):
+                click_targets = loaded_targets
+    except Exception:
+        click_targets = {}
 
-    # Windows branch assumes MTGA is running windowed at 1920x1080 with 100% display scaling.
+    if not click_targets:
+        click_targets = {
+            "keep_hand": {"x": 1407, "y": 795},
+            "queue_button": {"x": 1864, "y": 896},
+            "next": {"x": 1909, "y": 853},
+            "concede": {"x": 1286, "y": 611},
+            "attack_all": {"x": 1897, "y": 848},
+            "opponent_avatar": {"x": 1290, "y": 221},
+            "assign_damage_done": {"x": 960, "y": 540},
+            "hand_scan_points": {
+                "p1": {"x": 746, "y": 941},
+                "p2": {"x": 1816, "y": 940},
+            },
+        }
+
+    # MTGA must run windowed at 1920x1080 with 100% display scaling.
+    # Monitor resolution can be anything; the bot maps into the MTGA window.
     screen_bounds = ((0, 0), (1920, 1080))
 
     try:

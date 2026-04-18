@@ -1474,8 +1474,17 @@ class ConfigManager:
                         pass
                 return config
             except (json.JSONDecodeError, IOError):
-                return self._default_config()
-        return self._default_config()
+                pass
+        # First run (or unreadable file): persist defaults so Controller-side
+        # loaders also see a complete 1920-relative calibration out of the box.
+        config = self._default_config()
+        try:
+            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+            with open(self.config_path, "w") as f:
+                json.dump(config, f, indent=4)
+        except (IOError, OSError):
+            pass
+        return config
 
     def _default_config(self):
         detected_log = self._detect_player_log_path()
