@@ -103,17 +103,18 @@ def main():
         click_targets = {}
 
     if not click_targets:
+        # Match Controller.py internal fallbacks (1920-relative).
         click_targets = {
-            "keep_hand": {"x": 1407, "y": 795},
-            "queue_button": {"x": 1864, "y": 896},
-            "next": {"x": 1909, "y": 853},
-            "concede": {"x": 1286, "y": 611},
-            "attack_all": {"x": 1897, "y": 848},
-            "opponent_avatar": {"x": 1290, "y": 221},
-            "assign_damage_done": {"x": 960, "y": 540},
+            "keep_hand": {"x": 1101, "y": 870},
+            "queue_button": {"x": 1699, "y": 996},
+            "next": {"x": 1755, "y": 944},
+            "concede": {"x": 962, "y": 631},
+            "attack_all": {"x": 1755, "y": 944},
+            "opponent_avatar": {"x": 1286, "y": 216},
+            "assign_damage_done": {"x": 1280, "y": 720},
             "hand_scan_points": {
-                "p1": {"x": 746, "y": 941},
-                "p2": {"x": 1816, "y": 940},
+                "p1": {"x": 0, "y": 1050},
+                "p2": {"x": 1920, "y": 1050},
             },
         }
 
