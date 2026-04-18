@@ -10,6 +10,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Ensure the repo root is importable when launched as a subprocess with
+# sys.path[0] == tools/, so `runtime_paths` at the repo root is reachable.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from runtime_paths import ensure_runtime_subdir
 
 # Default locations and file names
