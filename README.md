@@ -1,10 +1,11 @@
 # Burning Lotus Bot
+<img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
 
 Automated MTGA bot with UI, calibration, account switching, and quest-based deck selection.
 
 ## Requirements
 
-- macOS 12+ or Windows 10/11
+- macOS 12+, Windows 10/11 or Linux (tested on Debian and CachyOS so far)
 - Python 3.10+
 - MTG Arena installed (Steam)
 - Python packages:
