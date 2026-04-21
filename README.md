@@ -2,7 +2,7 @@
 <img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
 
 ## Download / Support
-[elitepvpers Thread]([https://www.elitepvpers.com/DEIN-THREAD-LINK](https://www.elitepvpers.com/forum/newthread.php?do=newthread&f=225))
+[elitepvpers Thread](https://www.elitepvpers.com/DEIN-THREAD-LINK](https://www.elitepvpers.com/forum/newthread.php?do=newthread&f=225)
 
 Automated MTGA bot with UI, calibration, account switching, and quest-based deck selection.
 
