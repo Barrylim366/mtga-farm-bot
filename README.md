@@ -11,7 +11,10 @@ Automated MTGA bot with UI, calibration, account switching, and quest-based deck
 - **OS**: Windows 10/11, macOS 12+, or Linux (X11 or Wayland; tested on Debian and CachyOS)
 - Python 3.10+
 - MTG Arena installed (Windows: Steam / Wizards installer. macOS: Crossover or compatible. Linux: Wine/Proton via Steam or Lutris.)
-- Python packages are installed automatically by the launcher scripts; the raw list lives in `requirements.txt` (`pyautogui`, `pynput`, `numpy`, `Pillow`, `opencv-python`, `mss`).
+- The launcher scripts install the Python packages from `requirements.txt` automatically (`pyautogui`, `pynput`, `numpy`, `Pillow`, `opencv-python`, `mss`).
+- OS-/Python-level components are still your responsibility:
+  - macOS: a Python build with Tk support (`tkinter`), or Homebrew `python-tk@<python-version>`
+  - Linux: `tkinter` plus the window-detection / screenshot tools listed below
 
 MTGA in-game settings (required for all platforms):
 
@@ -30,7 +33,7 @@ Input backend:
 
 ## Quick Start
 
-The fastest path on each platform is the provided one-click launcher. It creates a local virtual environment, installs the Python packages from `requirements.txt`, and starts the UI.
+The fastest path on each platform is the provided launcher. It creates a local virtual environment, installs the Python packages from `requirements.txt`, and starts the UI once the required OS-/Python-level dependencies are already present.
 
 ### Windows
 
@@ -41,11 +44,15 @@ The script creates `.venv` and installs dependencies on first run.
 
 ### macOS
 
-1. Install Python 3.10+ (from python.org or `brew install python@3.12`).
+1. Install Python 3.10+.
+   - Recommended: python.org installer (ships with Tk for the UI).
+   - Homebrew also works, but Tk is separate there. Example for Homebrew Python 3.14:
+     `brew install python@3.14 python-tk@3.14`
 2. Double-click `start_ui.command` (or run `./start_ui.command` in Terminal).
 3. macOS permission prompts — grant both to the **Terminal** app you launched from **and** to the Python binary inside `.venv-macos`:
    - `System Settings -> Privacy & Security -> Accessibility` (input control)
    - `System Settings -> Privacy & Security -> Screen Recording` (image matching)
+4. If you switch to a different Python build after the first launch, delete `.venv-macos` once and run the launcher again so the virtual environment is recreated from the working interpreter.
 
 ### Linux
 
@@ -68,7 +75,7 @@ The script creates `.venv` and installs dependencies on first run.
    ./start_ui.sh
    ```
 
-   On first run the script creates `.venv`, installs Python dependencies, and starts the UI.
+  On first run the script creates `.venv`, installs Python dependencies, and starts the UI once the listed Linux packages are installed.
 
 3. MTGA must run through Wine/Proton (via Steam or Lutris). Under Wayland this goes through XWayland automatically, which is what the detection layer expects.
 
@@ -119,7 +126,7 @@ The main window now uses a ttk-based dark theme with centralized design tokens i
 - **Calibrate** now lives inside **Settings**
 - Calibrate uses a background-scene layout like Settings/Record Actions (no large dark outer frame), keeps glow-style action buttons, and opens to the right of Settings with ~0.4 cm gap
 - Calibrate follows a split `Capture` / `Verify` scene layout with a vertical divider, `Last Captured` coordinate card, dedicated `Status` card, and footer action row (`Saved Buttons`, `Back`)
-- Calibrate remains a fallback path for manual coordinate capture when the out-of-the-box arena detection/verification path is not enough
+- Calibrate remains a fallback path for manual coordinate capture when the automatic arena detection/verification path is not enough
 - Current Session window was restyled to the same fire/main theme (background image, unified panel colors, styled Back button) and now opens aligned below the main window
 - Current Session no longer uses a large dark container frame; stats and Back are rendered directly on the background scene, and the dark box-frame around Back was removed
 - Current Session stats are now grouped inside a bordered feature-card (`#320a02` fill, `#ff9318` border) with title/body typography aligned to the provided feature-box style
@@ -193,7 +200,7 @@ On first launch, the UI asks you to confirm these required settings:
 - `Options -> Video -> Resolution`: **1920 x 1080**
 - OS display scaling: **100%**
 
-The bot now runs in an out-of-the-box mode using:
+Once the platform prerequisites are installed, the bot can run without manual coordinate calibration using:
 
 - **Player.log as primary state source** (`Log = State`)
 - **Vision checks only as verification gates** (`Vision = Verify`)
