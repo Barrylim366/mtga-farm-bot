@@ -261,11 +261,13 @@ class Controller(ControllerSecondary):
         self.__last_target_select_source_id = None
         self.__last_target_select_ts = 0.0
         self.__pending_target_select = None
+        self.__target_select_token_counter = 0
         self.__last_submit_targets_ts = 0.0
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
         self.__last_submit_selection_ts = 0.0
+        self.__submit_selection_lock = threading.Lock()
         self.__select_n_token_counter = 0
         self.__select_n_stack_wait_timeout_sec = 8.0
         self.__target_submit_cooldown_sec = 1.0
@@ -2765,54 +2767,60 @@ class Controller(ControllerSecondary):
         return False
 
     def submit_selection(self, *, reason: str = "unknown", force: bool = False) -> bool:
-        if not force and not self.__selection_submit_allowed():
-            bot_logger.log_info(f"SubmitSelection skipped (not active). reason={reason}")
+        if not self.__submit_selection_lock.acquire(blocking=False):
+            bot_logger.log_info(f"SubmitSelection skipped (already running). reason={reason}")
             return False
-        submit_img = os.path.join(self._buttons_dir(), "submit_btn.png")
-        okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
-        if os.path.exists(submit_img):
-            if self._click_image_in_scaled_arena_region(
-                submit_img,
-                "SUBMIT_SELECTION_IMG",
-                rel_region=(1320, 720, 600, 320),
-                confidence=0.82,
-                timeout=1.5,
-            ) or self._click_image(submit_img, "SUBMIT_SELECTION_IMG", confidence=0.82, timeout=1.5):
-                self.__last_submit_selection_ts = time.time()
-                return True
-            # submit_btn not on screen — try okay_btn as fallback (e.g. combat confirm)
-            if os.path.exists(okay_img):
+        try:
+            if not force and not self.__selection_submit_allowed():
+                bot_logger.log_info(f"SubmitSelection skipped (not active). reason={reason}")
+                return False
+            submit_img = os.path.join(self._buttons_dir(), "submit_btn.png")
+            okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
+            if os.path.exists(submit_img):
                 if self._click_image_in_scaled_arena_region(
-                    okay_img,
-                    "SUBMIT_OKAY_FALLBACK_IMG",
+                    submit_img,
+                    "SUBMIT_SELECTION_IMG",
                     rel_region=(1320, 720, 600, 320),
                     confidence=0.82,
                     timeout=1.5,
-                ) or self._click_image(okay_img, "SUBMIT_OKAY_FALLBACK_IMG", confidence=0.82, timeout=1.5):
-                    bot_logger.log_info("SUBMIT_SELECTION: submit_btn not found, clicked okay_btn as fallback")
+                ) or self._click_image(submit_img, "SUBMIT_SELECTION_IMG", confidence=0.82, timeout=1.5):
                     self.__last_submit_selection_ts = time.time()
                     return True
-            return False
-        target, source = self._map_abs_point_to_arena(
-            self.main_br_button_coordinates,
-            label="SUBMIT_SELECTION",
-            force_reacquire=True,
-            apply_correction=False,
-        )
-        bot_logger.log_info(
-            f"SUBMIT_SELECTION target: source={source} arena={self._arena_region} raw={self.main_br_button_coordinates} mapped={target}"
-        )
-        if source == "absolute_no_arena":
-            bot_logger.log_error(
-                f"SUBMIT_SELECTION aborted: arena_region unavailable, refusing absolute desktop click. reason={reason}"
+                # submit_btn not on screen — try okay_btn as fallback (e.g. combat confirm)
+                if os.path.exists(okay_img):
+                    if self._click_image_in_scaled_arena_region(
+                        okay_img,
+                        "SUBMIT_OKAY_FALLBACK_IMG",
+                        rel_region=(1320, 720, 600, 320),
+                        confidence=0.82,
+                        timeout=1.5,
+                    ) or self._click_image(okay_img, "SUBMIT_OKAY_FALLBACK_IMG", confidence=0.82, timeout=1.5):
+                        bot_logger.log_info("SUBMIT_SELECTION: submit_btn not found, clicked okay_btn as fallback")
+                        self.__last_submit_selection_ts = time.time()
+                        return True
+                return False
+            target, source = self._map_abs_point_to_arena(
+                self.main_br_button_coordinates,
+                label="SUBMIT_SELECTION",
+                force_reacquire=True,
+                apply_correction=False,
             )
-            return False
-        bot_logger.log_click(target[0], target[1], "SUBMIT_SELECTION")
-        self.input.move_abs(target[0], target[1])
-        time.sleep(0.1)
-        self.input.left_click(1)
-        self.__last_submit_selection_ts = time.time()
-        return True
+            bot_logger.log_info(
+                f"SUBMIT_SELECTION target: source={source} arena={self._arena_region} raw={self.main_br_button_coordinates} mapped={target}"
+            )
+            if source == "absolute_no_arena":
+                bot_logger.log_error(
+                    f"SUBMIT_SELECTION aborted: arena_region unavailable, refusing absolute desktop click. reason={reason}"
+                )
+                return False
+            bot_logger.log_click(target[0], target[1], "SUBMIT_SELECTION")
+            self.input.move_abs(target[0], target[1])
+            time.sleep(0.1)
+            self.input.left_click(1)
+            self.__last_submit_selection_ts = time.time()
+            return True
+        finally:
+            self.__submit_selection_lock.release()
 
     def resolve(self) -> None:
         if self.__should_pause_for_assign_damage():
@@ -5182,7 +5190,14 @@ class Controller(ControllerSecondary):
             source_id = -1
         pending = self.__pending_target_select or {}
         if pending.get("source_id") != source_id:
-            pending = {"source_id": source_id}
+            self.__target_select_token_counter += 1
+            pending = {
+                "source_id": source_id,
+                "token": self.__target_select_token_counter,
+            }
+        elif "token" not in pending:
+            self.__target_select_token_counter += 1
+            pending["token"] = self.__target_select_token_counter
         pending["ts"] = time.time()
         if min_t is not _TARGET_FIELD_UNSET:
             pending["min"] = min_t
@@ -5339,19 +5354,33 @@ class Controller(ControllerSecondary):
         self.__last_target_select_source_id = source_id
         self.__last_target_select_ts = now
         self.__update_pending_target_select(source_id)
+        selection_token = (self.__pending_target_select or {}).get("token")
         bot_logger.log_info(f"{reason}: targeting opponent avatar")
 
+        def _target_selection_still_valid() -> bool:
+            if self._suppress_selections or self._stop_requested:
+                return False
+            pending = self.__pending_target_select or {}
+            return pending.get("source_id") == source_id and pending.get("token") == selection_token
+
+        def _submit_if_still_valid() -> None:
+            if not _target_selection_still_valid():
+                return
+            self.submit_selection(reason="target_selection_submit")
+
         def _attempt_submit():
+            if not _target_selection_still_valid():
+                return False
             if self.__pending_target_ready_to_submit():
                 self.__last_submit_targets_ts = time.time()
-                threading.Timer(0.3, self.submit_selection).start()
+                threading.Timer(0.3, _submit_if_still_valid).start()
                 return True
             return False
 
         retry_budget_sec = 10.0
 
         def _retry_if_needed():
-            if self._suppress_selections or self._stop_requested:
+            if not _target_selection_still_valid():
                 return
             pending = self.__pending_target_select
             if not pending:
@@ -5398,7 +5427,7 @@ class Controller(ControllerSecondary):
             threading.Timer(0.7, _retry_if_needed).start()
 
         def _do_click():
-            if self._suppress_selections or self._stop_requested:
+            if not _target_selection_still_valid():
                 return
             if _attempt_submit():
                 return
@@ -5617,8 +5646,16 @@ class Controller(ControllerSecondary):
                         max_t=max_t,
                         selected=selected,
                     )
+                    pending_token = (self.__pending_target_select or {}).get("token")
                     if self.__pending_target_ready_to_submit():
-                        threading.Timer(0.2, self.submit_selection).start()
+                        def _submit_if_pending_target_still_matches() -> None:
+                            pending = self.__pending_target_select or {}
+                            if (
+                                pending.get("source_id") == (req.get("sourceId") if req.get("sourceId") is not None else -1)
+                                and pending.get("token") == pending_token
+                            ):
+                                self.submit_selection(reason="target_selection_ready")
+                        threading.Timer(0.2, _submit_if_pending_target_still_matches).start()
                 source_id = message.get("selectTargetsReq", {}).get("sourceId")
                 self.__schedule_target_selection(source_id, reason="SelectTargetsReq (from game state)")
                 return
@@ -5626,6 +5663,18 @@ class Controller(ControllerSecondary):
                 if message.get("type") != "GREMessageType_GameStateMessage":
                     continue
                 annotations = message.get("gameStateMessage", {}).get("annotations", []) or []
+                for annotation in annotations:
+                    types = annotation.get("type", []) or []
+                    if "AnnotationType_PlayerSubmittedTargets" not in types:
+                        continue
+                    affector_id = annotation.get("affectorId")
+                    if affector_id is not None and affector_id != self.__system_seat_id:
+                        continue
+                    self.__last_submit_targets_ts = time.time()
+                    self.__clear_pending_target_select_state(
+                        "Target selection cleared: PlayerSubmittedTargets annotation received."
+                    )
+                    return
                 for annotation in annotations:
                     types = annotation.get("type", []) or []
                     if "AnnotationType_PlayerSelectingTargets" not in types:
