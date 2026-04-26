@@ -1272,72 +1272,30 @@ class Controller(ControllerSecondary):
         )
         return p1, p2
 
-    def _click_image(
-        self,
-        image_path: str,
-        label: str,
-        confidence: float = 0.82,
-        timeout: float = 20.0,
-        region: tuple[int, int, int, int] | None = None,
-    ) -> bool:
-        try:
-            import pyautogui
-        except Exception as e:
-            bot_logger.log_error(f"{label}: pyautogui not available: {e}")
-            return False
-
-        if not os.path.exists(image_path):
-            bot_logger.log_error(f"{label}: image not found at {image_path}")
-            return False
-
-        start = time.time()
+    @staticmethod
+    def _normalize_search_region(
+        region: tuple[int, int, int, int] | None,
+    ) -> tuple[tuple[int, int, int, int] | None, str]:
         region_info = ""
-        if region is not None:
-            try:
-                region = (
-                    int(region[0]),
-                    int(region[1]),
-                    max(1, int(region[2])),
-                    max(1, int(region[3])),
-                )
-                region_info = f", region={region}"
-            except Exception:
-                region = None
-        bot_logger.log_info(
-            f"{label}: searching image with confidence={confidence:.2f}, timeout={timeout:.1f}s{region_info}."
-        )
-        while (time.time() - start) < timeout:
-            if self._stop_requested:
-                bot_logger.log_info(f"{label}: search aborted (stop requested).")
-                return False
-            try:
-                if region is not None:
-                    pos = pyautogui.locateCenterOnScreen(image_path, confidence=confidence, region=region)
-                else:
-                    pos = pyautogui.locateCenterOnScreen(image_path, confidence=confidence)
-            except Exception:
-                pos = None
-            if pos:
-                x, y = int(pos.x), int(pos.y)
-                bot_logger.log_click(x, y, label)
-                runtime_status.touch_input(label, (x, y))
-                self.input.move_abs(x, y)
-                time.sleep(0.1)
-                self.input.left_down()
-                time.sleep(0.06)
-                self.input.left_up()
-                return True
-            time.sleep(0.5)
-            if int((time.time() - start) * 10) % 20 == 0:
-                elapsed = time.time() - start
-                bot_logger.log_info(f"{label}: still searching ({elapsed:.1f}s elapsed).")
-        bot_logger.log_error(f"{label}: image not found within {timeout:.1f}s")
-        return False
+        if region is None:
+            return None, region_info
+        try:
+            normalized = (
+                int(region[0]),
+                int(region[1]),
+                max(1, int(region[2])),
+                max(1, int(region[3])),
+            )
+            region_info = f", region={normalized}"
+            return normalized, region_info
+        except Exception:
+            return None, ""
 
-    def _locate_image_center(
+    def _locate_image_center_direct(
         self,
         image_path: str,
         label: str,
+        *,
         confidence: float = 0.82,
         timeout: float = 20.0,
         region: tuple[int, int, int, int] | None = None,
@@ -1353,18 +1311,7 @@ class Controller(ControllerSecondary):
             return None
 
         start = time.time()
-        region_info = ""
-        if region is not None:
-            try:
-                region = (
-                    int(region[0]),
-                    int(region[1]),
-                    max(1, int(region[2])),
-                    max(1, int(region[3])),
-                )
-                region_info = f", region={region}"
-            except Exception:
-                region = None
+        region, region_info = self._normalize_search_region(region)
         bot_logger.log_info(
             f"{label}: locating image with confidence={confidence:.2f}, timeout={timeout:.1f}s{region_info}."
         )
@@ -1385,6 +1332,72 @@ class Controller(ControllerSecondary):
             if int((time.time() - start) * 10) % 20 == 0:
                 elapsed = time.time() - start
                 bot_logger.log_info(f"{label}: still locating ({elapsed:.1f}s elapsed).")
+        return None
+
+    def _click_image(
+        self,
+        image_path: str,
+        label: str,
+        confidence: float = 0.82,
+        timeout: float = 20.0,
+        region: tuple[int, int, int, int] | None = None,
+    ) -> bool:
+        point = self._locate_image_center(
+            image_path,
+            label,
+            confidence=confidence,
+            timeout=timeout,
+            region=region,
+        )
+        if point is not None:
+            self._click_abs(point[0], point[1], label)
+            return True
+        bot_logger.log_error(f"{label}: image not found within {timeout:.1f}s")
+        return False
+
+    def _locate_image_center(
+        self,
+        image_path: str,
+        label: str,
+        confidence: float = 0.82,
+        timeout: float = 20.0,
+        region: tuple[int, int, int, int] | None = None,
+    ) -> tuple[int, int] | None:
+        if not os.path.exists(image_path):
+            bot_logger.log_error(f"{label}: image not found at {image_path}")
+            return None
+        region, _region_info = self._normalize_search_region(region)
+        direct_point = self._locate_image_center_direct(
+            image_path,
+            label,
+            confidence=confidence,
+            timeout=min(timeout, 1.5 if region is None else timeout),
+            region=region,
+        )
+        if direct_point is not None:
+            return direct_point
+        if region is not None:
+            point = self._locate_image_center_in_rescaled_region(
+                image_path,
+                f"{label}_RESCALED",
+                region=region,
+                normalized_size=(int(region[2]), int(region[3])),
+                confidence=confidence,
+                timeout=timeout,
+            )
+            if point is not None:
+                return point
+        else:
+            point = self._locate_image_center_in_scaled_arena_region(
+                image_path,
+                label,
+                rel_region=None,
+                confidence=confidence,
+                timeout=timeout,
+                use_direct=False,
+            )
+            if point is not None:
+                return point
         bot_logger.log_error(f"{label}: image not found within {timeout:.1f}s")
         return None
 
@@ -1455,6 +1468,7 @@ class Controller(ControllerSecondary):
         rel_region: tuple[int, int, int, int] | None = None,
         confidence: float = 0.82,
         timeout: float = 1.5,
+        use_direct: bool = True,
     ) -> tuple[int, int] | None:
         arena = self._get_ui_action_arena_region(force_reacquire=True, label=label)
         if arena is None:
@@ -1465,15 +1479,16 @@ class Controller(ControllerSecondary):
         else:
             region = self._scale_base_region_to_arena(arena, rel_region)
             normalized_size = (int(rel_region[2]), int(rel_region[3]))
-        point = self._locate_image_center(
-            image_path,
-            f"{label}_LOCATE",
-            confidence=confidence,
-            timeout=min(timeout, 1.0),
-            region=region,
-        )
-        if point is not None:
-            return point
+        if use_direct:
+            point = self._locate_image_center_direct(
+                image_path,
+                f"{label}_LOCATE",
+                confidence=confidence,
+                timeout=min(timeout, 1.0),
+                region=region,
+            )
+            if point is not None:
+                return point
         return self._locate_image_center_in_rescaled_region(
             image_path,
             f"{label}_RESCALED",
