@@ -43,6 +43,7 @@ class VisionEngine:
         self._mss_instance = None
         self._mss_failed = False
         self._linux_tool_cmd: list[str] | None = None
+        self._logical_screen_size: tuple[int, int] | None = None
 
     def begin_tick(self) -> None:
         self._tick_id += 1
@@ -171,9 +172,9 @@ class VisionEngine:
                 raw = self._mss_instance.grab(monitor)
                 arr = np.array(raw, dtype=np.uint8)
                 if arr.ndim == 3 and arr.shape[2] == 4:
-                    return arr[:, :, :3].copy()
+                    return self._normalize_frame_to_logical_size(arr[:, :, :3].copy())
                 if arr.ndim == 3 and arr.shape[2] == 3:
-                    return cvt_rgb_to_bgr(arr)
+                    return self._normalize_frame_to_logical_size(cvt_rgb_to_bgr(arr))
             except Exception:
                 self._mss_failed = True
                 try:
@@ -191,11 +192,37 @@ class VisionEngine:
         if pyautogui is not None:
             try:
                 shot = pyautogui.screenshot()
-                return cvt_rgb_to_bgr(np.array(shot))
+                return self._normalize_frame_to_logical_size(cvt_rgb_to_bgr(np.array(shot)))
             except Exception:
                 if not self._pyautogui_warned:
                     self._pyautogui_warned = True
         return None
+
+    def _normalize_frame_to_logical_size(self, frame: np.ndarray) -> np.ndarray:
+        if frame is None or frame.size == 0 or cv2 is None or sys.platform != "darwin" or pyautogui is None:
+            return frame
+        logical = self._logical_screen_size
+        if logical is None:
+            try:
+                size = pyautogui.size()
+                logical = (int(size.width), int(size.height))
+                if logical[0] > 0 and logical[1] > 0:
+                    self._logical_screen_size = logical
+            except Exception:
+                logical = None
+        if not logical:
+            return frame
+        target_w, target_h = logical
+        actual_h, actual_w = frame.shape[:2]
+        if target_w <= 0 or target_h <= 0 or actual_w <= 0 or actual_h <= 0:
+            return frame
+        ratio_x = float(actual_w) / float(target_w)
+        ratio_y = float(actual_h) / float(target_h)
+        if ratio_x < 1.2 or ratio_y < 1.2:
+            return frame
+        if abs(ratio_x - ratio_y) > 0.15:
+            return frame
+        return cv2.resize(frame, (int(target_w), int(target_h)), interpolation=cv2.INTER_AREA)
 
     def _grab_via_linux_tool(self) -> np.ndarray | None:
         import shutil

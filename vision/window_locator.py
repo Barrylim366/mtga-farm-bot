@@ -53,6 +53,18 @@ _ANCHOR_SPECS: tuple[dict[str, Any], ...] = (
     {"name": "attack_all.png", "roi": (1120, 700, 760, 320), "threshold": 0.80},
 )
 
+_COMMON_16_9_SIZES: tuple[tuple[int, int], ...] = (
+    (1024, 576),
+    (1152, 648),
+    (1280, 720),
+    (1360, 765),
+    (1440, 810),
+    (1600, 900),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+)
+
 
 class ArenaRegionProvider:
     def __init__(
@@ -146,7 +158,7 @@ class ArenaRegionProvider:
                 ok=False,
                 region=None,
                 code="window_not_found",
-                message="MTGA window not found. Open MTGA in a visible windowed 1920x1080 window.",
+                message="MTGA window not found. Open MTGA in a visible windowed 16:9 window.",
                 diagnostics=diagnostics,
             )
 
@@ -159,15 +171,12 @@ class ArenaRegionProvider:
             "score": float(selected.get("score", 0.0)),
         }
 
-        if not self._size_is_close(rect.w, rect.h, tolerance=8):
+        if not self._is_supported_arena_size(rect.w, rect.h):
             return ArenaDetectionResult(
                 ok=False,
                 region=region,
                 code="window_wrong_size",
-                message=(
-                    f"MTGA client area found at {rect.w}x{rect.h}. "
-                    f"Set Arena to windowed {self._expected_size[0]}x{self._expected_size[1]}."
-                ),
+                message=self._window_size_message(rect.w, rect.h, screen_size=(rect.w, rect.h)),
                 diagnostics=diagnostics,
             )
 
@@ -179,7 +188,7 @@ class ArenaRegionProvider:
                 region=region,
                 code="anchor_not_found",
                 message=(
-                    "MTGA window found at 1920x1080, but no known UI anchors matched. "
+                    f"MTGA window found at {rect.w}x{rect.h}, but no known UI anchors matched. "
                     "Open a supported Arena screen such as Home, Play, Decks, Store, Options, or an in-game board."
                 ),
                 diagnostics=diagnostics,
@@ -309,7 +318,7 @@ class ArenaRegionProvider:
         for ox, oy in candidate_origins:
             if ox < 0 or oy < 0:
                 continue
-            region = (int(ox), int(oy), ew, eh)
+            region = (int(ox), int(oy), int(rect.w), int(rect.h))
             matched_anchor, checks = self._verify_region_with_any_anchor(region)
             verify_checks.append({"origin": [int(ox), int(oy)], "matched_anchor": matched_anchor})
             if matched_anchor is not None:
@@ -325,16 +334,13 @@ class ArenaRegionProvider:
 
         diagnostics["verification"] = verify_checks
 
-        fallback_region = (int(rect.x), int(rect.y), ew, eh)
-        if abs(rect.w - ew) > 32 or abs(rect.h - eh) > 64:
+        fallback_region = (int(rect.x), int(rect.y), int(rect.w), int(rect.h))
+        if not self._is_supported_arena_size(rect.w, rect.h):
             return ArenaDetectionResult(
                 ok=False,
                 region=fallback_region,
                 code="window_wrong_size",
-                message=(
-                    f"MTGA window found at {rect.w}x{rect.h}. "
-                    f"Set Arena to windowed {ew}x{eh}."
-                ),
+                message=self._window_size_message(rect.w, rect.h, screen_size=(rect.w, rect.h)),
                 diagnostics=diagnostics,
             )
 
@@ -349,6 +355,127 @@ class ArenaRegionProvider:
             diagnostics=diagnostics,
         )
 
+    def _detect_macos_via_quartz(self) -> ArenaDetectionResult | None:
+        diagnostics: dict[str, Any] = {"platform": "macos", "method": "quartz"}
+        try:
+            import Quartz  # type: ignore
+        except Exception as exc:
+            diagnostics["error"] = f"quartz_import_failed: {exc}"
+            return ArenaDetectionResult(
+                ok=False,
+                region=None,
+                code="macos_quartz_unavailable",
+                message="macOS window enumeration is unavailable.",
+                diagnostics=diagnostics,
+            )
+
+        try:
+            windows = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly,
+                Quartz.kCGNullWindowID,
+            )
+        except Exception as exc:
+            diagnostics["error"] = f"quartz_enumeration_failed: {exc}"
+            return ArenaDetectionResult(
+                ok=False,
+                region=None,
+                code="macos_quartz_failed",
+                message=f"macOS window enumeration failed: {exc}",
+                diagnostics=diagnostics,
+            )
+
+        candidates: list[dict[str, Any]] = []
+        for item in windows or []:
+            try:
+                owner = str(item.get("kCGWindowOwnerName") or "")
+                title = str(item.get("kCGWindowName") or "")
+                name_blob = f"{owner} {title}".lower()
+                if "mtga" not in name_blob and "magic: the gathering arena" not in name_blob and "magic the gathering arena" not in name_blob:
+                    continue
+                bounds = item.get("kCGWindowBounds") or {}
+                window_rect = WindowRect(
+                    x=int(bounds.get("X") or 0),
+                    y=int(bounds.get("Y") or 0),
+                    w=int(bounds.get("Width") or 0),
+                    h=int(bounds.get("Height") or 0),
+                )
+                if window_rect.w < 320 or window_rect.h < 180:
+                    continue
+                rect = _estimate_macos_client_rect(window_rect)
+                candidates.append(
+                    {
+                        "title": title or owner,
+                        "owner": owner,
+                        "client_rect": rect,
+                        "window_rect": window_rect,
+                        "score": 0.0,
+                    }
+                )
+            except Exception:
+                continue
+
+        diagnostics["candidate_windows"] = [
+            {
+                "title": str(item.get("title", "")),
+                "owner": str(item.get("owner", "")),
+                "client_rect": _rect_to_dict(item.get("client_rect")),
+                "window_rect": _rect_to_dict(item.get("window_rect")),
+            }
+            for item in candidates
+        ]
+
+        selected = _pick_best_windows_candidate(candidates, self._expected_size)
+        if selected is None:
+            return ArenaDetectionResult(
+                ok=False,
+                region=None,
+                code="window_not_found",
+                message="MTGA window not found. Make sure MTGA is open, visible, and running in windowed mode.",
+                diagnostics=diagnostics,
+            )
+
+        rect = selected["client_rect"]
+        region = (rect.x, rect.y, rect.w, rect.h)
+        diagnostics["selected_window"] = {
+            "title": str(selected.get("title", "")),
+            "owner": str(selected.get("owner", "")),
+            "client_rect": _rect_to_dict(rect),
+            "window_rect": _rect_to_dict(selected.get("window_rect")),
+            "score": float(selected.get("score", 0.0)),
+        }
+
+        if not self._is_supported_arena_size(rect.w, rect.h):
+            return ArenaDetectionResult(
+                ok=False,
+                region=region,
+                code="window_wrong_size",
+                message=self._window_size_message(rect.w, rect.h, screen_size=(rect.w, rect.h)),
+                diagnostics=diagnostics,
+            )
+
+        matched_anchor, anchor_checks = self._verify_region_with_any_anchor(region)
+        diagnostics["anchor_checks"] = anchor_checks
+        if matched_anchor is None:
+            return ArenaDetectionResult(
+                ok=False,
+                region=region,
+                code="anchor_not_found",
+                message=(
+                    f"MTGA window found at {rect.w}x{rect.h}, but no known UI anchors matched. "
+                    "Open a supported Arena screen such as Home, Play, Decks, Store, Options, or an in-game board."
+                ),
+                diagnostics=diagnostics,
+            )
+
+        return ArenaDetectionResult(
+            ok=True,
+            region=region,
+            code="ok",
+            message="MTGA window detected and verified.",
+            matched_anchor=matched_anchor,
+            diagnostics=diagnostics,
+        )
+
     def _detect_generic(self) -> ArenaDetectionResult:
         platform_name = "macos" if sys.platform == "darwin" else "linux"
 
@@ -357,6 +484,15 @@ class ArenaRegionProvider:
             if x11_result is not None and x11_result.ok:
                 return x11_result
             x11_diagnostics = x11_result.diagnostics if x11_result is not None else None
+            if x11_result is not None and x11_result.code != "window_not_found":
+                return x11_result
+        elif sys.platform == "darwin":
+            macos_result = self._detect_macos_via_quartz()
+            if macos_result is not None and macos_result.ok:
+                return macos_result
+            x11_diagnostics = macos_result.diagnostics if macos_result is not None else None
+            if macos_result is not None and macos_result.code != "window_not_found":
+                return macos_result
         else:
             x11_diagnostics = None
 
@@ -386,19 +522,31 @@ class ArenaRegionProvider:
         fh, fw = frame.shape[:2]
         ew, eh = int(self._expected_size[0]), int(self._expected_size[1])
         diagnostics["screen_size"] = {"width": int(fw), "height": int(fh)}
+        candidate_size = self._best_fit_16_9_size(fw, fh)
+        diagnostics["fallback_candidate_size"] = {"width": int(candidate_size[0]), "height": int(candidate_size[1])}
 
-        if fw < ew or fh < eh:
+        if fw < 960 or fh < 540:
             return ArenaDetectionResult(
                 ok=False,
                 region=None,
                 code="screen_too_small",
                 message=(
-                    f"Captured screen is {fw}x{fh}, which is smaller than the required "
-                    f"{ew}x{eh} MTGA window. Set your display resolution to at least "
-                    f"{ew}x{eh} and run MTGA in a windowed {ew}x{eh} mode."
+                    f"Captured screen is {fw}x{fh}, which is too small for reliable Arena detection. "
+                    "Use a larger visible desktop area and run MTGA in a visible windowed 16:9 size."
                 ),
                 diagnostics=diagnostics,
             )
+
+        search_frame = frame
+        scale_x = 1.0
+        scale_y = 1.0
+        if cv2 is not None and candidate_size != (ew, eh):
+            scale_x = float(ew) / float(candidate_size[0] or ew)
+            scale_y = float(eh) / float(candidate_size[1] or eh)
+            normalized_w = max(1, int(round(float(fw) * scale_x)))
+            normalized_h = max(1, int(round(float(fh) * scale_y)))
+            search_frame = cv2.resize(frame, (normalized_w, normalized_h), interpolation=cv2.INTER_LINEAR)
+            diagnostics["normalized_search_size"] = {"width": int(normalized_w), "height": int(normalized_h)}
 
         seed_matches: list[dict[str, Any]] = []
         anchor_scan: list[dict[str, Any]] = []
@@ -415,7 +563,7 @@ class ArenaRegionProvider:
             th_, tw_ = template_size
 
             threshold = float(spec["threshold"])
-            match = self._vision.find_template(frame, template_path, threshold=threshold)
+            match = self._vision.find_template(search_frame, template_path, threshold=threshold)
             if match is None:
                 anchor_scan.append({
                     "anchor": spec["name"],
@@ -424,8 +572,8 @@ class ArenaRegionProvider:
                 })
                 continue
 
-            mx = int(match.x) - (tw_ // 2)
-            my = int(match.y) - (th_ // 2)
+            mx = int(round((float(match.x) - float(tw_ // 2)) / float(scale_x)))
+            my = int(round((float(match.y) - float(th_ // 2)) / float(scale_y)))
             seed_matches.append({
                 "name": str(spec["name"]),
                 "roi": tuple(int(v) for v in spec["roi"]),
@@ -449,28 +597,27 @@ class ArenaRegionProvider:
                 region=None,
                 code="window_not_found",
                 message=(
-                    "MTGA window not found. Make sure MTGA is visible, runs in a windowed "
-                    f"{ew}x{eh} client area, and that your display scaling is set to 100%."
+                    "MTGA window not found. Make sure MTGA is visible, runs in a windowed 16:9 client area, "
+                    "and that your display scaling is set to 100%."
                 ),
                 diagnostics=diagnostics,
             )
 
-        origin = self._solve_origin_from_seeds(seed_matches, frame_size=(fw, fh))
+        origin = self._solve_origin_from_seeds(seed_matches, frame_size=(fw, fh), candidate_size=candidate_size)
         if origin is None:
             return ArenaDetectionResult(
                 ok=False,
                 region=None,
                 code="anchor_not_found",
                 message=(
-                    "Arena anchors were visible on screen, but no consistent "
-                    f"{ew}x{eh} window position matched them. "
-                    "Check MTGA is at 1920x1080, undistorted, fully visible, "
+                    "Arena anchors were visible on screen, but no consistent visible 16:9 MTGA window position matched them. "
+                    "Check MTGA is undistorted, fully visible, "
                     "and not covered by overlays."
                 ),
                 diagnostics=diagnostics,
             )
 
-        region = (int(origin[0]), int(origin[1]), ew, eh)
+        region = (int(origin[0]), int(origin[1]), int(candidate_size[0]), int(candidate_size[1]))
         matched_anchor, anchor_checks = self._verify_region_with_any_anchor(region)
         diagnostics["anchor_checks"] = anchor_checks
         diagnostics["selected_origin"] = [int(origin[0]), int(origin[1])]
@@ -501,8 +648,12 @@ class ArenaRegionProvider:
         seed_matches: list[dict[str, Any]],
         *,
         frame_size: tuple[int, int],
+        candidate_size: tuple[int, int] | None = None,
     ) -> tuple[int, int] | None:
-        ew, eh = int(self._expected_size[0]), int(self._expected_size[1])
+        if candidate_size is None:
+            ew, eh = int(self._expected_size[0]), int(self._expected_size[1])
+        else:
+            ew, eh = int(candidate_size[0]), int(candidate_size[1])
         fw, fh = int(frame_size[0]), int(frame_size[1])
 
         def consistency_score(ox: int, oy: int) -> int:
@@ -594,7 +745,7 @@ class ArenaRegionProvider:
                 )
                 continue
 
-            roi = _abs_region(region, tuple(spec["roi"]))
+            roi = _scaled_abs_region(region, tuple(spec["roi"]), self._expected_size)
             image = self._vision.capture(roi)
             if image is None or getattr(image, "size", 0) == 0:
                 checks.append(
@@ -606,6 +757,13 @@ class ArenaRegionProvider:
                     }
                 )
                 continue
+
+            desired_w = max(1, int(spec["roi"][2]))
+            desired_h = max(1, int(spec["roi"][3]))
+            if cv2 is not None:
+                ih, iw = image.shape[:2]
+                if iw > 0 and ih > 0 and (iw != desired_w or ih != desired_h):
+                    image = cv2.resize(image, (desired_w, desired_h), interpolation=cv2.INTER_LINEAR)
 
             match = self._vision.find_template(image, template_path, threshold=0.0)
             score = float(match.score) if match is not None else 0.0
@@ -642,6 +800,29 @@ class ArenaRegionProvider:
         origin_y = int(match.y - self._global_anchor_offset[1])
         return (origin_x, origin_y, int(self._expected_size[0]), int(self._expected_size[1]))
 
+    def _best_fit_16_9_size(self, width: int, height: int) -> tuple[int, int]:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        max_width = min(width, (height * 16) // 9)
+        max_width -= max_width % 16
+        if max_width < 960:
+            max_width = min(width - (width % 16), 960)
+        max_height = max(1, (max_width * 9) // 16)
+        return (int(max_width), int(max_height))
+
+    def _is_supported_arena_size(self, w: int, h: int) -> bool:
+        w = int(w)
+        h = int(h)
+        if w < 960 or h < 540:
+            return False
+        return abs((w * 9) - (h * 16)) <= max(24, int(max(w, h) * 0.01))
+
+    def _window_size_message(self, w: int, h: int, *, screen_size: tuple[int, int] | None = None) -> str:
+        return (
+            f"MTGA window found at {int(w)}x{int(h)}. Use a visible windowed 16:9 resolution instead.\n\n"
+            + supported_16x9_message(screen_size=screen_size)
+        )
+
     def _write_detection_debug_bundle(
         self,
         result: ArenaDetectionResult,
@@ -676,11 +857,6 @@ class ArenaRegionProvider:
 
         bot_logger.log_error(f"Arena setup debug bundle saved: {debug_dir}")
         return str(debug_dir)
-
-    def _size_is_close(self, w: int, h: int, *, tolerance: int = 40) -> bool:
-        ew, eh = self._expected_size
-        return abs(int(w) - int(ew)) <= int(tolerance) and abs(int(h) - int(eh)) <= int(tolerance)
-
 
 def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
     if os.name != "nt":
@@ -728,6 +904,51 @@ def _abs_region(base_region: tuple[int, int, int, int], rel_region: tuple[int, i
     w = max(0, min(rw, max(0, bw - max(0, rx))))
     h = max(0, min(rh, max(0, bh - max(0, ry))))
     return (x, y, w, h)
+
+
+def _scaled_abs_region(
+    base_region: tuple[int, int, int, int],
+    rel_region: tuple[int, int, int, int],
+    reference_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    bx, by, bw, bh = [int(v) for v in base_region]
+    rx, ry, rw, rh = [int(v) for v in rel_region]
+    ref_w = max(1, int(reference_size[0]))
+    ref_h = max(1, int(reference_size[1]))
+
+    x = bx + int(round((float(rx) / float(ref_w)) * float(bw)))
+    y = by + int(round((float(ry) / float(ref_h)) * float(bh)))
+    w = max(1, int(round((float(rw) / float(ref_w)) * float(bw))))
+    h = max(1, int(round((float(rh) / float(ref_h)) * float(bh))))
+
+    x = max(bx, min(x, bx + max(0, bw - 1)))
+    y = max(by, min(y, by + max(0, bh - 1)))
+    w = min(w, max(1, (bx + bw) - x))
+    h = min(h, max(1, (by + bh) - y))
+    return (x, y, w, h)
+
+
+def supported_16x9_message(*, screen_size: tuple[int, int] | None = None) -> str:
+    sizes: list[tuple[int, int]] = list(_COMMON_16_9_SIZES)
+    if screen_size is not None:
+        sw = max(1, int(screen_size[0]))
+        sh = max(1, int(screen_size[1]))
+        max_fit_width = min(sw, (sh * 16) // 9)
+        max_fit_width -= max_fit_width % 16
+        max_fit_height = max(1, (max_fit_width * 9) // 16)
+        if max_fit_width >= 960 and (max_fit_width, max_fit_height) not in sizes:
+            sizes.append((max_fit_width, max_fit_height))
+        sizes = [item for item in sizes if item[0] <= sw and item[1] <= sh]
+
+    if not sizes:
+        sizes = list(_COMMON_16_9_SIZES[:6])
+
+    sizes = sorted(set(sizes))
+    size_text = ", ".join(f"{w}x{h}" for w, h in sizes)
+    formula = "Supported window sizes: any exact 16:9 resolution (16*n x 9*n)."
+    if screen_size is None:
+        return f"{formula}\nExamples: {size_text}"
+    return f"{formula}\nExamples that fit this visible area: {size_text}"
 
 
 def _read_template_size(template_path: str) -> tuple[int, int] | None:
@@ -813,6 +1034,26 @@ def _pick_best_windows_candidate(
             best_score = score
             best_item = item
     return best_item
+
+
+def _estimate_macos_client_rect(window_rect: WindowRect) -> WindowRect:
+    candidates = [0, 22, 24, 28, 30, 32, 36]
+    best = window_rect
+    best_err = abs((int(window_rect.w) * 9) - (int(window_rect.h) * 16))
+    for titlebar in candidates:
+        client_h = int(window_rect.h) - int(titlebar)
+        if client_h < 180:
+            continue
+        err = abs((int(window_rect.w) * 9) - (client_h * 16))
+        if err < best_err:
+            best_err = err
+            best = WindowRect(
+                x=int(window_rect.x),
+                y=int(window_rect.y) + int(titlebar),
+                w=int(window_rect.w),
+                h=int(client_h),
+            )
+    return best
 
 
 def _list_mtga_window_rects_windows() -> list[dict[str, Any]]:

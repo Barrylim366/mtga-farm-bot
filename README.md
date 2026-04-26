@@ -22,7 +22,7 @@ MTGA in-game settings (required for all platforms):
   *(the bot reads `Player.log` for its primary state; with detailed logs off it will not function)*
 - `Options -> Video -> Language`: **English**
 - `Options -> Video -> Display Mode`: **Windowed**
-- `Options -> Video -> Resolution`: **1920 x 1080**
+- `Options -> Video -> Resolution`: **any exact 16:9 windowed size**
 - OS display scaling: **100%**
 
 Input backend:
@@ -201,7 +201,7 @@ On first launch, the UI asks you to confirm these required settings:
 - `Options -> View Account -> Detailed Logs (Plugin Support)`: **ON**
 - `Options -> Video -> Language`: **English**
 - `Options -> Video -> Display Mode`: **Windowed**
-- `Options -> Video -> Resolution`: **1920 x 1080**
+- `Options -> Video -> Resolution`: **any exact 16:9 windowed size**
 - OS display scaling: **100%**
 
 Once the platform prerequisites are installed, the bot can run without manual coordinate calibration using:
@@ -256,7 +256,7 @@ The runtime tries to locate MTGA dynamically:
   - Subwindow minimum sizes are now derived from actual visible content bounds to avoid clipping without forcing oversized windows.
 
 5) Start Bot.
-   - Before the bot starts, the app checks that MTGA is visible with an exact windowed `1920x1080` client area and that OS display scaling is `100%`.
+  - Before the bot starts, the app checks that MTGA is visible in a windowed exact `16:9` client area and that OS display scaling is `100%`.
    - On Linux, detection uses `xwininfo` (X11/XWayland) plus anchor verification. On Windows, it uses the Win32 client rectangle. On macOS, detection falls back to anchor-based full-screen search.
    - If that check fails, the app writes an Arena setup debug bundle with diagnostics and screenshots.
 

@@ -503,7 +503,7 @@ class Controller(ControllerSecondary):
                 relx = int(avx - old_origin_x)
                 rely = int(avy - old_origin_y)
                 if 0 <= relx <= 1920 and 0 <= rely <= 1080:
-                    mapped = (int(arena[0] + relx), int(arena[1] + rely))
+                    mapped = self._map_base_point_into_arena(arena, (relx, rely))
                     self.opponent_avatar_coors = (relx, rely)
                     bot_logger.log_info(
                         "OPPONENT_AVATAR rebased via queue anchor: raw_avatar_cfg={} raw_queue_cfg={} "
@@ -525,7 +525,7 @@ class Controller(ControllerSecondary):
         candidates: list[tuple[tuple[int, int], str]] = []
         # Candidate A: interpret configured point as 1920-relative (new mode).
         if 0 <= px <= 1920 and 0 <= py <= 1080:
-            candidates.append(((int(arena[0] + px), int(arena[1] + py)), "relative_1920"))
+            candidates.append((self._map_base_point_into_arena(arena, (px, py)), "relative_1920"))
         # Candidate B: interpret configured point as absolute desktop coordinate (legacy calibration mode).
         if arena[0] <= px <= arena[0] + arena[2] and arena[1] <= py <= arena[1] + arena[3]:
             candidates.append(((px, py), "absolute_legacy"))
@@ -535,7 +535,7 @@ class Controller(ControllerSecondary):
                 relx = int(px - self._legacy_origin_hint[0])
                 rely = int(py - self._legacy_origin_hint[1])
                 if 0 <= relx <= 1920 and 0 <= rely <= 1080:
-                    candidates.append(((int(arena[0] + relx), int(arena[1] + rely)), "legacy_rebased_relative"))
+                    candidates.append((self._map_base_point_into_arena(arena, (relx, rely)), "legacy_rebased_relative"))
             except Exception:
                 pass
 
@@ -706,6 +706,35 @@ class Controller(ControllerSecondary):
         self._arena_region = cached
         return cached
 
+    def _map_base_point_into_arena(
+        self,
+        arena: tuple[int, int, int, int],
+        point: tuple[int, int],
+    ) -> tuple[int, int]:
+        ax, ay, aw, ah = [int(v) for v in arena]
+        px = max(0, min(1920, int(point[0])))
+        py = max(0, min(1080, int(point[1])))
+        mapped_x = int(round((float(px) / 1920.0) * float(aw)))
+        mapped_y = int(round((float(py) / 1080.0) * float(ah)))
+        return (
+            int(ax + min(max(0, mapped_x), max(0, aw - 1))),
+            int(ay + min(max(0, mapped_y), max(0, ah - 1))),
+        )
+
+    def _scale_base_region_to_arena(
+        self,
+        arena: tuple[int, int, int, int],
+        rel_region: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        ax, ay, aw, ah = [int(v) for v in arena]
+        rx, ry, rw, rh = [int(v) for v in rel_region]
+        left, top = self._map_base_point_into_arena(arena, (rx, ry))
+        width = max(1, int(round((float(rw) / 1920.0) * float(aw))))
+        height = max(1, int(round((float(rh) / 1080.0) * float(ah))))
+        width = min(width, max(1, (ax + aw) - left))
+        height = min(height, max(1, (ay + ah) - top))
+        return (left, top, width, height)
+
     def _map_abs_point_to_arena(
         self,
         point: tuple[int, int],
@@ -723,7 +752,7 @@ class Controller(ControllerSecondary):
 
             # 1) 1920-relative coordinate inside arena.
             if 0 <= px <= 1920 and 0 <= py <= 1080:
-                return (int(arena[0] + px), int(arena[1] + py)), "arena_relative_1920_direct"
+                return self._map_base_point_into_arena(arena, (px, py)), "arena_relative_1920_direct"
 
             # 2) Absolute point already inside arena extents.
             local_x = int(px - arena[0])
@@ -846,7 +875,7 @@ class Controller(ControllerSecondary):
                 tx_cfg = int(raw_target_cfg.get("x"))
                 ty_cfg = int(raw_target_cfg.get("y"))
                 if 0 <= tx_cfg <= 1920 and 0 <= ty_cfg <= 1080:
-                    mapped = (int(arena[0] + tx_cfg), int(arena[1] + ty_cfg))
+                    mapped = self._map_base_point_into_arena(arena, (tx_cfg, ty_cfg))
                     self._loaded_click_targets[config_key] = {"x": tx_cfg, "y": ty_cfg}
                     if config_key == "log_out_focus":
                         self.log_out_focus_coors = (tx_cfg, ty_cfg)
@@ -878,7 +907,7 @@ class Controller(ControllerSecondary):
                 relx = int(tx - old_origin_x)
                 rely = int(ty - old_origin_y)
                 if 0 <= relx <= 1920 and 0 <= rely <= 1080:
-                    mapped = (int(arena[0] + relx), int(arena[1] + rely))
+                    mapped = self._map_base_point_into_arena(arena, (relx, rely))
                     # Align with opponent-avatar behavior: persist resolved 1920-relative
                     # point for the current session so repeated clicks stay consistent.
                     self._loaded_click_targets[config_key] = {"x": relx, "y": rely}
@@ -1820,12 +1849,7 @@ class Controller(ControllerSecondary):
         if arena is not None:
             queue_template = os.path.join(self._buttons_dir(), "play_btn.png")
             if os.path.exists(queue_template):
-                template_roi = (
-                    int(arena[0] + 1160),
-                    int(arena[1] + 680),
-                    740,
-                    360,
-                )
+                template_roi = self._scale_base_region_to_arena(arena, (1160, 680, 740, 360))
                 self._vision.begin_tick()
                 roi_img = self._vision.capture(template_roi)
                 if roi_img is not None:
@@ -1847,8 +1871,8 @@ class Controller(ControllerSecondary):
                         source = mapped_source
                     else:
                         fallback_rel_x, fallback_rel_y = self._queue_button_rel
-                        if 0 <= fallback_rel_x <= arena[2] and 0 <= fallback_rel_y <= arena[3]:
-                            target = (int(arena[0] + fallback_rel_x), int(arena[1] + fallback_rel_y))
+                        if 0 <= fallback_rel_x <= 1920 and 0 <= fallback_rel_y <= 1080:
+                            target = self._map_base_point_into_arena(arena, (fallback_rel_x, fallback_rel_y))
                             source = "arena_rel_click_target"
             except Exception as e:
                 bot_logger.log_error(f"Queue target compute failed; using absolute target. err={e}")
@@ -1868,8 +1892,8 @@ class Controller(ControllerSecondary):
                         source = mapped_source
                     else:
                         fallback_rel_x, fallback_rel_y = self._queue_button_rel
-                        if 0 <= fallback_rel_x <= arena[2] and 0 <= fallback_rel_y <= arena[3]:
-                            target = (int(arena[0] + fallback_rel_x), int(arena[1] + fallback_rel_y))
+                        if 0 <= fallback_rel_x <= 1920 and 0 <= fallback_rel_y <= 1080:
+                            target = self._map_base_point_into_arena(arena, (fallback_rel_x, fallback_rel_y))
                             source = "arena_rel_click_target"
                 except Exception as e:
                     bot_logger.log_error(f"Queue target recompute failed after reacquire. err={e}")
@@ -2798,12 +2822,7 @@ class Controller(ControllerSecondary):
             button_img = os.path.join(self._buttons_dir(), "assign_damage_done.png")
             # The Assign Damage Done button lives near the lower arena center; search there first
             # because saved click targets can still be stale legacy desktop coordinates.
-            template_region = (
-                int(arena[0] + 480),
-                int(arena[1] + 700),
-                960,
-                280,
-            )
+            template_region = self._scale_base_region_to_arena(arena, (480, 700, 960, 280))
             if os.path.exists(button_img):
                 template_point = self._locate_image_center(
                     button_img,
@@ -3107,8 +3126,7 @@ class Controller(ControllerSecondary):
         # Click OK/confirm dialog — appears roughly at arena center+offset
         arena = self._arena_region
         if arena is not None:
-            ok_x = int(arena[0] + 960)
-            ok_y = int(arena[1] + 540)
+            ok_x, ok_y = self._map_base_point_into_arena(arena, (960, 540))
             bot_logger.log_info(f"{label}: clicking confirm OK at ({ok_x}, {ok_y})")
             self.input.move_abs(ok_x, ok_y)
             time.sleep(0.1)

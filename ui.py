@@ -10,7 +10,7 @@ import json
 import threading
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
 from runtime_paths import runtime_file
-from vision.window_locator import ArenaDetectionResult, run_arena_setup_check
+from vision.window_locator import ArenaDetectionResult, run_arena_setup_check, supported_16x9_message
 
 # Import bot components
 from Controller.MTGAController.Controller import Controller
@@ -1972,10 +1972,12 @@ class MTGBotUI(tk.Tk):
             "MTGA (Options > Video):\n"
             "  • Language: English\n"
             "  • Display mode: Windowed\n"
-            "  • Resolution: 1920 x 1080\n"
+            "  • Resolution: any exact 16:9 window size\n"
             "\n"
             "Operating system:\n"
             "  • Display scaling: 100%\n"
+            "\n"
+            f"{supported_16x9_message()}\n"
             "\n"
             "Click OK only after all of the above are applied."
         )
@@ -2937,7 +2939,9 @@ class MTGBotUI(tk.Tk):
             pass
 
         lines = [result.message]
-        lines.append("Required setup: MTGA visible with an exact windowed 1920x1080 client area and OS display scaling set to 100%.")
+        lines.append(
+            "Required setup: MTGA visible in a fully visible windowed 16:9 size and OS display scaling set to 100%."
+        )
         if result.debug_dir:
             lines.append(f"Debug bundle: {result.debug_dir}")
         messagebox.showerror(

@@ -40,4 +40,4 @@ fi
 
 echo "[INFO] macOS permissions still need to be granted manually:"
 echo "       Accessibility and Screen Recording for Terminal and the .venv-macos Python binary."
-echo "[INFO] MTGA still needs: English, Windowed, 1920x1080, Detailed Logs ON."
+echo "[INFO] MTGA still needs: English, Windowed, exact 16:9 resolution, Detailed Logs ON."
