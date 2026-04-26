@@ -3203,6 +3203,47 @@ class Controller(ControllerSecondary):
             self.__inactivity_timer.cancel()
             self.__inactivity_timer = None
 
+    def __get_running_inactivity_timer_remaining(self) -> float | None:
+        remaining_values: list[float] = []
+        for timer_state in self.__my_timer_state.values():
+            if not bool(timer_state.get("running", False)):
+                continue
+            if str(timer_state.get("type") or "") != "TimerType_Inactivity":
+                continue
+            remaining = timer_state.get("remaining_sec")
+            try:
+                if remaining is not None:
+                    remaining_values.append(float(remaining))
+            except Exception:
+                continue
+        if not remaining_values:
+            return None
+        return min(remaining_values)
+
+    def __should_allow_emergency_concede_now(self) -> tuple[bool, str]:
+        turn_info = self.updated_game_state.get_turn_info() or {}
+        my_seat = self.__system_seat_id or turn_info.get("decisionPlayer")
+        if my_seat is None:
+            return False, "local seat unknown"
+        if self.__pending_target_select is not None:
+            return True, "pending target selection"
+        if self.__pending_select_n is not None or self.__select_n_in_progress:
+            return True, "pending select-n"
+        if self.__should_pause_for_pay_costs():
+            return True, "pending pay costs"
+        if self.__should_pause_for_assign_damage():
+            return True, "assign damage active"
+        if turn_info.get("decisionPlayer") == my_seat:
+            return True, "local decision player"
+        return False, (
+            "decisionPlayer={} activePlayer={} priorityPlayer={} mySeat={}".format(
+                turn_info.get("decisionPlayer"),
+                turn_info.get("activePlayer"),
+                turn_info.get("priorityPlayer"),
+                my_seat,
+            )
+        )
+
     def __schedule_emergency_concede(self, timer_id: int, remaining_sec: float, delay: float) -> None:
         if self.__emergency_concede_timer is not None:
             self.__emergency_concede_timer.cancel()
@@ -3227,6 +3268,25 @@ class Controller(ControllerSecondary):
         """Safety-net concede when inactivity timer is critically low and supervisor is absent."""
         self.__emergency_concede_timer = None
         if self._stop_requested:
+            return
+        live_remaining = self.__get_running_inactivity_timer_remaining()
+        if live_remaining is None:
+            bot_logger.log_info("EMERGENCY_CONCEDE: cancelled — no running local inactivity timer.")
+            return
+        if live_remaining > (self.__emergency_concede_threshold_sec + 3.0):
+            bot_logger.log_info(
+                "EMERGENCY_CONCEDE: cancelled — inactivity timer is no longer critical "
+                f"(remaining={live_remaining:.1f}s)."
+            )
+            return
+        allowed_now, reason = self.__should_allow_emergency_concede_now()
+        if not allowed_now:
+            bot_logger.log_info(
+                "EMERGENCY_CONCEDE: deferred — local input not currently required ({})".format(reason)
+            )
+            self.__emergency_concede_timer = threading.Timer(5.0, self.__attempt_emergency_concede)
+            self.__emergency_concede_timer.daemon = True
+            self.__emergency_concede_timer.start()
             return
         # Cancel if bot was active at any point after the concede was scheduled — it's clearly not stuck.
         # Only fire if the bot has been continuously idle since scheduling.
@@ -5160,6 +5220,8 @@ class Controller(ControllerSecondary):
                 continue
             timer_type = prev.get("type", "?")
             bot_logger.log_info(f"MY_TIMER_STOP: timerId={timer_id} type={timer_type} (not running)")
+            if timer_type == "TimerType_Inactivity":
+                self.__cancel_emergency_concede_timer(f"timer {timer_id} disappeared from timer state")
             self.__my_timer_state[timer_id] = {
                 "running": False,
                 "warned": False,
