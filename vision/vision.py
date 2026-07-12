@@ -83,6 +83,7 @@ class VisionEngine:
         image: np.ndarray,
         template_path: str,
         threshold: float = 0.88,
+        scales: list[float] | tuple[float, ...] | None = None,
     ) -> TemplateMatch | None:
         if cv2 is None:
             if not self._cv2_warned:
@@ -94,16 +95,31 @@ class VisionEngine:
         if template is None:
             return None
         ih, iw = image.shape[:2]
-        th, tw = template.shape[:2]
-        if ih < th or iw < tw:
+        # cv2.matchTemplate is NOT scale-invariant: a template that is a slightly
+        # different pixel size than it appears on screen (DPI scaling, region
+        # normalization) never matches. When `scales` is given we try the template
+        # at each scale and keep the best hit; scales=None keeps the original
+        # single-scale behavior (unchanged for all existing callers).
+        scale_list = [1.0] if not scales else list(scales)
+        best: tuple[float, int, int] | None = None
+        for s in scale_list:
+            if s == 1.0:
+                t = template
+            else:
+                th0, tw0 = template.shape[:2]
+                nw, nh = max(1, int(round(tw0 * s))), max(1, int(round(th0 * s)))
+                interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR
+                t = cv2.resize(template, (nw, nh), interpolation=interp)
+            th, tw = t.shape[:2]
+            if ih < th or iw < tw:
+                continue
+            result = cv2.matchTemplate(image, t, cv2.TM_CCOEFF_NORMED)
+            _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
+            if best is None or float(max_val) > best[0]:
+                best = (float(max_val), int(max_loc[0] + (tw // 2)), int(max_loc[1] + (th // 2)))
+        if best is None or best[0] < float(threshold):
             return None
-        result = cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
-        _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
-        if float(max_val) < float(threshold):
-            return None
-        cx = int(max_loc[0] + (tw // 2))
-        cy = int(max_loc[1] + (th // 2))
-        return TemplateMatch(x=cx, y=cy, score=float(max_val))
+        return TemplateMatch(x=best[1], y=best[2], score=best[0])
 
     def assert_template(
         self,

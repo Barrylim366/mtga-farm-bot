@@ -1579,6 +1579,7 @@ class Controller(ControllerSecondary):
         normalized_size: tuple[int, int],
         confidence: float = 0.82,
         timeout: float = 20.0,
+        scales: list[float] | tuple[float, ...] | None = None,
     ) -> tuple[int, int] | None:
         if self._vision is None:
             return None
@@ -1620,7 +1621,7 @@ class Controller(ControllerSecondary):
                 search_image = cv2.resize(roi, (norm_w, norm_h), interpolation=cv2.INTER_LINEAR)
             else:
                 search_image = roi
-            match = self._vision.find_template(search_image, image_path, threshold=confidence)
+            match = self._vision.find_template(search_image, image_path, threshold=confidence, scales=scales)
             if match is not None:
                 hit_x = left + int(round((float(match.x) / float(norm_w)) * float(width)))
                 hit_y = top + int(round((float(match.y) / float(norm_h)) * float(height)))
@@ -1638,6 +1639,7 @@ class Controller(ControllerSecondary):
         confidence: float = 0.82,
         timeout: float = 1.5,
         use_direct: bool = True,
+        scales: list[float] | tuple[float, ...] | None = None,
     ) -> tuple[int, int] | None:
         arena = self._get_ui_action_arena_region(force_reacquire=True, label=label)
         if arena is None:
@@ -1648,7 +1650,10 @@ class Controller(ControllerSecondary):
         else:
             region = self._scale_base_region_to_arena(arena, rel_region)
             normalized_size = (int(rel_region[2]), int(rel_region[3]))
-        if use_direct:
+        # The direct (pyautogui) path is single-scale only; when a caller needs
+        # scale-tolerant matching it passes `scales`, so skip straight to the
+        # multi-scale rescaled matcher.
+        if use_direct and not scales:
             point = self._locate_image_center_direct(
                 image_path,
                 f"{label}_LOCATE",
@@ -1665,6 +1670,7 @@ class Controller(ControllerSecondary):
             normalized_size=normalized_size,
             confidence=confidence,
             timeout=timeout,
+            scales=scales,
         )
 
     def _click_image_in_scaled_arena_region(
@@ -2813,39 +2819,79 @@ class Controller(ControllerSecondary):
         # presence is a reliable, deck-independent anchor for "already open".
         submit_btn = os.path.join(self._buttons_dir(), "submit_deck.PNG")
 
-        if not self._starter_deck_picker_open():
+        # Reliably tell the two entry screens apart. The EVENT page shows the
+        # orange "Play" button (and a small current-deck box); the deck GRID shows
+        # "Submit Deck" instead. The Submit-Deck probe alone can FALSE-POSITIVE on
+        # the Play button (both are orange rounded buttons), which made the bot
+        # think it was already on the grid, skip opening it, click grid coordinates
+        # over the event art, and then hit "Play" -> it kept the current deck
+        # (e.g. Reckless Raid). So: if the event Play button is visible, we are on
+        # the event page and MUST click the deck box to open the grid.
+        event_play = os.path.join(self._buttons_dir(), "event_play.png")
+        on_event_page = os.path.exists(event_play) and self._locate_image_center_in_scaled_arena_region(
+            event_play, "STARTER_SWAP_EVENT_PROBE", rel_region=(1400, 900, 520, 180),
+            confidence=0.80, timeout=1.0,
+        ) is not None
+
+        if on_event_page or not self._starter_deck_picker_open():
             box_target, box_src = self._map_abs_point_to_arena(
                 self._STARTER_DECK_BOX_BASE, label="STARTER_DECK_BOX"
             )
             bot_logger.log_info(
                 f"Starter: opening deck chooser via deck box base={self._STARTER_DECK_BOX_BASE} "
-                f"-> {box_target} ({box_src})."
+                f"-> {box_target} ({box_src}) (on_event_page={on_event_page})."
             )
             self._click_abs(box_target[0], box_target[1], "STARTER_DECK_BOX")
             time.sleep(1.3)
 
-            # 1b) Verify the chooser actually opened before clicking the fixed
-            # grid position blindly. A miss here means the deck-box click did not
-            # land (or something else covers the event page), so we abort and
-            # keep the current deck rather than clicking the grid coordinates on
-            # whatever screen is actually showing.
-            if not self._starter_deck_picker_open():
+            # 1b) Verify the chooser actually opened before clicking the fixed grid
+            # position blindly. The grid is open only if the event Play button is
+            # GONE and Submit Deck is present -- checking Submit alone can
+            # false-positive on Play, so if Play is still visible the box click did
+            # not land and we abort (keep current deck) instead of clicking grid
+            # coordinates over the event page.
+            still_event = os.path.exists(event_play) and self._locate_image_center_in_scaled_arena_region(
+                event_play, "STARTER_SWAP_EVENT_PROBE2", rel_region=(1400, 900, 520, 180),
+                confidence=0.80, timeout=1.0,
+            ) is not None
+            if still_event or not self._starter_deck_picker_open():
                 bot_logger.log_error(
-                    "Starter: deck chooser did not open (Submit Deck not found); keeping current deck."
+                    "Starter: deck chooser did not open (still on event page / Submit Deck not found); "
+                    "keeping current deck."
                 )
                 return
         else:
             bot_logger.log_info("Starter: deck chooser already open (first-time deck pick); skipping box click.")
 
-        # 2) Select the quest deck at its fixed grid position.
-        deck_target, deck_src = self._map_abs_point_to_arena(
-            grid_base, label=f"STARTER_DECK_PICK_{desired_name}"
+        # 2) Select the quest deck. Prefer locating the deck's art thumbnail in the
+        #    grid by image match (robust to layout/scale/reordering, and clicks the
+        #    ACTUAL card) and click there; fall back to the fixed alphabetical grid
+        #    coordinate only if the template isn't confidently found. This is why a
+        #    miss used to land on the wrong deck (e.g. Rakdos sits right below WG in
+        #    the same column, so any vertical drift picked it).
+        # Multi-scale match: the deck thumbnails render at a slightly different
+        # pixel size than the templates once the arena capture is normalized
+        # (DPI/normalization), which single-scale matchTemplate can't handle.
+        # Verified offline that the templates hit score ~1.0 at the right scale.
+        deck_scales = [round(0.5 + 0.05 * i, 2) for i in range(21)]  # 0.5 .. 1.5
+        deck_point = self._locate_image_center_in_scaled_arena_region(
+            desired_tpl, f"STARTER_DECK_MATCH_{desired_name}",
+            rel_region=None, confidence=0.80, timeout=3.0, scales=deck_scales,
         )
-        bot_logger.log_info(
-            f"Starter: selecting deck {desired_name} at grid base={grid_base} "
-            f"-> {deck_target} ({deck_src})."
-        )
-        self._click_abs(deck_target[0], deck_target[1], f"STARTER_DECK_PICK_{desired_name}")
+        if deck_point is not None:
+            bot_logger.log_info(
+                f"Starter: located deck {desired_name} by image at {deck_point}; clicking the card."
+            )
+            self._click_abs(deck_point[0], deck_point[1], f"STARTER_DECK_PICK_{desired_name}")
+        else:
+            deck_target, deck_src = self._map_abs_point_to_arena(
+                grid_base, label=f"STARTER_DECK_PICK_{desired_name}"
+            )
+            bot_logger.log_info(
+                f"Starter: deck {desired_name} not matched by image; using fixed grid base={grid_base} "
+                f"-> {deck_target} ({deck_src})."
+            )
+            self._click_abs(deck_target[0], deck_target[1], f"STARTER_DECK_PICK_{desired_name}")
         time.sleep(0.8)
 
         # 3) Confirm via Submit Deck. Prefer the template (exact), fall back to the
