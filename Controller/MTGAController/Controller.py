@@ -6043,17 +6043,36 @@ class Controller(ControllerSecondary):
                     try:
                         if self._suppress_selections or self._stop_requested:
                             return
-                        # "Done" button, centre-bottom of the scry/surveil overlay
-                        # (base 1920x1080; calibrated from a scry capture).
-                        base_point = (960, 886)
+                        # Locate the orange "Done" button by template first. The
+                        # button is visually identical in scry and surveil but can
+                        # sit at slightly different heights, so a single fixed pixel
+                        # missed on scry (bot stalled with the prompt still open).
+                        # Template matching over a generous bottom-centre band works
+                        # for both overlays regardless of the exact position.
+                        # Scry's Done button sits ~49px higher than surveil's
+                        # (game-frame y~876 vs ~925); the band spans both. Template
+                        # confirmed to match the real scry overlay at conf ~0.86, so
+                        # 0.78 leaves headroom for the button's pulsing glow.
+                        done_tpl = os.path.join(self._buttons_dir(), "scry_done.png")
+                        if os.path.exists(done_tpl) and self._click_image_in_scaled_arena_region(
+                            done_tpl, "SCRY_DONE", rel_region=(700, 820, 520, 240),
+                            confidence=0.78, timeout=1.5,
+                        ):
+                            bot_logger.log_info("GROUP_REQ Done click: matched scry_done.png template.")
+                            return
+                        # Fallback fixed coordinate (base 1920x1080), measured from
+                        # real captures: scry's Done button centres at (960, 878),
+                        # surveil's ~47px lower at (960, 925). Pick by context so a
+                        # template miss still lands on the right overlay's button.
+                        base_point = (960, 878) if "scry" in context.lower() else (960, 925)
                         target, src = self._map_abs_point_to_arena(base_point, label="SCRY_DONE")
                         bot_logger.log_info(
-                            f"GROUP_REQ Done click: base={base_point} target={target} src={src}"
+                            f"GROUP_REQ Done click (fallback fixed, context={context}): base={base_point} target={target} src={src}"
                         )
-                        bot_logger.log_click(target[0], target[1], "SCRY_DONE")
-                        self.input.move_abs(target[0], target[1])
-                        time.sleep(0.3)
-                        self.input.left_click(1)
+                        # _click_abs does a proper left_down/hold/left_up press,
+                        # which Unity registers reliably (a bare left_click can be
+                        # dropped).
+                        self._click_abs(int(target[0]), int(target[1]), "SCRY_DONE")
                     except Exception as e:
                         bot_logger.log_error(f"GroupReq Done click failed: {e}")
 
