@@ -2505,13 +2505,8 @@ class Controller(ControllerSecondary):
         event_play = os.path.join(self._buttons_dir(), "event_play.png")
         if not os.path.exists(event_play):
             return False
-        # Play button at the bottom-right of the event page (1920x1080 frame).
-        event_play_roi = (1400, 900, 520, 180)
         # Confirm we are actually on the event page before touching the deck box.
-        if self._locate_image_center_in_scaled_arena_region(
-            event_play, "STARTER_EVENT_PLAY_PROBE", rel_region=event_play_roi,
-            confidence=0.80, timeout=1.0,
-        ) is None:
+        if not self._on_starter_event_landing_page("STARTER_EVENT_PLAY_PROBE"):
             return False
         # Between matches: refresh quest progress best-effort (keeps the cache and
         # the UI display current when Home has logged a fresh quests block).
@@ -2519,7 +2514,7 @@ class Controller(ControllerSecondary):
         # Swap to the deck that best advances the top quest, then queue.
         self._swap_starter_deck_for_quest(target_colors)
         if self._click_image_in_scaled_arena_region(
-            event_play, "STARTER_EVENT_PLAY", rel_region=event_play_roi,
+            event_play, "STARTER_EVENT_PLAY", rel_region=self._EVENT_PLAY_ROI,
             confidence=0.80, timeout=2.0,
         ):
             bot_logger.log_info("Starter: re-queued from event landing page via Play button.")
@@ -2759,6 +2754,18 @@ class Controller(ControllerSecondary):
     _STARTER_DECK_ROW_Y = (400, 705)
     _STARTER_DECK_BOX_BASE = (1734, 640)       # current-deck box on the event page
     _STARTER_SUBMIT_DECK_BASE = (1735, 1035)   # "Submit Deck" button in the chooser
+    # Bottom-right Play button ROI on the Starter Deck Duel event landing page
+    # (1920x1080 reference frame). Shared by every event_play.png probe/click.
+    _EVENT_PLAY_ROI = (1400, 900, 520, 180)
+
+    def _on_starter_event_landing_page(self, label: str) -> bool:
+        """True if the event's Play button is visible, i.e. we are on the Starter
+        Deck Duel landing page (not the deck-chooser grid)."""
+        event_play = os.path.join(self._buttons_dir(), "event_play.png")
+        return os.path.exists(event_play) and self._locate_image_center_in_scaled_arena_region(
+            event_play, label, rel_region=self._EVENT_PLAY_ROI,
+            confidence=0.80, timeout=1.0,
+        ) is not None
 
     def _starter_deck_grid_point(self, deck_code: str) -> tuple[int, int] | None:
         """Base-1920 (x, y) of a deck's card in the chooser grid, or None."""
@@ -2827,11 +2834,7 @@ class Controller(ControllerSecondary):
         # over the event art, and then hit "Play" -> it kept the current deck
         # (e.g. Reckless Raid). So: if the event Play button is visible, we are on
         # the event page and MUST click the deck box to open the grid.
-        event_play = os.path.join(self._buttons_dir(), "event_play.png")
-        on_event_page = os.path.exists(event_play) and self._locate_image_center_in_scaled_arena_region(
-            event_play, "STARTER_SWAP_EVENT_PROBE", rel_region=(1400, 900, 520, 180),
-            confidence=0.80, timeout=1.0,
-        ) is not None
+        on_event_page = self._on_starter_event_landing_page("STARTER_SWAP_EVENT_PROBE")
 
         if on_event_page or not self._starter_deck_picker_open():
             box_target, box_src = self._map_abs_point_to_arena(
@@ -2850,10 +2853,7 @@ class Controller(ControllerSecondary):
             # false-positive on Play, so if Play is still visible the box click did
             # not land and we abort (keep current deck) instead of clicking grid
             # coordinates over the event page.
-            still_event = os.path.exists(event_play) and self._locate_image_center_in_scaled_arena_region(
-                event_play, "STARTER_SWAP_EVENT_PROBE2", rel_region=(1400, 900, 520, 180),
-                confidence=0.80, timeout=1.0,
-            ) is not None
+            still_event = self._on_starter_event_landing_page("STARTER_SWAP_EVENT_PROBE2")
             if still_event or not self._starter_deck_picker_open():
                 bot_logger.log_error(
                     "Starter: deck chooser did not open (still on event page / Submit Deck not found); "
