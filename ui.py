@@ -3674,24 +3674,22 @@ class MTGBotUI(tk.Tk):
         current_acc = str(status.get("current_account") or "")
         next_acc = str(status.get("next_account") or "")
         show_acc = self._account_lines_visible()
-        # Resolve the Current/Next labels. While RUNNING, trust the controller's
-        # live value (it reflects the manual pin or auto-detect). While STOPPED,
-        # the status.json value is STALE from the last run, so the user's manual
-        # pick (config) must win -- otherwise choosing an account in the popup
-        # wouldn't visibly change the line.
+        # Current: prefer the live status.json value. The controller keeps it
+        # updated as it ROTATES (so it stays correct after switches and after the
+        # bot stops on a later account), and a manual pick writes it too (see
+        # _set_current_account). Fall back to the config pin / log only when it's
+        # empty (e.g. the very first run before anything is known).
         if show_acc:
-            if self.bot_running:
-                current_acc = (
-                    self._resolve_screenname_to_alias(current_acc)
-                    if current_acc else self._fallback_current_account()
-                )
-                if not next_acc:
-                    next_acc = self._fallback_next_account(current_acc)
+            if current_acc:
+                current_acc = self._resolve_screenname_to_alias(current_acc)
             else:
                 current_acc = (
                     self.config_manager.get_manual_current_account()
                     or self._fallback_current_account()
                 )
+            # Next: use the controller's published value while running; otherwise
+            # recompute it from the (resolved) current account.
+            if not (self.bot_running and next_acc):
                 next_acc = self._fallback_next_account(current_acc)
 
         # Only redraw when something actually changed (avoid canvas churn).
@@ -3777,8 +3775,16 @@ class MTGBotUI(tk.Tk):
         self.config_manager.set_manual_current_account(label)
         controller = getattr(self, "_controller", None)
         if controller is not None:
+            # Running: the controller pins it and publishes to status.json.
             try:
                 controller.set_current_account_manual(label)
+            except Exception:
+                pass
+        else:
+            # Stopped: no controller, so reflect the pick in status.json directly
+            # (clearing next so it recomputes) -- the display reads from there.
+            try:
+                runtime_status.update_status(current_account=label, next_account="")
             except Exception:
                 pass
         # Reflect immediately (bump the poll signature so the labels redraw).
