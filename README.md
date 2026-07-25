@@ -128,22 +128,36 @@ Accounts are stored as folders under `Accounts/` (gitignored by default):
 ```
 Accounts/
   MyAccount/
-    credentials.json   →   { "MyAccount": { "email": "...", "pw": "..." } }
+    credentials.json   →   { "MyAccount": { "email": "...", "pw": "...", "screen_name": "MyName#12345" } }
   AltAccount/
     credentials.json
 ```
 
 Manage accounts via **Settings → Manage Accounts**. Set a switch timer and play order. When the timer expires and the bot is at a safe screen, it logs out, switches account, and resumes.
 
+Every account needs its **Alias** — its in-game Magic Arena name, the one Arena shows top-left (`Name#12345`; the digits are optional). This is not cosmetic: the Arena log identifies an account *only* by that name, never by email or by the label you typed. Without it the bot cannot tell which account is logged in, so rotation order, per-account gold tracking and the Current/Next display are all unreliable. Aliases must be unique; a row without one is rejected on save. Accounts created by an older version have no Alias yet — Manage Accounts points this out when you open it, and they keep playing until you next save them.
+
+#### Current / Next account
+
+While account switching is enabled, the main window shows **Current ACC** (playing now) and **Next ACC** (the account the next switch will log into). Click **Current ACC** to tell the bot which account is open in Arena right now. Use it when you changed account by hand: Arena writes the login only once, so after a while the bot can no longer read it from the log, and a manual pick sets rotation straight again. The pin is dropped automatically on the next switch the bot performs itself, and when the pinned account is renamed or deleted.
+
+**Change Queue** and **Account Switch** in the main menu replace the older click-on-text toggles. Queue mode is locked while the bot runs (changing it mid-run would desync navigation).
+
 Account switching can be toggled on/off live from the main window without restarting the bot, and runs in one of two modes:
 - **Time**: switch every N minutes (configurable).
-- **Quests**: switch once the configured number of daily quests (measured *absolutely* — completed by the bot or by hand, whichever comes first) and/or daily wins seen this session are reached on that account. Once every configured account has completed a round, the bot stops itself instead of cycling back to the first account.
+- **Quests**: switch once the configured number of daily quests (measured *absolutely* — completed by the bot or by hand, whichever comes first) and/or daily wins seen this session are reached on that account. Once every configured account has completed a round, the bot stops itself instead of cycling back to the first account, and says so in a pop-up so a normal finish isn't mistaken for a freeze. A round covers the accounts in your play order — not every folder under `Accounts/` — and an account whose switch failed is not counted as finished.
+
+Rotation always continues from the account actually logged in, so it never wastes a switch logging back into the same account, and the order stays intact even after a failed switch.
 
 > **Known issue:** in quests mode, if a switch becomes due while the bot is on the Starter Deck Duel event page (`game_mode = starter`), the logout sequence can fail to open the Options menu and misclick into the event page instead of logging out. Time-mode switching from Home is unaffected. A fix (navigate to Home before attempting logout) is planned as a follow-up.
 
 ### Gold Tracking
 
-The bot reads each account's real Gold balance from MTGA's own logs and tracks the delta (current balance minus the balance first seen this session) per account — no estimate. Open **Current Session** from the main window to see gold farmed per account, alongside games/wins for the session.
+The bot reads each account's real Gold balance from MTGA's own logs and tracks the delta (current balance minus the balance first seen this session) per account — no estimate. Open **Current Session** from the main window to see gold farmed per account (labeled with your account names), alongside games/wins for the session.
+
+Accounts the bot switches into get their baseline read on arrival at Home, before they play, so their earnings are complete.
+
+> **Known limitation:** the **first** account of a session can show `0` farmed gold. MTGA only reports that account's balance after its first match, at which point the win reward is already included, so that match's earnings can't be measured. Every account the bot switches into afterwards tracks correctly.
 
 ### Quest-Based Deck Selection
 

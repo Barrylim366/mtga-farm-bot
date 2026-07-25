@@ -443,6 +443,9 @@ class Controller(ControllerSecondary):
         # requires matches (unlike the anti-storm counter, which only advances when
         # no match is played). Fresh per Controller (i.e. per bot Start).
         self._completed_account_keys: set[str] = set()
+        # Key added to _completed_account_keys by the switch currently running, kept
+        # so a failed logout can take it back again (see _revert_pending_completion).
+        self._pending_completed_key: str | None = None
         # The screenName that owns this account's quests block, latched from the
         # first block we see after (re)start / account switch. Comparing against
         # this fixed value -- instead of "whichever screenName is last in the log
@@ -514,9 +517,12 @@ class Controller(ControllerSecondary):
         # check-and-create of the queue-spam thread. The boolean/is_alive() guards
         # alone are NOT atomic: two near-simultaneous callers (from duplicated
         # post-match/queue loops) both pass them and start two logout sequences
-        # that click over each other -> the switch fails. These locks serialize it.
+        # that click over each other -> the switch fails.
+        # ONE lock covers both, deliberately: start_queueing reads the very flag
+        # _perform_account_switch sets, so two separate locks would still let a
+        # queue loop start into a switch that had just begun. Neither holds the lock
+        # while calling the other, so there is no lock-order cycle here.
         self._switch_start_lock = threading.Lock()
-        self._queue_start_lock = threading.Lock()
         self._queue_after_login = False
         self._queue_spam_thread = None
         self._stop_queue_spam = False
@@ -6012,7 +6018,9 @@ class Controller(ControllerSecondary):
     def start_queueing(self) -> None:
         # Atomic check-and-create so two racing callers can't both spawn a queue
         # loop (which doubles every SWITCH CHECK / navigation and races switches).
-        with self._queue_start_lock:
+        # Same lock as the switch start: the _account_switch_in_progress check below
+        # is only meaningful if a switch cannot claim that flag concurrently.
+        with self._switch_start_lock:
             if self._account_switch_in_progress:
                 bot_logger.log_info("Queue start requested but account switch in progress; ignoring.")
                 return
@@ -6061,6 +6069,23 @@ class Controller(ControllerSecondary):
             self.start_game_from_home_screen()
             time.sleep(3.0)
 
+    def _revert_pending_completion(self, why: str) -> None:
+        """Undo the "outgoing account finished its round" bookkeeping done at the
+        start of a switch, for the paths where the switch did NOT happen and we keep
+        playing on that same account. Leaving the key in place would let a couple of
+        failed logouts fill _completed_account_keys and trigger the end-of-round stop
+        -- presenting a malfunction to the user as a clean, finished round."""
+        key = self._pending_completed_key
+        self._pending_completed_key = None
+        if not key:
+            return
+        if key in self._completed_account_keys:
+            self._completed_account_keys.discard(key)
+            bot_logger.log_info(
+                f"Round-completion mark for '{key}' reverted ({why}); "
+                "the account stayed logged in and did not finish."
+            )
+
     def _perform_account_switch(self) -> None:
         # Atomic check-and-set so two racing callers can't both start a logout
         # sequence (which would click over each other and fail the switch).
@@ -6078,16 +6103,26 @@ class Controller(ControllerSecondary):
             self._update_gold_from_inventory()
         except Exception:
             pass
-        # The outgoing account met its switch criteria, so mark it complete for
-        # this round BEFORE the resets below clear its identity. screenName is the
-        # stable per-account key; fall back to the alias we switched in with.
-        outgoing_key = self._current_account_screen_name or self._pending_switch_alias
         # Configured label of the account we're leaving, captured BEFORE the reset
         # below clears _current_account_screen_name, so the next-target selection
         # can skip re-logging into the account that is already current.
         outgoing_config_name = self._current_account_config_name() or (
             self._pending_switch_alias or None
         )
+        # The outgoing account met its switch criteria, so mark it complete for
+        # this round BEFORE the resets below clear its identity. Prefer the
+        # configured label as the key: screenName and alias both identify the same
+        # account, so mixing them across switches would count one account twice and
+        # trip the end-of-round stop too early. Fall back to screenName / the alias
+        # we switched in with only when the label can't be resolved.
+        outgoing_key = (
+            outgoing_config_name
+            or self._current_account_screen_name
+            or self._pending_switch_alias
+        )
+        # Remembered so the logout-failure paths below can take it back: on those we
+        # stay signed in on this very account, so it did NOT finish its round.
+        self._pending_completed_key = str(outgoing_key) if outgoing_key else None
         if outgoing_key:
             self._completed_account_keys.add(str(outgoing_key))
         else:
@@ -6146,6 +6181,7 @@ class Controller(ControllerSecondary):
             accounts = self._load_accounts_from_dirs()
             if not accounts:
                 bot_logger.log_error("Account switch failed: no account credentials found in account folders.")
+                self._revert_pending_completion("no account credentials found")
                 self._account_switch_pending = False
                 return
             # Remember how many accounts are actually rotated, for the anti-storm
@@ -6176,6 +6212,7 @@ class Controller(ControllerSecondary):
                 return
             if not self.log_out_btn_coors or not self.log_out_ok_btn_coors:
                 bot_logger.log_error("Account switch failed: missing calibrated button(s).")
+                self._revert_pending_completion("missing logout button calibration")
                 self._account_switch_pending = False
                 return
             bot_logger.log_info(
@@ -6195,6 +6232,7 @@ class Controller(ControllerSecondary):
             )
             if next_index is None:
                 bot_logger.log_error("Account switch failed: could not select a next account.")
+                self._revert_pending_completion("no next account could be selected")
                 self._account_switch_pending = False
                 return
             account = accounts[next_index]
@@ -6245,6 +6283,7 @@ class Controller(ControllerSecondary):
                         "Aborting account switch and resuming queue on the current account."
                     )
                     self._write_nav_debug_bundle("logout_failed_home_visible")
+                    self._revert_pending_completion("logout aborted, still on Home")
                     self._account_switch_pending = False
                     # Stayed on the current account -> don't attribute its next
                     # quests block to the account we were switching TO.
@@ -6267,6 +6306,7 @@ class Controller(ControllerSecondary):
                     "resuming queue on the current account instead of idling."
                 )
                 self._write_nav_debug_bundle("logout_failed_no_login_screen")
+                self._revert_pending_completion("logout did not reach the login screen")
                 self._account_switch_pending = False
                 # Clear the outgoing-switch alias: we stayed on the CURRENT account,
                 # so the next quests block must NOT be attributed to the account we
@@ -6372,8 +6412,13 @@ class Controller(ControllerSecondary):
             self._persist_account_cycle_index()
         except Exception as e:
             bot_logger.log_error(f"Account switch failed: {e}")
+            # An exception mid-switch leaves the account state unknown; assume we
+            # are still on the outgoing account rather than marking it finished.
+            self._revert_pending_completion(f"switch raised: {e}")
         finally:
             runtime_status.clear_intentional_wait()
+            # Never carry a pending mark into the next switch.
+            self._pending_completed_key = None
             self._account_switch_in_progress = False
 
     def _run_mapped_logout_sequence(self) -> None:

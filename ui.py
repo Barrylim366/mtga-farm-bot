@@ -1894,6 +1894,10 @@ class ConfigManager:
             return self.get_managed_accounts()
         normalized = []
         seen_names = set()
+        # In-game aliases must be unique too: the alias is the ONLY identity the
+        # Player.log exposes, so two accounts sharing one alias would resolve to
+        # the same row and silently misattribute rotation + farmed gold.
+        seen_aliases = set()
         existing_accounts = self.get_managed_accounts()
         existing_by_name = {
             str(acc.get("name", "")).casefold(): str(acc.get("folder", "")).strip()
@@ -1917,7 +1921,12 @@ class ConfigManager:
             key = name.casefold()
             if key in seen_names:
                 continue
+            alias_key = screen_name.casefold()
+            if alias_key and alias_key in seen_aliases:
+                continue
             seen_names.add(key)
+            if alias_key:
+                seen_aliases.add(alias_key)
 
             folder = str(item.get("folder", "")).strip()
             if not folder:
@@ -1955,6 +1964,13 @@ class ConfigManager:
         valid = {acc["name"].casefold() for acc in normalized}
         order = [x for x in self.get_account_play_order() if x.casefold() in valid]
         self.config["account_play_order"] = order
+        # Drop a manual current-account pin whose account was renamed or deleted.
+        # A stale pin is worse than none: _run_bot seeds it into the controller,
+        # which then pins a non-existent identity and permanently suppresses the
+        # log-based auto-detection, so rotation starts from the wrong account.
+        pinned = self.get_manual_current_account()
+        if pinned and pinned.casefold() not in valid:
+            self.config["manual_current_account"] = ""
         if len(normalized) <= 1:
             self.config["account_cycle_index"] = 0
         elif self.get_account_cycle_index() >= len(normalized):
@@ -2018,6 +2034,17 @@ class ConfigManager:
 class MTGBotUI(tk.Tk):
     """Main application window"""
 
+    # Logical (unscaled) size of the main window. The height has to cover the
+    # button stack, the status/queue/account info panel, the three daily-quest
+    # rows and the footer without clipping.
+    _MAIN_BASE_W = 460
+    _MAIN_BASE_H = 1140
+    # Extra room reserved at the bottom for the global topmost toggle.
+    _MAIN_EXTRA_H = 134
+    # Screen height the window cannot use: its own y origin plus a taskbar and
+    # title-bar allowance. Keeps the footer above the screen edge.
+    _MAIN_SCREEN_RESERVE = 80
+
     def __init__(self):
         super().__init__()
 
@@ -2031,13 +2058,8 @@ class MTGBotUI(tk.Tk):
         self.title("Burning Lotus")
         self._suppress_tk_default_icon()
         self._ui_scale = self._compute_ui_scale()
-        width = self._scale_value(460)
-        # Reserve extra space at the bottom for the global topmost toggle.
-        extra_h = self._scale_value(134)
         x, y = 18, 24
-        # Base height sized so the three daily quests plus the (optional)
-        # Current/Next account lines fit above the footer without being clipped.
-        height = self._scale_value(1140) + extra_h
+        width, height = self._main_window_size()
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
 
@@ -2192,7 +2214,31 @@ class MTGBotUI(tk.Tk):
         auto_scale = min(sw / ref_w, sh / ref_h)
         auto_scale = max(0.82, min(1.0, auto_scale))
         user_percent = float(self.config_manager.get_ui_scale_percent()) / 100.0
-        return max(0.50, min(1.20, auto_scale * user_percent))
+        scale = max(0.50, min(1.20, auto_scale * user_percent))
+        # The main window is not resizable, so a height that does not fit on the
+        # screen puts the footer (and the topmost toggle in it) permanently out of
+        # reach. The vertical fit therefore caps the scale, overriding the 0.82
+        # readability floor above -- on a 1080p screen the full-height layout needs
+        # ~0.78. Never shrink below 0.50, where nothing would be legible anyway.
+        needed = float(self._MAIN_BASE_H + self._MAIN_EXTRA_H)
+        usable = sh - float(self._MAIN_SCREEN_RESERVE)
+        if usable > 200.0:
+            scale = min(scale, max(0.50, usable / needed))
+        return scale
+
+    def _main_window_size(self) -> tuple[int, int]:
+        """Scaled (width, height) for the main window. _compute_ui_scale already
+        picks a scale that fits vertically; the clamp here is a backstop for odd
+        screen metrics (and for a user scale percent applied on top)."""
+        width = self._scale_value(self._MAIN_BASE_W)
+        height = self._scale_value(self._MAIN_BASE_H) + self._scale_value(self._MAIN_EXTRA_H)
+        try:
+            usable = int(self.winfo_screenheight()) - self._MAIN_SCREEN_RESERVE
+            if usable > 200:
+                height = min(height, usable)
+        except Exception:
+            pass
+        return width, height
 
     @staticmethod
     def _read_window_xy(window) -> tuple[int, int]:
@@ -2244,9 +2290,9 @@ class MTGBotUI(tk.Tk):
         x = int(self.winfo_x())
         y = int(self.winfo_y())
         self._ui_scale = self._compute_ui_scale()
-        width = self._scale_value(460)
-        extra_h = self._scale_value(134)
-        height = self._scale_value(1140) + extra_h
+        # Scale-dependent cached font must not survive a scale change.
+        self._fit_quest_font = None
+        width, height = self._main_window_size()
         self.geometry(f"{width}x{height}+{x}+{y}")
 
         was_loading = bool(getattr(self, "_loading_visible", False))
@@ -3496,7 +3542,13 @@ class MTGBotUI(tk.Tk):
                 return text
             label_x = (canvas_w // 2) - (self._scale_value(336) // 2) + self._scale_value(14)
             max_px = max(40, canvas_w - label_x - self._scale_value(10))
-            font = tkfont.Font(font=getattr(self, "_info_font_sm", ("Segoe UI", 10)))
+            # Cached: this runs per quest row on every redraw, and building a
+            # tkfont.Font each time is a round trip into Tk for no gain. Dropped
+            # whenever the UI scale changes (see apply_ui_scale_live).
+            font = getattr(self, "_fit_quest_font", None)
+            if font is None:
+                font = tkfont.Font(font=getattr(self, "_info_font_sm", ("Segoe UI", 10)))
+                self._fit_quest_font = font
             if font.measure(text) <= max_px:
                 return text
             ell = "…"
@@ -3564,37 +3616,100 @@ class MTGBotUI(tk.Tk):
         except Exception:
             return ""
 
+    # Bounded log scan for the login screenName. Chunked from the END of the file
+    # so the LATEST login wins (a re-login appends a newer block), overlapping by
+    # more than one authenticateResponse block so a match straddling a chunk
+    # boundary is still found. _SCAN_BUDGET caps the worst case: without it a
+    # multi-hundred-MB Player.log with no match would be read in full.
+    _LOG_SCAN_CHUNK = 1 << 20            # 1 MiB per read
+    _LOG_SCAN_OVERLAP = 8192             # bytes re-read across each boundary
+    _LOG_SCAN_BUDGET = 32 << 20          # stop after 32 MiB scanned
+    _LOGIN_SCREENNAME_RE = re.compile(
+        r'"authenticateResponse"\s*:\s*\{[^{}]{0,4000}?"screenName"\s*:\s*"([^"]+)"'
+    )
+
+    @classmethod
+    def _scan_log_for_login_screenname(cls, path: str) -> str:
+        """Latest authenticateResponse screenName in `path`, or "". Reads only as
+        much of the file tail as needed (see the constants above) instead of
+        slurping it whole -- Player.log routinely reaches tens of MB."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return ""
+        if size <= 0:
+            return ""
+        scanned = 0
+        end = size
+        with open(path, "rb") as f:
+            while end > 0 and scanned < cls._LOG_SCAN_BUDGET:
+                start = max(0, end - cls._LOG_SCAN_CHUNK)
+                f.seek(start)
+                raw = f.read(end - start + (cls._LOG_SCAN_OVERLAP if end < size else 0))
+                scanned += len(raw)
+                chunk = raw.decode("utf-8", errors="ignore")
+                found = cls._LOGIN_SCREENNAME_RE.findall(chunk)
+                if found:
+                    # Latest within this chunk; chunks are walked newest-first, so
+                    # this is the newest in the file.
+                    return str(found[-1]).strip()
+                if start == 0:
+                    break
+                end = start
+        return ""
+
     def _fallback_current_account(self) -> str:
         """Best-effort current (logged-in) account from the latest
         authenticateResponse screenName in the Player.log, matched to a configured
-        account name. Cached briefly so the 3s poll doesn't re-read the log each
-        tick. Lets the line show even while the bot is stopped."""
+        account name. Lets the line show even while the bot is stopped.
+
+        The scan runs on a worker thread and only its RESULT is read here: this is
+        called from the Tk poll (i.e. the UI thread), where a multi-MB log read
+        would freeze the window for the duration of every refresh. Returns the last
+        known value (possibly stale) until a refresh lands -- "" on the first call."""
         now = time.time()
         cached = getattr(self, "_current_acc_log_cache", None)
         if cached is not None and (now - cached[0]) < 10.0:
             return cached[1]
-        value = ""
+        if getattr(self, "_current_acc_scan_busy", False):
+            return cached[1] if cached is not None else ""
+
+        path = ""
         try:
             path = str(self.config_manager.get_log_path() or "").strip()
-            if path and os.path.isfile(path):
-                size = os.path.getsize(path)
-                # The authenticateResponse is written once at login and can sit far
-                # back in a long session, so scan a wide window (whole file up to a
-                # sane cap). The 10s cache keeps this off the hot path.
-                start = max(0, size - 50_000_000)
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    f.seek(start)
-                    tail = f.read()
-                matches = re.findall(
-                    r'"authenticateResponse"\s*:\s*\{[^}]*?"screenName"\s*:\s*"([^"]+)"',
-                    tail,
-                )
-                if matches:
-                    value = self._resolve_screenname_to_alias(str(matches[-1]).strip())
         except Exception:
-            value = ""
-        self._current_acc_log_cache = (now, value)
-        return value
+            path = ""
+        if not path or not os.path.isfile(path):
+            self._current_acc_log_cache = (now, "")
+            return ""
+
+        self._current_acc_scan_busy = True
+
+        def _worker() -> None:
+            screen = ""
+            try:
+                screen = self._scan_log_for_login_screenname(path)
+            except Exception:
+                screen = ""
+            # Marshal back onto the UI thread: _resolve_screenname_to_alias reads
+            # config/status files and the result feeds canvas state.
+            def _apply() -> None:
+                try:
+                    value = self._resolve_screenname_to_alias(screen) if screen else ""
+                except Exception:
+                    value = ""
+                self._current_acc_log_cache = (time.time(), value)
+                self._current_acc_scan_busy = False
+                # A newly resolved name must reach the canvas without waiting for
+                # the value to change again (the poll dedupes on its signature).
+                self._quests_poll_signature = None
+            try:
+                self.after(0, _apply)
+            except Exception:
+                self._current_acc_scan_busy = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return cached[1] if cached is not None else ""
 
     def _resolve_screenname_to_alias(self, screen: str) -> str:
         """Map an MTGA in-game screenName to the label the user configured for that
@@ -4122,18 +4237,26 @@ class MTGBotUI(tk.Tk):
             bot_logger.log_info("UI start: game.start() completed")
             self.after(0, lambda: self._set_startup_loading(False))
 
-            # Wrap match end callback so we can update session stats and still restart games.
+            # Wrap match end callback so we can update session stats and still
+            # restart games. Game.on_match_end owns the duplicate suppression and
+            # reports whether this signal actually claimed the match end, so the
+            # session counters must run AFTER it and only when it returns True --
+            # counting first would let duplicate signals inflate games/wins.
             def _on_match_end(won=None):
-                self.session_games += 1
-                if won is True:
-                    self.session_wins += 1
-                self.after(0, self._update_current_session_window)
+                claimed = False
                 try:
                     if self.game:
-                        self.game.on_match_end(won)
+                        claimed = self.game.on_match_end(won)
                 except TypeError:
                     if self.game:
-                        self.game.on_match_end()
+                        claimed = self.game.on_match_end()
+                # Older Game versions returned None; treat that as "claimed" so the
+                # counters keep working instead of silently freezing at zero.
+                if self.game and claimed is not False:
+                    self.session_games += 1
+                    if won is True:
+                        self.session_wins += 1
+                    self.after(0, self._update_current_session_window)
 
             controller.set_match_end_callback(_on_match_end)
 
@@ -5912,6 +6035,38 @@ class SwitchAccountWindow(tk.Toplevel):
         self._refresh_accounts_table()
         self._refresh_order_choices()
         self.after(220, self._apply_content_minsize)
+        self.after(300, self._warn_missing_aliases)
+
+    def _warn_missing_aliases(self) -> None:
+        """Alias (in-game MTGA name) became a required field. Accounts saved by an
+        older version have none, and they keep working until the user saves -- at
+        which point validation rejects the row. Say so up front, and say WHERE to
+        read the name, instead of letting a bare error message do the explaining."""
+        try:
+            missing = [
+                str(row.get("name", "")).strip()
+                for row in self._accounts_data
+                if str(row.get("name", "")).strip()
+                and str(row.get("email", "")).strip()
+                and not str(row.get("screen_name", "")).strip()
+            ]
+            if not missing:
+                return
+            messagebox.showinfo(
+                "Alias required",
+                "These accounts have no Alias yet:\n\n"
+                + "\n".join(f"  • {n}" for n in missing)
+                + "\n\nThe Alias is the account's in-game Magic Arena name -- the "
+                "one shown top-left in Arena (e.g. Name#12345; the digits are "
+                "optional). It is the only account identity the Arena log exposes, "
+                "so account rotation, farmed-gold tracking and the Current/Next "
+                "account display need it.\n\n"
+                "Fill it in per row and press Save Accounts. Saving a row without "
+                "an Alias is rejected.",
+                parent=self,
+            )
+        except Exception:
+            pass
 
     def _s(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
@@ -6556,6 +6711,7 @@ class SwitchAccountWindow(tk.Toplevel):
     def _collect_accounts_for_save(self):
         accounts = []
         seen = set()
+        seen_aliases = set()
         for idx, row in enumerate(self._accounts_data, start=1):
             name = (row.get("name", "") or "").strip()
             alias = (row.get("screen_name", "") or "").strip()
@@ -6570,7 +6726,17 @@ class SwitchAccountWindow(tk.Toplevel):
             key = name.casefold()
             if key in seen:
                 raise ValueError(f"Duplicate account name: {name}")
+            # The alias is the account's only identity in the Player.log, so a
+            # duplicate would make two rows indistinguishable -- rotation would
+            # skip an account and its farmed gold would land on the other row.
+            alias_key = alias.casefold()
+            if alias_key in seen_aliases:
+                raise ValueError(
+                    f"Duplicate Alias (in-game MTGA name): {alias}. "
+                    "Each account needs its own in-game name."
+                )
             seen.add(key)
+            seen_aliases.add(alias_key)
             accounts.append(
                 {
                     "name": name,
