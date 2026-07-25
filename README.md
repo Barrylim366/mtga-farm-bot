@@ -167,6 +167,10 @@ After each account switch the bot picks a deck based on active quests. Place dec
 - `C.png` — used for creature-type quests
 - Random fallback if no quest matches
 
+In Starter Deck Duel the deck is additionally re-checked before **every** queue, so when a quest completes mid-session the bot swaps to the colors of the next one instead of finishing the session on the deck it started with.
+
+> Fixed in this version: the reward-popup handler mistook the event page's orange **Play** button for a **Claim** button (same corner, same shape). It pressed Play, which started the next match immediately and skipped the deck check — so the bot kept replaying its first deck even after the active quest changed colors. The handler now verifies it is not on the event page before clicking.
+
 ### Casting Logic
 
 The bot maximizes mana usage each turn:

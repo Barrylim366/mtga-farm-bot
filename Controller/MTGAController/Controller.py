@@ -2807,21 +2807,52 @@ class Controller(ControllerSecondary):
         Claim button; it covers the Play/Events controls, so the queue loop gets
         stuck retrying navigation forever. This is template-gated (Buttons/claim.png)
         so it is a safe no-op on any screen where the Claim button is absent.
+
+        The template alone is NOT a sufficient gate: claim.png scores above
+        threshold on the event landing page's orange "Play" button, which lives in
+        the same bottom-right corner -- claim_roi below covers essentially all of
+        _EVENT_PLAY_ROI. That false positive made the bot press Play, which starts
+        the next match immediately with whatever deck is selected, so the queue
+        path that swaps in the quest-matched deck was never reached and the bot
+        kept replaying the first deck it ever picked (observed live: 18 "Reward
+        screen detected" events in a session with zero wins, i.e. no reward screen
+        existed at all). So a match is only trusted after confirming we are NOT on
+        the event landing page.
+
+        That cross-check ASSUMES the reward popup is full-window and covers the
+        event Play button, i.e. the two screens are mutually exclusive -- verified
+        from logs, not from a pixel measurement of the popup. If the assumption ever
+        breaks the way the original bug did (event_play.png false-matching a real
+        Claim button), this refuses to claim -- but it does NOT deadlock: the caller
+        falls through to _queue_from_event_landing, which clicks event_play.png at
+        that same false match, i.e. lands on Claim and dismisses the popup anyway.
+        Worst case is one wasted navigation cycle, and _swap_starter_deck_for_quest
+        in between verifies the deck chooser really opened before touching the grid.
         """
         if self._stop_requested:
             return False
         claim_btn = os.path.join(self._buttons_dir(), "claim.png")
         if not os.path.exists(claim_btn):
             return False
-        # Claim button sits at the bottom-right of the window (1920x1080 frame).
-        claim_roi = (1450, 850, 470, 230)
-        if self._click_image_in_scaled_arena_region(
-            claim_btn, "REWARD_CLAIM", rel_region=claim_roi, confidence=0.80, timeout=1.5
-        ):
-            bot_logger.log_info("Reward screen detected: clicked Claim to continue.")
-            time.sleep(1.0)
-            return True
-        return False
+        point = self._locate_image_center_in_scaled_arena_region(
+            claim_btn, "REWARD_CLAIM", rel_region=self._REWARD_CLAIM_ROI,
+            confidence=0.80, timeout=1.5,
+        )
+        if point is None:
+            return False
+        # Candidate match -- verify before clicking. Done only now, so the extra
+        # probe costs nothing on the common path where no claim-like button is up.
+        if self._on_starter_event_landing_page("REWARD_CLAIM_EVENT_PLAY_GUARD"):
+            bot_logger.log_info(
+                "Reward claim candidate ignored: the event Play button is visible, so this "
+                "is the event landing page and not a reward popup (clicking would start a "
+                "match with the wrong deck)."
+            )
+            return False
+        self._click_abs(point[0], point[1], "REWARD_CLAIM")
+        bot_logger.log_info("Reward screen detected: clicked Claim to continue.")
+        time.sleep(1.0)
+        return True
 
     def _dismiss_match_end_screen(self) -> bool:
         """Safety net for a DEFEAT/VICTORY result screen the post-match timer
@@ -3140,6 +3171,13 @@ class Controller(ControllerSecondary):
     # Bottom-right Play button ROI on the Starter Deck Duel event landing page
     # (1920x1080 reference frame). Shared by every event_play.png probe/click.
     _EVENT_PLAY_ROI = (1400, 900, 520, 180)
+    # Search area for the reward popup's Claim button, same reference frame.
+    # NOTE: this deliberately overlaps _EVENT_PLAY_ROI above -- both buttons live
+    # in the bottom-right corner and claim.png matches the event Play button, so
+    # _dismiss_reward_popup CANNOT rely on the template alone and cross-checks
+    # _on_starter_event_landing_page before clicking. Keep them as constants so
+    # tests can assert that overlap still holds (tests/test_reward_popup_guard.py).
+    _REWARD_CLAIM_ROI = (1450, 850, 470, 230)
 
     def _on_starter_event_landing_page(self, label: str) -> bool:
         """True if the event's Play button is visible, i.e. we are on the Starter
