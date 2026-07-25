@@ -227,6 +227,10 @@ def suggest_signature_for_incident(
             ("SelectN in progress: pausing other decisions.",),
         ),
         (
+            "card_prompt_wait",
+            ("Pausing decision while a modal",),
+        ),
+        (
             "premature_mulligan_keep",
             ("Local MulliganReq observed: clearing premature keep state.",),
         ),
@@ -252,6 +256,10 @@ def suggest_signature_for_incident(
 
     prompt_hints = [
         ("select_n", ("SelectNReq", "SelectN ", "SelectN aborted", "SelectN failed")),
+        # Modal library-search / card-ordering windows. Everything behind them is
+        # unreachable, so a stall here looks like a normal decision stall unless
+        # the prompt itself is named.
+        ("card_prompt", ("SearchReq detected", "OrderReq detected", "prompt cleared (")),
         (
             "target_selection",
             (

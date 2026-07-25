@@ -184,6 +184,7 @@ The bot maximizes mana usage each turn:
 - Ties between otherwise equal casting plans favor lifegain-payoff creatures, so decks built around gaining life develop toward their game plan sooner
 - Removal only ever targets creatures still on the battlefield and never redirects a harmful spell at your own board when no valid enemy target exists
 - When a card lets you choose which creature to return from the graveyard or exile, the bot ranks candidates by their role in the deck's strategy instead of taking whatever the game offers first
+- Modal card windows are handled: the library browser from "search your library for …" (e.g. Circuitous Route) and the card-ordering window that follows it. The bot reads how many cards it may take and which ones are legal straight from the game's own request — Magic Arena pre-filters the browser to valid choices, so it takes the required number and confirms. Everything behind such a window is unreachable, so while one is open no other move is attempted; previously the bot hunted the hand row for a card it could not click and idled until the game was conceded. The result is verified against the client's own response, and a partial answer is logged as an error rather than passing silently.
 
 ### Stopping the bot
 
