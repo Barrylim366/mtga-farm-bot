@@ -574,6 +574,9 @@ class Controller(ControllerSecondary):
         self._last_account_switch_ts = time.time()
         self._account_switch_pending = False
         self._account_switch_in_progress = False
+        # One-shot so "waiting for the match to finish before switching" is logged
+        # once per wait, not on every 3s tick of the queue loop.
+        self._switch_wait_for_match_logged = False
         # Guards the check-and-set of _account_switch_in_progress and the
         # check-and-create of the queue-spam thread. The boolean/is_alive() guards
         # alone are NOT atomic: two near-simultaneous callers (from duplicated
@@ -3788,9 +3791,12 @@ class Controller(ControllerSecondary):
         #    Play button ROI, so a blind retry on the event page would queue a
         #    match); we make the failure visible instead, and the next queue cycle
         #    attempts the swap again from a known screen.
-        if self._starter_deck_picker_open() and not self._on_starter_event_landing_page(
+        # Event page FIRST: on the happy path it matches almost immediately, which
+        # short-circuits the 2s chooser probe. The other order paid that full 2s on
+        # every successful swap -- i.e. on every queue cycle -- to prove a negative.
+        if not self._on_starter_event_landing_page(
             "STARTER_SWAP_DONE_PROBE"
-        ):
+        ) and self._starter_deck_picker_open():
             bot_logger.log_error(
                 f"Starter: deck chooser still open after submit; deck {desired_name} may NOT "
                 "have been applied."
@@ -6603,6 +6609,22 @@ class Controller(ControllerSecondary):
             # waiting for a post-match trigger that already fired.
             if self._account_switch_pending or self._account_switch_due():
                 self._account_switch_pending = True
+                # A match is live (or starting): _perform_account_switch would only
+                # defer, and this loop EXITS after spawning it -- leaving no loop
+                # running and nothing to carry the switch out if that match never
+                # reaches a post-match flow (a cancelled queue, matchmaking aborted).
+                # Keep ticking instead: start_game_from_home_screen refuses to queue
+                # while a switch is pending, so we just wait here until the match is
+                # over and then switch on the next tick.
+                if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
+                    if not self._switch_wait_for_match_logged:
+                        self._switch_wait_for_match_logged = True
+                        bot_logger.log_info(
+                            "Account switch due but a match is in progress; waiting for it to finish."
+                        )
+                    time.sleep(3.0)
+                    continue
+                self._switch_wait_for_match_logged = False
                 # Perform the switch right here. We're in the queue loop, i.e. on
                 # Home with the post-match UI already cleared -- a safe place to
                 # switch from. Deferring to the post-match flow (as this used to do

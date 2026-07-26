@@ -14,6 +14,8 @@ import os
 import sys
 import tempfile
 import threading
+import time as time_module
+import types
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +24,7 @@ if ROOT not in sys.path:
 
 from Controller.MTGAController.Controller import Controller
 from Game import Game
+from state.state_machine import BotState
 
 
 def make_controller() -> Controller:
@@ -351,6 +354,118 @@ class SwitchStartSerializationTests(unittest.TestCase):
 
         self.assertTrue(c._account_switch_in_progress)
         self.assertIsNone(c._pending_completed_key)
+
+
+class QueueLoopSwitchTimingTests(unittest.TestCase):
+    """The queue loop must not exit while a due switch is waiting for a match.
+
+    _perform_account_switch defers while a match is live, and the loop RETURNS
+    right after spawning it -- so exiting there leaves no loop running and nothing
+    to carry the switch out if that match never reaches a post-match flow (a
+    cancelled queue, matchmaking aborted). The loop has to keep ticking instead.
+    """
+
+    def _loop_once(self, c, state) -> list:
+        """Run a single iteration of _queue_spam_loop with the state stubbed."""
+        spawned: list = []
+        c._get_state_from_log = lambda: state
+        c._account_switch_pending = True
+        c._perform_account_switch = lambda: spawned.append("switch")
+        c.start_game_from_home_screen = lambda: spawned.append("queue")
+        original_sleep = time_module.sleep
+        ticks = {"n": 0}
+
+        def fake_sleep(_secs):
+            ticks["n"] += 1
+            if ticks["n"] >= 1:
+                c._stop_queue_spam = True
+
+        time_module.sleep = fake_sleep
+        try:
+            c._queue_spam_loop()
+        finally:
+            time_module.sleep = original_sleep
+        return spawned
+
+    def test_loop_waits_instead_of_exiting_while_a_match_runs(self):
+        c = make_controller()
+        spawned = self._loop_once(c, BotState.IN_GAME)
+        self.assertEqual(spawned, [], "no switch and no queue click during a match")
+        self.assertTrue(c._account_switch_pending, "the switch stays pending")
+
+    def test_loop_waits_while_matchmaking(self):
+        c = make_controller()
+        spawned = self._loop_once(c, BotState.FIND_MATCH)
+        self.assertEqual(spawned, [])
+
+    def test_switch_runs_once_the_match_is_over(self):
+        c = make_controller()
+        spawned: list = []
+        c._get_state_from_log = lambda: BotState.HOME
+        c._account_switch_pending = True
+        started = threading.Event()
+
+        def _switch():
+            spawned.append("switch")
+            started.set()
+
+        c._perform_account_switch = _switch
+        c.start_game_from_home_screen = lambda: spawned.append("queue")
+        c._queue_spam_loop()
+        started.wait(2.0)
+        self.assertEqual(spawned, ["switch"])
+
+
+class NextAccountDisplayTests(unittest.TestCase):
+    """The UI recomputes the next switch target from config while the bot is
+    stopped (the controller publishes nothing then). That copy must agree with the
+    controller's selection, or the Next ACC line promises an account the bot will
+    not switch to."""
+
+    NAMES = ["bruno1", "bruno2", "milo", "oliver"]
+
+    def _ui_next(self, play_order, cycle, current) -> str:
+        from ui import MTGBotUI
+
+        names = self.NAMES
+
+        class _Cfg:
+            def get_managed_accounts(self):
+                return [{"name": n} for n in names]
+
+            def get_account_play_order(self):
+                return list(play_order)
+
+            def get_account_cycle_index(self):
+                return cycle
+
+        stub = types.SimpleNamespace(config_manager=_Cfg())
+        return MTGBotUI._fallback_next_account(stub, current)
+
+    def _controller_next(self, c, play_order, cycle, current) -> str:
+        c._account_play_order = list(play_order)
+        c._account_cycle_index = cycle
+        c._current_account_config_name = lambda screen=None: current or None
+        return c._peek_next_account_name() or ""
+
+    def test_ui_and_controller_agree_on_every_combination(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: accounts(*self.NAMES)
+        orders = [
+            [],
+            self.NAMES,
+            ["oliver", "milo", "bruno1", "bruno2"],
+            ["bruno1", "milo"],
+            ["milo"],
+        ]
+        for play_order in orders:
+            for cycle in range(len(self.NAMES) + 1):
+                for current in [""] + self.NAMES + ["not_a_configured_account"]:
+                    with self.subTest(order=play_order, cycle=cycle, current=current):
+                        self.assertEqual(
+                            self._ui_next(play_order, cycle, current),
+                            self._controller_next(c, play_order, cycle, current),
+                        )
 
 
 class AliasNamespaceTests(unittest.TestCase):
