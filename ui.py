@@ -3055,7 +3055,8 @@ class MTGBotUI(tk.Tk):
         self._loading_text_item = self._card_canvas.create_text(
             0,
             0,
-            text="Loading Carddata",
+            # Placeholder only: _set_startup_loading relabels this per phase.
+            text="Loading card data",
             fill=c["text_muted"],
             font=self.ui_theme["font"]["body"],
             anchor="n",
@@ -3510,17 +3511,143 @@ class MTGBotUI(tk.Tk):
             minutes = 0
         return f"{minutes} Min till Account Switch"
 
-    def _set_startup_loading(self, loading: bool):
+    def _set_startup_loading(self, loading: bool, text: str | None = None):
+        """Show/hide the startup progress bar, optionally relabelling it.
+
+        The bar runs for the whole start sequence -- setup check -> card data ->
+        Arena navigation -- and goes away when the bot presses Play (see
+        _poll_startup_phase). Its label names the step in progress, fed from
+        status.json by the controller. Previously it was hidden as soon as
+        game.start() returned, which is ~0.2s in, so the ~15-20s of navigation
+        that followed looked like a freeze.
+        """
         if not hasattr(self, "loading_bar"):
             return
+        if text is not None:
+            try:
+                self._card_canvas.itemconfigure(self._loading_text_item, text=text)
+            except Exception:
+                pass
         if loading:
+            # start() on an already-running bar restarts its animation, so only
+            # kick it off on the transition into the loading state.
+            if not self._loading_visible:
+                self.loading_bar.start(12)
             self._loading_visible = True
-            self.loading_bar.start(12)
             self._refresh_card_layout()
             return
         self._loading_visible = False
         self.loading_bar.stop()
         self._refresh_card_layout()
+        self._stop_poll_startup_phase()
+
+    # Phases the bar reports while the bot is coming up. The controller
+    # publishes the finer-grained Arena steps into status.json itself (see
+    # runtime_status.set_startup_phase); these are the UI-side ones.
+    _STARTUP_TEXT_SETUP = "Checking Arena setup"
+    _STARTUP_TEXT_CARDS = "Loading card data"
+    _STARTUP_TEXT_ARENA = "Preparing Arena"
+
+    # Modes that mean the bot is past startup and actually working, i.e. the bar
+    # has nothing left to report. "queueing" is deliberately NOT in here: the
+    # controller sets it the moment the queue thread spawns, before any of the
+    # slow navigation has happened.
+    _STARTUP_DONE_MODES = frozenset(
+        {"in_game", "ready", "post_match", "match_end", "account_switch", "stopped"}
+    )
+
+    # Click tags that mean "the bot just pressed Play", i.e. the queue has been
+    # entered and everything the bar reports on is done:
+    #   STARTER_PLAY_CONFIRM - Play/Resume on the event detail page
+    #   STARTER_EVENT_PLAY   - Play on the event landing page (re-queue path)
+    #   QUEUE_BUTTON         - the generic queue click used by the other modes
+    # Deliberately NOT the navigation clicks (STARTER_PLAY opens the Play blade,
+    # STARTER_BANNER selects the event) -- those are steps on the way there.
+    _STARTUP_DONE_INPUT_TAGS = frozenset(
+        {"STARTER_PLAY_CONFIRM", "STARTER_EVENT_PLAY", "QUEUE_BUTTON"}
+    )
+
+    # ...and mode alone would also be late: the controller only switches to
+    # "in_game" once the bot has its first real decision to make (declare
+    # attackers/blockers, select, assign damage), which can be several turns in.
+    # bot_state is refreshed from every single Player.log event
+    # (Controller.__log_callback -> touch_playerlog_event), so it reads IN_GAME
+    # as soon as the match is live.
+    _STARTUP_DONE_BOT_STATE = "IN_GAME"
+
+    # Hard stop for the bar. Navigation can legitimately take a while (retries on
+    # unrecognised screens), but if we are still not in a match after this long
+    # something is wrong and a spinner would only misinform -- the status field
+    # and bot.log are the honest sources then.
+    _STARTUP_PHASE_TIMEOUT_SEC = 180.0
+
+    def _start_poll_startup_phase(self) -> None:
+        """Drive the bar's label from status.json until the bot is really up."""
+        self._stop_poll_startup_phase()
+        self._startup_phase_deadline = time.time() + self._STARTUP_PHASE_TIMEOUT_SEC
+        # Baseline for the "bot has started moving" check below. Controller's
+        # ctor resets this to 0.0 on every start, so it is normally 0 here.
+        try:
+            status = runtime_status.read_status() or {}
+        except Exception:
+            status = {}
+        self._startup_input_baseline = float(status.get("last_input_at_epoch") or 0.0)
+        self._poll_startup_phase()
+
+    def _stop_poll_startup_phase(self) -> None:
+        job = getattr(self, "_startup_phase_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._startup_phase_job = None
+
+    def _poll_startup_phase(self) -> None:
+        self._startup_phase_job = None
+        if not self.bot_running or not getattr(self, "_loading_visible", False):
+            return
+        try:
+            status = runtime_status.read_status() or {}
+        except Exception:
+            status = {}
+        # Relabel first, so the step that ends the sequence ("Pressing Play") is
+        # still rendered on the frame where the bar goes away.
+        phase = str(status.get("startup_phase") or "").strip()
+        if phase:
+            try:
+                self._card_canvas.itemconfigure(self._loading_text_item, text=phase)
+            except Exception:
+                pass
+        # Primary signal: the bot has pressed Play, i.e. the whole startup
+        # sequence it was reporting on is over. The controller publishes the tag
+        # of every click it makes (Controller._click_abs -> touch_input), so the
+        # queue-entry clicks are directly observable. The timestamp guard keeps a
+        # tag left over from a previous session from ending the bar instantly.
+        try:
+            last_input = float(status.get("last_input_at_epoch") or 0.0)
+        except (TypeError, ValueError):
+            last_input = 0.0
+        tag = str(status.get("last_input_tag") or "")
+        if tag in self._STARTUP_DONE_INPUT_TAGS and last_input > getattr(
+            self, "_startup_input_baseline", 0.0
+        ):
+            self._set_startup_loading(False)
+            return
+        # Backstops. Play is best-effort in the navigation: clicking the event's
+        # "Resume" banner can launch the match on its own, in which case no Play
+        # click is ever recorded. Also covers attaching to a running match.
+        # bot_state is stored as the enum repr ("BotState.IN_GAME"), hence the
+        # substring test.
+        mode = str(status.get("mode") or "")
+        bot_state = str(status.get("bot_state") or "")
+        if mode in self._STARTUP_DONE_MODES or self._STARTUP_DONE_BOT_STATE in bot_state:
+            self._set_startup_loading(False)
+            return
+        if time.time() >= getattr(self, "_startup_phase_deadline", 0.0):
+            self._set_startup_loading(False)
+            return
+        self._startup_phase_job = self.after(250, self._poll_startup_phase)
 
     def _refresh_queue_mode_label(self) -> None:
         mode = str(self._queue_mode_var.get() or "historic").lower()
@@ -3965,6 +4092,9 @@ class MTGBotUI(tk.Tk):
         # animation is playing. The common case (anchors match immediately) still
         # returns on the first attempt with zero added delay. Runs via self.after
         # (not a blocking sleep loop) so the UI stays responsive during retries.
+        # The bar goes up first: with retries this check can run for several
+        # seconds, and it used to do so with no feedback at all.
+        self._set_startup_loading(True, self._STARTUP_TEXT_SETUP)
         self._run_arena_setup_check_async(
             show_success=False,
             attempts=8,
@@ -3974,10 +4104,11 @@ class MTGBotUI(tk.Tk):
 
     def _on_start_bot_setup_check_done(self, setup_ok: bool) -> None:
         if not setup_ok:
+            self._set_startup_loading(False)
             return
         self.bot_running = True
         self._set_running_state(True)
-        self._set_startup_loading(True)
+        self._set_startup_loading(True, self._STARTUP_TEXT_CARDS)
 
         # Start bot in separate thread
         self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
@@ -4235,7 +4366,12 @@ class MTGBotUI(tk.Tk):
             bot_logger.log_info("UI start: game.start() begin")
             self.game.start()
             bot_logger.log_info("UI start: game.start() completed")
-            self.after(0, lambda: self._set_startup_loading(False))
+            # game.start() only ARMS the controller (it returns in ~0.2s); the
+            # queue thread then spends ~15-20s navigating Arena before the first
+            # match. Keep the bar up for that, relabelled from status.json, and
+            # let the poll hide it once the bot is really playing.
+            self.after(0, lambda: self._set_startup_loading(True, self._STARTUP_TEXT_ARENA))
+            self.after(0, self._start_poll_startup_phase)
 
             # Wrap match end callback so we can update session stats and still
             # restart games. Game.on_match_end owns the duplicate suppression and

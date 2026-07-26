@@ -12,6 +12,9 @@ from runtime_paths import runtime_file
 
 _LOCK = threading.RLock()
 _SESSION_ID = uuid.uuid4().hex
+# Mirrors status.json's "startup_phase" so set_startup_phase can drop repeats
+# without a file round-trip. Kept in sync by reset_status.
+_last_startup_phase: str = ""
 
 
 def get_runtime_dir() -> str:
@@ -28,6 +31,12 @@ def get_status_path() -> str:
 
 
 def reset_status(*, log_path: str | None = None) -> dict[str, Any]:
+    global _last_startup_phase
+    # The dedupe cache in set_startup_phase mirrors what is in the file, so a
+    # reset (one per bot start, from the Controller ctor) has to clear it too --
+    # otherwise the first phase of a new session is dropped as a "repeat" of the
+    # last phase of the previous one.
+    _last_startup_phase = ""
     now = time.time()
     payload = {
         "session_id": _SESSION_ID,
@@ -57,6 +66,11 @@ def reset_status(*, log_path: str | None = None) -> dict[str, Any]:
         "my_timer_last_critical_at_epoch": 0.0,
         "my_timer_timeout_seen": False,
         "my_timer_timeout_at_epoch": 0.0,
+        # Human-readable label for the long startup phase between "card data
+        # loaded" and "bot is actually playing" (Home dip, quest refresh, Play
+        # navigation). The UI shows it on the startup progress bar so that phase
+        # is not a silent gap. "" whenever there is nothing to report.
+        "startup_phase": "",
         "quests": [],
         "active_quest_id": "",
         "active_quest_colors": "",
@@ -95,6 +109,25 @@ def update_status(**fields: Any) -> dict[str, Any]:
         payload.update(fields)
         payload["updated_at_epoch"] = time.time()
         return _write_payload(payload, already_locked=True)
+
+
+def set_startup_phase(phase: str) -> None:
+    """Publish what the bot is busy with during startup (see reset_status).
+
+    Called from the queue loop, which re-runs every few seconds, so repeats are
+    dropped without touching the file -- an unchanged phase must not turn this
+    into a periodic status.json write. Never raises: a cosmetic label must not
+    be able to break the navigation it is reporting on.
+    """
+    global _last_startup_phase
+    phase = str(phase or "")
+    if phase == _last_startup_phase:
+        return
+    _last_startup_phase = phase
+    try:
+        update_status(startup_phase=phase)
+    except Exception:
+        pass
 
 
 def set_mode(mode: str, **extra: Any) -> dict[str, Any]:

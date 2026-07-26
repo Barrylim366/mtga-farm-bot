@@ -2617,6 +2617,7 @@ class Controller(ControllerSecondary):
         if self._get_state_from_log() == BotState.IN_GAME:
             return False
         bot_logger.log_info("Quest refresh: dipping to Home to re-fetch quest progress.")
+        runtime_status.set_startup_phase("Refreshing quests")
         prev_active = self._cached_active_quest_id
         prev_progress = {q.get("id"): q.get("progress") for q in self._cached_quests}
         # Click the Home tab (best effort). The vision-anchor verification inside
@@ -2870,6 +2871,7 @@ class Controller(ControllerSecondary):
         claim_btn = os.path.join(self._buttons_dir(), "claim.png")
         if not os.path.exists(claim_btn):
             return False
+        runtime_status.set_startup_phase("Checking for reward popups")
         point = self._locate_image_center_in_scaled_arena_region(
             claim_btn, "REWARD_CLAIM", rel_region=self._REWARD_CLAIM_ROI,
             confidence=0.80, timeout=1.5,
@@ -2963,6 +2965,7 @@ class Controller(ControllerSecondary):
         self.refresh_quests_cache()
         # Swap to the deck that best advances the top quest, then queue.
         self._swap_starter_deck_for_quest(target_colors)
+        runtime_status.set_startup_phase("Pressing Play")
         if self._click_image_in_scaled_arena_region(
             event_play, "STARTER_EVENT_PLAY", rel_region=self._EVENT_PLAY_ROI,
             confidence=0.80, timeout=2.0,
@@ -3030,12 +3033,14 @@ class Controller(ControllerSecondary):
 
         # 1) Open the Play blade from Home. Best-effort: if we are already in the
         #    blade the home Play button is not found and we just continue.
+        runtime_status.set_startup_phase("Opening the Play menu")
         if self._click_image_in_scaled_arena_region(
             play_btn, "STARTER_PLAY", rel_region=home_play_roi, confidence=0.80, timeout=1.5
         ):
             time.sleep(1.0)
 
         # 2) Events tab (top-right of the Play blade).
+        runtime_status.set_startup_phase("Opening the Events tab")
         if not self._click_image_in_scaled_arena_region(
             events_tpl, "STARTER_EVENTS", rel_region=events_tab_roi, confidence=0.74, timeout=2.0
         ):
@@ -3080,6 +3085,7 @@ class Controller(ControllerSecondary):
             bot_logger.log_info("Starter: In Progress filter not clicked (banner likely already visible).")
 
         # 4) Starter Deck Duel banner on the left.
+        runtime_status.set_startup_phase("Looking for Starter Deck Duel")
         if not self._click_image_in_scaled_arena_region(
             starter_tpl, "STARTER_BANNER", rel_region=starter_banner_roi, confidence=0.72, timeout=3.0
         ):
@@ -3092,6 +3098,7 @@ class Controller(ControllerSecondary):
 
         # 5) Best-effort Play/Resume confirm. Clicking the "Resume" banner may
         #    already launch the match, so a missing Play button is not a failure.
+        runtime_status.set_startup_phase("Pressing Play")
         if self._click_image_in_scaled_arena_region(
             play_btn, "STARTER_PLAY_CONFIRM", rel_region=play_confirm_roi, confidence=0.80, timeout=1.5
         ):
@@ -3265,6 +3272,7 @@ class Controller(ControllerSecondary):
         if not desired_tpl:
             return
         desired_name = os.path.splitext(os.path.basename(desired_tpl))[0].upper()
+        runtime_status.set_startup_phase(f"Selecting the {desired_name} deck")
         grid_base = self._starter_deck_grid_point(desired_name)
         if grid_base is None:
             bot_logger.log_error(
