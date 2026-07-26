@@ -1,0 +1,225 @@
+[
+  {
+    "type": "GREMessageType_SearchReq",
+    "systemSeatIds": [
+      2
+    ],
+    "msgId": 165,
+    "gameStateId": 130,
+    "prompt": {
+      "promptId": 2209,
+      "parameters": [
+        {
+          "parameterName": "CardId",
+          "type": "ParameterType_Number",
+          "numberValue": 310
+        }
+      ]
+    },
+    "searchReq": {
+      "maxFind": 2,
+      "zonesToSearch": [
+        36
+      ],
+      "itemsToSearch": [
+        229,
+        230,
+        231,
+        232,
+        233,
+        234,
+        235,
+        236,
+        237,
+        238,
+        239,
+        240,
+        241,
+        242,
+        243,
+        244,
+        245,
+        246,
+        247,
+        248,
+        249,
+        250,
+        251,
+        252,
+        253,
+        254,
+        255,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270,
+        271,
+        272,
+        273,
+        274,
+        275,
+        276,
+        277,
+        278
+      ],
+      "itemsSought": [
+        278,
+        275,
+        267,
+        246,
+        233,
+        238,
+        268,
+        262,
+        239,
+        258,
+        242,
+        255,
+        261,
+        240
+      ],
+      "sourceId": 310
+    },
+    "allowCancel": "AllowCancel_No"
+  },
+  {
+    "type": "GREMessageType_SearchReq",
+    "systemSeatIds": [
+      1
+    ],
+    "msgId": 227,
+    "gameStateId": 172,
+    "prompt": {
+      "promptId": 2209,
+      "parameters": [
+        {
+          "parameterName": "CardId",
+          "type": "ParameterType_Number",
+          "numberValue": 320
+        }
+      ]
+    },
+    "searchReq": {
+      "maxFind": 2,
+      "zonesToSearch": [
+        32
+      ],
+      "itemsToSearch": [
+        170,
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179,
+        180,
+        181,
+        182,
+        183,
+        184,
+        185,
+        186,
+        187,
+        188,
+        189,
+        190,
+        191,
+        192,
+        193,
+        194,
+        195,
+        196,
+        197,
+        198,
+        199,
+        200,
+        201,
+        202,
+        203,
+        204,
+        205,
+        206,
+        207,
+        208,
+        209,
+        210,
+        211,
+        212,
+        213,
+        214,
+        215,
+        216,
+        217,
+        218
+      ],
+      "itemsSought": [
+        183,
+        184,
+        189,
+        186,
+        214,
+        213,
+        211,
+        206,
+        173,
+        216,
+        209,
+        172,
+        171,
+        177
+      ],
+      "sourceId": 320
+    },
+    "allowCancel": "AllowCancel_No"
+  },
+  {
+    "type": "GREMessageType_OrderReq",
+    "systemSeatIds": [
+      1
+    ],
+    "msgId": 230,
+    "gameStateId": 173,
+    "prompt": {
+      "promptId": 91,
+      "parameters": [
+        {
+          "parameterName": "CardId",
+          "type": "ParameterType_Number",
+          "numberValue": 320
+        }
+      ]
+    },
+    "orderReq": {
+      "ids": [
+        325,
+        326
+      ]
+    },
+    "allowCancel": "AllowCancel_No"
+  },
+  {
+    "type": "ClientMessageType_SearchResp",
+    "gameStateId": 172,
+    "respId": 227,
+    "searchResp": {
+      "itemsFound": [
+        173,
+        206
+      ]
+    }
+  }
+]

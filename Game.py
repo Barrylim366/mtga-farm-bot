@@ -28,13 +28,26 @@ class Game:
         self.game_started = False
         self.starting_hand_logged = False
         self._stop_requested = False
+        # Key of the match whose end was already handled -- see _match_end_key.
+        # Guards against a match-end being signalled more than once: without it,
+        # each duplicate schedules another restart timer, spawning parallel
+        # queue/switch loops that race and break account rotation + switch criteria.
+        # Keyed per MATCH rather than a bare flag, so the suppression lasts as long
+        # as the match does (a bare flag re-armed on the restart timer would let a
+        # duplicate ~10s later through) without ever latching permanently.
+        # Guarded by _match_end_lock: the signal arrives on the log-monitor thread
+        # while decision threads write the state the key is built from.
+        self._handled_match_end_key: str | None = None
+        self._match_end_lock = threading.Lock()
+        # Counts restarts, i.e. identifies the match slot we are in. Only used as
+        # the dedup key's fallback when no matchId is available -- unlike a
+        # timestamp that stays None until the bot first acts, this always differs
+        # between consecutive matches, so back-to-back matches that both end before
+        # the bot ever acts can never share a key (which would swallow the second
+        # match's end and leave the bot idle with no restart scheduled).
+        self._match_slot = 0
         self._timers: list[threading.Timer] = []
         self._last_action_delay_turn = -1
-        # The match-end signal can arrive more than once for the SAME match.
-        # Handling it twice schedules two restarts, i.e. two parallel queue/switch
-        # loops that click over each other and break the account rotation. Set on
-        # the first signal, re-armed in _restart_game.
-        self._match_end_handled = False
         # Tracks (turn, phase, step, decisionPlayer, move_name, move_payload) of
         # the last move actually executed, plus how many times in a row it has
         # repeated -- see _STUCK_MOVE_RETRY_LIMIT.
@@ -57,7 +70,8 @@ class Game:
     def start(self):
         self._debug("Game.start() called")
         self._stop_requested = False
-        self._match_end_handled = False
+        with self._match_end_lock:
+            self._handled_match_end_key = None
         try:
             debug_recorder.start_session()
         except Exception as e:
@@ -104,17 +118,51 @@ class Game:
         self.controller.set_match_end_callback(self.on_match_end)
         self._debug("All callbacks registered")
 
-    def on_match_end(self, won: bool | None = None):
-        """Called when a match ends - wait 20 seconds then start a new game"""
+    def _mark_match_started(self) -> None:
+        """A new match is confirmed live: first mulligan, or an inferred live state
+        when we attached mid-game."""
+        self._match_started_ts = time.time()
+
+    def _match_end_key(self) -> str:
+        """Identity of the match that is ending, used to collapse duplicate
+        match-end signals.
+
+        The matchId is the real identity and it is set when the match is JOINED, so
+        it is available even for a match that ended before the bot ever acted. When
+        it is missing, fall back to the match slot (the restart counter), which still
+        collapses duplicates inside one match but always differs between consecutive
+        matches.
+
+        Deliberately never a value that can repeat across matches: a key that does
+        can swallow a real match end, and then no restart is scheduled and the bot
+        sits idle forever. One redundant restart is the far cheaper failure --
+        start_queueing already refuses to spawn a second queue loop."""
+        match_id = ""
+        try:
+            if hasattr(self.controller, "get_current_match_id"):
+                match_id = str(self.controller.get_current_match_id() or "").strip()
+        except Exception:
+            match_id = ""
+        return f"id:{match_id}" if match_id else f"slot:{self._match_slot}"
+
+    def on_match_end(self, won: bool | None = None) -> bool:
+        """Called when a match ends - wait 10 seconds then start a new game.
+
+        Returns True if this call claimed the match end (i.e. it was the first
+        signal for this match), False if it was a suppressed duplicate. Callers
+        that record per-match data -- the UI's session win/loss counters -- must
+        only count when this returns True."""
         # Idempotency: the match-end can be signalled more than once for the same
         # match. Handle only the first; duplicates must NOT re-record the match or
         # schedule a second restart (which would spawn a parallel queue/switch loop
-        # -- the cause of broken rotation and duplicated switch attempts). Reset in
-        # _restart_game so the next match is handled normally.
-        if self._match_end_handled:
-            self._debug("Duplicate match-end signal ignored.")
-            return
-        self._match_end_handled = True
+        # -- the cause of broken rotation and duplicated switch attempts).
+        # Check-and-set under the lock so two concurrent signals can't both claim it.
+        key = self._match_end_key()
+        with self._match_end_lock:
+            if key is not None and key == self._handled_match_end_key:
+                self._debug(f"Duplicate match-end signal ignored ({key}).")
+                return False
+            self._handled_match_end_key = key
         # Finalize the debug recording first, independently of the restart
         # logic below -- otherwise stopping the bot at match end (a common case)
         # would skip the match.json footer and leave the last match unfinalized.
@@ -143,7 +191,7 @@ class Game:
             self._debug(f"Match-end marker failed: {e}")
         if self._stop_requested:
             self._debug("Match ended but stop requested - not restarting")
-            return
+            return True
         runtime_status.set_mode("match_end")
         self._debug("Match ended - scheduling restart in 10 seconds")
         # Stop inactivity timer since match ended
@@ -152,6 +200,7 @@ class Game:
         restart_timer = threading.Timer(10.0, self._restart_game)
         self._timers.append(restart_timer)
         restart_timer.start()
+        return True
 
     def _restart_game(self):
         """Reset state and start a new game"""
@@ -161,8 +210,11 @@ class Game:
         runtime_status.set_mode("restarting")
         self._debug("Restarting game...")
 
-        # Re-arm the match-end handler for the next match.
-        self._match_end_handled = False
+        # NB: _handled_match_end_key is deliberately NOT cleared here -- clearing it
+        # on the restart timer would reopen the duplicate-signal window ~10s after
+        # the match. Instead the key rotates on its own: a new matchId when the next
+        # match is joined, and the slot counter below as the fallback.
+        self._match_slot += 1
 
         # Reset Game state
         self.last_logged_turn = -1
@@ -229,7 +281,7 @@ class Game:
         self._debug(f"Mulligan decision called with {len(card_list)} cards")
         runtime_status.set_mode("in_game")
         if not self.game_started:
-            self._match_started_ts = time.time()
+            self._mark_match_started()
         self.game_started = True  # Mark game as started after mulligan
         keep = self.ai.generate_keep(card_list)
         bot_logger.log_mulligan_decision(keep, len(card_list))
@@ -267,7 +319,18 @@ class Game:
         return None
 
     def _refresh_card_data(self):
-        """Refresh cards.json from local MTGA data (Linux/macOS/Windows Steam paths)."""
+        """Refresh cards.json from local MTGA data (Linux/macOS/Windows Steam paths).
+
+        Deliberately no Scryfall bulk download here. The local export already
+        contains every Arena grpId, so a bulk merge can only ever skip cards it
+        already has -- it added exactly 0 entries while costing a blocking
+        ~600 MB download plus a full in-memory parse on the first start of each
+        day (Scryfall regenerates the bulk file daily). Cards the export misses,
+        and the oracle text/keywords it never carries, are resolved lazily and
+        cached per card instead: CardInfo.get_card_info()'s single-card Scryfall
+        fallback, CardInfo.refresh_missing_cards() at startup for IDs that
+        fallback failed on, and CardInfo.get_oracle_text_from_scryfall() on demand.
+        """
         try:
             import sys
             import subprocess
@@ -278,11 +341,6 @@ class Game:
                     self._debug("Card data refresh: cards.json reloaded into memory.")
                 except Exception as e:
                     self._debug(f"Card data refresh: reload failed: {e}")
-                try:
-                    CardInfo.refresh_cards_from_scryfall_bulk_if_needed()
-                    self._debug("Card data refresh: Scryfall bulk delta check done.")
-                except Exception as e:
-                    self._debug(f"Card data refresh: Scryfall bulk delta failed: {e}")
                 return
             base_candidates = [
                 os.path.expanduser("~/.local/share/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
@@ -331,11 +389,6 @@ class Game:
                 self._debug("Card data refresh: cards.json reloaded into memory.")
             except Exception as e:
                 self._debug(f"Card data refresh: reload failed: {e}")
-            try:
-                CardInfo.refresh_cards_from_scryfall_bulk_if_needed()
-                self._debug("Card data refresh: Scryfall bulk delta check done.")
-            except Exception as e:
-                self._debug(f"Card data refresh: Scryfall bulk delta failed: {e}")
         except Exception as e:
             self._debug(f"Card data refresh failed: {e}")
 
@@ -381,7 +434,7 @@ class Game:
                 return False
 
             if not self.game_started:
-                self._match_started_ts = time.time()
+                self._mark_match_started()
             self.game_started = True
             if turn_num > 1:
                 self.starting_hand_logged = True

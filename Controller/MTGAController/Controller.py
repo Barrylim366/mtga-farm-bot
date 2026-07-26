@@ -129,6 +129,24 @@ class Controller(ControllerSecondary):
             # blocks to avoid freezing on 'Choose blockers'.
             'declare_blockers': '"type": "GREMessageType_DeclareBlockersReq"',
             'select_n': '"type": "GREMessageType_SelectNReq"',
+            # Library-search prompts ("search your library for up to two basic
+            # land cards …", e.g. Circuitous Route). MTGA opens a full-window card
+            # browser and waits; the board and hand behind it are dead. Without
+            # this the bot never learns the prompt exists, keeps issuing normal
+            # main-phase moves, and sweeps the hand row for a card it can't reach
+            # (observed: "SCAN_STOPPED: No hover update before bounds" in a loop
+            # until the inactivity timer conceded the game).
+            'search_req': '"type": "GREMessageType_SearchReq"',
+            # Second half of the same interaction: after the search is answered,
+            # MTGA asks for the ORDER of the found cards in another modal window
+            # (verified live for Circuitous Route: SearchReq -> SearchResp ->
+            # OrderReq -> OrderResp). Handling only the search would stall the bot
+            # one prompt later, so both are gated the same way.
+            'order_req': '"type": "GREMessageType_OrderReq"',
+            # Our own answer coming back out of the client. This is ground truth
+            # for "did the clicks land": itemsFound lists exactly which cards were
+            # taken, so a search we answered badly is detectable instead of silent.
+            'client_search_resp': '"type": "ClientMessageType_SearchResp"',
             # Scry/surveil and other ordered-grouping prompts. We only click
             # Done for now so the bot does not stall on them.
             'group_req': '"type": "GREMessageType_GroupReq"',
@@ -341,6 +359,20 @@ class Controller(ControllerSecondary):
         self.__submit_selection_lock = threading.Lock()
         self.__select_n_token_counter = 0
         self.__select_n_stack_wait_timeout_sec = 8.0
+        # Open modal card prompt (SearchReq / OrderReq), or None. Holds what MTGA
+        # told us about it: `kind`, how many cards may be taken (max_find), the
+        # legal candidates it pre-filtered (sought -- we do NOT have to work out
+        # which library cards are basics/Gates ourselves), the source spell and
+        # whether the prompt can be cancelled. Only used to PAUSE decisions for
+        # now; answering it physically is a separate step.
+        self.__pending_card_prompt = None
+        # How long such a prompt may block decisions before we assume it was
+        # answered (possibly by hand) or vanished, and let the bot carry on.
+        # Generous: the window is modal, so acting into it is worse than waiting.
+        self.__card_prompt_timeout_sec = 90.0
+        # Invalidates the timers of a prompt that is already gone, so a late
+        # answer attempt can never click into the next one.
+        self.__card_prompt_token_counter = 0
         self.__target_submit_cooldown_sec = 1.0
         self.__pending_pay_costs_ts = 0.0
         # Stack-deferral watchdog. The "Deferring decision: stack has N object(s)"
@@ -456,6 +488,9 @@ class Controller(ControllerSecondary):
         # requires matches (unlike the anti-storm counter, which only advances when
         # no match is played). Fresh per Controller (i.e. per bot Start).
         self._completed_account_keys: set[str] = set()
+        # Key added to _completed_account_keys by the switch currently running, kept
+        # so a failed logout can take it back again (see _revert_pending_completion).
+        self._pending_completed_key: str | None = None
         # The screenName that owns this account's quests block, latched from the
         # first block we see after (re)start / account switch. Comparing against
         # this fixed value -- instead of "whichever screenName is last in the log
@@ -543,9 +578,12 @@ class Controller(ControllerSecondary):
         # check-and-create of the queue-spam thread. The boolean/is_alive() guards
         # alone are NOT atomic: two near-simultaneous callers (from duplicated
         # post-match/queue loops) both pass them and start two logout sequences
-        # that click over each other -> the switch fails. These locks serialize it.
+        # that click over each other -> the switch fails.
+        # ONE lock covers both, deliberately: start_queueing reads the very flag
+        # _perform_account_switch sets, so two separate locks would still let a
+        # queue loop start into a switch that had just begun. Neither holds the lock
+        # while calling the other, so there is no lock-order cycle here.
         self._switch_start_lock = threading.Lock()
-        self._queue_start_lock = threading.Lock()
         self._queue_after_login = False
         self._queue_spam_thread = None
         self._stop_queue_spam = False
@@ -1327,6 +1365,10 @@ class Controller(ControllerSecondary):
                 "current_hovered_id": current_hovered_id,
                 "pending_select_n": self.__pending_select_n,
                 "select_n_in_progress": self.__select_n_in_progress,
+                # An open search/order window is the one state that makes a hand
+                # scan hopeless -- record it so a bundle answers "was a modal
+                # prompt up?" without cross-reading the log.
+                "pending_card_prompt": self.__pending_card_prompt,
                 "turn_info": self.updated_game_state.get_turn_info() or {},
                 "log_path": self._log_path,
             }
@@ -2947,6 +2989,7 @@ class Controller(ControllerSecondary):
         if self._account_switch_in_progress:
             return False
         bot_logger.log_info("Quest refresh: dipping to Home to re-fetch quest progress.")
+        runtime_status.set_startup_phase("Refreshing quests")
         prev_active = self._cached_active_quest_id
         prev_progress = {q.get("id"): q.get("progress") for q in self._cached_quests}
         # Click the Home tab (best effort). The vision-anchor verification inside
@@ -3173,21 +3216,53 @@ class Controller(ControllerSecondary):
         Claim button; it covers the Play/Events controls, so the queue loop gets
         stuck retrying navigation forever. This is template-gated (Buttons/claim.png)
         so it is a safe no-op on any screen where the Claim button is absent.
+
+        The template alone is NOT a sufficient gate: claim.png scores above
+        threshold on the event landing page's orange "Play" button, which lives in
+        the same bottom-right corner -- claim_roi below covers essentially all of
+        _EVENT_PLAY_ROI. That false positive made the bot press Play, which starts
+        the next match immediately with whatever deck is selected, so the queue
+        path that swaps in the quest-matched deck was never reached and the bot
+        kept replaying the first deck it ever picked (observed live: 18 "Reward
+        screen detected" events in a session with zero wins, i.e. no reward screen
+        existed at all). So a match is only trusted after confirming we are NOT on
+        the event landing page.
+
+        That cross-check ASSUMES the reward popup is full-window and covers the
+        event Play button, i.e. the two screens are mutually exclusive -- verified
+        from logs, not from a pixel measurement of the popup. If the assumption ever
+        breaks the way the original bug did (event_play.png false-matching a real
+        Claim button), this refuses to claim -- but it does NOT deadlock: the caller
+        falls through to _queue_from_event_landing, which clicks event_play.png at
+        that same false match, i.e. lands on Claim and dismisses the popup anyway.
+        Worst case is one wasted navigation cycle, and _swap_starter_deck_for_quest
+        in between verifies the deck chooser really opened before touching the grid.
         """
         if self._stop_requested:
             return False
         claim_btn = os.path.join(self._buttons_dir(), "claim.png")
         if not os.path.exists(claim_btn):
             return False
-        # Claim button sits at the bottom-right of the window (1920x1080 frame).
-        claim_roi = (1450, 850, 470, 230)
-        if self._click_image_in_scaled_arena_region(
-            claim_btn, "REWARD_CLAIM", rel_region=claim_roi, confidence=0.80, timeout=1.5
-        ):
-            bot_logger.log_info("Reward screen detected: clicked Claim to continue.")
-            time.sleep(1.0)
-            return True
-        return False
+        runtime_status.set_startup_phase("Checking for reward popups")
+        point = self._locate_image_center_in_scaled_arena_region(
+            claim_btn, "REWARD_CLAIM", rel_region=self._REWARD_CLAIM_ROI,
+            confidence=0.80, timeout=1.5,
+        )
+        if point is None:
+            return False
+        # Candidate match -- verify before clicking. Done only now, so the extra
+        # probe costs nothing on the common path where no claim-like button is up.
+        if self._on_starter_event_landing_page("REWARD_CLAIM_EVENT_PLAY_GUARD"):
+            bot_logger.log_info(
+                "Reward claim candidate ignored: the event Play button is visible, so this "
+                "is the event landing page and not a reward popup (clicking would start a "
+                "match with the wrong deck)."
+            )
+            return False
+        self._click_abs(point[0], point[1], "REWARD_CLAIM")
+        bot_logger.log_info("Reward screen detected: clicked Claim to continue.")
+        time.sleep(1.0)
+        return True
 
     def _dismiss_match_end_screen(self) -> bool:
         """Safety net for a DEFEAT/VICTORY result screen the post-match timer
@@ -3273,6 +3348,7 @@ class Controller(ControllerSecondary):
             target_colors = refreshed_colors
         # Swap to the deck that best advances the top quest, then queue.
         self._swap_starter_deck_for_quest(target_colors)
+        runtime_status.set_startup_phase("Pressing Play")
         if self._click_image_in_scaled_arena_region(
             event_play, "STARTER_EVENT_PLAY", rel_region=self._EVENT_PLAY_ROI,
             confidence=0.80, timeout=2.0,
@@ -3340,12 +3416,14 @@ class Controller(ControllerSecondary):
 
         # 1) Open the Play blade from Home. Best-effort: if we are already in the
         #    blade the home Play button is not found and we just continue.
+        runtime_status.set_startup_phase("Opening the Play menu")
         if self._click_image_in_scaled_arena_region(
             play_btn, "STARTER_PLAY", rel_region=home_play_roi, confidence=0.80, timeout=1.5
         ):
             time.sleep(1.0)
 
         # 2) Events tab (top-right of the Play blade).
+        runtime_status.set_startup_phase("Opening the Events tab")
         if not self._click_image_in_scaled_arena_region(
             events_tpl, "STARTER_EVENTS", rel_region=events_tab_roi, confidence=0.74, timeout=2.0
         ):
@@ -3390,6 +3468,7 @@ class Controller(ControllerSecondary):
             bot_logger.log_info("Starter: In Progress filter not clicked (banner likely already visible).")
 
         # 4) Starter Deck Duel banner on the left.
+        runtime_status.set_startup_phase("Looking for Starter Deck Duel")
         if not self._click_image_in_scaled_arena_region(
             starter_tpl, "STARTER_BANNER", rel_region=starter_banner_roi, confidence=0.72, timeout=3.0
         ):
@@ -3402,6 +3481,7 @@ class Controller(ControllerSecondary):
 
         # 5) Best-effort Play/Resume confirm. Clicking the "Resume" banner may
         #    already launch the match, so a missing Play button is not a failure.
+        runtime_status.set_startup_phase("Pressing Play")
         if self._click_image_in_scaled_arena_region(
             play_btn, "STARTER_PLAY_CONFIRM", rel_region=play_confirm_roi, confidence=0.80, timeout=1.5
         ):
@@ -3517,6 +3597,13 @@ class Controller(ControllerSecondary):
     # Bottom-right Play button ROI on the Starter Deck Duel event landing page
     # (1920x1080 reference frame). Shared by every event_play.png probe/click.
     _EVENT_PLAY_ROI = (1400, 900, 520, 180)
+    # Search area for the reward popup's Claim button, same reference frame.
+    # NOTE: this deliberately overlaps _EVENT_PLAY_ROI above -- both buttons live
+    # in the bottom-right corner and claim.png matches the event Play button, so
+    # _dismiss_reward_popup CANNOT rely on the template alone and cross-checks
+    # _on_starter_event_landing_page before clicking. Keep them as constants so
+    # tests can assert that overlap still holds (tests/test_reward_popup_guard.py).
+    _REWARD_CLAIM_ROI = (1450, 850, 470, 230)
 
     def _on_starter_event_landing_page(self, label: str) -> bool:
         """True if the event's Play button is visible, i.e. we are on the Starter
@@ -3568,6 +3655,7 @@ class Controller(ControllerSecondary):
         if not desired_tpl:
             return
         desired_name = os.path.splitext(os.path.basename(desired_tpl))[0].upper()
+        runtime_status.set_startup_phase(f"Selecting the {desired_name} deck")
         grid_base = self._starter_deck_grid_point(desired_name)
         if grid_base is None:
             bot_logger.log_error(
@@ -4070,6 +4158,7 @@ class Controller(ControllerSecondary):
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
         self.__select_n_token_counter += 1
+        self.__pending_card_prompt = None
 
         # Disable any further input actions (timers may still fire briefly).
         self._disable_input()
@@ -5776,6 +5865,10 @@ class Controller(ControllerSecondary):
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
         self.__select_n_token_counter += 1
+        # A prompt left open when the match ended must not gate the next one: its
+        # source instance id belongs to a game that no longer exists, so the
+        # stack-based self-clear could not fire and only the timeout would.
+        self.__pending_card_prompt = None
         self.__clear_combat_recovery("Reset for new game")
         self.__last_attack_submit_ts = 0.0
         self.__my_timer_state = {}
@@ -6014,6 +6107,14 @@ class Controller(ControllerSecondary):
         elif pattern == self.patterns["select_n"]:
             runtime_status.set_mode("in_game", bot_state=str(current_state))
             self.__handle_select_n_req(line_containing_pattern)
+        elif pattern == self.patterns["search_req"]:
+            runtime_status.set_mode("in_game", bot_state=str(current_state))
+            self.__handle_search_req(line_containing_pattern)
+        elif pattern == self.patterns["order_req"]:
+            runtime_status.set_mode("in_game", bot_state=str(current_state))
+            self.__handle_order_req(line_containing_pattern)
+        elif pattern == self.patterns["client_search_resp"]:
+            self.__handle_search_resp(line_containing_pattern)
         elif pattern == self.patterns["group_req"]:
             runtime_status.set_mode("in_game", bot_state=str(current_state))
             self.__handle_group_req(line_containing_pattern)
@@ -6439,7 +6540,9 @@ class Controller(ControllerSecondary):
     def start_queueing(self) -> None:
         # Atomic check-and-create so two racing callers can't both spawn a queue
         # loop (which doubles every SWITCH CHECK / navigation and races switches).
-        with self._queue_start_lock:
+        # Same lock as the switch start: the _account_switch_in_progress check below
+        # is only meaningful if a switch cannot claim that flag concurrently.
+        with self._switch_start_lock:
             if self._account_switch_in_progress:
                 bot_logger.log_info("Queue start requested but account switch in progress; ignoring.")
                 return
@@ -6492,6 +6595,23 @@ class Controller(ControllerSecondary):
                 return
             self.start_game_from_home_screen()
             time.sleep(3.0)
+
+    def _revert_pending_completion(self, why: str) -> None:
+        """Undo the "outgoing account finished its round" bookkeeping done at the
+        start of a switch, for the paths where the switch did NOT happen and we keep
+        playing on that same account. Leaving the key in place would let a couple of
+        failed logouts fill _completed_account_keys and trigger the end-of-round stop
+        -- presenting a malfunction to the user as a clean, finished round."""
+        key = self._pending_completed_key
+        self._pending_completed_key = None
+        if not key:
+            return
+        if key in self._completed_account_keys:
+            self._completed_account_keys.discard(key)
+            bot_logger.log_info(
+                f"Round-completion mark for '{key}' reverted ({why}); "
+                "the account stayed logged in and did not finish."
+            )
 
     def _reset_state_for_incoming_account(self) -> None:
         """Clear the per-account state so the INCOMING account is measured fresh.
@@ -6569,6 +6689,12 @@ class Controller(ControllerSecondary):
                 reason, self._failed_switch_attempts, self._max_failed_switch_attempts
             )
         )
+        # The switch never happened, so the outgoing account did NOT finish its
+        # round: take back the completion mark set at the start of the attempt.
+        # Left in place, a couple of aborted switches would fill
+        # _completed_account_keys and trigger the end-of-round stop, presenting a
+        # malfunction to the user as a cleanly finished round.
+        self._revert_pending_completion(reason)
         self._account_switch_pending = False
         # We never left the account, so the next quests/login block we read is NOT
         # the target's -- don't let it be attributed to the account we aimed for.
@@ -6642,6 +6768,10 @@ class Controller(ControllerSecondary):
         outgoing_config_name = self._current_account_config_name() or (
             self._pending_switch_alias or None
         )
+        # Remembered so the paths below that end up STAYING on this account (aborts,
+        # failed logouts, a mid-switch exception) can take the mark back -- see
+        # _revert_pending_completion.
+        self._pending_completed_key = str(outgoing_key) if outgoing_key else None
         if outgoing_key:
             self._completed_account_keys.add(str(outgoing_key))
         else:
@@ -6801,6 +6931,7 @@ class Controller(ControllerSecondary):
                         "Aborting account switch and resuming queue on the current account."
                     )
                     self._write_nav_debug_bundle("logout_failed_home_visible")
+                    self._revert_pending_completion("logout aborted, still on Home")
                     self._account_switch_pending = False
                     # Stayed on the current account -> don't attribute its next
                     # quests block to the account we were switching TO.
@@ -6824,6 +6955,7 @@ class Controller(ControllerSecondary):
                     "resuming queue on the current account instead of idling."
                 )
                 self._write_nav_debug_bundle("logout_failed_no_login_screen")
+                self._revert_pending_completion("logout did not reach the login screen")
                 self._account_switch_pending = False
                 # Clear the outgoing-switch alias: we stayed on the CURRENT account,
                 # so the next quests block must NOT be attributed to the account we
@@ -6957,9 +7089,13 @@ class Controller(ControllerSecondary):
             # Count it as a failed attempt so the give-up guard bounds a repeatedly
             # throwing switch too -- but only if we never actually left the account.
             # After a confirmed logout the switch DID happen; an exception in the
-            # trailing bookkeeping must not count against the guard.
+            # trailing bookkeeping must not count against the guard, and the
+            # outgoing account really did finish its round (so its completion mark
+            # stands). Before that point the account state is unknown: assume we are
+            # still on the outgoing account and take the mark back.
             if not logout_confirmed:
                 self._failed_switch_attempts += 1
+                self._revert_pending_completion(f"switch raised: {e}")
             # Don't leave the bot idle: the queue loop returned when it spawned this
             # thread, so if we bail out here nothing else restarts it.
             if not queued_after_login and not self._stop_requested:
@@ -6971,6 +7107,8 @@ class Controller(ControllerSecondary):
                     bot_logger.log_error(f"Could not resume queueing after switch error: {exc}")
         finally:
             runtime_status.clear_intentional_wait()
+            # Never carry a pending mark into the next switch.
+            self._pending_completed_key = None
             self._account_switch_in_progress = False
             self._account_switch_pending = False
             # Identity/UI may have changed (or been cleared) along any path above;
@@ -7465,6 +7603,328 @@ class Controller(ControllerSecondary):
             self.__invoke_decision_callback("group/scry resume")
         except Exception as e:
             bot_logger.log_error(f"Resume-after-group decision failed: {e}")
+
+    def __handle_search_req(self, line: str) -> None:
+        """Record an open library-search prompt (e.g. Circuitous Route's "search
+        your library for up to two basic land cards and/or Gate cards").
+
+        MTGA hands us everything needed to answer it later: `maxFind` (how many
+        cards may be taken) and `itemsSought` (the candidates it already filtered
+        down to the legal ones -- so we do NOT have to work out which library cards
+        are basics/Gates). We only park that here; clicking the cards is a separate
+        step that needs the browser's on-screen geometry.
+
+        Nothing is clicked and no fallback is attempted: everything behind the
+        browser is unreachable, so the only useful thing to do is stop making moves
+        that cannot land."""
+        self.__record_card_prompt(
+            line,
+            message_type="GREMessageType_SearchReq",
+            payload_key="searchReq",
+            kind="search",
+        )
+
+    def __handle_order_req(self, line: str) -> None:
+        """Record an open card-ordering prompt.
+
+        Verified live: answering a SearchReq is immediately followed by an OrderReq
+        for the cards that were found ("put them onto the battlefield" wants an
+        order). It is just as modal as the search browser, so a bot that handled
+        only the search would stall one prompt later instead."""
+        self.__record_card_prompt(
+            line,
+            message_type="GREMessageType_OrderReq",
+            payload_key="orderReq",
+            kind="order",
+        )
+
+    def __record_card_prompt(
+        self, line: str, *, message_type: str, payload_key: str, kind: str
+    ) -> None:
+        """Shared bookkeeping for the modal card prompts above: park what MTGA
+        told us and make sure no decision is left armed to fire into the window."""
+        try:
+            if self._stop_requested:
+                return
+            start = line.find("{")
+            if start == -1:
+                return
+            payload = json.loads(line[start:])
+            messages = payload.get("greToClientEvent", {}).get("greToClientMessages", []) or []
+            for message in messages:
+                if message.get("type") != message_type:
+                    continue
+                # Only our own prompt: systemSeatIds names who has to answer it.
+                seats = message.get("systemSeatIds") or []
+                my_seat = self.__system_seat_id
+                if my_seat is not None and seats and my_seat not in seats:
+                    continue
+                req = message.get(payload_key) or {}
+                # SearchReq calls the candidates itemsSought; OrderReq just lists
+                # the cards to order in `ids`.
+                candidates = [
+                    int(x) for x in (req.get("itemsSought") or req.get("ids") or [])
+                ]
+                source_id = req.get("sourceId")
+                if source_id is None:
+                    # OrderReq carries the source in the prompt parameters instead.
+                    for param in (message.get("prompt") or {}).get("parameters", []) or []:
+                        if param.get("parameterName") == "CardId":
+                            source_id = param.get("numberValue")
+                            break
+                self.__card_prompt_token_counter += 1
+                token = self.__card_prompt_token_counter
+                self.__pending_card_prompt = {
+                    "kind": kind,
+                    "max_find": int(req.get("maxFind") or 0),
+                    "candidates": candidates,
+                    "zones": [int(z) for z in (req.get("zonesToSearch") or [])],
+                    "source_id": int(source_id) if source_id is not None else None,
+                    "allow_cancel": str(message.get("allowCancel") or ""),
+                    "ts": time.time(),
+                    "token": token,
+                    "answer_attempts": 0,
+                }
+                pending = self.__pending_card_prompt
+                bot_logger.log_info(
+                    "{} detected: kind={} max_find={} candidates={} zones={} source={} "
+                    "cancel={}. Pausing decisions -- the window is modal, so any "
+                    "board/hand action would be discarded. ids={}".format(
+                        message_type.replace("GREMessageType_", ""),
+                        kind,
+                        pending["max_find"],
+                        len(candidates),
+                        pending["zones"] or "-",
+                        pending["source_id"],
+                        pending["allow_cancel"] or "-",
+                        candidates or "-",
+                    )
+                )
+                # Drop an armed decision so it cannot fire into the window.
+                if self.__decision_execution_thread is not None:
+                    try:
+                        self.__decision_execution_thread.cancel()
+                    except Exception:
+                        pass
+                    self.__decision_execution_thread = None
+                    self.__decision_delay_key = None
+                    self.__decision_delay_scheduled_at = 0.0
+                runtime_status.set_intentional_wait(
+                    min(20.0, self.__card_prompt_timeout_sec), f"{kind}_prompt_wait"
+                )
+                # Answer it once the window has finished animating in. Token-gated,
+                # so a prompt that is gone by then cannot be clicked into.
+                timer = threading.Timer(
+                    self._CARD_PROMPT_SETTLE_SEC, lambda t=token: self.__answer_card_prompt(t)
+                )
+                timer.daemon = True
+                timer.start()
+                return
+        except Exception as e:
+            bot_logger.log_error(f"{message_type} handling failed: {e}")
+
+    # --- Modal card-prompt geometry, 1920x1080 arena reference frame ---------
+    # Measured off a captured browser (runtime/debug/hand-select-*/arena_region.png,
+    # 14 candidates): the fan spans x 336..1517 with the card art centred near
+    # y 500, and Submit sits bottom-right. Positions are only ever used to hit
+    # SOME card, never a specific one -- MTGA pre-filters the browser to the legal
+    # candidates, so any of them is a correct answer. That is what makes clicking
+    # by coordinate acceptable here when it would not be on the battlefield.
+    _CARD_PROMPT_FAN_CENTER_X = 926
+    # Well clear of "View Battlefield" (y<=115) and the pager (y~780): a stray
+    # click in this band lands on browser background, which does nothing.
+    _CARD_PROMPT_FAN_CLICK_Y = 500
+    # A card cannot be spaced further from its neighbour than its own width --
+    # beyond that they simply stop overlapping. Caps the spacing for small fans.
+    _CARD_PROMPT_CARD_MAX_W = 283
+    _CARD_PROMPT_FAN_FULL_W = 1181
+    _CARD_PROMPT_SUBMIT_POINT = (1740, 926)
+    # The browser animates in; clicking during that misses.
+    _CARD_PROMPT_SETTLE_SEC = 1.6
+    # Gap before checking whether the answer took, and retrying if not. Long
+    # enough for the client to emit its SearchResp and for the prompt to clear.
+    _CARD_PROMPT_RETRY_SEC = 3.5
+
+    def __card_prompt_click_points(self, candidates: int, picks: int) -> list[tuple[int, int]]:
+        """Base-1920 points that land on `picks` DIFFERENT cards of a fan holding
+        `candidates` cards.
+
+        The cards are laid out centred, so the per-card step follows from the
+        count. Picks are spread across the whole fan rather than bunched, because
+        a second click on a card already chosen would toggle it back off -- the one
+        way this can silently take fewer cards than asked for."""
+        if candidates <= 0 or picks <= 0:
+            return []
+        picks = min(picks, candidates)
+        step = min(
+            float(self._CARD_PROMPT_CARD_MAX_W),
+            float(self._CARD_PROMPT_FAN_FULL_W) / float(candidates),
+        )
+        left = self._CARD_PROMPT_FAN_CENTER_X - (candidates * step / 2.0)
+        points: list[tuple[int, int]] = []
+        for j in range(picks):
+            idx = int((j + 0.5) * candidates / picks)
+            idx = max(0, min(candidates - 1, idx))
+            x = int(round(left + (idx + 0.5) * step))
+            points.append((x, self._CARD_PROMPT_FAN_CLICK_Y))
+        return points
+
+    def __answer_card_prompt(self, token: int) -> None:
+        """Answer an open search/order window by clicking cards and Submit.
+
+        Deliberately blind: identity is unavailable here (hovering a browser card
+        reports `onHover: {}` with no objectId, verified from a live capture), and
+        unnecessary, since every card the browser shows is a legal choice. Whether
+        it worked is confirmed afterwards from ClientMessageType_SearchResp rather
+        than guessed, see __handle_search_resp."""
+        pending = self.__pending_card_prompt
+        if not pending or pending.get("token") != token:
+            return
+        if self._stop_requested or self._suppress_selections:
+            return
+        if pending.get("answer_attempts", 0) >= 2:
+            bot_logger.log_info("Card prompt: no attempts left; leaving it to the operator.")
+            return
+        attempt = int(pending.get("answer_attempts", 0))
+        pending["answer_attempts"] = attempt + 1
+        kind = pending.get("kind")
+        try:
+            if kind == "search":
+                candidates = len(pending.get("candidates") or [])
+                picks = max(1, min(int(pending.get("max_find") or 1), candidates))
+                points = self.__card_prompt_click_points(candidates, picks)
+                if attempt:
+                    # A retry means the first spread did not take. Nudge the whole
+                    # pattern sideways by half a card rather than repeating it --
+                    # repeating would land on the same cards and toggle them off.
+                    shift = int(
+                        min(
+                            self._CARD_PROMPT_CARD_MAX_W,
+                            self._CARD_PROMPT_FAN_FULL_W / max(1, candidates),
+                        ) / 2
+                    )
+                    points = [(x + shift, y) for x, y in points]
+                bot_logger.log_info(
+                    "Card prompt: answering search (attempt {}); {} candidate(s), "
+                    "taking {}; click points(base1920)={}".format(
+                        attempt + 1, candidates, picks, points
+                    )
+                )
+                for base_point in points:
+                    if self._stop_requested or self._suppress_selections:
+                        return
+                    target, src = self._map_abs_point_to_arena(
+                        base_point, label="CARD_PROMPT_PICK"
+                    )
+                    self._click_abs(target[0], target[1], "CARD_PROMPT_PICK", source=src)
+                    time.sleep(0.45)
+            else:
+                # Ordering only decides a sequence that does not matter for play
+                # (the cards enter tapped either way), so confirm the default.
+                bot_logger.log_info("Card prompt: confirming order window (default order).")
+            if self._stop_requested or self._suppress_selections:
+                return
+            self.__click_card_prompt_submit()
+            # Re-check afterwards. A successful answer clears the prompt (via
+            # SearchResp, or the source leaving the stack), which makes this a
+            # no-op; if it is still open the clicks did not take and the attempt
+            # is repeated with a shifted spread until the cap is reached. Without
+            # this the retry path above would never run.
+            retry = threading.Timer(
+                self._CARD_PROMPT_RETRY_SEC, lambda t=token: self.__answer_card_prompt(t)
+            )
+            retry.daemon = True
+            retry.start()
+        except Exception as e:
+            bot_logger.log_error(f"Card prompt answer failed: {e}")
+
+    def __click_card_prompt_submit(self) -> None:
+        """Press the window's Submit button: template first (it moves with the
+        selection count, e.g. "Submit 1"), then the measured position."""
+        submit_img = os.path.join(self._buttons_dir(), "submit_btn.png")
+        if os.path.exists(submit_img) and self._click_image_in_scaled_arena_region(
+            submit_img, "CARD_PROMPT_SUBMIT_IMG",
+            rel_region=(1500, 820, 420, 200), confidence=0.80, timeout=1.5,
+        ):
+            bot_logger.log_info("Card prompt: Submit clicked (template).")
+            return
+        target, src = self._map_abs_point_to_arena(
+            self._CARD_PROMPT_SUBMIT_POINT, label="CARD_PROMPT_SUBMIT"
+        )
+        bot_logger.log_info(
+            f"Card prompt: Submit template not found; clicking measured point {target} ({src})."
+        )
+        self._click_abs(target[0], target[1], "CARD_PROMPT_SUBMIT", source=src)
+
+    def __handle_search_resp(self, line: str) -> None:
+        """Read back our own answer. itemsFound is ground truth for how many cards
+        the clicks actually took, so a partial or failed answer is visible in the
+        log instead of looking like a normal resolution."""
+        try:
+            start = line.find("{")
+            if start == -1:
+                return
+            payload = json.loads(line[start:])
+            found = (payload.get("searchResp") or {}).get("itemsFound")
+            if found is None:
+                return
+            found = [int(x) for x in found]
+            pending = self.__pending_card_prompt or {}
+            wanted = int(pending.get("max_find") or 0)
+            if wanted and len(found) < wanted:
+                bot_logger.log_error(
+                    "Card prompt answered PARTIALLY: took {} of {} card(s) ({}). The click "
+                    "spread missed or toggled a card off; see CARD_PROMPT_PICK points above.".format(
+                        len(found), wanted, found
+                    )
+                )
+            else:
+                bot_logger.log_info(
+                    f"Card prompt answered: took {len(found)} card(s) {found}."
+                )
+            if pending.get("kind") == "search":
+                self.__clear_pending_card_prompt("search answered")
+        except Exception as e:
+            bot_logger.log_error(f"SearchResp handling failed: {e}")
+
+    def __clear_pending_card_prompt(self, reason: str) -> bool:
+        """Forget an open modal card prompt. True if one was actually open."""
+        pending = self.__pending_card_prompt
+        if pending is None:
+            return False
+        self.__pending_card_prompt = None
+        runtime_status.clear_intentional_wait()
+        bot_logger.log_info(
+            f"{pending.get('kind', 'card')} prompt cleared ({reason}): decisions may resume."
+        )
+        return True
+
+    def __should_pause_for_card_prompt(self) -> bool:
+        """True while a modal card prompt (search / order) is open and plausible.
+
+        Self-clearing on two independent signals, so this can never wedge the bot:
+        the source spell leaving the stack (the normal case -- the prompt was
+        answered, by us or by hand), and a timeout for anything we fail to observe.
+        """
+        pending = self.__pending_card_prompt
+        if not pending:
+            return False
+        if (time.time() - float(pending.get("ts") or 0.0)) > self.__card_prompt_timeout_sec:
+            self.__clear_pending_card_prompt("timed out")
+            return False
+        source_id = pending.get("source_id")
+        if source_id is not None:
+            try:
+                stack = self.updated_game_state.get_zone("ZoneType_Stack") or {}
+                stack_ids = set(stack.get("objectInstanceIds", []) or [])
+            except Exception:
+                stack_ids = set()
+            # Only trust a non-empty stack read: an update without the stack zone
+            # would otherwise look like "the spell resolved" on every message.
+            if stack_ids and int(source_id) not in stack_ids:
+                self.__clear_pending_card_prompt("source spell left the stack")
+                return False
+        return True
 
     def __handle_select_n_req(self, line: str) -> None:
         try:
@@ -8258,6 +8718,11 @@ class Controller(ControllerSecondary):
         ):
             return False
         if self.__select_n_in_progress or self.__pending_select_n is not None:
+            return False
+        # A modal search/order window swallows everything behind it, so re-driving
+        # a decision into it just repeats the move that cannot land (this is the
+        # path that kept re-triggering the hand-row sweep).
+        if self.__should_pause_for_card_prompt():
             return False
         return True
 
@@ -10622,6 +11087,21 @@ class Controller(ControllerSecondary):
                 self.__decision_delay_scheduled_at = 0.0
             runtime_status.set_intentional_wait(2.0, "scry_wait")
             bot_logger.log_info("Pausing decision while scry/group prompt is active")
+            return
+
+        # A search/order card window is modal: the board and hand behind it take no
+        # input, so every move we could pick here is discarded. This is the gate
+        # whose absence produced the hand-row sweep on an open search prompt.
+        if self.__should_pause_for_card_prompt():
+            if self.__decision_execution_thread is not None:
+                self.__decision_execution_thread.cancel()
+                self.__decision_execution_thread = None
+                self.__decision_delay_key = None
+                self.__decision_delay_scheduled_at = 0.0
+            kind = (self.__pending_card_prompt or {}).get("kind", "card")
+            runtime_status.set_intentional_wait(5.0, f"{kind}_prompt_wait")
+            runtime_status.touch_decision()
+            bot_logger.log_info(f"Pausing decision while a modal {kind} prompt is open")
             return
 
         if self.__should_pause_for_assign_damage():
