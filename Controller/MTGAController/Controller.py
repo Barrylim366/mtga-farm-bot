@@ -2530,7 +2530,15 @@ class Controller(ControllerSecondary):
         scr = screen if screen is not None else self._current_account_screen_name
         if not scr:
             return None
-        return self._screenname_to_alias.get(scr) or self._match_configured_alias(scr) or None
+        # Try the base (pre-'#') form too, mirroring _account_identity_key: the
+        # caller may pass a raw login screenName while the map is keyed canonically.
+        base = str(scr).split("#", 1)[0].strip()
+        return (
+            self._screenname_to_alias.get(scr)
+            or self._screenname_to_alias.get(base)
+            or self._match_configured_alias(base)
+            or None
+        )
 
     def _select_next_switch_target(self, accounts: list[dict], current_name: str | None):
         """Pick the next account to switch INTO. "Next" is anchored to the CURRENT
@@ -2653,8 +2661,14 @@ class Controller(ControllerSecondary):
                     data = json.load(f)
                 if isinstance(data, dict):
                     for k, v in data.items():
-                        if k and v and str(k) not in self._screenname_to_alias:
-                            self._screenname_to_alias[str(k)] = str(v)
+                        # Canonicalise on the way in: a file written before the seed
+                        # was canonicalised can hold 'Name#12345' keys, which no
+                        # lookup produces (queries are canonical or base-stripped,
+                        # never the other way round). Normalising here migrates
+                        # those entries instead of leaving them permanently dead.
+                        key = self._canonical_screen_name(k)
+                        if key and v and key not in self._screenname_to_alias:
+                            self._screenname_to_alias[key] = str(v)
         except Exception:
             pass
 
@@ -2675,7 +2689,15 @@ class Controller(ControllerSecondary):
         already-learned mapping from the live log wins over the configured value."""
         try:
             for acc in (self._load_accounts_from_dirs() or []):
-                screen = str(acc.get("screen_name", "")).strip()
+                # Canonical key ('#12345' stripped): the Alias field is filled in by
+                # hand and the dialog explicitly says the digits are optional, so a
+                # user following it types 'Name#12345' -- while EVERY latch point
+                # stores the canonicalised name. Seeding the raw value would key this
+                # map in a namespace no lookup ever produces: the configured label
+                # would never resolve, and the same account would then be tracked
+                # under two identities (screenName here, alias after a switch-in),
+                # breaking skip-self, next-target anchoring and round completion.
+                screen = self._canonical_screen_name(acc.get("screen_name"))
                 label = str(acc.get("name", "")).strip()
                 if screen and label and screen not in self._screenname_to_alias:
                     self._screenname_to_alias[screen] = label

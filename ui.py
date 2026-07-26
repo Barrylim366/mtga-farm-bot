@@ -3969,13 +3969,22 @@ class MTGBotUI(tk.Tk):
             else:
                 self._card_canvas.itemconfigure(item, text="", fill=muted)
         if hasattr(self, "_current_acc_item"):
+            # Through _fit_quest_text like the quest rows: these sit at the same
+            # left-aligned x with the same font, and the account label is free text
+            # the user types, so an unbounded one would run past the window edge.
             self._card_canvas.itemconfigure(
                 self._current_acc_item,
-                text=(f"Current ACC: {current_acc or '…'}  ✎" if show_acc else ""),
+                text=(
+                    self._fit_quest_text(f"Current ACC: {current_acc or '…'}  ✎")
+                    if show_acc else ""
+                ),
             )
             self._card_canvas.itemconfigure(
                 self._next_acc_item,
-                text=(f"Next ACC: {next_acc or '…'}" if show_acc else ""),
+                text=(
+                    self._fit_quest_text(f"Next ACC: {next_acc or '…'}")
+                    if show_acc else ""
+                ),
             )
         self._refresh_card_layout()
 

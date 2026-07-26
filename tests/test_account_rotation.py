@@ -353,5 +353,53 @@ class SwitchStartSerializationTests(unittest.TestCase):
         self.assertIsNone(c._pending_completed_key)
 
 
+class AliasNamespaceTests(unittest.TestCase):
+    """One account must collapse to ONE identity, whichever spelling it arrives in.
+
+    The Alias field is typed by hand and the dialog says the '#12345' digits are
+    optional, so the configured value and the latched screenName can differ by the
+    discriminator. Keyed in two namespaces, the same account is tracked twice:
+    skip-self and next-target anchoring stop working (no configured label resolves)
+    and round completion counts it under both keys.
+    """
+
+    def test_configured_alias_with_discriminator_still_resolves(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: [
+            {"name": "bruno1", "screen_name": "venturaa#12345"}
+        ]
+        c._screenname_to_alias = {}
+        c._seed_aliases_from_account_configs()
+
+        latched = c._canonical_screen_name("venturaa#12345")
+        c._current_account_screen_name = latched
+
+        self.assertEqual(c._current_account_config_name(), "bruno1")
+        self.assertEqual(c._account_identity_key(latched), "bruno1")
+        self.assertTrue(c._same_account(latched, "bruno1"))
+        self.assertTrue(c._same_account("venturaa#12345", "bruno1"))
+
+    def test_persisted_alias_keys_are_migrated_on_load(self):
+        c = make_controller()
+        c._screenname_to_alias = {}
+        path = c._account_aliases_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        saved = None
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                saved = f.read()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"venturaa#12345": "bruno1"}')
+            c._load_persisted_aliases()
+            self.assertEqual(c._screenname_to_alias, {"venturaa": "bruno1"})
+        finally:
+            if saved is None:
+                os.remove(path)
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(saved)
+
+
 if __name__ == "__main__":
     unittest.main()
