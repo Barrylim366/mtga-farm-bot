@@ -313,7 +313,18 @@ class Game:
         return None
 
     def _refresh_card_data(self):
-        """Refresh cards.json from local MTGA data (Linux/macOS/Windows Steam paths)."""
+        """Refresh cards.json from local MTGA data (Linux/macOS/Windows Steam paths).
+
+        Deliberately no Scryfall bulk download here. The local export already
+        contains every Arena grpId, so a bulk merge can only ever skip cards it
+        already has -- it added exactly 0 entries while costing a blocking
+        ~600 MB download plus a full in-memory parse on the first start of each
+        day (Scryfall regenerates the bulk file daily). Cards the export misses,
+        and the oracle text/keywords it never carries, are resolved lazily and
+        cached per card instead: CardInfo.get_card_info()'s single-card Scryfall
+        fallback, CardInfo.refresh_missing_cards() at startup for IDs that
+        fallback failed on, and CardInfo.get_oracle_text_from_scryfall() on demand.
+        """
         try:
             import sys
             import subprocess
@@ -324,11 +335,6 @@ class Game:
                     self._debug("Card data refresh: cards.json reloaded into memory.")
                 except Exception as e:
                     self._debug(f"Card data refresh: reload failed: {e}")
-                try:
-                    CardInfo.refresh_cards_from_scryfall_bulk_if_needed()
-                    self._debug("Card data refresh: Scryfall bulk delta check done.")
-                except Exception as e:
-                    self._debug(f"Card data refresh: Scryfall bulk delta failed: {e}")
                 return
             base_candidates = [
                 os.path.expanduser("~/.local/share/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
@@ -377,11 +383,6 @@ class Game:
                 self._debug("Card data refresh: cards.json reloaded into memory.")
             except Exception as e:
                 self._debug(f"Card data refresh: reload failed: {e}")
-            try:
-                CardInfo.refresh_cards_from_scryfall_bulk_if_needed()
-                self._debug("Card data refresh: Scryfall bulk delta check done.")
-            except Exception as e:
-                self._debug(f"Card data refresh: Scryfall bulk delta failed: {e}")
         except Exception as e:
             self._debug(f"Card data refresh failed: {e}")
 

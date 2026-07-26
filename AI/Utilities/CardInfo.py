@@ -95,13 +95,11 @@ CARD_DATA_PATH = _app_data_path("cards.json")
 SCRYFALL_CACHE_PATH = _app_data_path("scryfall_cache.json")
 SCRYFALL_ORACLE_CACHE_PATH = _app_data_path("scryfall_oracle_cache.json")
 MISSING_CARDS_PATH = _app_data_path("missing_cards.json")
-SCRYFALL_BULK_META_PATH = _app_data_path("scryfall_bulk_metadata.json")
 for _seed_name in (
     "cards.json",
     "scryfall_cache.json",
     "scryfall_oracle_cache.json",
     "missing_cards.json",
-    "scryfall_bulk_metadata.json",
 ):
     _seed_data_file(_seed_name)
 _card_data = []
@@ -167,6 +165,16 @@ def _save_missing_cards(ids: list[int]) -> None:
 
 
 def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
+    # Same transient-failure cooldown as get_produced_mana_from_scryfall /
+    # get_oracle_text_from_scryfall, and deliberately the same cache key: all
+    # three hit /cards/arena/{id}, so a network failure for one is a failure for
+    # all. Without it, an unknown grpId on the board with Scryfall unreachable
+    # re-issues a blocking 8s request on every get_card_info() call inside the
+    # hot removal/fight loop (_creature_keywords, _source_has_deathtouch,
+    # killable_by_damage), which can burn the in-game priority timer.
+    cache_key = str(arena_id)
+    if _transient_failure_active(cache_key):
+        return None
     try:
         url = f"https://api.scryfall.com/cards/arena/{arena_id}"
         req = urllib.request.Request(url, headers=_SCRYFALL_HEADERS)
@@ -186,98 +194,26 @@ def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
             "keywords": data.get("keywords", []),
         }
         return card
+    except urllib.error.HTTPError as e:
+        # A genuine 404 means this arena_id isn't on Scryfall at all -- no point
+        # in a cooldown, the caller records it in missing_cards.json. Any other
+        # status is transient and must trip the cooldown.
+        if e.code != 404:
+            _mark_transient_failure(cache_key)
+        return None
     except Exception:
+        _mark_transient_failure(cache_key)
         return None
 
 
-def _load_scryfall_bulk_metadata() -> dict:
-    data = _load_json_with_fallback(
-        SCRYFALL_BULK_META_PATH,
-        _resource_data_path("scryfall_bulk_metadata.json"),
-        {},
-    )
-    return data if isinstance(data, dict) else {}
-
-
-def _save_scryfall_bulk_metadata(meta: dict) -> None:
-    try:
-        with open(SCRYFALL_BULK_META_PATH, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
-    except Exception:
-        pass
-
-
-def refresh_cards_from_scryfall_bulk_if_needed() -> None:
-    """
-    Delta-refresh: check Scryfall bulk metadata and only download if updated.
-    We merge any missing Arena IDs into cards.json without overwriting MTGA export data.
-    """
-    try:
-        req = urllib.request.Request(
-            "https://api.scryfall.com/bulk-data",
-            headers=_SCRYFALL_HEADERS,
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return
-
-    bulk_items = data.get("data", [])
-    default_bulk = next((b for b in bulk_items if b.get("type") == "default_cards"), None)
-    if not isinstance(default_bulk, dict):
-        return
-
-    updated_at = default_bulk.get("updated_at", "")
-    download_uri = default_bulk.get("download_uri", "")
-    if not updated_at or not download_uri:
-        return
-
-    meta = _load_scryfall_bulk_metadata()
-    if meta.get("updated_at") == updated_at:
-        return
-
-    try:
-        req = urllib.request.Request(download_uri, headers=_SCRYFALL_HEADERS)
-        with urllib.request.urlopen(req, timeout=30) as response:
-            bulk_cards = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return
-
-    if not isinstance(bulk_cards, list):
-        return
-
-    existing_ids = {card.get("grpId") for card in _card_data if isinstance(card, dict)}
-    added = 0
-    for card in bulk_cards:
-        if not isinstance(card, dict):
-            continue
-        arena_id = card.get("arena_id")
-        if arena_id is None or arena_id in existing_ids:
-            continue
-        entry = {
-            "grpId": arena_id,
-            "titleId": card.get("oracle_id"),
-            "manaCost": card.get("mana_cost", ""),
-            "colors": card.get("colors", []),
-            "types": card.get("type_line", "").replace("â€”", "-").split(),
-            "setCode": card.get("set", "").upper(),
-            "rarity": card.get("rarity", ""),
-            "name": card.get("name", f"Card#{arena_id}"),
-            "oracleText": card.get("oracle_text", ""),
-            "keywords": card.get("keywords", []),
-        }
-        _card_data.append(entry)
-        existing_ids.add(arena_id)
-        added += 1
-
-    if added:
-        try:
-            with open(CARD_DATA_PATH, "w", encoding="utf-8") as f:
-                json.dump(_card_data, f, indent=2)
-        except Exception:
-            pass
-
-    _save_scryfall_bulk_metadata({"updated_at": updated_at})
+# There is deliberately no Scryfall bulk-download path here. Merging the
+# ~600 MB default_cards bulk file could only ever add Arena IDs that cards.json
+# does not already have -- and the MTGA export covers every Arena grpId, so it
+# added nothing while blocking the first start of each day (Scryfall rebuilds
+# the bulk file daily) on the download plus a full in-memory parse. Missing
+# cards and the oracle text/keywords the export never carries are resolved per
+# card and cached instead: refresh_missing_cards() below, get_card_info()'s
+# _fetch_card_info_from_scryfall() fallback, and get_oracle_text_from_scryfall().
 
 
 def refresh_missing_cards() -> None:
@@ -552,8 +488,8 @@ def _get_card_data_index() -> dict:
     """grpId -> card dict, rebuilt from _card_data whenever it changes.
 
     _card_data is a plain list scanned linearly by get_card_info, which used to
-    be an O(n) walk over the full (Scryfall-bulk-sized) card DB on every miss of
-    the small starter dict -- expensive when called per-creature inside the
+    be an O(n) walk over the full card DB (~26k entries from the MTGA export) on
+    every miss of the small starter dict -- expensive when called per-creature inside the
     hot removal/fight evaluation loop. The (id, len) pair changes on both an
     in-place append and a wholesale reassignment (reload_cards_from_disk), which
     are the only two ways _card_data is ever mutated, so it is a cheap and
