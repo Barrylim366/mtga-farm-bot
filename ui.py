@@ -4,6 +4,7 @@ from tkinter import filedialog, messagebox, ttk
 from datetime import datetime
 import glob
 import os
+import re
 import sys
 import time
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
@@ -1855,11 +1856,13 @@ class ConfigManager:
                         continue
                     email = str(details.get("email", "")).strip()
                     pw = str(details.get("pw", "")).strip()
+                    screen_name = str(details.get("screen_name", "")).strip()
                     if not account_name or not email or not pw:
                         continue
                     accounts.append(
                         {
                             "name": account_name,
+                            "screen_name": screen_name,
                             "email": email,
                             "pw": pw,
                             "folder": entry,
@@ -1904,6 +1907,7 @@ class ConfigManager:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name", "")).strip()
+            screen_name = str(item.get("screen_name", "")).strip()
             email = str(item.get("email", "")).strip()
             pw = str(item.get("pw", "")).strip()
             if not name:
@@ -1926,11 +1930,15 @@ class ConfigManager:
             folder_path = os.path.join(self._accounts_root(), folder)
             os.makedirs(folder_path, exist_ok=True)
             creds_path = os.path.join(folder_path, "credentials.json")
+            details = {"email": email, "pw": pw}
+            if screen_name:
+                details["screen_name"] = screen_name
             with open(creds_path, "w", encoding="utf-8") as f:
-                json.dump({name: {"email": email, "pw": pw}}, f, indent=2)
+                json.dump({name: details}, f, indent=2)
 
             normalized.append({
                 "name": name,
+                "screen_name": screen_name,
                 "email": email,
                 "pw": pw,
                 "folder": folder,
@@ -1968,6 +1976,16 @@ class ConfigManager:
         if index_i < 0:
             index_i = 0
         self.config["account_cycle_index"] = index_i
+        self._save_config()
+
+    def get_manual_current_account(self) -> str:
+        """Config label of the account the user says is logged in RIGHT NOW, or ""
+        for auto-detect. Used to pin identity when the log latch can't follow a
+        manual MTGA account change."""
+        return str(self.config.get("manual_current_account", "") or "").strip()
+
+    def set_manual_current_account(self, label: str) -> None:
+        self.config["manual_current_account"] = str(label or "").strip()
         self._save_config()
 
     def get_account_play_order(self) -> list[str]:
@@ -2017,7 +2035,9 @@ class MTGBotUI(tk.Tk):
         # Reserve extra space at the bottom for the global topmost toggle.
         extra_h = self._scale_value(134)
         x, y = 18, 24
-        height = self._scale_value(780) + extra_h
+        # Base height sized so the three daily quests plus the (optional)
+        # Current/Next account lines fit above the footer without being clipped.
+        height = self._scale_value(1140) + extra_h
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
 
@@ -2226,7 +2246,7 @@ class MTGBotUI(tk.Tk):
         self._ui_scale = self._compute_ui_scale()
         width = self._scale_value(460)
         extra_h = self._scale_value(134)
-        height = self._scale_value(780) + extra_h
+        height = self._scale_value(1140) + extra_h
         self.geometry(f"{width}x{height}+{x}+{y}")
 
         was_loading = bool(getattr(self, "_loading_visible", False))
@@ -2982,6 +3002,8 @@ class MTGBotUI(tk.Tk):
         self._create_canvas_menu_button("start", "Start Bot", "Primary.TButton", self._start_bot, enabled=True)
         self._create_canvas_menu_button("stop", "Stop Bot [Mouse Wheel]", "Destructive.TButton", self._stop_bot, enabled=False)
         self._create_canvas_menu_button("current_session", "Current Session", "Secondary.TButton", self._open_current_session, enabled=True)
+        self._create_canvas_menu_button("change_queue", "Change Queue", "Secondary.TButton", self._toggle_queue_mode, enabled=True)
+        self._create_canvas_menu_button("account_switch", "Account Switch", "Secondary.TButton", self._toggle_account_switch, enabled=True)
         self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
         self._loading_text_item = self._card_canvas.create_text(
@@ -3009,68 +3031,80 @@ class MTGBotUI(tk.Tk):
         )
         self._status_field_skin_cache = None
 
+        # All status-panel lines are info-only, left-aligned (anchor "nw") and
+        # non-bold. Hierarchy comes from the UPPERCASE label + normal value, not
+        # weight. _info_font is the shared size for the main lines.
+        self._info_font = ("Segoe UI", max(9, self._scale_value(11)))
+        self._info_font_sm = ("Segoe UI", max(8, self._scale_value(10)))
         self._status_text_item = self._card_canvas.create_text(
             0,
             0,
             text="Status: not running",
             fill=c["status_stopped_text"],
-            font=self.ui_theme["font"]["body"],
-            anchor="n",
+            font=self._info_font,
+            anchor="nw",
         )
         self._queue_mode_var = tk.StringVar(value=self.config_manager.get_game_mode())
+        # Info-only label (the toggle lives in the "Change Queue" button above).
         self._queue_mode_item = self._card_canvas.create_text(
             0,
             0,
             text="",
             fill="#ffb841",
-            font=("Segoe UI", max(9, self._scale_value(11)), "bold"),
-            anchor="n",
+            font=self._info_font,
+            anchor="nw",
         )
-        for _evt, _cb in (
-            ("<Button-1>", self._toggle_queue_mode),
-            ("<Enter>", lambda _e: self._card_canvas.configure(cursor="hand2")),
-            ("<Leave>", lambda _e: self._card_canvas.configure(cursor="")),
-        ):
-            self._card_canvas.tag_bind(self._queue_mode_item, _evt, _cb)
         self._refresh_queue_mode_label()
 
         # Account quests (up to 3), shown below the queue switch. The one being
         # pursued (whose colors we play) is highlighted. Data comes from the bot
         # via runtime_status; see Controller.refresh_quests_cache.
+        # Section title: yellow (shared accent), slightly larger + bold so it reads
+        # as a heading and separates clearly from the quest rows below it.
+        self._quest_title_font = ("Segoe UI", max(10, self._scale_value(12)), "bold")
         self._quest_title_item = self._card_canvas.create_text(
-            0, 0, text="", fill=c["text_muted"],
-            font=("Segoe UI", max(8, self._scale_value(10)), "bold"), anchor="n",
+            0, 0, text="", fill="#ffb841",
+            font=self._quest_title_font, anchor="n",
         )
         self._quest_items = []
         for _ in range(3):
             item = self._card_canvas.create_text(
                 0, 0, text="", fill=c["text_muted"],
-                font=("Segoe UI", max(8, self._scale_value(10))), anchor="n",
+                font=self._info_font_sm, anchor="nw",
             )
             self._quest_items.append(item)
         self._quests_poll_signature = None
         self.after(1500, self._poll_quests_display)
 
-        # Account-switch master on/off toggle (checkbox style, matching the
-        # "Keep Window on Top" control). Independent of the account data and the
-        # time/quest thresholds -- pauses switching without deleting accounts.
+        # Account-switch master on/off. The toggle lives in the "Account Switch"
+        # button above; this is an info-only label (Enabled/Disabled), matching the
+        # Queue line. Independent of the account data and the time/quest thresholds.
         self._account_switch_var = tk.BooleanVar(value=bool(self.config_manager.get_account_switch_enabled()))
-        self._account_switch_box_item = self._card_canvas.create_rectangle(
-            0, 0, 0, 0, fill="#320a02", outline="#ffb841", width=max(1, self._scale_value(1)),
+        self._account_switch_info_item = self._card_canvas.create_text(
+            0, 0, text="", fill="#ffb841",
+            font=self._info_font, anchor="nw",
         )
-        self._account_switch_tick_item = self._card_canvas.create_text(
-            0, 0, text="X", fill="#ffb841",
-            font=("Segoe UI", max(10, self._scale_value(11)), "bold"), anchor="center",
-        )
-        self._account_switch_label_item = self._card_canvas.create_text(
-            0, 0, text="Account Switch", fill="#ffb841",
-            font=("Segoe UI", max(9, self._scale_value(10))), anchor="w",
-        )
-        for item in (self._account_switch_box_item, self._account_switch_tick_item, self._account_switch_label_item):
-            self._card_canvas.tag_bind(item, "<Button-1>", self._toggle_account_switch)
-            self._card_canvas.tag_bind(item, "<Enter>", lambda _e: self._card_canvas.configure(cursor="hand2"))
-            self._card_canvas.tag_bind(item, "<Leave>", lambda _e: self._card_canvas.configure(cursor=""))
         self._refresh_account_switch_state()
+
+        # Current / Next account lines, shown just under the Account Switch toggle
+        # while switching is enabled. Text is filled from runtime_status (current
+        # account playing + the account we'll switch into) by _render_quests_from_status.
+        self._current_acc_item = self._card_canvas.create_text(
+            0, 0, text="", fill="#ffb841",
+            font=self._info_font_sm, anchor="nw", state="hidden",
+        )
+        # Click "Current Acc:" to manually declare which account is logged in now
+        # (the log-based auto-detect can't follow manual MTGA account changes).
+        for _evt, _cb in (
+            ("<Button-1>", self._choose_current_account),
+            ("<Enter>", lambda _e: self._card_canvas.configure(cursor="hand2")),
+            ("<Leave>", lambda _e: self._card_canvas.configure(cursor="")),
+        ):
+            self._card_canvas.tag_bind(self._current_acc_item, _evt, _cb)
+        self._next_acc_item = self._card_canvas.create_text(
+            0, 0, text="", fill="#ffb841",
+            font=self._info_font_sm, anchor="nw", state="hidden",
+        )
 
         self._main_topmost_var = tk.BooleanVar(value=bool(self.config_manager.get_ui_windows_topmost()))
         self._main_topmost_panel_item = self._card_canvas.create_rectangle(
@@ -3158,14 +3192,20 @@ class MTGBotUI(tk.Tk):
             total_h += body_h + sp["xs"] + loading_bar_h + sp["md"]
         total_h += sp["lg"] + body_h
         total_h += sp["xs"] + body_h
-        quest_font = tkfont.Font(font=("Segoe UI", max(8, self._scale_value(10))))
+        quest_font = tkfont.Font(font=getattr(self, "_info_font_sm", ("Segoe UI", max(8, self._scale_value(10)))))
         quest_h = quest_font.metrics("linespace")
-        quest_rows = 1 + len(getattr(self, "_quest_items", []))  # title + rows
-        total_h += (quest_h + sp["xs"]) * quest_rows
-        # Reserve space for the Account Switch checkbox row so it is not pushed
-        # under the footer (which would hide it behind the footer panel).
-        if hasattr(self, "_account_switch_box_item"):
-            total_h += self._scale_value(18) + sp["xs"]
+        # NB: distinct name -- do NOT reuse title_h (that's the main "Burning Lotus"
+        # title's height, used to space the button stack below it).
+        quest_title_font = tkfont.Font(font=getattr(self, "_quest_title_font", quest_font))
+        quest_title_h = quest_title_font.metrics("linespace")
+        # "Daily Quests" heading row (larger/bold) + one row per quest.
+        total_h += (quest_title_h + sp["xs"]) + (quest_h + sp["xs"]) * len(getattr(self, "_quest_items", []))
+        # Reserve space for the Account Switch info line (Enabled/Disabled).
+        if hasattr(self, "_account_switch_info_item"):
+            total_h += body_h + sp["xs"]
+        # Reserve the two Current/Next account lines when switching is enabled.
+        if self._account_lines_visible():
+            total_h += (body_h + sp["xs"]) * 2
         max_content_y = (canvas_h - footer_h) - footer_gap - total_h
         # Pull the whole main stack slightly upward (~1 cm) to reduce top logo whitespace.
         top_offset = int(self.winfo_fpixels("10m"))
@@ -3209,29 +3249,39 @@ class MTGBotUI(tk.Tk):
             self._card_canvas.itemconfigure(self._loading_text_item, state="hidden")
             self._card_canvas.itemconfigure(self._loading_bar_window, state="hidden")
 
-        # Top of the container field that wraps the three gold lines.
+        # Left edge for the info labels: inside the status-field panel (body_w=336,
+        # centered on center_x) with a small left padding, so every line starts at
+        # the same x for a clean left-aligned "KEY: value" list.
+        label_x = center_x - (self._scale_value(336) // 2) + self._scale_value(14)
+
+        # Top of the container field that wraps the info lines.
         status_field_top = y
-        self._card_canvas.coords(self._status_text_item, center_x, y)
+        self._card_canvas.coords(self._status_text_item, label_x, y)
         y += body_h + sp["xs"]
-        self._card_canvas.coords(self._queue_mode_item, center_x, y)
+        self._card_canvas.coords(self._queue_mode_item, label_x, y)
         self._card_canvas.tag_raise(self._queue_mode_item)
         y += body_h + sp["xs"]
-        # Account-switch on/off checkbox, directly below the Queue line.
-        if hasattr(self, "_account_switch_box_item"):
-            as_box = self._scale_value(18)
-            as_gap = self._scale_value(10)
-            as_font = tkfont.Font(font=("Segoe UI", max(9, self._scale_value(10))))
-            as_label = "Account Switch"
-            as_label_w = max(1, as_font.measure(as_label))
-            as_group_w = as_box + as_gap + as_label_w
-            as_x = center_x - (as_group_w // 2)
-            self._card_canvas.coords(self._account_switch_box_item, as_x, y, as_x + as_box, y + as_box)
-            self._card_canvas.coords(self._account_switch_tick_item, as_x + (as_box // 2), y + (as_box // 2))
-            self._card_canvas.coords(self._account_switch_label_item, as_x + as_box + as_gap, y + (as_box // 2))
-            self._card_canvas.tag_raise(self._account_switch_box_item)
-            self._card_canvas.tag_raise(self._account_switch_tick_item)
-            self._card_canvas.tag_raise(self._account_switch_label_item)
-            y += as_box + sp["xs"]
+        # Account-switch Enabled/Disabled info line, directly below the Queue line.
+        if hasattr(self, "_account_switch_info_item"):
+            self._card_canvas.coords(self._account_switch_info_item, label_x, y)
+            self._card_canvas.tag_raise(self._account_switch_info_item)
+            y += body_h + sp["xs"]
+
+        # Current / Next account lines, inside the panel right under the toggle.
+        # Only take space (and render) while account switching is enabled.
+        if hasattr(self, "_current_acc_item"):
+            if self._account_lines_visible():
+                self._card_canvas.coords(self._current_acc_item, label_x, y)
+                self._card_canvas.itemconfigure(self._current_acc_item, state="normal")
+                self._card_canvas.tag_raise(self._current_acc_item)
+                y += body_h + sp["xs"]
+                self._card_canvas.coords(self._next_acc_item, label_x, y)
+                self._card_canvas.itemconfigure(self._next_acc_item, state="normal")
+                self._card_canvas.tag_raise(self._next_acc_item)
+                y += body_h + sp["xs"]
+            else:
+                self._card_canvas.itemconfigure(self._current_acc_item, state="hidden")
+                self._card_canvas.itemconfigure(self._next_acc_item, state="hidden")
 
         # Draw the container field behind the three gold lines (status / queue /
         # account switch). Same body as the buttons, no colored rim; aligned to
@@ -3254,11 +3304,12 @@ class MTGBotUI(tk.Tk):
             self._card_canvas.tag_lower(self._status_field_item, self._status_text_item)
 
         if hasattr(self, "_quest_title_item"):
+            # Centered heading (the only centered line); quest rows stay left-aligned.
             self._card_canvas.coords(self._quest_title_item, center_x, y)
             self._card_canvas.tag_raise(self._quest_title_item)
-            y += quest_h + sp["xs"]
+            y += quest_title_h + sp["xs"]
         for item in getattr(self, "_quest_items", []):
-            self._card_canvas.coords(item, center_x, y)
+            self._card_canvas.coords(item, label_x, y)
             self._card_canvas.tag_raise(item)
             y += quest_h + sp["xs"]
 
@@ -3275,8 +3326,8 @@ class MTGBotUI(tk.Tk):
                 self._status_field_item, self._status_text_item, self._queue_mode_item,
             ]
             for attr in (
-                "_account_switch_box_item", "_account_switch_tick_item",
-                "_account_switch_label_item", "_quest_title_item",
+                "_account_switch_info_item", "_current_acc_item", "_next_acc_item",
+                "_quest_title_item",
             ):
                 movers.append(getattr(self, attr, None))
             movers.extend(getattr(self, "_quest_items", []))
@@ -3311,6 +3362,8 @@ class MTGBotUI(tk.Tk):
         if running:
             self._set_canvas_menu_button_enabled("start", False)
             self._set_canvas_menu_button_enabled("stop", True)
+            # Queue can't change mid-run (would desync navigation).
+            self._set_canvas_menu_button_enabled("change_queue", False)
             self._card_canvas.itemconfigure(
                 self._status_text_item,
                 text="Status: Running",
@@ -3320,6 +3373,7 @@ class MTGBotUI(tk.Tk):
 
         self._set_canvas_menu_button_enabled("start", True)
         self._set_canvas_menu_button_enabled("stop", False)
+        self._set_canvas_menu_button_enabled("change_queue", True)
         status_text = "Status: Stopped"
         self._card_canvas.itemconfigure(
             self._status_text_item,
@@ -3428,10 +3482,170 @@ class MTGBotUI(tk.Tk):
         try:
             self._card_canvas.itemconfigure(
                 self._queue_mode_item,
-                text=f"Queue: {label}   (click to switch)",
+                text=f"Queue: {label}",
             )
         except Exception:
             pass
+
+    def _fit_quest_text(self, text: str) -> str:
+        """Truncate a left-aligned quest row with an ellipsis so it never spills
+        past the window's right edge (quest names can be longer than the panel)."""
+        try:
+            canvas_w = self._card_canvas.winfo_width()
+            if canvas_w <= 1:
+                return text
+            label_x = (canvas_w // 2) - (self._scale_value(336) // 2) + self._scale_value(14)
+            max_px = max(40, canvas_w - label_x - self._scale_value(10))
+            font = tkfont.Font(font=getattr(self, "_info_font_sm", ("Segoe UI", 10)))
+            if font.measure(text) <= max_px:
+                return text
+            ell = "…"
+            while text and font.measure(text + ell) > max_px:
+                text = text[:-1]
+            return (text + ell) if text else ell
+        except Exception:
+            return text
+
+    def _account_lines_visible(self) -> bool:
+        """Whether the Current/Next account lines should occupy space + render.
+        Only while the account-switch master toggle is on."""
+        try:
+            var = getattr(self, "_account_switch_var", None)
+            return bool(var is not None and var.get())
+        except Exception:
+            return False
+
+    def _fallback_next_account(self, current_name: str = "") -> str:
+        """Next switch target derived from config (accounts on disk + play order +
+        cycle index) so the line shows even while the bot is stopped. Mirrors
+        Controller._peek_next_account_name / _perform_account_switch selection."""
+        try:
+            accounts = self.config_manager.get_managed_accounts() or []
+            names = [str(a.get("name", "")).strip() for a in accounts]
+            names = [n for n in names if n]
+            if not names:
+                return ""
+            name_to_pos = {}
+            for i, nm in enumerate(names):
+                name_to_pos.setdefault(nm.casefold(), i)
+            custom = []
+            for raw in self.config_manager.get_account_play_order():
+                pos = name_to_pos.get(str(raw).strip().casefold())
+                if pos is not None and pos not in custom:
+                    custom.append(pos)
+            cycle = self.config_manager.get_account_cycle_index()
+            # Skip the account that is already current so we preview the next
+            # DIFFERENT account (mirrors Controller._select_next_switch_target).
+            current = str(current_name or "").strip().casefold()
+
+            def is_current(i: int) -> bool:
+                return bool(current and names[i].casefold() == current)
+
+            if custom:
+                order_len = len(custom)
+                # Anchor to the current account's slot in the order (mirrors
+                # Controller._select_next_switch_target), falling back to the cycle
+                # index only when current isn't in the order.
+                cur_pos = next((p for p, idx in enumerate(custom) if is_current(idx)), None)
+                start = ((cur_pos + 1) % order_len) if cur_pos is not None else (cycle if 0 <= cycle < order_len else 0)
+                for step in range(order_len):
+                    idx = custom[(start + step) % order_len]
+                    if not is_current(idx):
+                        return names[idx]
+                return names[custom[start]]
+            n = len(names)
+            cur_idx = next((i for i in range(n) if is_current(i)), None)
+            start = ((cur_idx + 1) % n) if cur_idx is not None else (cycle if 0 <= cycle < n else 0)
+            for step in range(n):
+                idx = (start + step) % n
+                if not is_current(idx):
+                    return names[idx]
+            return names[start]
+        except Exception:
+            return ""
+
+    def _fallback_current_account(self) -> str:
+        """Best-effort current (logged-in) account from the latest
+        authenticateResponse screenName in the Player.log, matched to a configured
+        account name. Cached briefly so the 3s poll doesn't re-read the log each
+        tick. Lets the line show even while the bot is stopped."""
+        now = time.time()
+        cached = getattr(self, "_current_acc_log_cache", None)
+        if cached is not None and (now - cached[0]) < 10.0:
+            return cached[1]
+        value = ""
+        try:
+            path = str(self.config_manager.get_log_path() or "").strip()
+            if path and os.path.isfile(path):
+                size = os.path.getsize(path)
+                # The authenticateResponse is written once at login and can sit far
+                # back in a long session, so scan a wide window (whole file up to a
+                # sane cap). The 10s cache keeps this off the hot path.
+                start = max(0, size - 50_000_000)
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(start)
+                    tail = f.read()
+                matches = re.findall(
+                    r'"authenticateResponse"\s*:\s*\{[^}]*?"screenName"\s*:\s*"([^"]+)"',
+                    tail,
+                )
+                if matches:
+                    value = self._resolve_screenname_to_alias(str(matches[-1]).strip())
+        except Exception:
+            value = ""
+        self._current_acc_log_cache = (now, value)
+        return value
+
+    def _resolve_screenname_to_alias(self, screen: str) -> str:
+        """Map an MTGA in-game screenName to the label the user configured for that
+        account, so the display is consistent with the switch config. Consults, in
+        order: the learned live map (status.json account_aliases), the persisted
+        learned map (account_aliases.json), then an exact match against a managed
+        account name; falls back to the raw screenName when nothing matches."""
+        screen = str(screen or "").strip()
+        if not screen:
+            return ""
+        base = screen.split("#", 1)[0].casefold()
+        # 1) live learned map published by the controller.
+        try:
+            live = runtime_status.read_status().get("account_aliases") or {}
+            for k, v in live.items():
+                if str(k).casefold() in (screen.casefold(), base) and str(v).strip():
+                    return str(v).strip()
+        except Exception:
+            pass
+        # 2) persisted learned map (screenName -> alias) from prior sessions.
+        try:
+            path = str(runtime_file("config", "account_aliases.json"))
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    persisted = json.load(f)
+                if isinstance(persisted, dict):
+                    for k, v in persisted.items():
+                        if str(k).casefold() in (screen.casefold(), base) and str(v).strip():
+                            return str(v).strip()
+        except Exception:
+            pass
+        # 3) the in-game alias the user configured for a managed account (the
+        #    global, deterministic link) -> that account's label.
+        try:
+            for a in (self.config_manager.get_managed_accounts() or []):
+                sn = str(a.get("screen_name", "")).strip()
+                nm = str(a.get("name", "")).strip()
+                if nm and sn and sn.casefold() in (screen.casefold(), base):
+                    return nm
+        except Exception:
+            pass
+        # 4) exact match against a configured account name (folder == screenName).
+        try:
+            for a in (self.config_manager.get_managed_accounts() or []):
+                nm = str(a.get("name", "")).strip()
+                if nm and nm.casefold() in (screen.casefold(), base):
+                    return nm
+        except Exception:
+            pass
+        # 5) nothing learned yet -> show the raw in-game name.
+        return screen
 
     def _poll_quests_display(self) -> None:
         try:
@@ -3457,9 +3671,32 @@ class MTGBotUI(tk.Tk):
         if not isinstance(quests, list):
             quests = []
         active_id = str(status.get("active_quest_id") or "")
+        current_acc = str(status.get("current_account") or "")
+        next_acc = str(status.get("next_account") or "")
+        show_acc = self._account_lines_visible()
+        # Current: prefer the live status.json value. The controller keeps it
+        # updated as it ROTATES (so it stays correct after switches and after the
+        # bot stops on a later account), and a manual pick writes it too (see
+        # _set_current_account). Fall back to the config pin / log only when it's
+        # empty (e.g. the very first run before anything is known).
+        if show_acc:
+            if current_acc:
+                current_acc = self._resolve_screenname_to_alias(current_acc)
+            else:
+                current_acc = (
+                    self.config_manager.get_manual_current_account()
+                    or self._fallback_current_account()
+                )
+            # Next: use the controller's published value while running; otherwise
+            # recompute it from the (resolved) current account.
+            if not (self.bot_running and next_acc):
+                next_acc = self._fallback_next_account(current_acc)
 
         # Only redraw when something actually changed (avoid canvas churn).
-        sig = json.dumps([quests, active_id], sort_keys=True, default=str)
+        sig = json.dumps(
+            [quests, active_id, current_acc, next_acc, show_acc],
+            sort_keys=True, default=str,
+        )
         if sig == getattr(self, "_quests_poll_signature", None):
             return
         self._quests_poll_signature = sig
@@ -3469,7 +3706,7 @@ class MTGBotUI(tk.Tk):
         self._card_canvas.itemconfigure(
             self._quest_title_item,
             text=("Daily Quests" if quests else ""),
-            fill=muted,
+            fill="#ffb841",
         )
         for i, item in enumerate(self._quest_items):
             if i < len(quests) and isinstance(quests[i], dict):
@@ -3483,11 +3720,21 @@ class MTGBotUI(tk.Tk):
                     parts.append(f"{q.get('progress')}/{goal}")
                 is_active = bool(active_id) and str(q.get("id") or "") == active_id
                 text = ("▶ " if is_active else "") + "  ".join(parts)
+                text = self._fit_quest_text(text)
                 self._card_canvas.itemconfigure(
                     item, text=text, fill=(active_color if is_active else muted)
                 )
             else:
                 self._card_canvas.itemconfigure(item, text="", fill=muted)
+        if hasattr(self, "_current_acc_item"):
+            self._card_canvas.itemconfigure(
+                self._current_acc_item,
+                text=(f"Current ACC: {current_acc or '…'}  ✎" if show_acc else ""),
+            )
+            self._card_canvas.itemconfigure(
+                self._next_acc_item,
+                text=(f"Next ACC: {next_acc or '…'}" if show_acc else ""),
+            )
         self._refresh_card_layout()
 
     def _toggle_queue_mode(self, _event=None) -> None:
@@ -3499,6 +3746,53 @@ class MTGBotUI(tk.Tk):
         self.config_manager.set_game_mode(new_mode)
         self._refresh_queue_mode_label()
         self._card_canvas.configure(cursor="")
+
+    def _choose_current_account(self, _event=None) -> None:
+        """Popup to manually declare which account is logged into MTGA right now.
+        Pins it so the (fragile) log-based auto-detect can't override it, fixing
+        rotation when the account was changed by hand in MTGA."""
+        try:
+            accounts = [str(a.get("name", "")).strip() for a in (self.config_manager.get_managed_accounts() or [])]
+            accounts = [a for a in accounts if a]
+        except Exception:
+            accounts = []
+        if not accounts:
+            return
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Which account is open in MTGA right now?", state="disabled")
+        menu.add_command(label="(must match — the bot rotates starting from here)", state="disabled")
+        menu.add_separator()
+        current = self.config_manager.get_manual_current_account()
+        for name in accounts:
+            mark = "  ✓" if name.casefold() == current.casefold() else ""
+            menu.add_command(label=f"{name}{mark}", command=lambda n=name: self._set_current_account(n))
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _set_current_account(self, label: str) -> None:
+        self.config_manager.set_manual_current_account(label)
+        controller = getattr(self, "_controller", None)
+        if controller is not None:
+            # Running: the controller pins it and publishes to status.json.
+            try:
+                controller.set_current_account_manual(label)
+            except Exception:
+                pass
+        else:
+            # Stopped: no controller, so reflect the pick in status.json directly
+            # (clearing next so it recomputes) -- the display reads from there.
+            try:
+                runtime_status.update_status(current_account=label, next_account="")
+            except Exception:
+                pass
+        # Reflect immediately (bump the poll signature so the labels redraw).
+        self._quests_poll_signature = None
+        try:
+            self._render_quests_from_status()
+        except Exception:
+            pass
 
     def _toggle_main_topmost(self, _event=None) -> None:
         enabled = not bool(self._main_topmost_var.get())
@@ -3525,6 +3819,11 @@ class MTGBotUI(tk.Tk):
             except Exception:
                 pass
         self._refresh_account_switch_state()
+        # Show/hide the Current/Next account lines right away (don't wait for the poll).
+        try:
+            self._render_quests_from_status()
+        except Exception:
+            pass
         # Reflect immediately in the Current Session switch line.
         self._switch_eta_text = self._get_configured_switch_eta_text()
         self._update_current_session_window()
@@ -3532,8 +3831,13 @@ class MTGBotUI(tk.Tk):
 
     def _refresh_account_switch_state(self) -> None:
         is_enabled = bool(self._account_switch_var.get())
-        tick_state = "normal" if is_enabled else "hidden"
-        self._card_canvas.itemconfigure(self._account_switch_tick_item, state=tick_state)
+        try:
+            self._card_canvas.itemconfigure(
+                self._account_switch_info_item,
+                text=f"Account switch: {'Enabled' if is_enabled else 'Disabled'}",
+            )
+        except Exception:
+            pass
 
     def _start_bot(self):
         if self.bot_running:
@@ -3802,6 +4106,17 @@ class MTGBotUI(tk.Tk):
                                    gold_per_win=gold_per_win,
                                    account_switch_enabled=account_switch_enabled)
             self._controller = controller
+            # Seed the manually-pinned current account (if the user set one), so
+            # rotation starts from the right place even when the log-based detect
+            # would get it wrong.
+            manual_cur = self.config_manager.get_manual_current_account()
+            if manual_cur:
+                try:
+                    # Seeded (not a fresh user action): the pinned account may no
+                    # longer be the one loaded now, so let the live login correct it.
+                    controller.set_current_account_manual(manual_cur, seeded=True)
+                except Exception:
+                    pass
             ai = DummyAI()
             self.game = Game(controller, ai, data_dir_prompt=self._resolve_mtga_data_dir)
             bot_logger.log_info("UI start: game.start() begin")
@@ -3832,6 +4147,16 @@ class MTGBotUI(tk.Tk):
                 except Exception:
                     pass
                 self.after(0, self._stop_bot)
+                # Tell the user WHY it stopped when it's the end-of-round completion,
+                # so a normal finish isn't mistaken for a crash/freeze.
+                reason_s = str(reason or "").lower()
+                if "account" in reason_s and "complet" in reason_s:
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Round complete",
+                        "All configured accounts have finished their daily quests.\n\n"
+                        "The bot stopped because there are no more accounts to play.",
+                        parent=self,
+                    ))
 
             controller.set_stop_bot_callback(_on_controller_stop)
 
@@ -5559,6 +5884,7 @@ class SwitchAccountWindow(tk.Toplevel):
         self._table_rows = []
         self._selected_account_idx = 0
         self.account_name_var = tk.StringVar()
+        self.account_alias_var = tk.StringVar()
         self.account_email_var = tk.StringVar()
         self.account_pw_var = tk.StringVar()
 
@@ -5600,6 +5926,7 @@ class SwitchAccountWindow(tk.Toplevel):
             self._accounts_data.append(
                 {
                     "name": str(account.get("name", "")),
+                    "screen_name": str(account.get("screen_name", "")),
                     "email": str(account.get("email", "")),
                     "pw": str(account.get("pw", "")),
                     "folder": str(account.get("folder", "")),
@@ -5971,8 +6298,11 @@ class SwitchAccountWindow(tk.Toplevel):
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
         self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=94)
-        self._create_manage_group_panel("accounts_block", x=16, y=136, width=428, height=410)
-        self._create_manage_group_panel("order_block", x=16, y=558, width=428, height=220)
+        # accounts_block grew +30 to contain the extra Alias field row (which pushed
+        # the Save Row / Delete / Save Accounts buttons down); order_block shifted
+        # +30 to stay below it, matching the +30 shift of its own content.
+        self._create_manage_group_panel("accounts_block", x=16, y=136, width=428, height=440)
+        self._create_manage_group_panel("order_block", x=16, y=588, width=428, height=220)
 
         # Row 1: switch trigger mode (time vs quests, mutually exclusive) + time.
         cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
@@ -6035,21 +6365,31 @@ class SwitchAccountWindow(tk.Toplevel):
         name_entry.bind("<Return>", lambda _e: self._save_selected_account())
         cv.create_window(84, 402, anchor="nw", window=name_entry)
 
-        cv.create_text(26, 434, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        # In-game MTGA screenName for this account. Required: it's the only account
+        # identity the Player.log exposes, so the switch/UI can map the logged-in
+        # account (screenName) to this row's label -- including the startup account,
+        # which is never "switched into" and so is otherwise unlinkable.
+        cv.create_text(26, 434, text="Alias", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        alias_entry = self._make_entry(self, textvariable=self.account_alias_var, width=20)
+        alias_entry.bind("<Return>", lambda _e: self._save_selected_account())
+        cv.create_window(84, 432, anchor="nw", window=alias_entry)
+        cv.create_text(250, 434, text="(in-game MTGA name)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+
+        cv.create_text(26, 464, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         email_entry = self._make_entry(self, textvariable=self.account_email_var, width=34)
         email_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(84, 432, anchor="nw", window=email_entry)
+        cv.create_window(84, 462, anchor="nw", window=email_entry)
 
-        cv.create_text(26, 464, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 494, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         password_entry = self._make_entry(self, textvariable=self.account_pw_var, width=34, show="*")
         password_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(84, 462, anchor="nw", window=password_entry)
+        cv.create_window(84, 492, anchor="nw", window=password_entry)
 
         self._create_manage_canvas_button(
             name="save_row",
             text="Save Row",
             x=26,
-            y=498,
+            y=528,
             body_w=104,
             body_h=30,
             command=self._save_selected_account,
@@ -6060,7 +6400,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="delete_row",
             text="Delete Row",
             x=134,
-            y=498,
+            y=528,
             body_w=104,
             body_h=30,
             command=self._clear_selected_account_row,
@@ -6071,15 +6411,15 @@ class SwitchAccountWindow(tk.Toplevel):
             name="save_accounts",
             text="Save Accounts",
             x=244,
-            y=498,
+            y=528,
             body_w=158,
             body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(26, 570, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
-        cv.create_line(22, 587, 438, 587, fill=c["table_border"], width=1)
+        cv.create_text(26, 600, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
+        cv.create_line(22, 617, 438, 617, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
@@ -6089,7 +6429,7 @@ class SwitchAccountWindow(tk.Toplevel):
             col = idx // 5
             row = idx % 5
             lx, cx = col_x[col]
-            y = 594 + row * 24
+            y = 624 + row * 24
             cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
@@ -6104,13 +6444,13 @@ class SwitchAccountWindow(tk.Toplevel):
             self._order_vars.append(var)
             self._order_combos.append(combo)
         # vertical divider between columns
-        cv.create_line(230, 590, 230, 716, fill=c["table_border"], width=1)
+        cv.create_line(230, 620, 230, 746, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
             x=26,
-            y=726,
+            y=756,
             body_w=140,
             body_h=34,
             command=self._save_account_play_order,
@@ -6120,7 +6460,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="close_bottom",
             text="Back",
             x=246,
-            y=726,
+            y=756,
             body_w=120,
             body_h=34,
             command=self.destroy,
@@ -6152,23 +6492,28 @@ class SwitchAccountWindow(tk.Toplevel):
     def _populate_details_fields(self):
         account = self._accounts_data[self._selected_account_idx]
         self.account_name_var.set(str(account.get("name", "")))
+        self.account_alias_var.set(str(account.get("screen_name", "")))
         self.account_email_var.set(str(account.get("email", "")))
         self.account_pw_var.set(str(account.get("pw", "")))
 
     def _apply_details_to_selected(self, validate: bool, show_error: bool = False) -> bool:
         name = (self.account_name_var.get() or "").strip()
+        alias = (self.account_alias_var.get() or "").strip()
         email = (self.account_email_var.get() or "").strip()
         pw = (self.account_pw_var.get() or "").strip()
-        if validate and (name or email or pw) and (not name or not email or not pw):
+        row_has_data = bool(name or alias or email or pw)
+        if validate and row_has_data and (not name or not alias or not email or not pw):
             if show_error:
                 messagebox.showerror(
                     "Manage Accounts",
-                    "Name, Email and Password are required for a non-empty row.",
+                    "Name, Alias (in-game MTGA name), Email and Password are all "
+                    "required for a non-empty row.",
                     parent=self,
                 )
             return False
         row = self._accounts_data[self._selected_account_idx]
         row["name"] = name
+        row["screen_name"] = alias
         row["email"] = email
         row["pw"] = pw
         if not name:
@@ -6189,10 +6534,12 @@ class SwitchAccountWindow(tk.Toplevel):
     def _clear_selected_account_row(self):
         row = self._accounts_data[self._selected_account_idx]
         row["name"] = ""
+        row["screen_name"] = ""
         row["email"] = ""
         row["pw"] = ""
         row["folder"] = ""
         self.account_name_var.set("")
+        self.account_alias_var.set("")
         self.account_email_var.set("")
         self.account_pw_var.set("")
         self._refresh_accounts_table()
@@ -6213,12 +6560,15 @@ class SwitchAccountWindow(tk.Toplevel):
         seen = set()
         for idx, row in enumerate(self._accounts_data, start=1):
             name = (row.get("name", "") or "").strip()
+            alias = (row.get("screen_name", "") or "").strip()
             email = (row.get("email", "") or "").strip()
             pw = (row.get("pw", "") or "").strip()
-            if not name and not email and not pw:
+            if not name and not alias and not email and not pw:
                 continue
-            if not name or not email or not pw:
-                raise ValueError(f"Row {idx}: Name, Email and Password are required.")
+            if not name or not alias or not email or not pw:
+                raise ValueError(
+                    f"Row {idx}: Name, Alias (in-game MTGA name), Email and Password are required."
+                )
             key = name.casefold()
             if key in seen:
                 raise ValueError(f"Duplicate account name: {name}")
@@ -6226,6 +6576,7 @@ class SwitchAccountWindow(tk.Toplevel):
             accounts.append(
                 {
                     "name": name,
+                    "screen_name": alias,
                     "email": email,
                     "pw": pw,
                     "folder": row.get("folder", ""),

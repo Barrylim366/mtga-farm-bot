@@ -435,6 +435,19 @@ class Controller(ControllerSecondary):
         # already meets the criteria -> stop cycling (a logout/login loop is worse
         # than playing). Reset whenever a match completes.
         self._switches_without_match = 0
+        # Consecutive FAILED switch attempts (the logout never reached the login
+        # screen, so the bot resumed on the same account). Tracked separately from
+        # _switches_without_match, which resets on every completed match: with a
+        # persistently broken logout the bot plays a match between each retry, so
+        # that counter oscillates 0<->1 and its guard can never trip, retrying a
+        # doomed logout forever. This one only resets on a CONFIRMED switch.
+        self._failed_switch_attempts = 0
+        # How many consecutive failed switch attempts to allow before giving up on
+        # switching for this session (the bot keeps playing on the current account
+        # rather than looping through logout attempts that never land).
+        self._max_failed_switch_attempts = 3
+        # One-shot so the give-up message is logged once, not on every queue tick.
+        self._failed_switch_giveup_logged = False
         self._known_account_count = 0
         # Round tracking: screenNames of the accounts whose switch criteria we have
         # completed this session. When its size reaches the number of configured
@@ -449,6 +462,24 @@ class Controller(ControllerSecondary):
         # tail" -- avoids misreading an opponent's screenName (match-room events
         # log both players' names) as a sign that the account changed.
         self._current_account_screen_name: str | None = None
+        # When the user manually pins the current account (the log-based screenName
+        # latch can't follow MANUAL account changes in MTGA -- the login event
+        # scrolls out of the tail after some play), auto-latching is suspended so
+        # it can't overwrite the pinned identity. Cleared by the next bot switch,
+        # which re-establishes identity from its own login.
+        self._current_account_pinned: bool = False
+        # Log byte offset the current pin is anchored to. A login event
+        # (authenticateResponse) at or past this offset is NEWER than the pin and
+        # therefore authoritative -- it supersedes the pin (the user, or the game,
+        # logged into a different account after the pin was set). A pin SEEDED from
+        # persisted config carries no "as of when" guarantee, so it anchors at 0:
+        # any login in the log outranks it, letting a stale pin from a previous
+        # session be corrected by whoever is actually logged in now. See
+        # _reconcile_pin_with_login.
+        self._pin_log_offset: int = 0
+        # Throttle for the (wider) log read that reconciles a pin against the live
+        # login event. Reset to 0 when a pin is (re)set so the first check runs now.
+        self._pin_reconcile_ts: float = 0.0
         # Per-account gold farmed this SESSION. The controller is recreated every
         # time the bot is started, so this dict naturally starts empty (each
         # account resets to 0 on bot open, as required). Keyed by the account's
@@ -472,6 +503,10 @@ class Controller(ControllerSecondary):
         # Throttle for the wide log read used to find the startup account's login
         # screenName when it has scrolled past the normal quests tail.
         self._last_login_wide_scan_ts = 0.0
+        # Throttle for _refresh_identity_from_login's opportunistic call site (the
+        # 1s quest-refresh poll), so an unlatched identity can't re-read the log on
+        # every tick. Bypassed with force=True by the post-login one-shots.
+        self._last_identity_login_scan_ts = 0.0
         # Gold reward of each of the current account's quests, captured while the
         # quest is still in the list so we still know its value once it completes
         # and drops out. Reset on account switch.
@@ -485,6 +520,9 @@ class Controller(ControllerSecondary):
         # screenName of the account that logs in, we know screenName -> A.
         self._screenname_to_alias: dict[str, str] = {}
         self._load_persisted_aliases()
+        # Seed the map from the in-game alias the user configured per account, so
+        # the startup account resolves to its label without waiting for a switch.
+        self._seed_aliases_from_account_configs()
         self._pending_switch_alias: str | None = None
         bot_logger.log_info(
             "Account-switch config: mode={} time_min={} main_quests={} daily_wins={}".format(
@@ -501,6 +539,13 @@ class Controller(ControllerSecondary):
         self._last_account_switch_ts = time.time()
         self._account_switch_pending = False
         self._account_switch_in_progress = False
+        # Guards the check-and-set of _account_switch_in_progress and the
+        # check-and-create of the queue-spam thread. The boolean/is_alive() guards
+        # alone are NOT atomic: two near-simultaneous callers (from duplicated
+        # post-match/queue loops) both pass them and start two logout sequences
+        # that click over each other -> the switch fails. These locks serialize it.
+        self._switch_start_lock = threading.Lock()
+        self._queue_start_lock = threading.Lock()
         self._queue_after_login = False
         self._queue_spam_thread = None
         self._stop_queue_spam = False
@@ -510,6 +555,17 @@ class Controller(ControllerSecondary):
         self._cached_quests: list[dict] = []
         self._cached_active_quest_id: str = ""
         self._cached_active_colors: str = ""
+        # Log offset below which quests blocks are ignored while a session is being
+        # primed (see prime_quests_for_new_session). Everything already in the log
+        # when Start is pressed may belong to another account -- or to the quest
+        # list the user has just re-rolled by hand in MTGA -- so the bot waits for
+        # MTGA to log a block PAST this offset instead of trusting the old one.
+        # 0 = no floor (normal tail reads).
+        self._quests_session_floor_offset = 0
+        # Timestamp of the last ACCEPTED quests block (a real parse, not a
+        # cache-preserving miss). The priming loop watches this to tell "MTGA
+        # logged a fresh block" from "we re-read the same old one".
+        self._quests_last_valid_read_ts = 0.0
         # MTGA only logs quest progress on Home (via QuestGetQuests), never on the
         # event page where the bot re-queues, so quest data/UI would otherwise
         # freeze at startup values. Periodically dip back to Home to refresh.
@@ -925,8 +981,15 @@ class Controller(ControllerSecondary):
             return
         age = max(0.0, now - self._last_good_arena_region_ts)
         if reuse_cached:
-            bot_logger.log_error(
-                f"Arena region unavailable during {context}; reusing cached arena_region={cached} age={age:.1f}s."
+            # INFO, not ERROR: this is the DESIGNED path. During gameplay the
+            # locator deliberately keeps the cached region (the window anchor is
+            # not visible mid-match), so every reuse was emitting a false alarm --
+            # 454 of them in a single session, drowning the real failures in the
+            # log the watchdog reads. The genuine failure is the "not reused"
+            # branch below, which stays an error.
+            bot_logger.log_info(
+                f"Arena region not re-located during {context}; keeping cached "
+                f"arena_region={cached} age={age:.1f}s."
             )
         else:
             bot_logger.log_error(
@@ -2009,6 +2072,13 @@ class Controller(ControllerSecondary):
                 start_offset=self._quests_valid_from_offset,
                 max_bytes=2_000_000,
             )
+        elif self._quests_session_floor_offset > 0:
+            # Session priming: only blocks logged since Start was pressed count.
+            log_tail = self._read_log_since(
+                self._log_path,
+                start_offset=self._quests_session_floor_offset,
+                max_bytes=2_000_000,
+            )
         else:
             log_tail = self._read_log_tail(self._log_path)
         if not log_tail:
@@ -2016,6 +2086,15 @@ class Controller(ControllerSecondary):
         idx = log_tail.rfind('"quests"')
         if idx == -1:
             return None
+        # NOTE: do NOT gate this on "is the block newer than the latest
+        # authenticateResponse". Every occurrence of that event in the log is a
+        # MATCH-server handshake ("Match to <clientId>: AuthenticateResponse"),
+        # emitted on every match connect -- not an account login. Gating on it
+        # would reject the account's real quests block for the whole match, and
+        # freeze quest data (and the switch decision with it) whenever the
+        # post-match Home dip fails. Post-switch staleness is handled by
+        # _quests_valid_from_offset, and start-up staleness by
+        # _quests_session_floor_offset.
         start = log_tail.rfind("{", 0, idx)
         if start == -1:
             return None
@@ -2038,6 +2117,15 @@ class Controller(ControllerSecondary):
         return quests
 
     @staticmethod
+    def _canonical_screen_name(screen: str | None) -> str:
+        """Strip the '#12345' discriminator MTGA appends to screenNames in some
+        events. Applied at every latch point so ONE canonical spelling reaches the
+        per-account keys (farmed gold, completed-round tracking, the alias map).
+        Without it the same account can be keyed twice ('venturaa' and
+        'venturaa#123'), splitting its gold row and breaking round completion."""
+        return str(screen or "").split("#", 1)[0].strip()
+
+    @staticmethod
     def _find_latest_login_screenname(text: str) -> str | None:
         owner = None
         for m in re.finditer(
@@ -2047,7 +2135,58 @@ class Controller(ControllerSecondary):
             owner = m.group(1)
         return owner
 
+    def set_current_account_manual(self, label: str | None, *, seeded: bool = False) -> None:
+        """Manually declare which account is logged in RIGHT NOW (by config label),
+        pinning it so the fragile log-based latch can't overwrite it. Used when the
+        user changes account in MTGA by hand -- the bot can't reliably follow that.
+        Passing an empty label unpins (returns to auto-detection).
+
+        `seeded` marks a pin restored from persisted config at startup (rather than
+        a fresh user action). A seeded pin has no temporal authority -- the account
+        actually logged in now may differ from whatever was pinned last session --
+        so it anchors at offset 0 and any login event in the log can correct it. A
+        fresh (interactive) pin anchors at the current log end, so only a LATER
+        login supersedes it; logins already present when the user pinned (the very
+        thing the pin overrides) are ignored. See _reconcile_pin_with_login."""
+        label = str(label or "").strip()
+        if not label:
+            self._current_account_pinned = False
+            bot_logger.log_info("Current account unpinned (auto-detection resumed).")
+            self._publish_account_switch_status()
+            return
+        screen = None
+        for acc in (self._load_accounts_from_dirs() or []):
+            if str(acc.get("name", "")).strip().casefold() == label.casefold():
+                screen = str(acc.get("screen_name", "")).strip() or label
+                break
+        # Canonical (no '#discriminator') so a pinned account keys its gold/round
+        # tracking exactly like the same account latched from the log would.
+        screen = self._canonical_screen_name(screen or label) or label
+        self._current_account_screen_name = screen
+        self._current_account_pinned = True
+        self._pin_log_offset = 0 if seeded else self._get_log_size(self._log_path)
+        self._pin_reconcile_ts = 0.0
+        if screen not in self._screenname_to_alias:
+            self._screenname_to_alias[screen] = label
+        try:
+            self._register_current_account_for_gold()
+        except Exception:
+            pass
+        self._publish_account_switch_status()
+        bot_logger.log_info(
+            "Current account {} pinned: '{}' (screenName '{}').".format(
+                "seeded" if seeded else "manually", label, screen
+            )
+        )
+
     def _latch_account_screen_name_from(self, log_tail: str) -> None:
+        # Respect a manual pin -- but reconcile it against the live login event so a
+        # pin that no longer matches the account actually logged in (a stale pin
+        # seeded from a previous session, or a manual MTGA change made after the
+        # pin) can't keep mislabelling the current account.
+        if self._current_account_pinned:
+            self._reconcile_pin_with_login()
+            return
         try:
             owner = self._find_latest_login_screenname(log_tail)
             # The login can scroll past the normal tail during long play. While we
@@ -2061,11 +2200,148 @@ class Controller(ControllerSecondary):
                     owner = self._find_latest_login_screenname(
                         self._read_log_tail(self._log_path, max_bytes=8_000_000)
                     )
+            owner = self._canonical_screen_name(owner) or None
             if owner and owner != self._current_account_screen_name:
                 self._current_account_screen_name = owner
                 self._register_current_account_for_gold()
         except Exception:
             pass
+
+    def _find_latest_login_with_offset(self, max_bytes: int) -> tuple[str | None, int]:
+        """(screenName, absolute byte offset) of the LAST login (authenticateResponse)
+        in the log tail, or (None, 0). The offset lets a caller tell a login apart
+        from one that predates a reference point (e.g. a manual pin)."""
+        path = self._log_path
+        if not path:
+            return None, 0
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                base = max(0, size - int(max_bytes))
+                f.seek(base)
+                raw = f.read()
+        except Exception:
+            return None, 0
+        text = raw.decode("utf-8", errors="ignore")
+        owner = None
+        last_start = 0
+        for m in re.finditer(
+            r'"authenticateResponse"\s*:\s*\{[^}]*?"screenName"\s*:\s*"([^"]+)"',
+            text,
+        ):
+            owner = m.group(1)
+            last_start = m.start()
+        if owner is None:
+            return None, 0
+        # Approximate the match's absolute byte offset (log is effectively ASCII).
+        abs_off = base + len(text[:last_start].encode("utf-8", errors="ignore"))
+        return owner, abs_off
+
+    def _account_identity_key(self, screen: str | None) -> str:
+        """Collapse an MTGA screenName to a stable per-account key, tolerating the
+        '#12345' discriminator MTGA appends in login events and resolving to the
+        configured label when known, so 'venturaa_a#123', 'venturaa_a' and the
+        alias 'bruno2' all compare equal."""
+        s = str(screen or "").strip()
+        if not s:
+            return ""
+        base = s.split("#", 1)[0].strip()
+        alias = (
+            self._screenname_to_alias.get(s)
+            or self._screenname_to_alias.get(base)
+            or self._match_configured_alias(base)
+        )
+        return (alias or base).casefold()
+
+    def _same_account(self, screen_a: str | None, screen_b: str | None) -> bool:
+        """Whether two screenNames refer to the same configured account."""
+        a = self._account_identity_key(screen_a)
+        b = self._account_identity_key(screen_b)
+        return bool(a) and a == b
+
+    def _reconcile_pin_with_login(self) -> None:
+        """Correct a manual pin that no longer matches the account actually logged
+        in. The login event (authenticateResponse.screenName) is the authoritative
+        record of who is logged in; when it names a DIFFERENT configured account
+        than the pin AND is at/after the pin's anchor offset, the log wins and the
+        pin is dropped (auto-detection resumes). A pin still holds against logins
+        that predate it (the pre-existing state the user deliberately overrode) and
+        against an unreadable/absent login. Throttled -- the read is wide."""
+        if not self._log_path:
+            return
+        now = time.time()
+        if now - self._pin_reconcile_ts < 15.0:
+            return
+        self._pin_reconcile_ts = now
+        try:
+            owner, pos = self._find_latest_login_with_offset(16_000_000)
+        except Exception:
+            return
+        if not owner:
+            return
+        if self._same_account(owner, self._current_account_screen_name):
+            return
+        if pos < self._pin_log_offset:
+            # A login that predates the pin -> exactly what the pin overrides.
+            return
+        bot_logger.log_info(
+            "Manual account pin ('{}') superseded by the logged-in account "
+            "('{}'); resuming auto-detection.".format(
+                self._current_account_screen_name, owner
+            )
+        )
+        self._current_account_pinned = False
+        self._current_account_screen_name = self._canonical_screen_name(owner) or owner
+        self._register_current_account_for_gold()
+
+    def _refresh_identity_from_login(self, *, force: bool = False) -> bool:
+        """Latch the current account's screenName straight from its login event,
+        WITHOUT needing a quests block. The login (authenticateResponse.screenName)
+        is written when the account logs in, regardless of whether Home or the
+        quests list ever loads -- so the UI can reflect the new account as soon as
+        it is in, even when the post-switch Home navigation fails and no quests
+        block is ever parsed (which otherwise leaves the identity, and the Current
+        Account line, stuck on the PREVIOUS account). No-op once latched. Returns
+        True when it latched an identity here.
+
+        `force` skips the throttle, for the one-shot calls that must land now (right
+        after a login, and before picking the next switch target). The throttle
+        exists because the opportunistic call site sits in a 1s quest-refresh poll:
+        while the identity is still unlatched every tick would re-read the log."""
+        if self._current_account_pinned or self._current_account_screen_name is not None:
+            return False
+        if not self._log_path:
+            return False
+        now = time.time()
+        if not force and (now - self._last_identity_login_scan_ts) < 5.0:
+            return False
+        self._last_identity_login_scan_ts = now
+        try:
+            # Read only the log written since the switch (until an identity is
+            # latched) so the PREVIOUS account's login -- still in the tail, but
+            # before this offset -- can't be mistaken for the incoming one.
+            if self._quests_valid_from_offset > 0:
+                text = self._read_log_since(
+                    self._log_path,
+                    start_offset=self._quests_valid_from_offset,
+                    max_bytes=8_000_000,
+                )
+            else:
+                text = self._read_log_tail(self._log_path, max_bytes=2_000_000)
+            owner = self._canonical_screen_name(self._find_latest_login_screenname(text))
+            if not owner:
+                return False
+            self._current_account_screen_name = owner
+            self._register_current_account_for_gold()
+            bot_logger.log_info(
+                "Account identity latched from login: '{}' (alias '{}').".format(
+                    owner, self._screenname_to_alias.get(owner) or "?"
+                )
+            )
+            return True
+        except Exception:
+            return False
 
     def _parse_guild_quests(self, quests: list[dict]) -> list[dict]:
         parsed = []
@@ -2086,8 +2362,18 @@ class Controller(ControllerSecondary):
                     gold = int(loc_params.get("number1") or 0)
                 except (TypeError, ValueError):
                     gold = 0
-            parsed.append({"guild": guild, "gold": gold})
-            bot_logger.log_info(f"Post-login: quest guild={guild} gold={gold}.")
+            try:
+                progress = int(quest.get("endingProgress") or 0)
+            except (TypeError, ValueError):
+                progress = 0
+            try:
+                goal = int(quest.get("goal") or 0)
+            except (TypeError, ValueError):
+                goal = 0
+            parsed.append({"guild": guild, "gold": gold, "progress": progress, "goal": goal})
+            bot_logger.log_info(
+                f"Post-login: quest guild={guild} gold={gold} progress={progress}/{goal}."
+            )
         return parsed
 
     def _has_creature_quest(self, quests: list[dict]) -> bool:
@@ -2110,8 +2396,19 @@ class Controller(ControllerSecondary):
         bot_logger.log_info(f"Post-login: parsed {len(quests)} quest entries from player.log.")
         guild_quests = self._parse_guild_quests(quests)
         if guild_quests:
-            guild_quests.sort(key=lambda q: q.get("gold", 0), reverse=True)
-            top = guild_quests[0]
+            # Prefer a quest that still has progress to make. Without this the live
+            # parse (the fallback used whenever the cache is empty -- e.g. right
+            # after an account switch) could keep picking a COMPLETED quest's colors
+            # and farm its deck forever, while refresh_quests_cache -- which does
+            # skip finished quests -- disagreed with it. Fall back to the full list
+            # if every guild quest is done, so behaviour is unchanged in that case.
+            incomplete = [
+                q for q in guild_quests
+                if not q.get("goal") or q.get("progress", 0) < q.get("goal", 0)
+            ]
+            pool = incomplete or guild_quests
+            pool.sort(key=lambda q: q.get("gold", 0), reverse=True)
+            top = pool[0]
             top["type"] = "guild"
             return top
         if self._has_quest_loc_key(quests, "quest_fatal_push"):
@@ -2184,6 +2481,99 @@ class Controller(ControllerSecondary):
         except Exception:
             pass
 
+    def _current_account_config_name(self, screen: str | None = None) -> str | None:
+        """The configured account label for the account currently logged in
+        (screenName -> alias via the learned map, else an exact name match), so we
+        can compare it against switch targets. None when unknown."""
+        scr = screen if screen is not None else self._current_account_screen_name
+        if not scr:
+            return None
+        return self._screenname_to_alias.get(scr) or self._match_configured_alias(scr) or None
+
+    def _select_next_switch_target(self, accounts: list[dict], current_name: str | None):
+        """Pick the next account to switch INTO. "Next" is anchored to the CURRENT
+        account's slot in the play order (the account after it), so the sequence
+        always follows the configured order regardless of the persisted cycle
+        index -- which can go stale (e.g. it never advances when switches fail, so
+        it would keep pointing at the first account). Falls back to the cycle index
+        only when the current account isn't in the order (e.g. an unknown startup
+        account). Returns (next_index, advance_index, advance_mod): next_index
+        indexes `accounts`; the cycle index advances to (advance_index + 1) %
+        advance_mod after a successful switch. (None, None, None) if no accounts."""
+        if not accounts:
+            return None, None, None
+
+        cur_key = str(current_name).strip().casefold() if current_name else ""
+
+        def is_current(idx: int) -> bool:
+            nm = str(accounts[idx].get("name", "")).strip().casefold()
+            return bool(cur_key and nm and nm == cur_key)
+
+        custom_order = self._resolve_account_play_order(accounts)
+        if custom_order:
+            order_len = len(custom_order)
+            # Anchor to the current account's position in the order when we can.
+            cur_pos = next(
+                (p for p, idx in enumerate(custom_order) if is_current(idx)), None
+            )
+            if cur_pos is not None:
+                start = (cur_pos + 1) % order_len
+            else:
+                start = self._account_cycle_index if 0 <= self._account_cycle_index < order_len else 0
+            for step in range(order_len):
+                p = (start + step) % order_len
+                if not is_current(custom_order[p]):
+                    return custom_order[p], p, order_len
+            # Every entry is the current account (single-account order) -> stay.
+            return custom_order[start], start, order_len
+        n = len(accounts)
+        cur_idx = next((i for i in range(n) if is_current(i)), None)
+        if cur_idx is not None:
+            start = (cur_idx + 1) % n
+        else:
+            start = self._account_cycle_index if 0 <= self._account_cycle_index < n else 0
+        for step in range(n):
+            idx = (start + step) % n
+            if not is_current(idx):
+                return idx, idx, n
+        return start, start, n
+
+    def _peek_next_account_name(self) -> str | None:
+        """Alias/name of the account we would switch INTO next, computed WITHOUT
+        mutating any cycle state (skips the current account, mirroring
+        _perform_account_switch). Returns None when it can't be determined."""
+        try:
+            accounts = self._load_accounts_from_dirs()
+            if not accounts:
+                return None
+            next_index, _, _ = self._select_next_switch_target(
+                accounts, self._current_account_config_name()
+            )
+            if next_index is None:
+                return None
+            account = accounts[next_index]
+            name = str(account.get("name", "")).strip() or str(account.get("folder", "")).strip()
+            return name or None
+        except Exception:
+            return None
+
+    def _publish_account_switch_status(self) -> None:
+        """Push the current + next account (friendly aliases) to runtime_status so
+        the main UI can show them under the Account Switch toggle. Cheap and
+        side-effect free; safe to call often."""
+        try:
+            cur_screen = self._current_account_screen_name
+            current = ""
+            if cur_screen:
+                current = self._screenname_to_alias.get(cur_screen) or cur_screen
+            nxt = self._peek_next_account_name() if self._account_switch_enabled else None
+            runtime_status.update_status(
+                current_account=current or "",
+                next_account=nxt or "",
+            )
+        except Exception:
+            pass
+
     def set_gold_per_win(self, gold: int) -> None:
         """Live-adjust the per-win gold estimate. Not currently called from any
         UI control (the Current Session window is read-only) -- kept for a
@@ -2235,6 +2625,21 @@ class Controller(ControllerSecondary):
         except Exception:
             pass
 
+    def _seed_aliases_from_account_configs(self) -> None:
+        """Seed screenName -> label from the in-game alias the user configured per
+        account (credentials.json 'screen_name'). This is the GLOBAL, deterministic
+        link that lets the startup account (never switched into, so never learned)
+        resolve to its label and be skipped as a switch target. Fill-in only: an
+        already-learned mapping from the live log wins over the configured value."""
+        try:
+            for acc in (self._load_accounts_from_dirs() or []):
+                screen = str(acc.get("screen_name", "")).strip()
+                label = str(acc.get("name", "")).strip()
+                if screen and label and screen not in self._screenname_to_alias:
+                    self._screenname_to_alias[screen] = label
+        except Exception:
+            pass
+
     def _register_current_account_for_gold(self) -> None:
         """Ensure the current account has a (0-gold) row as soon as its screenName
         is known, map it to its configured alias when we can, and fold in any gold
@@ -2251,6 +2656,8 @@ class Controller(ControllerSecondary):
         pending = self._gold_farmed_by_account.pop("(current account)", 0) if key != "(current account)" else 0
         self._gold_farmed_by_account[key] = self._gold_farmed_by_account.get(key, 0) + int(pending or 0)
         self._publish_gold_farmed()
+        # The current account's identity just changed -> refresh the UI lines.
+        self._publish_account_switch_status()
 
     def _read_latest_inventory_gold(self) -> int | None:
         """The current account's real Gold balance from the latest InventoryInfo
@@ -2313,8 +2720,14 @@ class Controller(ControllerSecondary):
         quests = self._extract_latest_quests()
         if quests is None:
             # No readable/valid quests block right now -> keep the last known list.
+            # Still latch identity straight from the login event so the Current
+            # Account line follows the switch even when Home/quests never load.
+            self._refresh_identity_from_login()
             return self._cached_quests
         # quests may be an empty list here, meaning all daily quests are done.
+        # A block was really parsed -> mark the read valid (the priming loop uses
+        # this to tell a FRESH block from a re-read of the same old one).
+        self._quests_last_valid_read_ts = time.time()
         view = self._build_quest_view(quests)
 
         # This is a VALID read (a quests block was parsed), so update the absolute
@@ -2361,12 +2774,122 @@ class Controller(ControllerSecondary):
             )
         except Exception:
             pass
+        # Refresh the current/next account lines shown under the UI toggle.
+        self._publish_account_switch_status()
         bot_logger.log_info(
             "Quests cached: {} quest(s); active={} colors={}.".format(
                 len(view), active_id or "-", active_colors or "-"
             )
         )
         return view
+
+    # How long the start-of-session quest priming waits for MTGA to log a fresh
+    # quests block before giving up and accepting whatever the log already has.
+    # Generous on purpose: the block only appears once the client (re)loads Home,
+    # which can lag behind the Home click by several seconds -- and after a manual
+    # quest re-roll / account change by the user it can take longer still.
+    _QUESTS_PRIME_TIMEOUT = 30.0
+
+    def _reset_quest_cache_for_new_session(self) -> None:
+        """Forget every cached quest and publish the empty state to the UI.
+
+        Whatever the previous session (or the previous account) left behind must
+        not survive a Start: the user may have re-rolled a quest, finished one by
+        hand, or changed account in MTGA meanwhile."""
+        self._cached_quests = []
+        self._cached_active_quest_id = ""
+        self._cached_active_colors = ""
+        self._last_valid_quest_active_incomplete = None
+        self._home_quest_check_done = False
+        self._home_quest_check_attempts = 0
+        self._quests_last_valid_read_ts = 0.0
+        try:
+            runtime_status.update_status(
+                quests=[], active_quest_id="", active_quest_colors="",
+            )
+        except Exception:
+            pass
+
+    def prime_quests_for_new_session(self) -> bool:
+        """Read the account's quests from scratch when the bot is started.
+
+        Everything already in the player.log at this point is suspect: it can be
+        the previous account's block, or the quest list as it was BEFORE the user
+        re-rolled/completed a quest by hand in MTGA. So this drops the cache, sets
+        a floor at the current log size (blocks before it are ignored), nudges the
+        client to Home -- the only screen where MTGA logs QuestGetQuests -- and
+        waits up to _QUESTS_PRIME_TIMEOUT for a fresh block.
+
+        Always bounded and self-healing: on timeout the floor is dropped and the
+        newest available block is accepted, so the bot is never left blind (it just
+        falls back to the old, best-effort behaviour). Returns True if a fresh
+        block was read."""
+        # The Start button is what got us here; a stale stop flag from the previous
+        # session would otherwise make every wait below return immediately.
+        # start_game() sets this again right after.
+        self._stop_requested = False
+        self._reset_quest_cache_for_new_session()
+        if not self._log_path:
+            return False
+        # Mid-match start (the user pressed Start with a game already running):
+        # never click the screen, and no fresh Home block is coming -- read what the
+        # log has (still login-gated) and move on.
+        if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
+            bot_logger.log_info("Quest prime: match already in progress; reading quests without a Home dip.")
+            self.refresh_quests_cache()
+            return False
+        # No MTGA window -> no Home dip is possible, so no fresh block will ever be
+        # logged. Don't burn the whole wait on it: read what the log has and let the
+        # normal startup path report the missing window.
+        if self._ensure_arena_region(force_reacquire=True) is None:
+            bot_logger.log_info("Quest prime: MTGA window not found; reading quests without a Home dip.")
+            self.refresh_quests_cache()
+            return False
+        self._quests_session_floor_offset = self._get_log_size(self._log_path)
+        bot_logger.log_info(
+            "Quest prime: ignoring quests logged before this start (floor offset={}); "
+            "waiting up to {:.0f}s for a fresh block.".format(
+                self._quests_session_floor_offset, self._QUESTS_PRIME_TIMEOUT
+            )
+        )
+        try:
+            # A reward popup covers the nav bar, so the Home click would land on it
+            # and no fresh quests block would ever be logged. Safe no-op elsewhere.
+            self._dismiss_reward_popup()
+            # Best effort: a miss just means we poll until MTGA logs the block on
+            # its own (it also logs one right after login / on returning Home).
+            self._navigate_to_home()
+            deadline = time.time() + self._QUESTS_PRIME_TIMEOUT
+            # MTGA only writes the quests block when Home is (re)entered. If the
+            # first click did not move us -- or we were already on Home, where the
+            # block was logged before our floor -- a single retry halfway through
+            # the wait is what actually unblocks the read.
+            retry_at = time.time() + (self._QUESTS_PRIME_TIMEOUT / 2.0)
+            retried = False
+            while time.time() < deadline and not self._stop_requested:
+                if not retried and time.time() >= retry_at:
+                    retried = True
+                    bot_logger.log_info("Quest prime: no block yet; clicking Home once more.")
+                    self._navigate_to_home()
+                self.refresh_quests_cache()
+                if self._quests_last_valid_read_ts > 0.0:
+                    bot_logger.log_info(
+                        "Quest prime: fresh quests block read ({} quest(s), colors {}).".format(
+                            len(self._cached_quests), self._cached_active_colors or "-"
+                        )
+                    )
+                    return True
+                time.sleep(1.0)
+            bot_logger.log_info(
+                "Quest prime: no fresh quests block within {:.0f}s; falling back to the "
+                "newest block already in the log.".format(self._QUESTS_PRIME_TIMEOUT)
+            )
+        finally:
+            # Whatever happened, the floor is a start-up device only -- from here on
+            # normal tail reads (login-gated) apply.
+            self._quests_session_floor_offset = 0
+        self.refresh_quests_cache()
+        return False
 
     # The Home tab sits at a fixed spot in the top-left nav bar (1920x1080 frame).
     # A TEMPLATE match only works when Home is the ACTIVE tab, so from the event
@@ -2413,7 +2936,15 @@ class Controller(ControllerSecondary):
         never permanently stall the bot. Returns True if Home was reached."""
         if self._stop_requested:
             return False
-        if self._get_state_from_log() == BotState.IN_GAME:
+        # Never dip to Home on top of a game or a game about to start. IN_GAME is the
+        # obvious case; FIND_MATCH (matchmaking) matters too -- the queue has been
+        # accepted and the match is loading, so the Home click lands mid-transition,
+        # fails to verify, and burns the refresh attempt for nothing.
+        if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
+            return False
+        # An account switch owns the screen (logout/login/post-login navigation);
+        # a Home dip in parallel would click over it.
+        if self._account_switch_in_progress:
             return False
         bot_logger.log_info("Quest refresh: dipping to Home to re-fetch quest progress.")
         prev_active = self._cached_active_quest_id
@@ -2729,6 +3260,17 @@ class Controller(ControllerSecondary):
         # Between matches: refresh quest progress best-effort (keeps the cache and
         # the UI display current when Home has logged a fresh quests block).
         self.refresh_quests_cache()
+        # Re-resolve AFTER that refresh. The colors passed in were computed before
+        # it, so using them here replayed the finished quest's deck for one more
+        # match every time a quest completed (or the player swapped quests by hand)
+        # -- exactly the case this refresh exists to catch.
+        refreshed_colors = self._resolve_starter_target_colors()
+        if refreshed_colors != target_colors:
+            bot_logger.log_info(
+                f"Starter: quest colors changed after refresh ({target_colors or '-'} -> "
+                f"{refreshed_colors or '-'}); using the new target."
+            )
+            target_colors = refreshed_colors
         # Swap to the deck that best advances the top quest, then queue.
         self._swap_starter_deck_for_quest(target_colors)
         if self._click_image_in_scaled_arena_region(
@@ -3129,6 +3671,21 @@ class Controller(ControllerSecondary):
             self._click_abs(sub_target[0], sub_target[1], "STARTER_SUBMIT_DECK")
         time.sleep(1.2)
 
+        # 4) Verify the chooser actually closed. If it did not, the submit missed
+        #    and the deck was NOT changed -- the caller then queues with whatever
+        #    deck was selected before, silently farming the wrong colors. We do not
+        #    retry the click here (the submit coordinate overlaps the event page's
+        #    Play button ROI, so a blind retry on the event page would queue a
+        #    match); we make the failure visible instead, and the next queue cycle
+        #    attempts the swap again from a known screen.
+        if self._starter_deck_picker_open() and not self._on_starter_event_landing_page(
+            "STARTER_SWAP_DONE_PROBE"
+        ):
+            bot_logger.log_error(
+                f"Starter: deck chooser still open after submit; deck {desired_name} may NOT "
+                "have been applied."
+            )
+
     def _run_post_login_routine(self, account: dict, all_accounts: list[dict]) -> bool:
         if self._stop_requested:
             return False
@@ -3294,16 +3851,20 @@ class Controller(ControllerSecondary):
             ):
                 self._home_quest_check_done = True
             # Diagnostic: make the switch decision visible in the log on landing.
-            completed = self._main_quests_completed_absolute()
+            # Framed the way the criterion actually works: switch when the account
+            # has few enough daily quests LEFT (not "did literally N quests"). With
+            # the usual threshold 3 the target is 0 quests remaining -- i.e. clear
+            # whatever daily quests the account has (1, 2 or 3), then switch.
+            remaining = self._last_valid_quest_active_incomplete
+            remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
             bot_logger.log_info(
-                "SWITCH CHECK (account='{}'): enabled={} mode={} | quests completed(absolute)={} "
-                "(active_incomplete={}) need>={} | wins(session)={} need>={} | attempt={} | due={}".format(
+                "SWITCH CHECK (account='{}'): enabled={} mode={} | daily quests remaining={} "
+                "need<={} | wins(session)={} need>={} | attempt={} | due={}".format(
                     self._current_account_key(),
                     self._account_switch_enabled,
                     self._account_switch_mode,
-                    completed if completed is not None else "unknown",
-                    self._last_valid_quest_active_incomplete,
-                    self._account_switch_main_quests,
+                    remaining if remaining is not None else "unknown",
+                    remaining_target,
                     self._daily_wins_this_account,
                     self._account_switch_daily_wins,
                     self._home_quest_check_attempts,
@@ -5491,6 +6052,7 @@ class Controller(ControllerSecondary):
         """Live master on/off from the main UI toggle."""
         self._account_switch_enabled = bool(enabled)
         bot_logger.log_info(f"Account switching {'ENABLED' if self._account_switch_enabled else 'DISABLED'} (UI toggle).")
+        self._publish_account_switch_status()
 
     def get_account_switch_enabled(self) -> bool:
         return bool(self._account_switch_enabled)
@@ -5507,6 +6069,24 @@ class Controller(ControllerSecondary):
     def _account_switch_due(self) -> bool:
         # Master switch off -> never switch, whatever the thresholds/accounts are.
         if not self._account_switch_enabled:
+            return False
+        # Give up on switching after repeated CONSECUTIVE failures (the logout never
+        # reaches the login screen -- e.g. miscalibrated buttons or a changed MTGA
+        # layout). Applies to both modes: retrying a logout that cannot work just
+        # burns the session in a click loop, so keep playing on this account
+        # instead. Cleared by any confirmed switch.
+        if (
+            self._max_failed_switch_attempts
+            and self._failed_switch_attempts >= self._max_failed_switch_attempts
+        ):
+            if not self._failed_switch_giveup_logged:
+                self._failed_switch_giveup_logged = True
+                bot_logger.log_error(
+                    "Account switching disabled for this session: {} consecutive failed "
+                    "switch attempts (logout never reached the login screen). Check the "
+                    "Log Out / confirm button calibration. The bot keeps playing on the "
+                    "current account.".format(self._failed_switch_attempts)
+                )
             return False
         # Quest mode: switch once BOTH criteria are met. Main quests are measured
         # ABSOLUTELY (done by bot OR human). Daily wins are counted only for what
@@ -5527,11 +6107,18 @@ class Controller(ControllerSecondary):
             if self._account_switch_main_quests <= 0:
                 main_ok = True
             else:
-                completed = self._main_quests_completed_absolute()
-                if completed is None:
+                remaining = self._last_valid_quest_active_incomplete
+                if remaining is None:
                     # Quest state not read from Home yet -> never switch on a guess.
                     return False
-                main_ok = completed >= self._account_switch_main_quests
+                # The threshold means "clear the account's daily quests", NOT "do
+                # exactly N quests": MTGA hands out 1 daily quest/day (up to 3 held),
+                # so an account may have only 1 or 2 to do. Completed quests drop out
+                # of the list, so the criterion is "few enough LEFT": with threshold
+                # 3 the account must reach 0 remaining (clear all it has, however
+                # many); a lower threshold tolerates that many still pending.
+                remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
+                main_ok = remaining <= remaining_target
             wins_ok = self._daily_wins_this_account >= self._account_switch_daily_wins
             return main_ok and wins_ok
         # Time mode (default): switch every N minutes.
@@ -5850,74 +6437,77 @@ class Controller(ControllerSecondary):
         return (time.time() - self._post_match_ready_ts) < self._post_match_delay_sec
 
     def start_queueing(self) -> None:
-        if self._account_switch_in_progress:
-            bot_logger.log_info("Queue start requested but account switch in progress; ignoring.")
-            return
-        if self._queue_spam_thread and self._queue_spam_thread.is_alive():
-            bot_logger.log_info("Queue spam already running.")
-            return
-        self._stop_queue_spam = False
-        self._queue_ready = False
-        runtime_status.clear_intentional_wait()
-        runtime_status.set_mode(
-            "queueing",
-            bot_state=str(self._get_state_from_log()),
-            my_timer_running=False,
-            my_timer_type="",
-            my_timer_remaining_sec=None,
-            my_timer_elapsed_sec=None,
-            my_timer_duration_sec=None,
-            my_timer_critical_count=0,
-            my_timer_last_critical_at_epoch=0.0,
-            my_timer_timeout_seen=False,
-            my_timer_timeout_at_epoch=0.0,
-        )
-        bot_logger.log_info("Starting queue spam loop.")
-        self._queue_spam_thread = threading.Thread(target=self._queue_spam_loop, daemon=True)
-        self._queue_spam_thread.start()
+        # Atomic check-and-create so two racing callers can't both spawn a queue
+        # loop (which doubles every SWITCH CHECK / navigation and races switches).
+        with self._queue_start_lock:
+            if self._account_switch_in_progress:
+                bot_logger.log_info("Queue start requested but account switch in progress; ignoring.")
+                return
+            if self._queue_spam_thread and self._queue_spam_thread.is_alive():
+                bot_logger.log_info("Queue spam already running.")
+                return
+            self._stop_queue_spam = False
+            self._queue_ready = False
+            runtime_status.clear_intentional_wait()
+            runtime_status.set_mode(
+                "queueing",
+                bot_state=str(self._get_state_from_log()),
+                my_timer_running=False,
+                my_timer_type="",
+                my_timer_remaining_sec=None,
+                my_timer_elapsed_sec=None,
+                my_timer_duration_sec=None,
+                my_timer_critical_count=0,
+                my_timer_last_critical_at_epoch=0.0,
+                my_timer_timeout_seen=False,
+                my_timer_timeout_at_epoch=0.0,
+            )
+            bot_logger.log_info("Starting queue spam loop.")
+            self._queue_spam_thread = threading.Thread(target=self._queue_spam_loop, daemon=True)
+            self._queue_spam_thread.start()
 
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
             if self._account_switch_in_progress:
                 bot_logger.log_info("Queue spam stopping: account switch in progress.")
                 return
-            if self._account_switch_due():
+            # `pending` (not just `due`) so a switch DEFERRED because a match was
+            # running is actually carried out. The queue loop only ticks between
+            # matches, and start_game_from_home_screen refuses to queue while a
+            # switch is pending -- without this the bot would spin here forever
+            # waiting for a post-match trigger that already fired.
+            if self._account_switch_pending or self._account_switch_due():
                 self._account_switch_pending = True
-                if self._post_match_ready_ts is None:
-                    # Switch became due BEFORE any match finished (e.g. the account
-                    # already meets the criteria at start). The post-match path
-                    # never runs here, so trigger the switch directly -- otherwise
-                    # the loop would just stop and nothing would perform it.
-                    bot_logger.log_info("Account switch due before a match finished; performing switch now.")
-                    threading.Thread(target=self._perform_account_switch, daemon=True).start()
-                else:
-                    bot_logger.log_info("Account switch due; stopping queue spam; post-match flow will perform it.")
+                # Perform the switch right here. We're in the queue loop, i.e. on
+                # Home with the post-match UI already cleared -- a safe place to
+                # switch from. Deferring to the post-match flow (as this used to do
+                # when a match had already finished) DEADLOCKS when the criteria
+                # only became true AFTER that flow ran -- e.g. the deciding quest
+                # completed during this loop's own dip-to-Home quest refresh, so the
+                # post-match action had already passed and nothing would perform it.
+                # _perform_account_switch guards against concurrent runs, so racing
+                # with a post-match trigger is harmless.
+                bot_logger.log_info("Account switch due; performing switch now.")
+                threading.Thread(target=self._perform_account_switch, daemon=True).start()
                 return
             self.start_game_from_home_screen()
             time.sleep(3.0)
 
-    def _perform_account_switch(self) -> None:
-        if self._account_switch_in_progress:
-            return
-        self._account_switch_in_progress = True
-        # The outgoing account met its switch criteria, so mark it complete for
-        # this round BEFORE the resets below clear its identity. screenName is the
-        # stable per-account key; fall back to the alias we switched in with.
-        outgoing_key = self._current_account_screen_name or self._pending_switch_alias
-        if outgoing_key:
-            self._completed_account_keys.add(str(outgoing_key))
-        else:
-            bot_logger.log_info(
-                "Account switch: outgoing account has no screenName/alias yet; "
-                "round-completion tracking will skip it."
-            )
-        # Reset quest-mode tracking so the incoming account is measured fresh:
-        # restart its daily-win count.
+    def _reset_state_for_incoming_account(self) -> None:
+        """Clear the per-account state so the INCOMING account is measured fresh.
+
+        Called only once the logout is CONFIRMED (we really left the account).
+        Doing this before the logout -- as it used to -- corrupts the current
+        account whenever the logout fails and the bot resumes on it: its daily-win
+        count would be wiped (forcing it to re-earn wins it already had) and its
+        identity dropped, while its switch criteria stayed met, so the bot would
+        retry the same failing switch indefinitely."""
+        # Quest-mode tracking: the incoming account restarts its daily-win count.
         self._daily_wins_this_account = 0
         self._win_counted_this_match = False
         # Re-evaluate the incoming account's quest state fresh from its own Home:
         # forget the previous account's absolute count and re-arm the one-shot
-        # Home quest check. Count this switch for the anti-storm guard.
+        # Home quest check.
         self._last_valid_quest_active_incomplete = None
         self._home_quest_check_done = False
         self._home_quest_check_attempts = 0
@@ -5927,17 +6517,16 @@ class Controller(ControllerSecondary):
         self._cached_quests = []
         self._cached_active_quest_id = ""
         self._cached_active_colors = ""
-        # Gate quest reads to the log written from here on, so the previous
-        # account's block (still in the tail) can't be latched as the new owner.
-        # Captured before logout: the incoming account's first block is written
-        # after login, i.e. strictly past this offset.
-        self._quests_valid_from_offset = self._get_log_size(self._log_path)
         self._starter_picker_shortcut_tried = False
+        # A switch really happened, so the logout works -> clear the failed-attempt
+        # guard, and count this switch for the anti-storm guard (which asks "have we
+        # cycled through every account without playing a single match?").
+        self._failed_switch_attempts = 0
+        self._failed_switch_giveup_logged = False
         self._switches_without_match += 1
-        # Reset post-match marker so the incoming account is treated as "no match
-        # played yet": if it already meets the criteria on landing, the queue loop
-        # performs the switch immediately instead of waiting for a match that the
-        # post-match path would need.
+        # Treat the incoming account as "no match played yet": if it already meets
+        # the criteria on landing, the queue loop performs the switch immediately
+        # instead of waiting for a match that the post-match path would need.
         self._post_match_ready_ts = None
         # Per-account gold tracking is measured fresh for the incoming account.
         # The accumulated per-account totals (_gold_farmed_by_account) are kept:
@@ -5945,13 +6534,141 @@ class Controller(ControllerSecondary):
         # session total across switches.
         self._account_quest_gold = {}
         self._credited_quest_ids = set()
-        # Forget the previous account's screenName so the next quests block we
-        # parse (the new account's) is latched as the new owner instead of being
-        # rejected as stale.
+        # Forget the previous account's screenName so the next login/quests block we
+        # read (the new account's) is latched as the new owner instead of being
+        # rejected as stale. Also drop any manual pin: the bot is now driving the
+        # identity via its own login, so auto-detection should resume.
         self._current_account_screen_name = None
+        self._current_account_pinned = False
+        # Let the incoming account's identity be latched at the first opportunity
+        # rather than waiting out a throttle window left over from the last account.
+        self._last_identity_login_scan_ts = 0.0
+        # The Current Account line must not keep showing the account we just left
+        # while the incoming one logs in.
+        self._publish_account_switch_status()
+
+    def _abort_switch_and_resume(self, reason: str) -> None:
+        """Give up on THIS switch attempt and resume playing on the account we are
+        still logged into.
+
+        Every early exit from _perform_account_switch must go through here, for two
+        reasons:
+        1. The queue loop RETURNS right after spawning the switch thread, so an exit
+           that merely returns leaves no loop running at all and the bot idles until
+           it is stopped by hand.
+        2. Restarting the queue loop alone would spin: it re-checks
+           _account_switch_due(), finds it still true (nothing about the account
+           changed), spawns another attempt that aborts identically, and loops with
+           no delay. Counting the attempt as a failure is what bounds it -- after
+           _max_failed_switch_attempts the due-check gives up and the bot plays on.
+        """
+        self._failed_switch_attempts += 1
+        bot_logger.log_error(
+            "Account switch aborted ({}); staying on the current account "
+            "(attempt {}/{}).".format(
+                reason, self._failed_switch_attempts, self._max_failed_switch_attempts
+            )
+        )
+        self._account_switch_pending = False
+        # We never left the account, so the next quests/login block we read is NOT
+        # the target's -- don't let it be attributed to the account we aimed for.
+        self._pending_switch_alias = None
+        self._last_account_switch_ts = time.time()
+        # Must be cleared BEFORE start_queueing, which ignores the request while a
+        # switch is flagged as in progress.
+        self._account_switch_in_progress = False
+        runtime_status.clear_intentional_wait()
+        self._set_runtime_home_mode("home_ready")
+        self.start_queueing()
+
+    def _perform_account_switch(self) -> None:
+        # Atomic check-and-set so two racing callers can't both start a logout
+        # sequence (which would click over each other and fail the switch).
+        with self._switch_start_lock:
+            if self._account_switch_in_progress:
+                return
+            self._account_switch_in_progress = True
+        # Never act while a match is running or starting. The post-match flow and
+        # the queue loop can both fire this, and they race with the queue click:
+        # observed live, the loop clicked Play and ~1s later a queue-ready marker
+        # re-entered the post-match action, which switched -- and, with the round
+        # already complete, STOPPED THE BOT while the match it had just started was
+        # being played. Deferring keeps the switch pending, so the same decision is
+        # taken again from the post-match screen once the match really is over.
+        state = self._get_state_from_log()
+        if state in (BotState.IN_GAME, BotState.FIND_MATCH):
+            bot_logger.log_info(
+                f"Account switch deferred: a match is in progress/starting (state={state}); "
+                "it will run once the match ends."
+            )
+            self._account_switch_pending = True
+            self._account_switch_in_progress = False
+            return
+        # Make sure we know WHICH account we are leaving before capturing it below.
+        # Identity is normally latched from a quests read, which never happens if
+        # the startup account's Home reads all failed. Without it the account is
+        # skipped in round tracking (the round can then never complete) AND
+        # _select_next_switch_target has no current account to skip, so it can pick
+        # the account we are already on and "switch" into itself. The login event is
+        # always in the log, so this resolves it.
+        if self._current_account_screen_name is None:
+            try:
+                self._refresh_identity_from_login(force=True)
+            except Exception:
+                pass
+        # Capture the OUTGOING account's final gold BEFORE the reset below clears
+        # its identity. The switch fires post-match once Home is loaded, so the
+        # win/quest reward has just landed in InventoryInfo -- reading it here is
+        # the last chance to attribute that gold to this account (otherwise, with a
+        # low win threshold, the bot switches away before any later Home read would
+        # catch it, and the account shows 0 farmed).
+        try:
+            self._update_gold_from_inventory()
+        except Exception:
+            pass
+        # The outgoing account met its switch criteria, so mark it complete for
+        # this round BEFORE the resets below clear its identity. Normalised through
+        # _account_identity_key so every account contributes exactly ONE key: the
+        # raw sources mix two namespaces (an MTGA screenName like 'venturaa' vs the
+        # config alias 'bruno1' we fall back to), and recording the same account
+        # under both would inflate the set and end the round early -- stopping the
+        # bot before every account has actually been played.
+        outgoing_key = self._account_identity_key(
+            self._current_account_screen_name or self._pending_switch_alias
+        )
+        # Configured label of the account we're leaving, captured BEFORE the reset
+        # below clears _current_account_screen_name, so the next-target selection
+        # can skip re-logging into the account that is already current.
+        outgoing_config_name = self._current_account_config_name() or (
+            self._pending_switch_alias or None
+        )
+        if outgoing_key:
+            self._completed_account_keys.add(str(outgoing_key))
+        else:
+            bot_logger.log_info(
+                "Account switch: outgoing account has no screenName/alias yet; "
+                "round-completion tracking will skip it."
+            )
+        # Gate quest reads to the log written from here on, so the previous
+        # account's block (still in the tail) can't be latched as the new owner.
+        # Captured before logout: the incoming account's first block is written
+        # after login, i.e. strictly past this offset. Safe to set even if the
+        # logout then fails -- the gate only applies while the screenName is
+        # unlatched, and on failure we keep the current account's identity.
+        self._quests_valid_from_offset = self._get_log_size(self._log_path)
+        # NOTE: the per-account state resets (win count, quest state, cached quest
+        # view, identity) are deliberately NOT done here. They belong to the
+        # INCOMING account, and the logout below can fail and leave us on the
+        # CURRENT one -- wiping its daily-win count then would make it re-farm wins
+        # it already earned, and re-trigger the same doomed switch forever. They run
+        # in _reset_state_for_incoming_account(), once the logout is confirmed.
         runtime_status.clear_intentional_wait()
         runtime_status.set_mode("account_switch", bot_state=str(self._get_state_from_log()))
         queued_after_login = False
+        # Set once the logout is confirmed, so an exception raised AFTER the switch
+        # already succeeded (e.g. while persisting the cycle index) is not miscounted
+        # as a failed switch attempt against the give-up guard.
+        logout_confirmed = False
         try:
             if self._stop_requested:
                 bot_logger.log_info("Account switch aborted: stop requested.")
@@ -5959,15 +6676,18 @@ class Controller(ControllerSecondary):
             bot_logger.log_info("Account switch: starting logout/login flow.")
             accounts = self._load_accounts_from_dirs()
             if not accounts:
-                bot_logger.log_error("Account switch failed: no account credentials found in account folders.")
-                self._account_switch_pending = False
+                self._abort_switch_and_resume("no account credentials found in account folders")
+                queued_after_login = True
                 return
-            # Remember how many accounts exist, for the anti-storm guard. Set
-            # this BEFORE the calibration check below so a missing button
-            # calibration (which aborts every switch attempt) still lets the
-            # guard trip instead of leaving _known_account_count at 0 forever
-            # and disabling the anti-storm protection permanently.
-            self._known_account_count = len(accounts)
+            # Remember how many accounts are actually rotated, for the anti-storm
+            # guard and the end-of-round stop. When a play order is configured, the
+            # round is those accounts (not every folder on disk) -- otherwise a
+            # 2-account order among 4 folders would never reach "all completed" and
+            # the bot would loop forever instead of stopping. Set BEFORE the
+            # calibration check below so a missing-button abort still lets the guard
+            # trip instead of leaving the count at 0 forever.
+            _ordered = self._resolve_account_play_order(accounts)
+            self._known_account_count = len(_ordered) if _ordered else len(accounts)
             # End of the round: if we have now completed every configured account
             # this session, stop instead of logging into an account we have already
             # finished. Quests mode only (time mode never "completes" a round).
@@ -5986,8 +6706,8 @@ class Controller(ControllerSecondary):
                 self._request_stop_bot("all accounts completed this round")
                 return
             if not self.log_out_btn_coors or not self.log_out_ok_btn_coors:
-                bot_logger.log_error("Account switch failed: missing calibrated button(s).")
-                self._account_switch_pending = False
+                self._abort_switch_and_resume("missing calibrated Log Out button(s)")
+                queued_after_login = True
                 return
             bot_logger.log_info(
                 "Accounts loaded: count={} names={}".format(
@@ -5999,47 +6719,53 @@ class Controller(ControllerSecondary):
 
             custom_order = self._resolve_account_play_order(accounts)
             bot_logger.log_info(f"Account play order resolved indices: {custom_order}")
-            if custom_order:
-                order_len = len(custom_order)
-                if order_len == 1:
-                    next_pos = 0
-                    next_index = custom_order[0]
-                else:
-                    # Treat account_cycle_index as the NEXT position to use.
-                    # If unset/invalid, start at the first entry.
-                    pos = self._account_cycle_index
-                    if pos < 0 or pos >= order_len:
-                        pos = 0
-                    next_pos = pos
-                    next_index = custom_order[next_pos]
-                bot_logger.log_info(f"Account play order (indices): {custom_order}")
-                bot_logger.log_info(f"Account play order pos (next): {self._account_cycle_index} -> {next_pos}")
-            else:
-                # No explicit play order configured: cycle by sorted account list.
-                if self._account_cycle_index < 0 or self._account_cycle_index >= len(accounts):
-                    self._account_cycle_index = 0
-                next_index = self._account_cycle_index
+            # Select the next target, skipping the account that is already current
+            # (captured before the reset above) so we don't switch into ourselves.
+            next_index, advance_index, advance_mod = self._select_next_switch_target(
+                accounts, outgoing_config_name
+            )
+            if next_index is None:
+                self._abort_switch_and_resume("could not select a next account")
+                queued_after_login = True
+                return
             account = accounts[next_index]
             account_name = str(account.get("name", "")).strip() or str(account.get("folder", "")).strip()
 
-            bot_logger.log_info(f"Switching account to '{account_name}'")
+            # Never log out just to log back into the SAME account: that wastes a
+            # full logout/login cycle and re-marks an account we already finished.
+            # Only possible with >1 configured account when the selection could not
+            # identify the current one; with a single account, staying is correct.
+            if (
+                len(accounts) > 1
+                and outgoing_config_name
+                and account_name.casefold() == str(outgoing_config_name).casefold()
+            ):
+                self._abort_switch_and_resume(
+                    "next target '{}' is the account already logged in".format(account_name)
+                )
+                queued_after_login = True
+                return
+
+            bot_logger.log_info(
+                "Switching account to '{}' (leaving '{}'; cycle {} -> {})".format(
+                    account_name,
+                    outgoing_config_name or "-",
+                    self._account_cycle_index,
+                    (advance_index + 1) % advance_mod,
+                )
+            )
             # Remember which alias we're switching to, so the next quests block we
             # latch (the new account's) can be mapped screenName -> alias.
             self._pending_switch_alias = account_name or None
-            if custom_order:
-                next_cycle = (next_pos + 1) % len(custom_order)
-                bot_logger.log_info(f"Account cycle index (order pos): {self._account_cycle_index} -> {next_cycle}")
-            else:
-                bot_logger.log_info(f"Account cycle index: {self._account_cycle_index} -> {next_index}")
             self._post_login_action_done = False
             logout_log_offset = self._get_log_size(self._log_path)
             logout_ok = False
             if self._replay_recorded_logout():
                 bot_logger.log_info("Recorded logout replay started; waiting for login-screen transition.")
-                runtime_status.set_intentional_wait(max(8.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
+                runtime_status.set_intentional_wait(max(40.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
                 logout_ok = self._wait_for_logout_to_reach_login_screen(
                     start_offset=logout_log_offset,
-                    timeout_sec=max(8.0, self._login_delete_delay_sec + 3.0),
+                    timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
                 )
                 if not logout_ok:
                     bot_logger.log_error("Recorded logout replay did not reach the login screen; falling back to built-in logout clicks.")
@@ -6049,12 +6775,22 @@ class Controller(ControllerSecondary):
             if not logout_ok:
                 logout_log_offset = self._get_log_size(self._log_path)
                 self._run_mapped_logout_sequence()
-                runtime_status.set_intentional_wait(max(8.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
+                runtime_status.set_intentional_wait(max(40.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
                 logout_ok = self._wait_for_logout_to_reach_login_screen(
                     start_offset=logout_log_offset,
-                    timeout_sec=max(8.0, self._login_delete_delay_sec + 3.0),
+                    timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
                 )
             if not logout_ok:
+                # The switch did not happen: we are still signed in on the current
+                # account. Count it so a persistently broken logout eventually stops
+                # being retried (see _max_failed_switch_attempts) instead of looping
+                # forever. Reset only by a confirmed switch.
+                self._failed_switch_attempts += 1
+                bot_logger.log_info(
+                    "Account switch attempt failed ({}/{} consecutive).".format(
+                        self._failed_switch_attempts, self._max_failed_switch_attempts
+                    )
+                )
                 home_ready_after_logout = self._playerlog_contains_marker_since(
                     ["MainNav load in"],
                     start_offset=logout_log_offset,
@@ -6079,9 +6815,10 @@ class Controller(ControllerSecondary):
                 # Logout failed and we could not positively confirm Home either.
                 # Do NOT idle: the logout almost certainly left us still signed in
                 # on the current account, so resume queueing there instead of
-                # leaving the bot dead. The anti-storm guard (_switches_without_match
-                # >= _known_account_count) bounds repeated failed attempts, after
-                # which _account_switch_due() returns False and we just keep playing.
+                # leaving the bot dead. The failed-attempt guard
+                # (_failed_switch_attempts >= _max_failed_switch_attempts) bounds
+                # repeated failures, after which _account_switch_due() returns False
+                # and we just keep playing on this account.
                 bot_logger.log_error(
                     "Account switch failed: logout did not reach the login screen; "
                     "resuming queue on the current account instead of idling."
@@ -6109,6 +6846,12 @@ class Controller(ControllerSecondary):
                 self.start_queueing()
                 queued_after_login = True
                 return
+            # Logout CONFIRMED (we reached the login screen) -> we really have left
+            # the outgoing account, so it is now safe to clear its per-account state
+            # for the incoming one. Deliberately after every logout-failure path
+            # above, each of which returns while staying on the current account.
+            self._reset_state_for_incoming_account()
+            logout_confirmed = True
             if self._stop_requested:
                 bot_logger.log_info("Account switch aborted after logout: stop requested.")
                 return
@@ -6144,11 +6887,49 @@ class Controller(ControllerSecondary):
                     if self._stop_requested:
                         break
                     time.sleep(0.1)
+            if not self._stop_requested:
+                # Latch the incoming account's identity straight from its login
+                # event first, so the Current Account line updates as soon as the
+                # account is in -- independent of whether Home/quests load (the
+                # refresh_quests_cache latch below is coupled to a quests read,
+                # which fails silently when post-switch Home navigation misfires,
+                # leaving the UI stuck on the previous account).
+                try:
+                    self._refresh_identity_from_login(force=True)
+                except Exception:
+                    pass
+                # Establish the INCOMING account's gold baseline now: Home is loaded
+                # (its InventoryInfo is written) and it hasn't played yet, so the
+                # baseline is pre-win. Without this the baseline is only captured
+                # when the account first wins -- baking the win into it (0 farmed).
+                # refresh_quests_cache also latches the new account's screenName.
+                try:
+                    self.refresh_quests_cache()
+                except Exception:
+                    pass
+                # Quests were just read on Home here, so the incoming account starts
+                # its match-count fresh. Without this the counter carries over from
+                # the account we just left (>=1 when a switch fired after a match),
+                # so the queue loop would immediately dip back to Home for a quest
+                # refresh -- racing the match the post-login routine is about to
+                # queue, which is exactly why the Home nav then fails ("Home click
+                # did not land on Home"). Reset so the next dip happens between
+                # matches, safely on Home, not on top of a starting game.
+                self._matches_since_quest_refresh = 0
             if not self._stop_requested and not self._post_login_action_done:
                 if self._run_post_login_routine(account, accounts):
                     self._post_login_action_done = True
-            if not self._stop_requested and self._post_login_action_done:
-                bot_logger.log_info("Post-login routine done; waiting 5s before queueing.")
+            if not self._stop_requested:
+                # Resume the queue loop whether or not the post-login routine
+                # completed. It is self-healing (re-navigates from Home and
+                # re-checks the switch criteria), so skipping it on a routine
+                # failure just leaves the bot idle -- _queue_after_login is only
+                # consumed by a post-match flow, which never runs after a startup
+                # switch, so the bot would hang until manually stopped.
+                if self._post_login_action_done:
+                    bot_logger.log_info("Post-login routine done; waiting 5s before queueing.")
+                else:
+                    bot_logger.log_info("Post-login routine did not complete; resuming queue loop anyway (self-healing).")
                 runtime_status.set_intentional_wait(5.2, "post_login_queue_delay")
                 for _ in range(50):
                     if self._stop_requested:
@@ -6163,12 +6944,9 @@ class Controller(ControllerSecondary):
                     self.start_queueing()
                     queued_after_login = True
 
-            if custom_order:
-                # Advance to next position after a successful switch.
-                self._account_cycle_index = (next_pos + 1) % len(custom_order)
-            else:
-                # Advance to next account in default sorted list.
-                self._account_cycle_index = (next_index + 1) % len(accounts)
+            # Advance past the position we consumed (skip-self already applied by
+            # _select_next_switch_target).
+            self._account_cycle_index = (advance_index + 1) % advance_mod
             self._last_account_switch_ts = time.time()
             self._account_switch_pending = False
             if not queued_after_login:
@@ -6176,9 +6954,31 @@ class Controller(ControllerSecondary):
             self._persist_account_cycle_index()
         except Exception as e:
             bot_logger.log_error(f"Account switch failed: {e}")
+            # Count it as a failed attempt so the give-up guard bounds a repeatedly
+            # throwing switch too -- but only if we never actually left the account.
+            # After a confirmed logout the switch DID happen; an exception in the
+            # trailing bookkeeping must not count against the guard.
+            if not logout_confirmed:
+                self._failed_switch_attempts += 1
+            # Don't leave the bot idle: the queue loop returned when it spawned this
+            # thread, so if we bail out here nothing else restarts it.
+            if not queued_after_login and not self._stop_requested:
+                try:
+                    self._account_switch_in_progress = False
+                    self.start_queueing()
+                    queued_after_login = True
+                except Exception as exc:
+                    bot_logger.log_error(f"Could not resume queueing after switch error: {exc}")
         finally:
             runtime_status.clear_intentional_wait()
             self._account_switch_in_progress = False
+            self._account_switch_pending = False
+            # Identity/UI may have changed (or been cleared) along any path above;
+            # make sure the Current/Next account lines reflect the final state.
+            try:
+                self._publish_account_switch_status()
+            except Exception:
+                pass
 
     def _run_mapped_logout_sequence(self) -> None:
         bot_logger.log_info("Account switch: using built-in macOS-style logout sequence.")
@@ -6256,7 +7056,7 @@ class Controller(ControllerSecondary):
             self._run_mapped_logout_sequence()
             return self._wait_for_logout_to_reach_login_screen(
                 start_offset=logout_log_offset,
-                timeout_sec=max(8.0, self._login_delete_delay_sec + 3.0),
+                timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
             )
         except Exception as e:
             bot_logger.log_error(f"Built-in logout test sequence failed: {e}")
@@ -6313,6 +7113,7 @@ class Controller(ControllerSecondary):
                         continue
                     email = str(details.get("email", "")).strip()
                     pw = str(details.get("pw", "")).strip()
+                    screen_name = str(details.get("screen_name", "")).strip()
                     if not first_name or not email or not pw:
                         continue
                     accounts.append({
@@ -6320,6 +7121,7 @@ class Controller(ControllerSecondary):
                         "folder": entry,
                         "email": email,
                         "pw": pw,
+                        "screen_name": screen_name,
                     })
                     seen_folders.add(entry_key)
         except Exception as e:

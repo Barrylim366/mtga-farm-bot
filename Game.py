@@ -30,6 +30,11 @@ class Game:
         self._stop_requested = False
         self._timers: list[threading.Timer] = []
         self._last_action_delay_turn = -1
+        # The match-end signal can arrive more than once for the SAME match.
+        # Handling it twice schedules two restarts, i.e. two parallel queue/switch
+        # loops that click over each other and break the account rotation. Set on
+        # the first signal, re-armed in _restart_game.
+        self._match_end_handled = False
         # Tracks (turn, phase, step, decisionPlayer, move_name, move_payload) of
         # the last move actually executed, plus how many times in a row it has
         # repeated -- see _STUCK_MOVE_RETRY_LIMIT.
@@ -52,6 +57,7 @@ class Game:
     def start(self):
         self._debug("Game.start() called")
         self._stop_requested = False
+        self._match_end_handled = False
         try:
             debug_recorder.start_session()
         except Exception as e:
@@ -78,10 +84,16 @@ class Game:
             self._debug("Card data refresh: missing cards resolved via Scryfall (if any).")
         except Exception as e:
             self._debug(f"Card data refresh failed: {e}")
-        # Cache the account's quests once from Home so deck selection uses local
-        # data instead of re-parsing the player.log every queue cycle.
+        # Read the account's quests from scratch, ignoring anything the log already
+        # holds: it can belong to another account, or predate a quest the user
+        # re-rolled/finished by hand in MTGA. Bounded (see prime_quests_for_new_session)
+        # and done BEFORE start_game() so the first queue already knows the right
+        # deck colours. The cache is then reused locally instead of re-parsing the
+        # player.log on every queue cycle.
         try:
-            if hasattr(self.controller, "refresh_quests_cache"):
+            if hasattr(self.controller, "prime_quests_for_new_session"):
+                self.controller.prime_quests_for_new_session()
+            elif hasattr(self.controller, "refresh_quests_cache"):
                 self.controller.refresh_quests_cache()
         except Exception as e:
             self._debug(f"Quest cache refresh failed: {e}")
@@ -94,6 +106,15 @@ class Game:
 
     def on_match_end(self, won: bool | None = None):
         """Called when a match ends - wait 20 seconds then start a new game"""
+        # Idempotency: the match-end can be signalled more than once for the same
+        # match. Handle only the first; duplicates must NOT re-record the match or
+        # schedule a second restart (which would spawn a parallel queue/switch loop
+        # -- the cause of broken rotation and duplicated switch attempts). Reset in
+        # _restart_game so the next match is handled normally.
+        if self._match_end_handled:
+            self._debug("Duplicate match-end signal ignored.")
+            return
+        self._match_end_handled = True
         # Finalize the debug recording first, independently of the restart
         # logic below -- otherwise stopping the bot at match end (a common case)
         # would skip the match.json footer and leave the last match unfinalized.
@@ -139,6 +160,9 @@ class Game:
             return
         runtime_status.set_mode("restarting")
         self._debug("Restarting game...")
+
+        # Re-arm the match-end handler for the next match.
+        self._match_end_handled = False
 
         # Reset Game state
         self.last_logged_turn = -1
