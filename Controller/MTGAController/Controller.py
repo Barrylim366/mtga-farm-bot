@@ -407,6 +407,8 @@ class Controller(ControllerSecondary):
         # Cap on how long that pause may last, so a dialog we simply cannot see
         # resolve (hand-answered, or a shape we mis-read) never freezes the bot.
         self.__casting_time_options_wait_sec = 12.0
+        # Newest gameStateId seen on ANY GRE message -- see __note_gre_state_id.
+        self.__latest_gre_state_id = None
         self.__last_modal_choice_ts = 0.0
         self.__last_group_req_ts = 0.0
         self.__group_req_active_until = 0.0
@@ -6020,6 +6022,9 @@ class Controller(ControllerSecondary):
         self.__select_n_in_progress_since = 0.0
         self.__select_n_token_counter += 1
         self.__pending_pay_costs_ts = 0.0
+        # gameStateId restarts low every game; carrying the old one over would
+        # make a fresh match look like it had already advanced.
+        self.__latest_gre_state_id = None
         self.__clear_casting_time_options_wait(f"state reset ({reason})")
         self.__clear_combat_recovery(reason)
         self.__last_attack_submit_ts = 0.0
@@ -10712,8 +10717,51 @@ class Controller(ControllerSecondary):
         # Treat PayCostsReq as blocking for a short window.
         return (time.time() - self.__pending_pay_costs_ts) < 3.0
 
+    def __note_gre_state_id(self, raw_dict: dict) -> None:
+        """Remember the newest gameStateId carried by any GRE message on a line.
+
+        The merged state only ever learns the id of messages we actually merge,
+        and a TimerStateMessage carries no gameStateMessage -- so none of its id
+        reaches updated_game_state. That blind spot cost us three stray clicks in
+        the 2026-07-27 run: answering Apothecary Stomper's modal moved the GRE
+        224 -> 226, the sole carrier of 226 was a timer message, and with the
+        merged id still reading 224 the retry fired 2s later into a dialog that
+        had already closed. The client got no further diff until the follow-up
+        SelectTargetsReq (227), 2.7s after the click that actually worked.
+        """
+        try:
+            messages = raw_dict.get("greToClientEvent", {}).get("greToClientMessages", []) or []
+        except Exception:
+            return
+        newest = None
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            candidates = [message.get("gameStateId")]
+            nested = message.get("gameStateMessage")
+            if isinstance(nested, dict):
+                candidates.append(nested.get("gameStateId"))
+            for value in candidates:
+                if value is None:
+                    continue
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if newest is None or value > newest:
+                    newest = value
+        if newest is not None:
+            self.__latest_gre_state_id = newest
+
     def __read_game_state_id(self):
-        """The GRE's gameStateId from the merged state, or None if unreadable.
+        """The GRE's gameStateId: the newest one seen on the wire if we have it,
+        else whatever the merged state carries.
+
+        The wire value is preferred because it is strictly fresher -- see
+        __note_gre_state_id for the timer-message gap that makes the merged value
+        lag. Both are compared with `!=` rather than `>`, so the id restarting low
+        on a new match reads as "advanced" and releases the pause; failing open is
+        the right direction for a guard whose whole job is to not click blind.
 
         This is the "did the game move on?" tell for the casting-time dialog.
         Deliberately NOT the stack contents: MTGA omits `objectInstanceIds`
@@ -10728,6 +10776,8 @@ class Controller(ControllerSecondary):
         unanswered the GRE is waiting on US and sends nothing -- verified against
         the Apothecary Stomper capture, where it froze at 217 for the whole stall.
         """
+        if self.__latest_gre_state_id is not None:
+            return self.__latest_gre_state_id
         try:
             state = self.updated_game_state.get_full_state() or {}
             value = state.get("gameStateId")
@@ -11339,6 +11389,10 @@ class Controller(ControllerSecondary):
                 my_timer_timeout_seen=True,
                 my_timer_timeout_at_epoch=time.time(),
             )
+
+        # Before the merge: a timer message advances this without touching the
+        # merged state, and that is exactly the case the retry guard needs.
+        self.__note_gre_state_id(raw_dict)
 
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict, fallback_seat_id=self.__system_seat_id or 1)
         self.updated_game_state.update(game_state)

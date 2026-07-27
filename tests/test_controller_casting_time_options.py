@@ -130,6 +130,30 @@ def apply_resolution_diff(c: Controller, *, game_state_id=218):
     }))
 
 
+def timer_state_line(*, game_state_id=226) -> str:
+    """A TimerStateMessage, the shape that exposed the stray-retry bug.
+
+    It carries a gameStateId but no gameStateMessage, so nothing of it survives
+    into the merged state. In the 2026-07-27 capture this was the ONLY carrier of
+    the state advance between answering Apothecary Stomper's modal (224) and the
+    follow-up SelectTargetsReq 2.7s later (227)."""
+    return "[Message] " + json.dumps({
+        "greToClientEvent": {
+            "greToClientMessages": [{
+                "type": "GREMessageType_TimerStateMessage",
+                "systemSeatIds": [1, 2],
+                "msgId": 290,
+                "gameStateId": game_state_id,
+                "timerStateMessage": {
+                    "seatId": 1,
+                    "timers": [{"timerId": 3, "type": "TimerType_ActivePlayer",
+                                "durationSec": 68, "running": True}],
+                },
+            }]
+        }
+    })
+
+
 def casting_time_options_line(
     *, option_type="CastingTimeOptionType_Modal",
     grp_id=APOTHECARY_STOMPER_ABILITY_GRP_ID, seat_ids=(1,),
@@ -228,6 +252,59 @@ class CastingTimeOptionsPauseTest(unittest.TestCase):
             casting_time_options_line(seat_ids=(2,))
         )
         self.assertFalse(self.still_open())
+
+
+class WireGameStateIdTest(unittest.TestCase):
+    """Regression for the stray retry clicks seen in the 2026-07-27 run.
+
+    The fix worked -- three Apothecary Stomper modals were answered and no match
+    stalled -- but Player.log recorded 8 responses for 8 dialogs against 11
+    clicks. The 3 extra ones were the Modal retries: the first click had already
+    been accepted, and the only evidence of that reaching the client was a timer
+    message, which the merged state throws away.
+    """
+
+    def setUp(self):
+        self.c = make_controller()
+        seed_state(self.c, game_state_id=224)
+        self.timer_patch = mock.patch.object(controller_module.threading, "Timer", FakeTimer)
+        self.timer_patch.start()
+        self.addCleanup(self.timer_patch.stop)
+
+    def note(self, line: str) -> None:
+        self.c._Controller__note_gre_state_id(json.loads(line.split("[Message] ", 1)[1]))
+
+    def test_timer_message_state_id_is_picked_up(self):
+        self.note(timer_state_line(game_state_id=226))
+        self.assertEqual(self.c._Controller__read_game_state_id(), 226)
+
+    def test_merged_state_is_the_fallback_when_nothing_seen_on_the_wire(self):
+        self.assertEqual(self.c._Controller__read_game_state_id(), 224)
+
+    def test_timer_message_alone_closes_the_dialog_window(self):
+        """The load-bearing case: no diff reaches the merged state at all, yet the
+        pause must lift so the retry does not click onto the board."""
+        self.c._Controller__handle_casting_time_options_req(casting_time_options_line())
+        self.assertTrue(self.c._Controller__should_pause_for_casting_time_options())
+        self.note(timer_state_line(game_state_id=226))
+        self.assertEqual(
+            self.c.updated_game_state.get_full_state().get("gameStateId"), 224,
+            "precondition: the merged state must NOT have learned 226, or this "
+            "test would pass without the fix",
+        )
+        self.assertFalse(self.c._Controller__should_pause_for_casting_time_options())
+
+    def test_unchanged_state_id_keeps_the_window_open(self):
+        self.c._Controller__handle_casting_time_options_req(casting_time_options_line())
+        self.note(timer_state_line(game_state_id=224))
+        self.assertTrue(self.c._Controller__should_pause_for_casting_time_options())
+
+    def test_state_id_does_not_survive_into_the_next_match(self):
+        """gameStateId restarts low each game; a stale high one would make every
+        fresh dialog look already-answered."""
+        self.note(timer_state_line(game_state_id=226))
+        self.c._Controller__reset_live_game_state("test")
+        self.assertIsNone(self.c._Controller__latest_gre_state_id)
 
 
 class CastingTimeOptionsRetryTest(unittest.TestCase):
