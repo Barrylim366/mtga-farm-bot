@@ -187,6 +187,7 @@ The bot maximizes mana usage each turn:
 - Type priority when CMC is tied: creature → instant → sorcery → enchantment
 - Supports Convoke (untapped creatures as mana sources)
 - Kicker: the "Cast with Kicker?" chooser is answered automatically (always the plain, non-kicked version for now) so the bot never stalls on it
+- The mid-screen "Choose One" overlay — kicker plates, a modal spell's or creature's mode plates (e.g. Apothecary Stomper's enter-the-battlefield choice), and the "sacrifice or pay" buttons — is treated as blocking: while it is up, no other move is dispatched, and the chosen plate is clicked again if the game has not moved on. Previously a single click that failed to register left the dialog open and the bot immediately swept the hand row for its next play behind the overlay, which could not be reached — the match then idled until it was conceded
 - Client-side "Are You Sure?" confirmations are handled reactively after a failed cast attempt, avoiding speculative screen probes during normal casts
 - Decision recovery is guarded against open payment/selection prompts and resumes safely after modal, stack, or scry interruptions
 - Ties between otherwise equal casting plans favor lifegain-payoff creatures, so decks built around gaining life develop toward their game plan sooner

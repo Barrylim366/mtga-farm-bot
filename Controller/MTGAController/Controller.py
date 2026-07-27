@@ -392,6 +392,21 @@ class Controller(ControllerSecondary):
         self.__decision_heartbeat_idle_sec = 8.0
         self.__last_decision_ts = 0.0
         self.__last_casting_time_options_ts = 0.0
+        # Open mid-screen "Choose One" casting-time dialog (kicker plates, modal
+        # mode plates, sacrifice-or-pay buttons). A single blind click used to be
+        # the whole answer: if it did not land, the dialog stayed up forever while
+        # the decision loop happily dispatched the NEXT move into it -- observed on
+        # Apothecary Stomper's modal ETB, where the follow-up land play turned into
+        # an endless hand-row hover scan ("SCAN_STOPPED") over the blocking overlay.
+        # These fields let us (a) pause decisions while the dialog is up and
+        # (b) retry the click until the game visibly moves on.
+        self.__casting_time_options_until = 0.0
+        self.__casting_time_options_click_ts = 0.0
+        self.__casting_time_options_turn_key = None
+        self.__casting_time_options_state_id = None
+        # Cap on how long that pause may last, so a dialog we simply cannot see
+        # resolve (hand-answered, or a shape we mis-read) never freezes the bot.
+        self.__casting_time_options_wait_sec = 12.0
         self.__last_modal_choice_ts = 0.0
         self.__last_group_req_ts = 0.0
         self.__group_req_active_until = 0.0
@@ -1378,6 +1393,9 @@ class Controller(ControllerSecondary):
                 # scan hopeless -- record it so a bundle answers "was a modal
                 # prompt up?" without cross-reading the log.
                 "pending_card_prompt": self.__pending_card_prompt,
+                # Same question for the mid-screen "Choose One" overlay: it hides
+                # the hand row just as thoroughly (issue #41).
+                "casting_time_options_open": self.__casting_time_options_still_open(),
                 "turn_info": self.updated_game_state.get_turn_info() or {},
                 "log_path": self._log_path,
             }
@@ -6002,6 +6020,7 @@ class Controller(ControllerSecondary):
         self.__select_n_in_progress_since = 0.0
         self.__select_n_token_counter += 1
         self.__pending_pay_costs_ts = 0.0
+        self.__clear_casting_time_options_wait(f"state reset ({reason})")
         self.__clear_combat_recovery(reason)
         self.__last_attack_submit_ts = 0.0
         self.__my_timer_state = {}
@@ -8903,6 +8922,7 @@ class Controller(ControllerSecondary):
             self.__should_pause_for_targets()
             or self.__should_pause_for_assign_damage()
             or self.__should_pause_for_pay_costs()
+            or self.__should_pause_for_casting_time_options()
         ):
             return False
         if self.__select_n_in_progress or self.__pending_select_n is not None:
@@ -9027,6 +9047,11 @@ class Controller(ControllerSecondary):
     # toughness 4 or greater", never the indestructible mode.
     _MODAL_PICK_SECOND_GRPIDS = {72198, 78825, 93566, 94011, 98299}
 
+    # Extra clicks on the chosen plate/button if the dialog is still up. Each one
+    # is gated on __casting_time_options_still_open(), so they stop the moment the
+    # game moves on and never rain onto the battlefield behind the overlay.
+    __CASTING_TIME_OPTION_MAX_RETRIES = 2
+
     def __handle_casting_time_options_req(self, line: str) -> None:
         # Kicker & friends: after clicking a card with optional casting-time
         # costs, MTGA blocks the cast behind a mid-screen "Choose One" dialog
@@ -9124,43 +9149,36 @@ class Controller(ControllerSecondary):
                 {"choice": choice_desc, "options": list(option_summaries)},
             )
 
-            # Snapshot the turn state so retries stop once the dialog resolves --
-            # avoids clicking the board after it closes (like the modal handler).
-            snap_ti = {}
+            # Snapshot the state the "is the dialog still up?" test compares
+            # against, and open the pause window. Both the retry loop below and
+            # the decision gates read this -- see __casting_time_options_still_open.
+            # gameStateId is the load-bearing part: a mid-main-phase modal is
+            # answered without turn/phase/step/decisionPlayer moving at all, so
+            # the turn key alone could never see the dialog close.
             try:
                 snap_ti = dict(self.updated_game_state.get_turn_info() or {})
             except Exception:
                 snap_ti = {}
-            snap_key = (
+            self.__casting_time_options_turn_key = (
                 snap_ti.get("turnNumber"), snap_ti.get("phase"),
                 snap_ti.get("step"), snap_ti.get("decisionPlayer"),
             )
-
-            # PayCostsReq marker at the moment we schedule the click: if picking
-            # "Sacrifice a creature" immediately opens the cost-selection picker
-            # (a PayCostsReq newer than this timestamp), the ChooseOrCost dialog
-            # is gone and any retry click must not hit the button again -- the
-            # picker sits at the same bottom-right screen area and a stray click
-            # there could cancel the cost selection instead of confirming it.
-            click_scheduled_ts = now
-
-            def _dialog_still_open() -> bool:
-                if self.__pending_pay_costs_ts > click_scheduled_ts:
-                    return False
-                try:
-                    ti = self.updated_game_state.get_turn_info() or {}
-                except Exception:
-                    return True
-                return (
-                    ti.get("turnNumber"), ti.get("phase"),
-                    ti.get("step"), ti.get("decisionPlayer"),
-                ) == snap_key
+            self.__casting_time_options_state_id = self.__read_game_state_id()
+            # PayCostsReq/SelectTargetsReq marker at the moment we schedule the
+            # click: if picking "Sacrifice a creature" immediately opens the
+            # cost-selection picker, or a chosen mode asks for its target, the
+            # dialog is gone and any retry click must not fire -- the picker sits
+            # at the same screen area and a stray click there could cancel the
+            # selection instead of confirming it.
+            self.__casting_time_options_click_ts = now
+            self.__casting_time_options_until = now + self.__casting_time_options_wait_sec
 
             def _click_option(attempt: int = 0) -> None:
                 try:
                     if self._suppress_selections or self._stop_requested:
+                        self.__clear_casting_time_options_wait("selections suppressed")
                         return
-                    if attempt > 0 and not _dialog_still_open():
+                    if attempt > 0 and not self.__casting_time_options_still_open():
                         bot_logger.log_info(
                             f"CASTING_TIME_OPTION: dialog resolved before retry {attempt}; stopping."
                         )
@@ -9173,12 +9191,35 @@ class Controller(ControllerSecondary):
                     bot_logger.log_click(target[0], target[1], label)
                     self.input.move_abs(target[0], target[1])
                     time.sleep(0.4)
+                    # Re-check after the settle sleep, not just before the move:
+                    # the plate sits mid-screen over the battlefield, and in that
+                    # 0.4s the dialog can close and another thread can park the
+                    # cursor somewhere else entirely. A retry must never be the
+                    # thing that taps a creature.
+                    if attempt > 0 and not self.__casting_time_options_still_open():
+                        bot_logger.log_info(
+                            f"CASTING_TIME_OPTION: dialog resolved during retry {attempt}; not clicking."
+                        )
+                        return
                     self.input.left_click(1)
-                    # Only the ChooseOrCost button gets retries -- the Kicker plate
-                    # sits mid-screen and a stray click there could hit the board.
-                    if is_choose_or_cost and attempt < 2:
-                        threading.Timer(1.4, lambda: _click_option(attempt + 1)).start()
+                    # Every option shape gets retries now. A plate click that does
+                    # not register (overlay still animating in, click swallowed by
+                    # the cast flow's own mouse work) used to hang the match for
+                    # good; the resolved-check above is what makes a repeat safe.
+                    if attempt < self.__CASTING_TIME_OPTION_MAX_RETRIES:
+                        threading.Timer(1.6, lambda: _click_option(attempt + 1)).start()
+                    else:
+                        # Out of attempts: stop pausing decisions so the bot plays
+                        # on (badly) rather than idling into the priority rope.
+                        threading.Timer(
+                            1.6,
+                            lambda: self.__clear_casting_time_options_wait("retries exhausted"),
+                        ).start()
                 except Exception as e:
+                    # Never leave the pause armed on a crash -- it would block
+                    # decisions for the whole 12s window with nothing scheduled
+                    # to release it.
+                    self.__clear_casting_time_options_wait(f"click failed ({e})")
                     bot_logger.log_error(f"CastingTimeOptionsReq click execution failed: {e}")
 
             # Stamp the dedupe window only once a click is actually scheduled,
@@ -10671,6 +10712,88 @@ class Controller(ControllerSecondary):
         # Treat PayCostsReq as blocking for a short window.
         return (time.time() - self.__pending_pay_costs_ts) < 3.0
 
+    def __read_game_state_id(self):
+        """The GRE's gameStateId from the merged state, or None if unreadable.
+
+        This is the "did the game move on?" tell for the casting-time dialog.
+        Deliberately NOT the stack contents: MTGA omits `objectInstanceIds`
+        entirely (rather than sending an empty list) when a zone empties, and
+        GameState merges diffs field-by-field, so a stack that empties leaves the
+        previous ids in place -- the merged stack simply never shows a modal's
+        source leaving. Turn info is no better: a mid-main-phase modal is answered
+        without turn/phase/step or decisionPlayer changing at all.
+
+        gameStateId has neither problem. It is a scalar present on every diff, it
+        advances on any state the GRE records, and while a required prompt sits
+        unanswered the GRE is waiting on US and sends nothing -- verified against
+        the Apothecary Stomper capture, where it froze at 217 for the whole stall.
+        """
+        try:
+            state = self.updated_game_state.get_full_state() or {}
+            value = state.get("gameStateId")
+        except Exception:
+            return None
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def __casting_time_options_still_open(self) -> bool:
+        """Best-effort "the Choose One overlay is still blocking the client"."""
+        until = float(self.__casting_time_options_until or 0.0)
+        if not until:
+            return False
+        if time.time() > until:
+            self.__clear_casting_time_options_wait("wait window expired")
+            return False
+        click_ts = float(self.__casting_time_options_click_ts or 0.0)
+        # Anything the client only asks for AFTER a mode is picked proves the
+        # dialog is gone: the follow-up cost payment or target request.
+        if float(self.__pending_pay_costs_ts or 0.0) > click_ts:
+            self.__clear_casting_time_options_wait("pay-costs prompt followed")
+            return False
+        if float(self.__last_target_select_ts or 0.0) > click_ts:
+            self.__clear_casting_time_options_wait("target selection followed")
+            return False
+        state_id = self.__read_game_state_id()
+        if (
+            state_id is not None
+            and self.__casting_time_options_state_id is not None
+            and state_id != self.__casting_time_options_state_id
+        ):
+            self.__clear_casting_time_options_wait("game state advanced")
+            return False
+        try:
+            ti = self.updated_game_state.get_turn_info() or {}
+        except Exception:
+            ti = {}
+        turn_key = (
+            ti.get("turnNumber"), ti.get("phase"),
+            ti.get("step"), ti.get("decisionPlayer"),
+        )
+        if self.__casting_time_options_turn_key is not None and turn_key != self.__casting_time_options_turn_key:
+            self.__clear_casting_time_options_wait("turn state advanced")
+            return False
+        return True
+
+    def __clear_casting_time_options_wait(self, reason: str) -> None:
+        if not self.__casting_time_options_until:
+            return
+        bot_logger.log_info(f"CASTING_TIME_OPTION wait cleared: {reason}.")
+        self.__casting_time_options_until = 0.0
+        self.__casting_time_options_turn_key = None
+        self.__casting_time_options_state_id = None
+
+    def __should_pause_for_casting_time_options(self) -> bool:
+        """Never dispatch a board move into an open Choose One overlay.
+
+        The overlay swallows every click and hover behind it, so a cast or land
+        play scheduled while it is up cannot land -- it just sweeps the mouse
+        across the hand row until the scan gives up (issue #41)."""
+        return self.__casting_time_options_still_open()
+
     def __handle_target_selection_from_raw_dict(self, raw_dict: dict) -> None:
         try:
             messages = raw_dict.get("greToClientEvent", {}).get("greToClientMessages", [])
@@ -11400,6 +11523,13 @@ class Controller(ControllerSecondary):
                             self.__decision_execution_thread = threading.Timer(0.5, _retry_after_pay_costs_pause)
                             self.__decision_execution_thread.start()
                             return
+                        # A Choose One overlay can open while the pay-costs pause
+                        # is running (or outlive it); resuming into it is the same
+                        # unreachable-hand-row bug as issue #41.
+                        if self.__should_pause_for_casting_time_options():
+                            self.__decision_execution_thread = threading.Timer(0.5, _retry_after_pay_costs_pause)
+                            self.__decision_execution_thread.start()
+                            return
                         if (
                             self.__decision_callback
                             and self.__has_mulled_keep
@@ -11524,6 +11654,20 @@ class Controller(ControllerSecondary):
                         if self.__should_pause_for_pay_costs():
                             bot_logger.log_info("Deferring decision; pay-costs prompt still pending")
                             runtime_status.set_intentional_wait(3.0, "pay_costs_wait")
+                            runtime_status.touch_decision()
+                            self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
+                            self.__decision_delay_key = delay_key
+                            self.__decision_delay_scheduled_at = time.time()
+                            self.__decision_execution_thread.start()
+                            return
+                        # The mid-screen "Choose One" overlay (kicker/modal/
+                        # sacrifice-or-pay) blocks every click behind it. Firing a
+                        # cast or land play into it produced the Apothecary Stomper
+                        # freeze: the hand-row hover scan swept under the dialog,
+                        # found nothing, and retried until the match was lost.
+                        if self.__should_pause_for_casting_time_options():
+                            bot_logger.log_info("Deferring decision; casting-time Choose One dialog still open")
+                            runtime_status.set_intentional_wait(3.0, "casting_time_option_wait")
                             runtime_status.touch_decision()
                             self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
                             self.__decision_delay_key = delay_key
