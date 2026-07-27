@@ -460,6 +460,13 @@ class Controller(ControllerSecondary):
         # account's and then rejecting the real block as stale. 0 = read the tail
         # normally (startup / already latched).
         self._quests_valid_from_offset = 0
+        # Set in begin_session(): the gold read must ignore the previous session's
+        # tail, which holds other accounts' balances. See _read_latest_inventory_gold.
+        # None means "not armed yet" -- 0 is a legitimate floor (empty log).
+        self._gold_valid_from_offset = None
+        # {account key: balance already reported as below its baseline}, so the
+        # warning fires on a change rather than on every poll.
+        self._last_gold_below_baseline: dict[str, int] = {}
         # One-shot: read this account's quests from Home before the first queue,
         # so the switch check reflects real state on landing. Reset per account.
         self._home_quest_check_done = False
@@ -2792,14 +2799,51 @@ class Controller(ControllerSecondary):
     def _read_latest_inventory_gold(self) -> int | None:
         """The current account's real Gold balance from the latest InventoryInfo
         log event ({"InventoryInfo":{...,"Gold":N,...}}), or None if none is
-        readable. Uses the same post-switch offset gate as the quests read so we
-        never pick up the PREVIOUS account's balance right after a switch."""
+        readable.
+
+        Nothing in an InventoryInfo entry names the account it belongs to, so the
+        only defence available here is positional: ignore anything written before
+        this session started, or before the last switch was initiated. The gate
+        used to apply only while the screenName was unlatched -- a window of
+        seconds -- and for the rest of the account's turn the read fell back to
+        the whole log tail.
+
+        Two caveats, both real:
+          * _quests_valid_from_offset is captured at the START of the switch
+            routine, not at the logout, and that routine can spend ~45s clicking
+            through menus. Balances the OUTGOING account writes in that gap are
+            past the boundary and still eligible.
+          * The boundary can only discard entries OLDER than itself. It cannot
+            help when the newest balance in the log is genuinely the wrong
+            account's -- which happens when our idea of the current account is
+            stale, not when the balance is. That is the failure behind the
+            2026-07-27 'Affinity2004: 18700' row: the switch to TEUBAT logged in
+            successfully, but the abort path skipped the identity reset, so a
+            correct TEUBAT balance was booked against Affinity2004. Fixing that
+            belongs in the switch/identity flow, not here."""
         if not self._log_path:
             return None
-        if self._current_account_screen_name is None and self._quests_valid_from_offset > 0:
+        # Latest of the two boundaries: this session's start (the account we
+        # booted on) and the last switch (the account we switched into).
+        floor = max(int(self._quests_valid_from_offset or 0), int(self._gold_valid_from_offset or 0))
+        # MTGA rotates Player.log to Player-prev.log on restart, so the file can
+        # shrink below a boundary we captured. _read_log_since returns "" for that,
+        # which would leave the gold rows frozen for the rest of the session. Drop
+        # the stale boundary instead and re-arm it at the new end of the log.
+        if floor > 0:
+            size = self._get_log_size(self._log_path)
+            if size < floor:
+                bot_logger.log_info(
+                    f"Gold read: log shrank ({size} < boundary {floor}); assuming a log "
+                    "rotation and dropping the boundary (a rotated log holds only this session)."
+                )
+                self._gold_valid_from_offset = 0
+                self._quests_valid_from_offset = min(int(self._quests_valid_from_offset or 0), size)
+                floor = max(int(self._quests_valid_from_offset or 0), int(self._gold_valid_from_offset or 0))
+        if floor > 0:
             log_tail = self._read_log_since(
                 self._log_path,
-                start_offset=self._quests_valid_from_offset,
+                start_offset=floor,
                 max_bytes=2_000_000,
                 prefer_newest=True,
             )
@@ -2809,6 +2853,9 @@ class Controller(ControllerSecondary):
             return None
         idx = log_tail.rfind('"InventoryInfo"')
         if idx == -1:
+            # No balance written since the boundary yet. Returning None keeps the
+            # last known figure rather than guessing from a pre-boundary entry --
+            # a guess here is exactly what produced the wrong rows.
             return None
         m = re.search(r'"Gold"\s*:\s*(\d+)', log_tail[idx:idx + 3000])
         if not m:
@@ -2832,7 +2879,21 @@ class Controller(ControllerSecondary):
         if key not in self._account_initial_gold:
             self._account_initial_gold[key] = gold
             bot_logger.log_info(f"Gold baseline for '{key}': {gold} (session start balance).")
-        farmed = max(0, gold - self._account_initial_gold[key])
+        delta = gold - self._account_initial_gold[key]
+        if delta < 0 and self._last_gold_below_baseline.get(key) != gold:
+            # Spending gold in the store explains this; so does a balance that
+            # belongs to a different account. The latter used to be silent -- the
+            # clamp below turned it into a plausible-looking 0 -- so say it out
+            # loud. Keyed on the balance so a row that sits below its baseline for
+            # a whole rotation logs once, not once per poll.
+            self._last_gold_below_baseline[key] = gold
+            bot_logger.log_info(
+                "GOLD_BALANCE_BELOW_BASELINE: '{}' balance={} baseline={} (spent gold, "
+                "or a balance read that is not this account's).".format(
+                    key, gold, self._account_initial_gold[key]
+                )
+            )
+        farmed = max(0, delta)
         if self._gold_farmed_by_account.get(key) != farmed:
             self._gold_farmed_by_account[key] = farmed
             bot_logger.log_info(
@@ -4182,6 +4243,21 @@ class Controller(ControllerSecondary):
         session is starting' an explicit act of the start path, instead of a side
         effect buried in a quest helper -- and makes it a no-op to call twice."""
         self._stop_requested = False
+        # Floor for the gold-balance read. The log tail still holds the balances
+        # of whichever accounts the PREVIOUS session rotated through, and an
+        # InventoryInfo entry does not say who it belongs to -- taking one of
+        # those as the startup account's baseline would misreport its farmed gold
+        # for the whole session. Post-switch attribution is handled separately by
+        # _quests_valid_from_offset; this covers the account we start on.
+        #
+        # First call wins, because this method is documented as a no-op when
+        # repeated and the start path really does call it twice: Game.start()
+        # calls it, primes the quests (the Home dip that makes MTGA write the
+        # startup account's balance), then calls start_game() which calls it
+        # again. Re-arming the floor there would throw that balance away and
+        # baseline the account from its first post-match reward instead.
+        if self._gold_valid_from_offset is None:
+            self._gold_valid_from_offset = self._get_log_size(self._log_path)
 
     def start_game(self) -> None:
         self.begin_session()

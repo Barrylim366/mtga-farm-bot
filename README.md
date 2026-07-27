@@ -163,7 +163,11 @@ The bot reads each account's real Gold balance from MTGA's own logs and tracks t
 
 Accounts the bot switches into get their baseline read on arrival at Home, before they play, so their earnings are complete.
 
-> **Known limitation:** the **first** account of a session can show `0` farmed gold. MTGA only reports that account's balance after its first match, at which point the win reward is already included, so that match's earnings can't be measured. Every account the bot switches into afterwards tracks correctly.
+A balance in MTGA's log does not say which account it belongs to, so only balances written after the session started — and after the most recent account switch — are used. Anything older is ignored rather than guessed at.
+
+> **Known limitation:** the **first** account of a session can show `0` farmed gold. MTGA only reports that account's balance after its first match, at which point the win reward is already included, so that match's earnings can't be measured.
+
+> **Known bug:** if an account switch logs in successfully but its confirmation step reports failure, the bot keeps using the *previous* account's name. Balances read after that are correct but booked against the wrong account, which can show up as one implausibly large row and one `0`. A `GOLD_BALANCE_BELOW_BASELINE` line in the log marks the direction that would otherwise be invisible.
 
 ### Quest-Based Deck Selection
 
