@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -209,6 +210,9 @@ class AccountSwitchTimingTests(_QuestLogTestBase):
         c._resolve_account_play_order = lambda accounts: [0, 1]
         c._completed_account_keys = {"a", "b"}
         c._current_account_screen_name = "a"
+        # Never spawn the real queue loop from a test (it clicks the screen).
+        self.queue_starts = []
+        c.start_queueing = lambda: self.queue_starts.append(True)
         stops: list = []
         c.set_stop_bot_callback(stops.append)
         return stops
@@ -237,6 +241,160 @@ class AccountSwitchTimingTests(_QuestLogTestBase):
         self.controller._get_state_from_log = lambda: BotState.HOME
         self.controller._perform_account_switch()
         self.assertEqual(len(stops), 1)
+        self.assertTrue(self.controller._stop_requested)
+
+    def test_deferred_switch_leaves_a_queue_loop_running(self):
+        """The queue loop guards this case before spawning the switch, but the
+        post-match flow does not: it fires on 'MainNav loaded', and if the log
+        state still reads IN_GAME then, a deferral that merely returned would
+        leave NOTHING running -- no loop, no switch -- until a manual stop."""
+        self._arm_round_complete()
+        self.controller._get_state_from_log = lambda: BotState.IN_GAME
+        self.controller._perform_account_switch()
+        self.assertEqual(self.queue_starts, [True])
+
+    def test_deferred_switch_does_not_queue_after_a_stop(self):
+        self._arm_round_complete()
+        self.controller._get_state_from_log = lambda: BotState.IN_GAME
+        self.controller._stop_requested = True
+        self.controller._perform_account_switch()
+        self.assertEqual(self.queue_starts, [])
+
+
+class SwitchOwnershipTests(_QuestLogTestBase):
+    """Only the thread that CLAIMED the switch slot may hand it back.
+
+    Several exit paths inside _perform_account_switch release the slot early and
+    restart the queue loop; that loop can spawn the next switch immediately (the
+    criteria are unchanged). The first thread's finally must not then clear the
+    new owner's flags -- that would unblock a third switch and defeat the lock
+    that exists to keep two logout sequences from clicking over each other."""
+
+    def test_a_foreign_thread_cannot_release_the_slot(self):
+        c = self.controller
+        with c._switch_start_lock:
+            c._account_switch_in_progress = True
+            c._switch_owner_ident = threading.get_ident()
+        result: list = []
+        t = threading.Thread(target=lambda: result.append(c._release_switch_ownership()))
+        t.start()
+        t.join()
+        self.assertEqual(result, [False])
+        self.assertTrue(c._account_switch_in_progress)
+        # The owner still can.
+        self.assertTrue(c._release_switch_ownership())
+        self.assertFalse(c._account_switch_in_progress)
+
+    def test_finally_keeps_the_slot_of_a_switch_the_restarted_loop_claimed(self):
+        c = self.controller
+        c._get_state_from_log = lambda: BotState.HOME
+        c._account_switch_mode = "time"
+        # No credentials -> _abort_switch_and_resume, which releases and restarts
+        # the queue loop while the aborting thread is still inside the try block.
+        c._load_accounts_from_dirs = lambda: []
+        claimed: list = []
+
+        def fake_start_queueing():
+            # What the restarted loop does on its very first tick: the switch is
+            # still due, so it spawns a new attempt, which claims the free slot.
+            def claim():
+                with c._switch_start_lock:
+                    if not c._account_switch_in_progress:
+                        c._account_switch_in_progress = True
+                        c._switch_owner_ident = threading.get_ident()
+                        claimed.append(True)
+            t = threading.Thread(target=claim)
+            t.start()
+            t.join()
+
+        c.start_queueing = fake_start_queueing
+        c._perform_account_switch()
+        self.assertEqual(claimed, [True], "the restarted loop should claim the free slot")
+        self.assertTrue(
+            c._account_switch_in_progress,
+            "the aborting thread's finally must not clear the new owner's slot",
+        )
+
+    def test_a_throwing_switch_does_not_leave_the_pending_flag_set(self):
+        """The queue loop short-circuits on `pending or _account_switch_due()`, so
+        a stale `pending` bypasses the give-up guard entirely: a switch that throws
+        reproducibly would respawn itself with no delay and no bound."""
+        c = self.controller
+        c._get_state_from_log = lambda: BotState.HOME
+        c._account_switch_mode = "time"
+        c._account_switch_pending = True
+
+        def boom():
+            raise RuntimeError("switch exploded")
+
+        c._load_accounts_from_dirs = boom
+        c.start_queueing = lambda: None
+        c._perform_account_switch()
+        self.assertFalse(c._account_switch_pending)
+        self.assertFalse(c._account_switch_in_progress)
+        self.assertEqual(c._failed_switch_attempts, 1)
+
+    def test_successful_switch_clears_pending_before_restarting_the_queue(self):
+        """A `pending` still set when the loop starts makes its first tick spawn
+        another switch -- out of the account we only just logged into."""
+        c = self.controller
+        c._account_switch_pending = True
+        c._switch_owner_ident = threading.get_ident()
+        c._account_switch_in_progress = True
+        seen: list = []
+        c.start_queueing = lambda: seen.append(c._account_switch_pending)
+        # The exact sequence the successful post-login path runs.
+        c._release_switch_ownership(clear_pending=True)
+        c.start_queueing()
+        self.assertEqual(seen, [False])
+
+
+class LogWindowTests(_QuestLogTestBase):
+    """_read_log_since has to drop data when the range exceeds the cap; which end
+    it drops depends on what the caller is looking for."""
+
+    def test_prefer_newest_keeps_the_end_of_the_range(self):
+        self.append("A" * 1000 + "TAIL")
+        text = self.controller._read_log_since(
+            self.log_path, start_offset=0, max_bytes=100, prefer_newest=True
+        )
+        self.assertTrue(text.endswith("TAIL"))
+
+    def test_default_keeps_the_start_of_the_range(self):
+        """Marker waits scan for an event logged right after the offset; keeping
+        the newest window instead would lose exactly that event."""
+        self.append("HEAD" + "A" * 1000)
+        text = self.controller._read_log_since(
+            self.log_path, start_offset=0, max_bytes=100
+        )
+        self.assertTrue(text.startswith("HEAD"))
+
+    def test_prefer_newest_never_reads_before_the_offset(self):
+        """The offset is a gate (post-switch: the previous account's blocks sit
+        before it), so the newest window must still be clamped to it."""
+        self.append("OLD-ACCOUNT-BLOCK\n")
+        offset = os.path.getsize(self.log_path)
+        self.append("NEW\n")
+        text = self.controller._read_log_since(
+            self.log_path, start_offset=offset, max_bytes=8_000_000, prefer_newest=True
+        )
+        self.assertNotIn("OLD-ACCOUNT-BLOCK", text)
+        self.assertIn("NEW", text)
+
+
+class SessionStartTests(_QuestLogTestBase):
+    """begin_session() owns the stop-flag reset, not the quest priming."""
+
+    def test_begin_session_clears_the_previous_runs_stop_flag(self):
+        self.controller._stop_requested = True
+        self.controller.begin_session()
+        self.assertFalse(self.controller._stop_requested)
+
+    def test_priming_does_not_resurrect_a_stopped_session(self):
+        """Priming polls and clicks; if it cleared the flag itself, a Stop that
+        arrived during startup would be swallowed by a quest helper."""
+        self.controller._stop_requested = True
+        self.controller.prime_quests_for_new_session()
         self.assertTrue(self.controller._stop_requested)
 
 

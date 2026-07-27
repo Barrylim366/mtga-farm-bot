@@ -516,5 +516,69 @@ class AliasNamespaceTests(unittest.TestCase):
                     f.write(saved)
 
 
+class PinReconciliationTests(unittest.TestCase):
+    """When the live login event is allowed to override a manual pin.
+
+    The pin exists because the log-based latch is unreliable, so it may only be
+    dropped on positive evidence: a login naming a DIFFERENT account we can
+    actually identify. An account saved before `screen_name` became a field is
+    pinned under its config LABEL, so its real screenName never matches the pin
+    -- treating that mismatch as evidence would silently undo the pin every 15s
+    for exactly the accounts it exists for."""
+
+    def _controller_with_login(self, screen_name: str, accounts_cfg: list[dict]) -> Controller:
+        f = tempfile.NamedTemporaryFile(suffix=".log", delete=False, mode="w", encoding="utf-8")
+        f.write(
+            '{"authenticateResponse": {"clientId": "C", "screenName": "%s"}}\n' % screen_name
+        )
+        f.close()
+        c = Controller(f.name)
+        c._load_accounts_from_dirs = lambda: accounts_cfg
+        c._publish_account_switch_status = lambda: None
+        c._register_current_account_for_gold = lambda: None
+        return c
+
+    def test_unknown_screenname_does_not_drop_the_pin(self):
+        # Legacy row: no screen_name configured, so the pin is stored as the label.
+        c = self._controller_with_login("venturaa", [{"name": "bruno1", "folder": "bruno1"}])
+        c._screenname_to_alias = {}
+        c._current_account_screen_name = "bruno1"
+        c._current_account_pinned = True
+        c._pin_log_offset = 0
+        c._pin_reconcile_ts = 0.0
+        c._reconcile_pin_with_login()
+        self.assertTrue(c._current_account_pinned)
+        self.assertEqual(c._current_account_screen_name, "bruno1")
+
+    def test_login_of_another_configured_account_drops_the_pin(self):
+        c = self._controller_with_login(
+            "venturaa",
+            [
+                {"name": "bruno1", "folder": "bruno1", "screen_name": "venturaa"},
+                {"name": "bruno2", "folder": "bruno2", "screen_name": "otherguy"},
+            ],
+        )
+        c._screenname_to_alias = {"venturaa": "bruno1", "otherguy": "bruno2"}
+        c._current_account_screen_name = "otherguy"
+        c._current_account_pinned = True
+        c._pin_log_offset = 0
+        c._pin_reconcile_ts = 0.0
+        c._reconcile_pin_with_login()
+        self.assertFalse(c._current_account_pinned)
+        self.assertEqual(c._current_account_screen_name, "venturaa")
+
+    def test_login_of_the_pinned_account_keeps_the_pin(self):
+        c = self._controller_with_login(
+            "venturaa#12345", [{"name": "bruno1", "folder": "bruno1", "screen_name": "venturaa"}]
+        )
+        c._screenname_to_alias = {"venturaa": "bruno1"}
+        c._current_account_screen_name = "venturaa"
+        c._current_account_pinned = True
+        c._pin_log_offset = 0
+        c._pin_reconcile_ts = 0.0
+        c._reconcile_pin_with_login()
+        self.assertTrue(c._current_account_pinned)
+
+
 if __name__ == "__main__":
     unittest.main()

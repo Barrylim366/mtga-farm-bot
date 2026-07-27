@@ -105,6 +105,11 @@ class Game:
         # deck colours. The cache is then reused locally instead of re-parsing the
         # player.log on every queue cycle.
         try:
+            # Clear the previous run's stop flag first: the priming below polls and
+            # clicks, and would otherwise bail out on its first tick. start_game()
+            # calls this again (it is idempotent).
+            if hasattr(self.controller, "begin_session"):
+                self.controller.begin_session()
             if hasattr(self.controller, "prime_quests_for_new_session"):
                 self.controller.prime_quests_for_new_session()
             elif hasattr(self.controller, "refresh_quests_cache"):

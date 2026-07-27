@@ -574,6 +574,12 @@ class Controller(ControllerSecondary):
         self._last_account_switch_ts = time.time()
         self._account_switch_pending = False
         self._account_switch_in_progress = False
+        # Thread ident of the switch that currently OWNS _account_switch_in_progress.
+        # Several paths inside _perform_account_switch hand the slot back early (to
+        # restart the queue loop, which can immediately spawn the NEXT switch); the
+        # outgoing thread's finally must then not clear the flags of that new owner.
+        # See _release_switch_ownership.
+        self._switch_owner_ident: int | None = None
         # One-shot so "waiting for the match to finish before switching" is logged
         # once per wait, not on every 3s tick of the queue loop.
         self._switch_wait_for_match_logged = False
@@ -1942,7 +1948,25 @@ class Controller(ControllerSecondary):
         except Exception:
             return 0
 
-    def _read_log_since(self, path: str, start_offset: int, max_bytes: int = 400000) -> str:
+    def _read_log_since(
+        self,
+        path: str,
+        start_offset: int,
+        max_bytes: int = 400000,
+        *,
+        prefer_newest: bool = False,
+    ) -> str:
+        """The log written since `start_offset`, capped at `max_bytes`.
+
+        When more than `max_bytes` is available the cap has to drop something, and
+        which end to drop depends on the caller:
+        - default (False): keep the OLDEST window. For callers scanning for a marker
+          that appears once shortly after the offset (_wait_for_playerlog_marker),
+          dropping the front would lose the very event they wait for.
+        - prefer_newest=True: keep the NEWEST window, still clamped to never start
+          before `start_offset`. For callers that rfind() the LAST occurrence of a
+          block (quests, InventoryInfo, the login event), where the front window can
+          simply not contain the answer."""
         try:
             offset = max(0, int(start_offset or 0))
         except Exception:
@@ -1953,8 +1977,13 @@ class Controller(ControllerSecondary):
                 size = f.tell()
                 if size <= offset:
                     return ""
-                f.seek(offset)
-                data = f.read(min(max_bytes, size - offset))
+                start = offset
+                if prefer_newest:
+                    # max() keeps the offset gate intact: never read before it, even
+                    # when the newest max_bytes would reach further back.
+                    start = max(offset, size - max_bytes)
+                f.seek(start)
+                data = f.read(min(max_bytes, size - start))
             return data.decode("utf-8", errors="ignore")
         except Exception as e:
             bot_logger.log_error(f"Failed to read player.log delta: {e}")
@@ -2116,6 +2145,7 @@ class Controller(ControllerSecondary):
                 self._log_path,
                 start_offset=self._quests_valid_from_offset,
                 max_bytes=2_000_000,
+                prefer_newest=True,
             )
         elif self._quests_session_floor_offset > 0:
             # Session priming: only blocks logged since Start was pressed count.
@@ -2123,6 +2153,7 @@ class Controller(ControllerSecondary):
                 self._log_path,
                 start_offset=self._quests_session_floor_offset,
                 max_bytes=2_000_000,
+                prefer_newest=True,
             )
         else:
             log_tail = self._read_log_tail(self._log_path)
@@ -2311,8 +2342,9 @@ class Controller(ControllerSecondary):
         record of who is logged in; when it names a DIFFERENT configured account
         than the pin AND is at/after the pin's anchor offset, the log wins and the
         pin is dropped (auto-detection resumes). A pin still holds against logins
-        that predate it (the pre-existing state the user deliberately overrode) and
-        against an unreadable/absent login. Throttled -- the read is wide."""
+        that predate it (the pre-existing state the user deliberately overrode),
+        against an unreadable/absent login, and against a login whose screenName we
+        cannot attribute to any CONFIGURED account. Throttled -- the read is wide."""
         if not self._log_path:
             return
         now = time.time()
@@ -2329,6 +2361,16 @@ class Controller(ControllerSecondary):
             return
         if pos < self._pin_log_offset:
             # A login that predates the pin -> exactly what the pin overrides.
+            return
+        if self._current_account_config_name(owner) is None:
+            # The login names a screenName we cannot map to any configured account,
+            # so "different from the pin" proves nothing: an account whose
+            # credentials.json has no screen_name is pinned under its LABEL, and its
+            # real screenName then never matches -- dropping the pin here would
+            # silently undo it every 15s for exactly the accounts (legacy rows saved
+            # before screen_name became a field) whose log latch the pin exists to
+            # override. Only a login we can attribute to a configured account is
+            # evidence that the pin is on the wrong account.
             return
         bot_logger.log_info(
             "Manual account pin ('{}') superseded by the logged-in account "
@@ -2371,6 +2413,7 @@ class Controller(ControllerSecondary):
                     self._log_path,
                     start_offset=self._quests_valid_from_offset,
                     max_bytes=8_000_000,
+                    prefer_newest=True,
                 )
             else:
                 text = self._read_log_tail(self._log_path, max_bytes=2_000_000)
@@ -2735,7 +2778,10 @@ class Controller(ControllerSecondary):
             return None
         if self._current_account_screen_name is None and self._quests_valid_from_offset > 0:
             log_tail = self._read_log_since(
-                self._log_path, start_offset=self._quests_valid_from_offset, max_bytes=2_000_000
+                self._log_path,
+                start_offset=self._quests_valid_from_offset,
+                max_bytes=2_000_000,
+                prefer_newest=True,
             )
         else:
             log_tail = self._read_log_tail(self._log_path)
@@ -2891,10 +2937,12 @@ class Controller(ControllerSecondary):
         newest available block is accepted, so the bot is never left blind (it just
         falls back to the old, best-effort behaviour). Returns True if a fresh
         block was read."""
-        # The Start button is what got us here; a stale stop flag from the previous
-        # session would otherwise make every wait below return immediately.
-        # start_game() sets this again right after.
-        self._stop_requested = False
+        # This runs between the UI's "Loading card data" label and the first phase
+        # the navigation publishes, and it can wait _QUESTS_PRIME_TIMEOUT seconds --
+        # far longer than the card load itself. Without its own phase the loading
+        # bar keeps saying "Loading card data" for that whole wait, which reads as
+        # a hung card import.
+        runtime_status.set_startup_phase("Reading daily quests")
         self._reset_quest_cache_for_new_session()
         if not self._log_path:
             return False
@@ -2937,6 +2985,8 @@ class Controller(ControllerSecondary):
                 if not retried and time.time() >= retry_at:
                     retried = True
                     bot_logger.log_info("Quest prime: no block yet; clicking Home once more.")
+                    # Distinct label: the wait is now visibly a retry, not a stall.
+                    runtime_status.set_startup_phase("Reading daily quests (retrying)")
                     self._navigate_to_home()
                 self.refresh_quests_cache()
                 if self._quests_last_valid_read_ts > 0.0:
@@ -4102,8 +4152,19 @@ class Controller(ControllerSecondary):
     def start_monitor(self) -> None:
         self.log_reader.start_log_monitor()
 
-    def start_game(self) -> None:
+    def begin_session(self) -> None:
+        """Mark the start of a bot session: clear the stop flag from the PREVIOUS
+        run so the startup work that happens before start_game() (quest priming,
+        which polls and clicks) isn't cancelled by it on the first tick.
+
+        Split out of start_game() because that runs only AFTER the priming. Keeping
+        the reset here rather than inside prime_quests_for_new_session keeps 'the
+        session is starting' an explicit act of the start path, instead of a side
+        effect buried in a quest helper -- and makes it a no-op to call twice."""
         self._stop_requested = False
+
+    def start_game(self) -> None:
+        self.begin_session()
         self.__start_decision_heartbeat()
         runtime_status.set_mode(
             "starting",
@@ -4166,7 +4227,10 @@ class Controller(ControllerSecondary):
         # Stop any background queue spam/account switch loops.
         self._stop_queue_spam = True
         self._account_switch_pending = False
+        # Hard reset (not _release_switch_ownership): a UI stop must clear the slot
+        # whatever thread happens to hold it.
         self._account_switch_in_progress = False
+        self._switch_owner_ident = None
         self._queue_after_login = False
 
         self.__decision_callback = None
@@ -6604,8 +6668,9 @@ class Controller(ControllerSecondary):
                 return
             # `pending` (not just `due`) so a switch DEFERRED because a match was
             # running is actually carried out. The queue loop only ticks between
-            # matches, and start_game_from_home_screen refuses to queue while a
-            # switch is pending -- without this the bot would spin here forever
+            # matches, and this branch is what keeps it from queueing while a
+            # switch is pending (start_game_from_home_screen itself only checks
+            # in-progress/due) -- without this the bot would spin here forever
             # waiting for a post-match trigger that already fired.
             if self._account_switch_pending or self._account_switch_due():
                 self._account_switch_pending = True
@@ -6613,9 +6678,9 @@ class Controller(ControllerSecondary):
                 # defer, and this loop EXITS after spawning it -- leaving no loop
                 # running and nothing to carry the switch out if that match never
                 # reaches a post-match flow (a cancelled queue, matchmaking aborted).
-                # Keep ticking instead: start_game_from_home_screen refuses to queue
-                # while a switch is pending, so we just wait here until the match is
-                # over and then switch on the next tick.
+                # Keep ticking instead: this branch is reached before the queue
+                # click below, so nothing is queued while we wait here until the
+                # match is over and we switch on the next tick.
                 if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
                     if not self._switch_wait_for_match_logged:
                         self._switch_wait_for_match_logged = True
@@ -6711,6 +6776,41 @@ class Controller(ControllerSecondary):
         # while the incoming one logs in.
         self._publish_account_switch_status()
 
+    def _resume_queue_if_idle(self) -> None:
+        """Restart the queue loop unless the bot is stopped or a switch owns the
+        screen. start_queueing itself no-ops while a loop is alive, so this is only
+        ever a repair for 'nothing is running at all'."""
+        if self._stop_requested or self._stop_queue_spam:
+            return
+        if self._account_switch_in_progress:
+            return
+        try:
+            self.start_queueing()
+        except Exception as e:
+            bot_logger.log_error(f"Could not resume queueing after a deferred switch: {e}")
+
+    def _release_switch_ownership(self, *, clear_pending: bool = False) -> bool:
+        """Hand the switch slot back -- but ONLY if the calling thread still owns it.
+
+        _perform_account_switch has paths that release the slot early and restart the
+        queue loop (aborts, a failed logout, the exception handler). That loop starts
+        with no delay and re-checks _account_switch_due(), which is still true, so it
+        can spawn a SECOND switch that legitimately claims the slot before the first
+        thread reaches its finally. A bare `_account_switch_in_progress = False` there
+        would clear the flags of that new owner: start_queueing would stop refusing,
+        a third switch could start, and _switch_start_lock -- whose whole job is to
+        keep two logout sequences from clicking over each other -- would be defeated.
+
+        Returns True if this call actually released the slot."""
+        with self._switch_start_lock:
+            if self._switch_owner_ident != threading.get_ident():
+                return False
+            self._switch_owner_ident = None
+            self._account_switch_in_progress = False
+            if clear_pending:
+                self._account_switch_pending = False
+            return True
+
     def _abort_switch_and_resume(self, reason: str) -> None:
         """Give up on THIS switch attempt and resume playing on the account we are
         still logged into.
@@ -6744,9 +6844,9 @@ class Controller(ControllerSecondary):
         # the target's -- don't let it be attributed to the account we aimed for.
         self._pending_switch_alias = None
         self._last_account_switch_ts = time.time()
-        # Must be cleared BEFORE start_queueing, which ignores the request while a
+        # Must be released BEFORE start_queueing, which ignores the request while a
         # switch is flagged as in progress.
-        self._account_switch_in_progress = False
+        self._release_switch_ownership()
         runtime_status.clear_intentional_wait()
         self._set_runtime_home_mode("home_ready")
         self.start_queueing()
@@ -6758,6 +6858,7 @@ class Controller(ControllerSecondary):
             if self._account_switch_in_progress:
                 return
             self._account_switch_in_progress = True
+            self._switch_owner_ident = threading.get_ident()
         # Never act while a match is running or starting. The post-match flow and
         # the queue loop can both fire this, and they race with the queue click:
         # observed live, the loop clicked Play and ~1s later a queue-ready marker
@@ -6772,7 +6873,32 @@ class Controller(ControllerSecondary):
                 "it will run once the match ends."
             )
             self._account_switch_pending = True
-            self._account_switch_in_progress = False
+            self._release_switch_ownership()
+            # Leave SOMETHING running. The queue loop guards this case itself before
+            # spawning us, but the post-match flow does not: it fires on "MainNav
+            # loaded", and if the log state still reads IN_GAME at that moment this
+            # deferral would return with no loop alive and nothing left to carry the
+            # switch out. start_queueing is a no-op when a loop is already running,
+            # and a running loop parks in its own wait-for-match branch rather than
+            # queueing, so this is safe in both cases.
+            #
+            # The delayed retry closes the one gap the immediate call cannot: when
+            # the loop that spawned US is still alive (it returns right after the
+            # spawn), start_queueing no-ops against a thread that is about to exit,
+            # and again nothing is left running. By the retry it has exited, so the
+            # call takes effect -- and if a loop IS running by then, it no-ops as
+            # usual. Best effort: a failed timer must not take the switch down.
+            if not self._stop_requested:
+                self.start_queueing()
+                try:
+                    # daemon: a pending repair timer must never hold up shutdown
+                    # (threading.Timer threads are non-daemon by default, so the
+                    # process would sit out the full delay on exit).
+                    repair = threading.Timer(5.0, self._resume_queue_if_idle)
+                    repair.daemon = True
+                    repair.start()
+                except Exception:
+                    pass
             return
         # Make sure we know WHICH account we are leaving before capturing it below.
         # Identity is normally latched from a quests read, which never happens if
@@ -6981,7 +7107,7 @@ class Controller(ControllerSecondary):
                     # quests block to the account we were switching TO.
                     self._pending_switch_alias = None
                     self._last_account_switch_ts = time.time()
-                    self._account_switch_in_progress = False
+                    self._release_switch_ownership()
                     runtime_status.clear_intentional_wait()
                     self._set_runtime_home_mode("home_ready")
                     self.start_queueing()
@@ -7007,7 +7133,7 @@ class Controller(ControllerSecondary):
                 # and per-account gold totals).
                 self._pending_switch_alias = None
                 self._last_account_switch_ts = time.time()
-                self._account_switch_in_progress = False
+                self._release_switch_ownership()
                 runtime_status.clear_intentional_wait()
                 # We could not confirm Home and the logout half-ran, so a modal
                 # (Options / logout-confirm) may still be up. Best-effort return to
@@ -7114,8 +7240,13 @@ class Controller(ControllerSecondary):
                 if not self._stop_requested:
                     # Reset switch timer before queueing so we don't immediately mark as due.
                     self._last_account_switch_ts = time.time()
-                    # Mark switch complete before queueing so start_queueing won't ignore.
-                    self._account_switch_in_progress = False
+                    # Mark the switch complete AND no longer pending before queueing:
+                    # start_queueing would otherwise be ignored, and the loop it
+                    # starts reads `pending` on its first tick -- with the switch
+                    # just finished we are on Home, so nothing would stop it from
+                    # immediately spawning a second switch into the account we only
+                    # just logged into.
+                    self._release_switch_ownership(clear_pending=True)
                     self._queue_after_login = False
                     self.start_queueing()
                     queued_after_login = True
@@ -7124,7 +7255,9 @@ class Controller(ControllerSecondary):
             # _select_next_switch_target).
             self._account_cycle_index = (advance_index + 1) % advance_mod
             self._last_account_switch_ts = time.time()
-            self._account_switch_pending = False
+            # `pending` is cleared with the slot above (or by the finally, on the
+            # stop-requested path that skips it). Not cleared again here: by now a
+            # queue loop is running and a NEW switch may legitimately have set it.
             if not queued_after_login:
                 self._queue_after_login = True
             self._persist_account_cycle_index()
@@ -7144,7 +7277,13 @@ class Controller(ControllerSecondary):
             # thread, so if we bail out here nothing else restarts it.
             if not queued_after_login and not self._stop_requested:
                 try:
-                    self._account_switch_in_progress = False
+                    # clear_pending: this is the ONE path that has not cleared the
+                    # flag itself. Left set, the queue loop we start below short-
+                    # circuits `pending or _account_switch_due()` on its first tick
+                    # and spawns another switch -- bypassing the give-up guard that
+                    # is supposed to bound a repeatedly throwing switch, and looping
+                    # with no delay.
+                    self._release_switch_ownership(clear_pending=True)
                     self.start_queueing()
                     queued_after_login = True
                 except Exception as exc:
@@ -7153,8 +7292,13 @@ class Controller(ControllerSecondary):
             runtime_status.clear_intentional_wait()
             # Never carry a pending mark into the next switch.
             self._pending_completed_key = None
-            self._account_switch_in_progress = False
-            self._account_switch_pending = False
+            # Only if this thread still owns the slot: a path above may have handed
+            # it back and restarted the queue loop, which can already have spawned
+            # the next switch. Clearing its flags from here would let a third one
+            # start alongside it. Every path that releases early also clears
+            # `pending` there (or, in the deferral, sets it deliberately), so
+            # skipping this leaves nothing stale behind.
+            self._release_switch_ownership(clear_pending=True)
             # Identity/UI may have changed (or been cleared) along any path above;
             # make sure the Current/Next account lines reflect the final state.
             try:
