@@ -3057,7 +3057,10 @@ class MTGBotUI(tk.Tk):
             0,
             # Placeholder only: _set_startup_loading relabels this per phase.
             text="Loading card data",
-            fill=c["text_muted"],
+            # Same accent as the "Daily Quests" heading: this line explains what the
+            # bot is doing right now, so it should read as active status, not as the
+            # muted grey used for secondary text.
+            fill="#ffb841",
             font=self.ui_theme["font"]["body"],
             anchor="n",
         )
@@ -3333,6 +3336,7 @@ class MTGBotUI(tk.Tk):
         # Draw the container field behind the three gold lines (status / queue /
         # account switch). Same body as the buttons, no colored rim; aligned to
         # the button width so it lines up with the stack above.
+        field_bottom_px = y - sp["xs"]
         if getattr(self, "_status_field_item", None) is not None:
             glow_pad = 6
             pad_t = self._scale_value(9)
@@ -3341,8 +3345,10 @@ class MTGBotUI(tk.Tk):
             radius = self._scale_value(14)
             field_top_px = status_field_top - pad_t
             field_bottom_px = (y - sp["xs"]) + pad_b  # y is past the last row
-            body_h = max(1, field_bottom_px - field_top_px)
-            photo = self._render_panel_skin(body_w, body_h, radius)
+            # Distinct name: `body_h` is the body FONT's line height and is still
+            # needed above; reusing it here for the panel height shadowed it.
+            field_h = max(1, field_bottom_px - field_top_px)
+            photo = self._render_panel_skin(body_w, field_h, radius)
             img_x = center_x - (body_w // 2) - glow_pad
             img_y = field_top_px - glow_pad
             self._card_canvas.coords(self._status_field_item, img_x, img_y)
@@ -3350,20 +3356,19 @@ class MTGBotUI(tk.Tk):
             # Above the background, below the gold text/controls it wraps.
             self._card_canvas.tag_lower(self._status_field_item, self._status_text_item)
 
-        if hasattr(self, "_quest_title_item"):
-            # Centered heading (the only centered line); quest rows stay left-aligned.
-            self._card_canvas.coords(self._quest_title_item, center_x, y)
-            self._card_canvas.tag_raise(self._quest_title_item)
-            y += quest_title_h + sp["xs"]
-        for item in getattr(self, "_quest_items", []):
-            self._card_canvas.coords(item, label_x, y)
-            self._card_canvas.tag_raise(item)
-            y += quest_h + sp["xs"]
+        # Height of the "Daily Quests" heading + the quest rows, WITHOUT a trailing
+        # gap after the last row -- that gap is spacing between rows, not part of
+        # the block, and counting it would push the block visually off-centre.
+        quest_rows = getattr(self, "_quest_items", [])
+        quest_block_h = quest_title_h + sp["xs"] + (quest_h + sp["xs"]) * len(quest_rows)
+        quest_block_h = max(0, quest_block_h - sp["xs"])
 
-        # Vertically center the whole block below the Settings button (status
-        # field + quest rows) in the gap between the button stack and the footer.
+        # Vertically center the whole block below the Settings button (status field
+        # + quest rows) in the gap between the button stack and the footer. The
+        # quest rows are placed afterwards, in final coordinates, so they are NOT
+        # moved here -- only the status field and everything above it.
         block_top = status_field_top - self._scale_value(9)  # field's padded top
-        block_bottom = y - sp["xs"]                           # last quest row bottom
+        block_bottom = y + quest_block_h                      # where the rows will end
         settings_bottom = menu_end_y - sp["lg"]
         footer_top = canvas_h - footer_h
         center_offset = ((footer_top + settings_bottom) - (block_bottom + block_top)) // 2
@@ -3372,15 +3377,33 @@ class MTGBotUI(tk.Tk):
                 self._loading_text_item, self._loading_bar_window,
                 self._status_field_item, self._status_text_item, self._queue_mode_item,
             ]
-            for attr in (
-                "_account_switch_info_item", "_current_acc_item", "_next_acc_item",
-                "_quest_title_item",
-            ):
+            for attr in ("_account_switch_info_item", "_current_acc_item", "_next_acc_item"):
                 movers.append(getattr(self, attr, None))
-            movers.extend(getattr(self, "_quest_items", []))
             for it in movers:
                 if it is not None:
                     self._card_canvas.move(it, 0, center_offset)
+            field_bottom_px += center_offset
+
+        # Center the quest block in the gap between the two dark panels: the status
+        # field above and the footer bar below. Placed against the field's real
+        # BOTTOM EDGE (which includes its bottom padding, and so sits below the last
+        # text row) -- deriving it from the text row instead is what let the panel's
+        # padding run over the "Daily Quests" heading.
+        quest_gap_top = field_bottom_px
+        quest_gap_h = footer_top - quest_gap_top
+        # Never let the heading touch either panel, even if the window is too short
+        # to centre anything: the minimum breathing room wins over centring.
+        min_gap = sp["sm"]
+        quest_y = quest_gap_top + max(min_gap, (quest_gap_h - quest_block_h) // 2)
+        if hasattr(self, "_quest_title_item"):
+            # Centered heading (the only centered line); quest rows stay left-aligned.
+            self._card_canvas.coords(self._quest_title_item, center_x, quest_y)
+            self._card_canvas.tag_raise(self._quest_title_item)
+            quest_y += quest_title_h + sp["xs"]
+        for item in quest_rows:
+            self._card_canvas.coords(item, label_x, quest_y)
+            self._card_canvas.tag_raise(item)
+            quest_y += quest_h + sp["xs"]
 
         footer_y1 = canvas_h - footer_h
         self._card_canvas.coords(self._main_topmost_panel_item, 0, footer_y1, canvas_w, canvas_h)
