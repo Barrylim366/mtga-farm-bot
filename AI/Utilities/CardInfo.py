@@ -141,7 +141,30 @@ def _save_scryfall_cache():
         pass
 
 
-def _load_missing_cards() -> list[int]:
+# How long to wait before asking Scryfall again about an ID it answered 404 for.
+# A 404 means the card is not in Scryfall's database AT ALL -- almost always an
+# Arena-only object (tokens, Alchemy rebalances, tutorial cards) that will never
+# be there. Retrying those every start is pure cost: it is the same request, the
+# same answer, every time, and the list only ever grows. Not "never" though --
+# Scryfall does add cards -- so it is a long backoff rather than a permanent
+# blacklist.
+_MISSING_NOT_FOUND_RETRY_SEC = 30 * 24 * 3600  # 30 days
+# Wall-clock budget for one refresh_missing_cards() pass. It runs during startup,
+# blocking, one request at a time. With Scryfall unreachable each request sits out
+# its full 8s timeout, so an unbounded pass over a few dozen IDs could stall the
+# start for minutes. Whatever is not reached this time is simply tried on the next
+# start -- the list is persistent, nothing is lost.
+_MISSING_REFRESH_BUDGET_SEC = 10.0
+
+
+def _load_missing_entries() -> dict[str, dict]:
+    """Missing Arena IDs as {"<id>": {"last_try": epoch, "status": str}}.
+
+    Also reads the legacy plain-list format ([123, 456]) and migrates it: no
+    last_try means "never tried under the new scheme", so every legacy entry is
+    due immediately and the first run after the upgrade behaves exactly like the
+    old one -- it just records the outcome this time.
+    """
     candidates = [MISSING_CARDS_PATH, _resource_data_path("missing_cards.json")]
     for path in candidates:
         if not os.path.exists(path):
@@ -149,22 +172,96 @@ def _load_missing_cards() -> list[int]:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, list):
-                return [int(x) for x in data if isinstance(x, int) or str(x).isdigit()]
         except Exception:
             continue
-    return []
+        if isinstance(data, dict):
+            out: dict[str, dict] = {}
+            for key, meta in data.items():
+                if not str(key).isdigit():
+                    continue
+                out[str(key)] = meta if isinstance(meta, dict) else {}
+            return out
+        if isinstance(data, list):
+            return {
+                str(int(x)): {}
+                for x in data
+                if isinstance(x, int) or str(x).isdigit()
+            }
+    return {}
 
 
-def _save_missing_cards(ids: list[int]) -> None:
+def _save_missing_entries(entries: dict[str, dict]) -> None:
     try:
+        ordered = {k: entries[k] for k in sorted(entries, key=lambda s: int(s))}
         with open(MISSING_CARDS_PATH, "w", encoding="utf-8") as f:
-            json.dump(sorted(set(ids)), f, indent=2)
+            json.dump(ordered, f, indent=2)
     except Exception:
         pass
 
 
+def _missing_entry_due(meta: dict, now: float) -> bool:
+    """Whether this ID should be asked about again on this pass.
+
+    Only a recorded 404 ("not_found") gets the long backoff. A transient failure
+    -- no network, a timeout, rate limiting -- says nothing about the card, so it
+    stays due and is retried on the next start as before."""
+    if not isinstance(meta, dict):
+        return True
+    if str(meta.get("status") or "") != "not_found":
+        return True
+    try:
+        last_try = float(meta.get("last_try") or 0.0)
+    except (TypeError, ValueError):
+        return True
+    # A clock that jumped backwards would otherwise park an entry until the
+    # original deadline; treat a future timestamp as "due now".
+    if last_try > now:
+        return True
+    return (now - last_try) >= _MISSING_NOT_FOUND_RETRY_SEC
+
+
+def _record_missing_card(arena_id: int, status: str = "") -> None:
+    """Remember an ID that could not be resolved, preserving what we already know
+    about it (a previously recorded 404 keeps its backoff instead of being reset
+    to 'due' by every later lookup of the same card).
+
+    `status` is the outcome of the lookup that just failed, when the caller has it:
+    a 404 recorded here starts its backoff immediately, so the ID does not cost one
+    more pointless request on the next start.
+
+    Never raises. Callers sit on the in-match decision path (get_card_info is
+    reached from DummyAI with a grpId that can legitimately be None), and the old
+    load-append-save swallowed a bad ID inside _save_missing_cards' except -- a
+    bookkeeping write must not be able to break the move being decided."""
+    try:
+        key = str(int(arena_id))
+    except (TypeError, ValueError):
+        return
+    entries = _load_missing_entries()
+    if key in entries:
+        return
+    entries[key] = (
+        {"last_try": time.time(), "status": "not_found"}
+        if status == "not_found"
+        else {}
+    )
+    _save_missing_entries(entries)
+
+
 def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
+    """The card, or None. Thin wrapper for callers that only care about the hit."""
+    card, _status = _fetch_card_info_with_status(arena_id)
+    return card
+
+
+def _fetch_card_info_with_status(arena_id: int) -> tuple[dict | None, str]:
+    """(card, status) where status is "ok", "not_found" (Scryfall answered 404) or
+    "error" (anything else: no network, timeout, rate limit, bad payload).
+
+    The distinction is what lets refresh_missing_cards() back off on a 404 while
+    still retrying a transient failure promptly -- the two look identical from the
+    outside (both return no card), which is why they used to be treated the same
+    and every unresolvable ID was re-requested at every start."""
     # Same transient-failure cooldown as get_produced_mana_from_scryfall /
     # get_oracle_text_from_scryfall, and deliberately the same cache key: all
     # three hit /cards/arena/{id}, so a network failure for one is a failure for
@@ -174,7 +271,7 @@ def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
     # killable_by_damage), which can burn the in-game priority timer.
     cache_key = str(arena_id)
     if _transient_failure_active(cache_key):
-        return None
+        return None, "error"
     try:
         url = f"https://api.scryfall.com/cards/arena/{arena_id}"
         req = urllib.request.Request(url, headers=_SCRYFALL_HEADERS)
@@ -193,17 +290,18 @@ def _fetch_card_info_from_scryfall(arena_id: int) -> dict | None:
             "oracleText": data.get("oracle_text", ""),
             "keywords": data.get("keywords", []),
         }
-        return card
+        return card, "ok"
     except urllib.error.HTTPError as e:
         # A genuine 404 means this arena_id isn't on Scryfall at all -- no point
         # in a cooldown, the caller records it in missing_cards.json. Any other
         # status is transient and must trip the cooldown.
         if e.code != 404:
             _mark_transient_failure(cache_key)
-        return None
+            return None, "error"
+        return None, "not_found"
     except Exception:
         _mark_transient_failure(cache_key)
-        return None
+        return None, "error"
 
 
 # There is deliberately no Scryfall bulk-download path here. Merging the
@@ -220,26 +318,74 @@ def refresh_missing_cards() -> None:
     """
     Try to resolve any previously missing Arena IDs from Scryfall.
     This keeps cards.json up to date across sessions without a full bulk download.
+
+    Runs at startup and blocks, so it is deliberately cheap in the steady state:
+      * IDs the MTGA export has meanwhile started shipping are dropped without
+        asking anyone (an Arena patch is the usual way one of these resolves),
+      * IDs Scryfall answered 404 for are not asked again for
+        _MISSING_NOT_FOUND_RETRY_SEC -- they are Arena-only objects and the answer
+        does not change, so re-requesting them at every start cost seconds of
+        startup for nothing,
+      * the pass stops starting new requests after _MISSING_REFRESH_BUDGET_SEC, so
+        an unreachable Scryfall cannot turn it into a multi-minute stall (the one
+        request already in flight still runs to its timeout, so the real ceiling is
+        the budget plus one request).
     """
-    ids = _load_missing_cards()
-    if not ids:
+    entries = _load_missing_entries()
+    if not entries:
         return
-    updated = False
-    remaining = []
-    for arena_id in ids:
-        card = _fetch_card_info_from_scryfall(arena_id)
+    now = time.time()
+    deadline = now + _MISSING_REFRESH_BUDGET_SEC
+    index = _get_card_data_index()
+    updated = False   # cards.json gained an entry
+    changed = False   # missing_cards.json needs rewriting
+    # Least-recently-tried first (never tried = 0 = first), ID as the tie-break so
+    # the order stays deterministic. With Scryfall down every entry stays due, and
+    # a fixed numeric order would spend the whole budget on the same few lowest IDs
+    # at every start -- the rest would never be tried at all. This rotates instead.
+    def _order(k: str):
+        meta = entries.get(k) or {}
+        try:
+            last = float(meta.get("last_try") or 0.0)
+        except (TypeError, ValueError):
+            last = 0.0
+        return (last, int(k))
+
+    for key in sorted(entries, key=_order):
+        try:
+            arena_id = int(key)
+        except (TypeError, ValueError):
+            entries.pop(key, None)
+            changed = True
+            continue
+        # Already known locally (e.g. a later MTGA export added it): nothing to
+        # resolve, just stop tracking it.
+        if arena_id in index:
+            entries.pop(key, None)
+            changed = True
+            continue
+        if not _missing_entry_due(entries.get(key) or {}, now):
+            continue
+        if time.time() >= deadline:
+            # Out of budget: leave the rest untouched and due, so the next start
+            # picks up exactly where this one stopped.
+            break
+        card, status = _fetch_card_info_with_status(arena_id)
+        changed = True
         if card:
             _card_data.append(card)
             updated = True
-        else:
-            remaining.append(arena_id)
+            entries.pop(key, None)
+            continue
+        entries[key] = {"last_try": time.time(), "status": status}
     if updated:
         try:
             with open(CARD_DATA_PATH, "w", encoding="utf-8") as f:
                 json.dump(_card_data, f, indent=2)
         except Exception:
             pass
-    _save_missing_cards(remaining)
+    if changed:
+        _save_missing_entries(entries)
 
 
 def get_produced_mana_from_scryfall(arena_id: int):
@@ -523,7 +669,7 @@ def get_card_info(mtga_id: int):
     if card is not None:
         return card
     # Not found in local data: try Scryfall once and cache.
-    card = _fetch_card_info_from_scryfall(mtga_id)
+    card, fetch_status = _fetch_card_info_with_status(mtga_id)
     if card:
         _card_data.append(card)
         try:
@@ -532,11 +678,12 @@ def get_card_info(mtga_id: int):
         except Exception:
             pass
         return card
-    # Track missing IDs for refresh on next start.
-    ids = _load_missing_cards()
-    if mtga_id not in ids:
-        ids.append(mtga_id)
-        _save_missing_cards(ids)
+    # Track missing IDs for refresh on next start. Via _record_missing_card so an
+    # ID that already carries a 404 backoff keeps it -- rewriting the entry here
+    # would re-arm it as "due" on every board that contains the card, which is the
+    # very repetition the backoff exists to stop. The status is passed on so a 404
+    # seen here does not cost one more request on the next start.
+    _record_missing_card(mtga_id, fetch_status)
     return None # Return None if card not found
 
 
