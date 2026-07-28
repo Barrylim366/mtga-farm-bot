@@ -181,6 +181,10 @@ Place deck screenshot images in the account folder named by color letters:
 
 In Starter Deck Duel the deck is additionally re-checked before **every** queue, so when a quest completes mid-session the bot swaps to the colors of the next one instead of finishing the session on the deck it started with. The colors are resolved *after* that check (previously the just-completed quest's deck was replayed for one more match), and the bot verifies the deck chooser actually closed after submitting — a missed swap is now reported in `bot.log` instead of silently farming the wrong colors.
 
+When MTGA runs a lot of events at once, the Events grid grows and the **Starter Deck Duel** banner can end up below the visible area, where the bot cannot click it. If the banner is not found, the bot clicks **In Progress** in the right-hand event menu — that filters the grid down to the events it is actually playing, bringing the banner back on screen — and looks again. If the banner is still missing afterwards the **All** view is restored, so a filter that hides the event (one you have never entered is not "in progress") does not stick for the rest of the session.
+
+> Fixed in this version: the bot pressed **All** instead of **In Progress**, on every single queue cycle. The reference image for that menu entry had been captured while its row was *selected*, so what it really matched was "the highlighted row" — whichever one that was. It therefore clicked the currently selected category, clearing any filter, and reported success, which also suppressed the retry above. The two entries are now clicked by position, and the bot reads back which row ended up highlighted so a misaimed click is reported in `bot.log` instead of passing silently.
+
 > Fixed in this version: the reward-popup handler mistook the event page's orange **Play** button for a **Claim** button (same corner, same shape). It pressed Play, which started the next match immediately and skipped the deck check — so the bot kept replaying its first deck even after the active quest changed colors. The handler now verifies it is not on the event page before clicking.
 
 ### Casting Logic

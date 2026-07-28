@@ -3640,17 +3640,98 @@ class Controller(ControllerSecondary):
             return True
         return False
 
+    # Right-hand category menu of the Events page ("All", "In Progress", ...) in
+    # the 1920x1080 reference frame, and the fixed positions of the two entries we
+    # use. Rows are 60px apart with "All" first, measured from a live capture.
+    #
+    # Why coordinates and NOT in_progress_anchor.PNG: that template was captured
+    # with its row SELECTED -- filled orange diamond, highlighted background -- so
+    # what it actually matches is "the selected row", whichever one that is.
+    # Observed live (2026-07-27): with "All" selected it matched the All row and
+    # the bot clicked THAT every cycle, i.e. it kept clearing the filter while
+    # logging that it had applied one. Clicking by position is safe here because
+    # MTGA appends new categories at the BOTTOM of this menu, so the first two
+    # entries stay put even on the most crowded Events page.
+    _EVENT_MENU_ROI = (1380, 90, 540, 900)
+    _EVENT_CATEGORY_X = 1700
+    _EVENT_CATEGORY_Y = {"all": 244, "in_progress": 304}
+    # Banner grid on the left. Wide enough for both banner columns: the event is
+    # not always in the first slot (e.g. Jump In! can occupy it, pushing Starter
+    # Deck Duel into the second column at x ~760..1460 in the 1920 frame).
+    _STARTER_BANNER_ROI = (20, 80, 1500, 900)
+
+    def _click_event_category(self, name: str) -> bool:
+        """Click one of the Events page's category entries by fixed position."""
+        y = self._EVENT_CATEGORY_Y.get(name)
+        if y is None:
+            return False
+        label = f"EVENT_CATEGORY_{name.upper()}"
+        base = (self._EVENT_CATEGORY_X, y)
+        target, src = self._map_abs_point_to_arena(base, label=label)
+        bot_logger.log_info(f"Starter: clicking '{name}' category base={base} -> {target} ({src}).")
+        self._click_abs(target[0], target[1], label)
+        time.sleep(0.8)
+        self._log_selected_event_category(name)
+        return True
+
+    def _log_selected_event_category(self, expected: str) -> None:
+        """Report which category row ended up selected after a click.
+
+        in_progress_anchor.PNG matches the SELECTED row rather than any
+        particular label (see _EVENT_CATEGORY_Y), which makes it useless for
+        finding an entry but exactly right for reading back which one we just
+        selected. Diagnostics only -- the banner search is still the real gate,
+        so a probe that finds nothing must never block navigation.
+        """
+        tpl = os.path.join(self._app_path("assets", "assert"), "in_progress_anchor.PNG")
+        if not os.path.exists(tpl):
+            return
+        point = self._locate_image_center_in_scaled_arena_region(
+            tpl, "EVENT_CATEGORY_SELECTED", rel_region=self._EVENT_MENU_ROI,
+            confidence=0.66, timeout=1.0,
+        )
+        if point is None:
+            bot_logger.log_info("Starter: could not read back the selected category row.")
+            return
+        arena = self._arena_region
+        if not arena:
+            return
+        # Back to the 1920x1080 frame the category table is written in.
+        rel_y = int(round((point[1] - arena[1]) * 1080.0 / float(arena[3])))
+        want = self._EVENT_CATEGORY_Y.get(expected)
+        if want is not None and abs(rel_y - want) > 25:
+            bot_logger.log_error(
+                f"Starter: expected the '{expected}' row (y~{want}) to be selected but the "
+                f"highlighted row is at y~{rel_y}; the category table may be stale."
+            )
+        else:
+            bot_logger.log_info(f"Starter: '{expected}' category is selected (row y~{rel_y}).")
+
+    def _click_starter_banner(self, template: str, label: str) -> bool:
+        """Click the Starter Deck Duel banner in the events grid, if visible."""
+        runtime_status.set_startup_phase("Looking for Starter Deck Duel")
+        if not self._click_image_in_scaled_arena_region(
+            template, label, rel_region=self._STARTER_BANNER_ROI, confidence=0.72, timeout=3.0
+        ):
+            return False
+        time.sleep(1.0)
+        return True
+
     def _navigate_starter_deck(self) -> bool:
-        """Navigate Home -> Play -> Events -> In Progress -> Starter Deck Duel.
+        """Navigate Home -> Play -> Events -> Starter Deck Duel.
 
         This mirrors how the Historic flow selects its queue, but instead of the
-        Historic button it clicks the "In Progress" filter and then the Starter
-        Deck Duel banner on the left. Every click is done through
-        _click_image_in_scaled_arena_region, so all ROIs are 1920x1080 arena
-        references scaled to the real arena -> resolution independent. Template
-        matching also makes the flow self-limiting: if we are already in
-        matchmaking or in a game, the buttons are not on screen and each step
-        returns without disrupting anything.
+        Historic button it clicks the Starter Deck Duel banner on the left. Every
+        click is done through _click_image_in_scaled_arena_region, so all ROIs are
+        1920x1080 arena references scaled to the real arena -> resolution
+        independent. Template matching also makes the flow self-limiting: if we
+        are already in matchmaking or in a game, the buttons are not on screen and
+        each step returns without disrupting anything.
+
+        The banner step has a second pass: if the banner is nowhere on the events
+        grid (a crowded Events page pushes it below the fold), the "In Progress"
+        category shortens the grid and the banner is searched again, with the
+        "All" view restored if that still does not surface it.
         """
         if self._stop_requested:
             return False
@@ -3681,17 +3762,13 @@ class Controller(ControllerSecondary):
         assets_dir = self._app_path("assets", "assert")
         play_btn = os.path.join(buttons_dir, "play_btn.png")
         events_tpl = os.path.join(assets_dir, "events_tab.png")
-        in_progress_tpl = os.path.join(assets_dir, "in_progress_anchor.PNG")
         starter_tpl = os.path.join(assets_dir, "starter_deck.PNG")
 
         # ROIs in the 1920x1080 arena reference frame (scaled to the real arena).
+        # The In Progress / banner ROIs are class constants (see above) because
+        # the retry path below reuses them.
         home_play_roi = (1450, 820, 440, 220)
         events_tab_roi = (1150, 40, 770, 320)
-        in_progress_roi = (1380, 200, 540, 500)
-        # Wide enough for both banner columns: the event is not always in the
-        # first slot (e.g. Jump In! can occupy it, pushing Starter Deck Duel
-        # into the second column at x ~760..1460 in the 1920 frame).
-        starter_banner_roi = (20, 80, 1500, 900)
         play_confirm_roi = (1160, 680, 740, 360)
 
         bot_logger.log_info("Starter: navigating Play > Events > In Progress > Starter Deck Duel.")
@@ -3738,27 +3815,31 @@ class Controller(ControllerSecondary):
             return False
         time.sleep(0.8)
 
-        # 3) Best-effort "In Progress" filter. It only helps surface the banner
-        #    when the default Events view does not already show it, so a miss is
-        #    not a failure -- the banner match below is the real success gate.
-        if self._click_image_in_scaled_arena_region(
-            in_progress_tpl, "STARTER_IN_PROGRESS", rel_region=in_progress_roi, confidence=0.66, timeout=1.5
-        ):
-            bot_logger.log_info("Starter: In Progress filter selected.")
-            time.sleep(0.8)
-        else:
-            bot_logger.log_info("Starter: In Progress filter not clicked (banner likely already visible).")
+        # 3) Starter Deck Duel banner on the left. The events grid is searched as
+        #    it comes: no category is touched up front, because whichever one is
+        #    already selected (often "In Progress" from the previous cycle) is
+        #    more likely to be showing the banner than a view we just reset.
+        if not self._click_starter_banner(starter_tpl, "STARTER_BANNER"):
+            # When MTGA adds a batch of new events the grid grows and pushes the
+            # Starter Deck Duel banner below the fold, where no amount of template
+            # matching can find it. The "In Progress" category in the right-hand
+            # menu shortens the grid to the events we are actually playing, which
+            # brings the banner back on screen.
+            runtime_status.set_startup_phase("Filtering events by In Progress")
+            self._click_event_category("in_progress")
+            if not self._click_starter_banner(starter_tpl, "STARTER_BANNER_FILTERED"):
+                bot_logger.log_error(
+                    "Starter: Starter Deck Duel banner still not found after applying "
+                    "the In Progress filter; restoring the All view."
+                )
+                # Leave the page as we found it. An event we have never entered is
+                # not "in progress", so the filter we just applied HIDES it -- and
+                # MTGA remembers the category between visits, which would keep
+                # every later cycle looking at a list the banner cannot be in.
+                self._click_event_category("all")
+                return False
 
-        # 4) Starter Deck Duel banner on the left.
-        runtime_status.set_startup_phase("Looking for Starter Deck Duel")
-        if not self._click_image_in_scaled_arena_region(
-            starter_tpl, "STARTER_BANNER", rel_region=starter_banner_roi, confidence=0.72, timeout=3.0
-        ):
-            bot_logger.log_error("Starter: Starter Deck Duel banner not found on screen.")
-            return False
-        time.sleep(1.0)
-
-        # 4.5) Swap to the quest-matched starter deck before pressing Play.
+        # 4) Swap to the quest-matched starter deck before pressing Play.
         self._swap_starter_deck_for_quest(target_colors)
 
         # 5) Best-effort Play/Resume confirm. Clicking the "Resume" banner may
