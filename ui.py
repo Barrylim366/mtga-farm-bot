@@ -1874,6 +1874,29 @@ class ConfigManager:
         accounts.sort(key=lambda item: str(item.get("name", "")).casefold())
         return accounts[:10]
 
+    def apply_account_renames(self, renames: dict[str, str]) -> None:
+        """Follow a rename ({old name: new name}) through the settings that
+        reference accounts by name. Matching is case-insensitive, as everywhere
+        else accounts are compared by name.
+
+        Must run BEFORE save_managed_accounts writes the new names: that method
+        filters the play order against the names it just saved, so an order still
+        spelled the old way would be silently emptied instead of carried over."""
+        if not renames:
+            return
+        try:
+            lookup = {str(k).strip().casefold(): str(v) for k, v in renames.items()}
+            order = self.get_account_play_order()
+            new_order = [lookup.get(str(x).strip().casefold(), str(x)) for x in order]
+            pinned = self.get_manual_current_account()
+            new_pin = lookup.get(pinned.casefold(), pinned) if pinned else pinned
+            if new_order != order or new_pin != pinned:
+                self.config["account_play_order"] = new_order
+                self.config["manual_current_account"] = new_pin
+                self._save_config()
+        except Exception:
+            pass
+
     def _remove_account_credentials(self, folder: str) -> None:
         folder_name = str(folder or "").strip()
         if not folder_name:
@@ -6175,7 +6198,6 @@ class SwitchAccountWindow(tk.Toplevel):
         self._table_rows = []
         self._selected_account_idx = 0
         self.account_name_var = tk.StringVar()
-        self.account_alias_var = tk.StringVar()
         self.account_email_var = tk.StringVar()
         self.account_pw_var = tk.StringVar()
 
@@ -6208,31 +6230,31 @@ class SwitchAccountWindow(tk.Toplevel):
         self.after(300, self._warn_missing_aliases)
 
     def _warn_missing_aliases(self) -> None:
-        """Alias (in-game MTGA name) became a required field. Accounts saved by an
-        older version have none, and they keep working until the user saves -- at
-        which point validation rejects the row. Say so up front, and say WHERE to
-        read the name, instead of letting a bare error message do the explaining."""
+        """Rows saved before the Arena name existed carry only a free-text name,
+        which may or may not BE the Arena name -- we cannot tell. Those rows show
+        that old name in the single field now, so say plainly that it has to be
+        checked instead of letting the bot rotate on a name Arena never uses."""
         try:
-            missing = [
+            unverified = [
                 str(row.get("name", "")).strip()
                 for row in self._accounts_data
                 if str(row.get("name", "")).strip()
                 and str(row.get("email", "")).strip()
-                and not str(row.get("screen_name", "")).strip()
+                and not row.get("arena_verified")
             ]
-            if not missing:
+            if not unverified:
                 return
             messagebox.showinfo(
-                "Alias required",
-                "These accounts have no Alias yet:\n\n"
-                + "\n".join(f"  • {n}" for n in missing)
-                + "\n\nThe Alias is the account's in-game Magic Arena name -- the "
-                "one shown top-left in Arena (e.g. Name#12345; the digits are "
-                "optional). It is the only account identity the Arena log exposes, "
-                "so account rotation, farmed-gold tracking and the Current/Next "
-                "account display need it.\n\n"
-                "Fill it in per row and press Save Accounts. Saving a row without "
-                "an Alias is rejected.",
+                "Check the Arena Name",
+                "These accounts were saved before the Arena Name was a separate "
+                "field, so what is shown may just be a label you chose:\n\n"
+                + "\n".join(f"  • {n}" for n in unverified)
+                + "\n\nThe Arena Name must be the account's in-game Magic Arena "
+                "name -- the one shown top-left in Arena (e.g. Name#12345; the "
+                "digits are optional). It is the only account identity the Arena "
+                "log exposes, so account rotation, farmed-gold tracking and the "
+                "Current/Next account display all key off it.\n\n"
+                "Correct it per row where needed and press Save Accounts.",
                 parent=self,
             )
         except Exception:
@@ -6246,10 +6268,24 @@ class SwitchAccountWindow(tk.Toplevel):
         self._accounts_data = []
         for idx in range(self._max_accounts):
             account = existing[idx] if idx < len(existing) else {}
+            stored_name = str(account.get("name", ""))
+            arena = str(account.get("screen_name", "")).strip()
             self._accounts_data.append(
                 {
-                    "name": str(account.get("name", "")),
-                    "screen_name": str(account.get("screen_name", "")),
+                    # One name per row now, and the Arena name is the one that has
+                    # to be right, so a legacy row whose free-text name drifted from
+                    # it is shown (and saved) under the Arena name.
+                    "name": arena or stored_name,
+                    "screen_name": arena or stored_name,
+                    # What this row is called ON DISK. Saving renames the account,
+                    # and _save_accounts uses this to carry the play order and the
+                    # manual pin across that rename. Nothing outside the dialog
+                    # sees it -- _collect_accounts_for_save does not pass it on.
+                    "stored_name": stored_name,
+                    # False for a row that never had an Arena name on disk: what it
+                    # shows is a label the user picked, which may not be the Arena
+                    # one. _warn_missing_aliases asks about exactly these.
+                    "arena_verified": bool(arena),
                     "email": str(account.get("email", "")),
                     "pw": str(account.get("pw", "")),
                     "folder": str(account.get("folder", "")),
@@ -6621,11 +6657,11 @@ class SwitchAccountWindow(tk.Toplevel):
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
         self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=94)
-        # accounts_block grew +30 to contain the extra Alias field row (which pushed
-        # the Save Row / Delete / Save Accounts buttons down); order_block shifted
-        # +30 to stay below it, matching the +30 shift of its own content.
-        self._create_manage_group_panel("accounts_block", x=16, y=136, width=428, height=440)
-        self._create_manage_group_panel("order_block", x=16, y=588, width=428, height=220)
+        # The separate Alias row is gone (one Arena Name field now does both jobs),
+        # so accounts_block is back to its pre-Alias height and order_block back to
+        # its pre-Alias y -- the -30 that undoes the +30 that row cost.
+        self._create_manage_group_panel("accounts_block", x=16, y=136, width=428, height=410)
+        self._create_manage_group_panel("order_block", x=16, y=558, width=428, height=220)
 
         # Row 1: switch trigger mode (time vs quests, mutually exclusive) + time.
         cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
@@ -6665,7 +6701,7 @@ class SwitchAccountWindow(tk.Toplevel):
 
         cv.create_text(26, 146, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
         cv.create_text(26, 174, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(62, 174, text="Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(62, 174, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         cv.create_text(208, 174, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
 
         self._table_rows = []
@@ -6683,36 +6719,34 @@ class SwitchAccountWindow(tk.Toplevel):
             self._canvas.tag_bind(tag, "<Enter>", lambda _e: self._canvas.configure(cursor="hand2"))
             self._canvas.tag_bind(tag, "<Leave>", lambda _e: self._canvas.configure(cursor=""))
 
-        cv.create_text(26, 404, text="Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        name_entry = self._make_entry(self, textvariable=self.account_name_var, width=34)
+        # One name per account: the in-game MTGA screenName. It used to be two
+        # fields -- a free-text "Name" plus an "Alias" that was actually the Arena
+        # name -- which read backwards (the field called Alias was the hard
+        # identity) and let the two drift apart, so the gold panel showed a label
+        # that appeared nowhere in Arena. The Arena name is the only identity the
+        # Player.log exposes, so it is the one that has to be right; the label is
+        # now just the same string.
+        cv.create_text(26, 404, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        name_entry = self._make_entry(self, textvariable=self.account_name_var, width=24)
         name_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(84, 402, anchor="nw", window=name_entry)
+        cv.create_window(104, 402, anchor="nw", window=name_entry)
+        cv.create_text(280, 404, text="(as shown in Arena)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
 
-        # In-game MTGA screenName for this account. Required: it's the only account
-        # identity the Player.log exposes, so the switch/UI can map the logged-in
-        # account (screenName) to this row's label -- including the startup account,
-        # which is never "switched into" and so is otherwise unlinkable.
-        cv.create_text(26, 434, text="Alias", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        alias_entry = self._make_entry(self, textvariable=self.account_alias_var, width=20)
-        alias_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(84, 432, anchor="nw", window=alias_entry)
-        cv.create_text(250, 434, text="(in-game MTGA name)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
-
-        cv.create_text(26, 464, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 434, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         email_entry = self._make_entry(self, textvariable=self.account_email_var, width=34)
         email_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(84, 462, anchor="nw", window=email_entry)
+        cv.create_window(104, 432, anchor="nw", window=email_entry)
 
-        cv.create_text(26, 494, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 464, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         password_entry = self._make_entry(self, textvariable=self.account_pw_var, width=34, show="*")
         password_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(84, 492, anchor="nw", window=password_entry)
+        cv.create_window(104, 462, anchor="nw", window=password_entry)
 
         self._create_manage_canvas_button(
             name="save_row",
             text="Save Row",
             x=26,
-            y=528,
+            y=498,
             body_w=104,
             body_h=30,
             command=self._save_selected_account,
@@ -6723,7 +6757,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="delete_row",
             text="Delete Row",
             x=134,
-            y=528,
+            y=498,
             body_w=104,
             body_h=30,
             command=self._clear_selected_account_row,
@@ -6734,15 +6768,15 @@ class SwitchAccountWindow(tk.Toplevel):
             name="save_accounts",
             text="Save Accounts",
             x=244,
-            y=528,
+            y=498,
             body_w=158,
             body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(26, 600, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
-        cv.create_line(22, 617, 438, 617, fill=c["table_border"], width=1)
+        cv.create_text(26, 570, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
+        cv.create_line(22, 587, 438, 587, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
@@ -6752,7 +6786,7 @@ class SwitchAccountWindow(tk.Toplevel):
             col = idx // 5
             row = idx % 5
             lx, cx = col_x[col]
-            y = 624 + row * 24
+            y = 594 + row * 24
             cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
@@ -6767,13 +6801,13 @@ class SwitchAccountWindow(tk.Toplevel):
             self._order_vars.append(var)
             self._order_combos.append(combo)
         # vertical divider between columns
-        cv.create_line(230, 620, 230, 746, fill=c["table_border"], width=1)
+        cv.create_line(230, 590, 230, 716, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
             x=26,
-            y=756,
+            y=726,
             body_w=140,
             body_h=34,
             command=self._save_account_play_order,
@@ -6783,7 +6817,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="close_bottom",
             text="Back",
             x=246,
-            y=756,
+            y=726,
             body_w=120,
             body_h=34,
             command=self.destroy,
@@ -6815,28 +6849,29 @@ class SwitchAccountWindow(tk.Toplevel):
     def _populate_details_fields(self):
         account = self._accounts_data[self._selected_account_idx]
         self.account_name_var.set(str(account.get("name", "")))
-        self.account_alias_var.set(str(account.get("screen_name", "")))
         self.account_email_var.set(str(account.get("email", "")))
         self.account_pw_var.set(str(account.get("pw", "")))
 
     def _apply_details_to_selected(self, validate: bool, show_error: bool = False) -> bool:
         name = (self.account_name_var.get() or "").strip()
-        alias = (self.account_alias_var.get() or "").strip()
         email = (self.account_email_var.get() or "").strip()
         pw = (self.account_pw_var.get() or "").strip()
-        row_has_data = bool(name or alias or email or pw)
-        if validate and row_has_data and (not name or not alias or not email or not pw):
+        row_has_data = bool(name or email or pw)
+        if validate and row_has_data and (not name or not email or not pw):
             if show_error:
                 messagebox.showerror(
                     "Manage Accounts",
-                    "Name, Alias (in-game MTGA name), Email and Password are all "
-                    "required for a non-empty row.",
+                    "Arena Name, Email and Password are all required for a "
+                    "non-empty row.",
                     parent=self,
                 )
             return False
         row = self._accounts_data[self._selected_account_idx]
+        # Both keys are written from the one field: `screen_name` is what the bot
+        # matches against the Arena log, `name` is what it labels the row with, and
+        # keeping them equal is the point of having a single field.
         row["name"] = name
-        row["screen_name"] = alias
+        row["screen_name"] = name
         row["email"] = email
         row["pw"] = pw
         if not name:
@@ -6861,8 +6896,14 @@ class SwitchAccountWindow(tk.Toplevel):
         row["email"] = ""
         row["pw"] = ""
         row["folder"] = ""
+        # This slot no longer stands for the account that was here. Leaving its
+        # on-disk name behind would make the NEXT account typed into the slot look
+        # like a rename of the deleted one -- inheriting its play-order position
+        # and, worse, its manual pin, so the bot would claim to be signed into an
+        # account it has never logged into.
+        row["stored_name"] = ""
+        row["arena_verified"] = False
         self.account_name_var.set("")
-        self.account_alias_var.set("")
         self.account_email_var.set("")
         self.account_pw_var.set("")
         self._refresh_accounts_table()
@@ -6881,42 +6922,54 @@ class SwitchAccountWindow(tk.Toplevel):
     def _collect_accounts_for_save(self):
         accounts = []
         seen = set()
-        seen_aliases = set()
         for idx, row in enumerate(self._accounts_data, start=1):
             name = (row.get("name", "") or "").strip()
-            alias = (row.get("screen_name", "") or "").strip()
             email = (row.get("email", "") or "").strip()
             pw = (row.get("pw", "") or "").strip()
-            if not name and not alias and not email and not pw:
+            if not name and not email and not pw:
                 continue
-            if not name or not alias or not email or not pw:
+            if not name or not email or not pw:
                 raise ValueError(
-                    f"Row {idx}: Name, Alias (in-game MTGA name), Email and Password are required."
+                    f"Row {idx}: Arena Name, Email and Password are required."
                 )
-            key = name.casefold()
-            if key in seen:
-                raise ValueError(f"Duplicate account name: {name}")
-            # The alias is the account's only identity in the Player.log, so a
+            # The Arena name is the account's only identity in the Player.log, so a
             # duplicate would make two rows indistinguishable -- rotation would
             # skip an account and its farmed gold would land on the other row.
-            alias_key = alias.casefold()
-            if alias_key in seen_aliases:
+            key = name.casefold()
+            if key in seen:
                 raise ValueError(
-                    f"Duplicate Alias (in-game MTGA name): {alias}. "
-                    "Each account needs its own in-game name."
+                    f"Duplicate Arena Name: {name}. Each account needs its own "
+                    "in-game name."
                 )
             seen.add(key)
-            seen_aliases.add(alias_key)
             accounts.append(
                 {
                     "name": name,
-                    "screen_name": alias,
+                    "screen_name": name,
                     "email": email,
                     "pw": pw,
                     "folder": row.get("folder", ""),
                 }
             )
         return accounts
+
+    def _collect_pending_renames(self) -> dict[str, str]:
+        """{old name -> new name} for rows this save renames, in their original
+        spelling so the mapping can be inverted if the save then fails.
+
+        Only rows that still have their credentials: a row the user cleared is a
+        deletion, and treating it as a rename would drag a dead name through the
+        play order."""
+        renames = {}
+        for row in self._accounts_data:
+            old = str(row.get("stored_name", "")).strip()
+            new = str(row.get("name", "")).strip()
+            if not old or not new or old.casefold() == new.casefold():
+                continue
+            if not str(row.get("email", "")).strip() or not str(row.get("pw", "")).strip():
+                continue
+            renames[old] = new
+        return renames
 
     def _save_switch_settings(self):
         # Mode (time vs quests -- mutually exclusive).
@@ -6979,9 +7032,22 @@ class SwitchAccountWindow(tk.Toplevel):
             messagebox.showerror("Save Accounts", str(e))
             return
 
+        # Saving rewrites each account under the name in its row, which for a
+        # legacy two-field row is a rename. Carry the play order and the manual pin
+        # across it first -- save_managed_accounts drops order entries whose name it
+        # doesn't recognise, so doing it afterwards would lose the order instead.
+        renames = self._collect_pending_renames()
+        self._config_manager.apply_account_renames(renames)
+
         try:
             saved_accounts = self._config_manager.save_managed_accounts(accounts)
         except Exception as e:
+            # The rename above already reached the config, so an I/O failure here
+            # leaves the settings ahead of the disk. Put them back rather than
+            # leave the play order pointing at names no account file carries.
+            self._config_manager.apply_account_renames(
+                {new: old for old, new in renames.items()}
+            )
             messagebox.showerror("Save Accounts", f"Failed to save accounts: {e}")
             return
 
@@ -6992,6 +7058,10 @@ class SwitchAccountWindow(tk.Toplevel):
                 row["folder"] = str(saved.get("folder", ""))
             else:
                 row["folder"] = ""
+            # This row now IS its on-disk name, so a second save is not a rename,
+            # and the name it carries is on disk as the Arena name.
+            row["stored_name"] = row["name"]
+            row["arena_verified"] = bool(row["name"])
 
         self._refresh_order_choices()
         self._refresh_accounts_table()

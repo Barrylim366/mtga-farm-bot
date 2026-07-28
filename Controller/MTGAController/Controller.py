@@ -578,11 +578,22 @@ class Controller(ControllerSecondary):
         # reliably from switches: when we switch TO alias A and then latch the
         # screenName of the account that logs in, we know screenName -> A.
         self._screenname_to_alias: dict[str, str] = {}
-        self._load_persisted_aliases()
-        # Seed the map from the in-game alias the user configured per account, so
-        # the startup account resolves to its label without waiting for a switch.
+        # Keys in the map above that are inferred rather than known -- see
+        # _persist_aliases, which refuses to write them out.
+        self._guessed_aliases: set[str] = set()
+        # Config first, learned file second -- both fill-in-only, so this decides
+        # which wins. The config mapping is stated by the user; the learned one was
+        # INFERRED from a switch ("we aimed at row X, then saw screenName Y"), and
+        # that inference is wrong whenever the identity was stale at the time. One
+        # such miss used to be permanent: the wrong pair was persisted and reloaded
+        # every session, so an account kept showing under another row's label.
         self._seed_aliases_from_account_configs()
+        self._load_persisted_aliases()
         self._pending_switch_alias: str | None = None
+        # True while the current identity comes from the credentials WE typed, not
+        # from the log. Such an identity is authoritative: see
+        # _latch_identity_from_switch_target for why the log is the weaker source.
+        self._identity_from_config = False
         bot_logger.log_info(
             "Account-switch config: mode={} time_min={} main_quests={} daily_wins={}".format(
                 self._account_switch_mode,
@@ -2167,7 +2178,15 @@ class Controller(ControllerSecondary):
         # account's block (still in the 600KB tail) can't be latched as the new
         # owner. Once latched, the screenName comparison guards staleness and we
         # go back to the normal tail read.
-        if self._current_account_screen_name is None and self._quests_valid_from_offset > 0:
+        # Gate on the switch boundary while the incoming account is still new to us:
+        # either we have no identity yet, or we have one only because we typed its
+        # credentials and it has not been corroborated from the log. Setting the
+        # identity at login time used to end this gate early, dropping the read back
+        # to a plain tail that can still contain the OUTGOING account's quests block
+        # -- i.e. the new account would start on the old account's quests.
+        if self._quests_valid_from_offset > 0 and (
+            self._current_account_screen_name is None or self._identity_from_config
+        ):
             log_tail = self._read_log_since(
                 self._log_path,
                 start_offset=self._quests_valid_from_offset,
@@ -2252,6 +2271,11 @@ class Controller(ControllerSecondary):
         login supersedes it; logins already present when the user pinned (the very
         thing the pin overrides) are ignored. See _reconcile_pin_with_login."""
         label = str(label or "").strip()
+        # Either branch replaces the identity with the user's answer, so it is no
+        # longer the one we set from our own login. Leaving the flag on would keep
+        # protecting a name that no longer came from the credentials -- and on the
+        # unpin branch that protection is exactly what the user just switched off.
+        self._identity_from_config = False
         if not label:
             self._current_account_pinned = False
             bot_logger.log_info("Current account unpinned (auto-detection resumed).")
@@ -2304,11 +2328,49 @@ class Controller(ControllerSecondary):
                         self._read_log_tail(self._log_path, max_bytes=8_000_000)
                     )
             owner = self._canonical_screen_name(owner) or None
-            if owner and owner != self._current_account_screen_name:
-                self._current_account_screen_name = owner
-                self._register_current_account_for_gold()
+            if self._identity_from_config:
+                # We logged this account in ourselves, so only a handshake written
+                # AFTER the switch can outrank that -- anything older is by
+                # definition the account we left. Without this test the previous
+                # account's last match connect silently reclaims the identity (the
+                # `log_tail` above is ungated once an identity exists) and every
+                # later gold read lands on its row.
+                #
+                # Re-resolved from the offset lookup rather than reused from above:
+                # the two reads happen microseconds apart, and adopting one read's
+                # name on the strength of the other read's timestamp is how you end
+                # up installing the stale name WITH the guard disarmed.
+                owner, is_post_switch = self._post_switch_login_owner()
+                if not is_post_switch:
+                    return
+            if not owner or owner == self._current_account_screen_name:
+                return
+            self._current_account_screen_name = owner
+            # Whatever the log says now supersedes the credential-derived name
+            # (the user can switch account in MTGA by hand), so stop protecting it.
+            self._identity_from_config = False
+            self._register_current_account_for_gold()
         except Exception:
             pass
+
+    def _post_switch_login_owner(self) -> tuple[str | None, bool]:
+        """(screenName, was it written after the current switch began?) for the
+        newest authenticateResponse in the log.
+
+        Conservative on failure: anything unreadable answers "not post-switch",
+        which keeps the identity we are sure about instead of replacing it with a
+        guess. Same for a missing boundary -- _quests_valid_from_offset is set at
+        the start of every switch, so a zero here means _get_log_size failed, not
+        that everything qualifies."""
+        if self._quests_valid_from_offset <= 0:
+            return None, False
+        try:
+            owner, offset = self._find_latest_login_with_offset(8_000_000)
+        except Exception:
+            return None, False
+        if not owner or not offset or offset < self._quests_valid_from_offset:
+            return None, False
+        return self._canonical_screen_name(owner) or None, True
 
     def _find_latest_login_with_offset(self, max_bytes: int) -> tuple[str | None, int]:
         """(screenName, absolute byte offset) of the LAST login (authenticateResponse)
@@ -2408,6 +2470,52 @@ class Controller(ControllerSecondary):
         self._current_account_pinned = False
         self._current_account_screen_name = self._canonical_screen_name(owner) or owner
         self._register_current_account_for_gold()
+
+    def _latch_identity_from_switch_target(self, account: dict) -> bool:
+        """Take the incoming account's identity from the credentials we just typed.
+
+        We KNOW which account we logged into -- we entered its e-mail and password
+        a second ago -- so deriving that from the log afterwards throws away the
+        only certain source and replaces it with a guess. And the guess is bad:
+        the log has no login event to read. What both log-side latches match is
+        `authenticateResponse.screenName`, which (see the note in
+        _read_quests_from_log) is the MATCH-server handshake, emitted on every
+        match connect. Right after a switch, before the incoming account has
+        played anything, the newest one in the tail still belongs to the account
+        we just left -- so the old name gets re-latched, silently, and sticks.
+
+        That is the whole 2026-07-27 'Affinity2004: 18700 / 0' story: the identity
+        was resolved 3 times in six hours across ~24 real switches, and the
+        balances -- correct in themselves, but nameless in the log -- were booked
+        against whichever stale name was current.
+
+        Called right after the login is submitted rather than after it is
+        confirmed, because there is nothing to confirm against. A login that fails
+        leaves us on the login screen playing no matches, so the worst case is a
+        name shown for an account that earns nothing; the previous behaviour
+        mis-attributed real gold, which is strictly worse.
+
+        Returns True when an identity was set (i.e. the account has a configured
+        in-game name to set it from)."""
+        screen = self._canonical_screen_name(account.get("screen_name"))
+        if not screen:
+            # No Alias configured (rows saved before it became mandatory). Leave
+            # the identity unlatched so _refresh_identity_from_login still gets
+            # its shot at the log.
+            return False
+        label = str(account.get("name", "")).strip() or screen
+        self._current_account_screen_name = screen
+        self._identity_from_config = True
+        # A manual pin is the user overriding the identity by hand; our own login
+        # supersedes it, since we just changed which account is actually signed in.
+        self._current_account_pinned = False
+        self._screenname_to_alias.setdefault(screen, label)
+        self._register_current_account_for_gold()
+        bot_logger.log_info(
+            "Account identity set from the credentials we logged in with: "
+            "'{}' (alias '{}').".format(screen, label)
+        )
+        return True
 
     def _refresh_identity_from_login(self, *, force: bool = False) -> bool:
         """Latch the current account's screenName straight from its login event,
@@ -2746,11 +2854,20 @@ class Controller(ControllerSecondary):
             pass
 
     def _persist_aliases(self) -> None:
+        """Write the mappings we KNOW (screenName matched to a configured account)
+        and drop the ones we merely inferred from a switch. This dumps the whole
+        dict, so without the filter a guess parked in memory would ride along on
+        the next unrelated write -- and once on disk it is reloaded every session,
+        which is how an account ends up permanently wearing another row's label."""
         try:
             path = self._account_aliases_path()
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            known = {
+                k: v for k, v in self._screenname_to_alias.items()
+                if k not in self._guessed_aliases
+            }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(self._screenname_to_alias, f, indent=2)
+                json.dump(known, f, indent=2)
         except Exception:
             pass
 
@@ -2783,12 +2900,21 @@ class Controller(ControllerSecondary):
         credited before it was latched (a win that landed under the fallback key)."""
         key = self._current_account_key()
         if key != "(current account)" and key not in self._screenname_to_alias:
-            alias = self._pending_switch_alias or self._match_configured_alias(key)
+            # Exact config match first: it is a fact. _pending_switch_alias is only
+            # the row we AIMED at, which is the wrong answer whenever the screenName
+            # we ended up latching is not that row's -- and persisting that guess is
+            # how an account ends up permanently labelled as a different one.
+            alias = self._match_configured_alias(key)
             if alias:
                 self._screenname_to_alias[key] = alias
                 # Remember it so this account resolves to its alias next session,
                 # even as the STARTUP account (no switch-in to teach it then).
                 self._persist_aliases()
+            elif self._pending_switch_alias:
+                # Usable for this session, but marked so _persist_aliases leaves it
+                # out. Persisting it is what made one bad guess permanent.
+                self._screenname_to_alias[key] = self._pending_switch_alias
+                self._guessed_aliases.add(key)
         self._pending_switch_alias = None
         pending = self._gold_farmed_by_account.pop("(current account)", 0) if key != "(current account)" else 0
         self._gold_farmed_by_account[key] = self._gold_farmed_by_account.get(key, 0) + int(pending or 0)
@@ -6869,6 +6995,9 @@ class Controller(ControllerSecondary):
         # identity via its own login, so auto-detection should resume.
         self._current_account_screen_name = None
         self._current_account_pinned = False
+        # The incoming account's identity has not been established yet; the login
+        # further down sets it from that account's own credentials.
+        self._identity_from_config = False
         # Let the incoming account's identity be latched at the first opportunity
         # rather than waiting out a throttle window left over from the last account.
         self._last_identity_login_scan_ts = 0.0
@@ -7281,6 +7410,15 @@ class Controller(ControllerSecondary):
             bot_logger.log_info("Account switch: submitting login with Enter.")
             self.input.tap_enter()
             bot_logger.log_info("Account switch: login submitted.")
+            # We just typed this account's credentials, so we know who is signing
+            # in. Latch it now, before anything reads the log: the log-side
+            # fallbacks below would otherwise pick up the OUTGOING account's last
+            # match handshake and freeze the identity there.
+            try:
+                identity_from_config = self._latch_identity_from_switch_target(account)
+            except Exception as exc:
+                identity_from_config = False
+                bot_logger.log_error(f"Could not set identity from config (continuing): {exc}")
 
             if not self._stop_requested:
                 bot_logger.log_info("Account switch: waiting 20s before post-login record.")
@@ -7290,16 +7428,15 @@ class Controller(ControllerSecondary):
                         break
                     time.sleep(0.1)
             if not self._stop_requested:
-                # Latch the incoming account's identity straight from its login
-                # event first, so the Current Account line updates as soon as the
-                # account is in -- independent of whether Home/quests load (the
-                # refresh_quests_cache latch below is coupled to a quests read,
-                # which fails silently when post-switch Home navigation misfires,
-                # leaving the UI stuck on the previous account).
-                try:
-                    self._refresh_identity_from_login(force=True)
-                except Exception:
-                    pass
+                # Fallback for accounts with no configured Alias: derive the
+                # identity from the log. A no-op when the config latch above
+                # already set one. Kept because it is still better than nothing
+                # for a row saved before the Alias field became mandatory.
+                if not identity_from_config:
+                    try:
+                        self._refresh_identity_from_login(force=True)
+                    except Exception:
+                        pass
                 # Establish the INCOMING account's gold baseline now: Home is loaded
                 # (its InventoryInfo is written) and it hasn't played yet, so the
                 # baseline is pre-win. Without this the baseline is only captured
