@@ -173,7 +173,24 @@ class Controller(ControllerSecondary):
         self._log_path = log_path
         runtime_status.reset_status(log_path=log_path)
         try:
-            self.input = create_input_controller(input_backend)
+            # No backend named -> nothing that can touch the real mouse. Every
+            # entry point that actually drives Arena (ui.py, run_bot.py, tools/*)
+            # passes one explicitly; what is left is tests and ad-hoc scripts,
+            # which have no business owning the cursor.
+            #
+            # This is not hypothetical: a Controller arms fire-and-forget daemon
+            # timers (see __answer_card_prompt), and nothing cancels them when
+            # the caller goes away. One `python -m unittest discover tests` used
+            # to fire 77 real clicks at absolute screen coordinates, seconds
+            # after the tests that armed them had already passed, onto whatever
+            # the user was doing at the time. Defaulting to a live backend made
+            # "I constructed an object" mean "I took over the mouse".
+            #
+            # MTGA_BOT_INPUT_BACKEND still overrides, so forcing a real backend
+            # without touching the call site remains possible.
+            self.input = create_input_controller(
+                input_backend or os.environ.get("MTGA_BOT_INPUT_BACKEND") or "null"
+            )
         except InputControllerError as e:
             raise RuntimeError(f"Failed to initialize input backend {input_backend!r}: {e}") from e
         try:
@@ -3640,6 +3657,299 @@ class Controller(ControllerSecondary):
             return True
         return False
 
+    # --- Events list scrolling ---------------------------------------------
+    #
+    # All in the 1920x1080 arena reference frame, scaled to the real arena like
+    # every other ROI here. Measured on a 2048x1152 client: the scrollbar sits at
+    # x=1493, in the dead band between the right edge of the banner column
+    # (~1470) and the events filter panel (~1530). That gap is what makes the
+    # drag safe -- a press that misses the thumb lands on empty chrome, never on
+    # an event banner, so the worst case is "nothing happens" rather than "the
+    # bot entered a Draft".
+    _EVENTS_SCROLLBAR_BAND = (1480, 110, 28, 900)
+    # Fallback step, in 1920-frame pixels, for the rewind (which runs before the
+    # thumb has been measured). Deliberately coarse: the rewind only needs to get
+    # to the top, not to stop anywhere precise.
+    _EVENTS_SCROLL_STEP = 45
+    # Enough steps to cross the track even when the thumb is short (a long list).
+    _EVENTS_SCROLL_MAX_STEPS = 24
+    # Hard ceiling on one search, in seconds. The step count alone is a poor bound
+    # because each step costs a page probe, a drag and two banner probes (~5s
+    # measured), so 24 steps plus two rewinds is minutes -- on the queue loop,
+    # between matches, where it delays the next game and any pending account
+    # switch, and where enough silence trips the session watchdog's idle alarm.
+    # Giving up early is cheap: the caller retries on the next queue cycle.
+    _EVENTS_SCROLL_BUDGET_SEC = 45.0
+
+    def _events_scroll_step(self, thumb: tuple[int, int, int]) -> int:
+        """How far to drag between banner probes, derived from the thumb itself.
+
+        The step has to stay under the height of one banner, or the sweep lands
+        above the banner on one iteration and below it on the next and matches
+        neither -- a 170px step did exactly that against a live client, sailing
+        over the ~60px window in which Starter Deck Duel was fully on screen.
+
+        The catch is that the step is in THUMB space while the constraint is in
+        LIST space, and the ratio between them is the thumb's own length: a thumb
+        filling a quarter of its track means the list moves four times as far. So
+        a constant tuned against one list length silently becomes too coarse as
+        the list grows -- the same bug again, just deferred. Taking a fraction of
+        the measured thumb makes the step track one viewport instead: a third of
+        the thumb is a third of a page, comfortably inside one banner row, at any
+        list length.
+        """
+        _x, top, bottom = thumb
+        arena = self._ensure_arena_region()
+        scale = 1080.0 / arena[3] if arena and arena[3] else 1.0
+        thumb_ref = max(1, int(round((bottom - top) * scale)))
+        # Floor of 12: below that the drag is smaller than the couple of pixels of
+        # slop in "did the thumb move", so the sweep would read as end-of-list.
+        return max(12, min(self._EVENTS_SCROLL_STEP, thumb_ref // 3))
+
+    def _locate_events_scrollbar_thumb(self) -> tuple[int, int, int] | None:
+        """(x, top_y, bottom_y) of the Events scrollbar thumb, in screen pixels.
+
+        The thumb is the one bright, tall, narrow run in a column band that is
+        otherwise dark chrome, so a brightness profile finds it without a
+        template -- which matters because the thumb's LENGTH changes with the
+        number of events, and a template would have to match all of them.
+
+        None when no run looks like a thumb: either the list is short enough that
+        MTGA draws no scrollbar (nothing to scroll, so nothing to do) or the UI
+        moved again. Both mean "do not drag", which is the safe answer.
+        """
+        arena = self._ensure_arena_region()
+        if arena is None:
+            return None
+        region = self._scale_base_region_to_arena(arena, self._EVENTS_SCROLLBAR_BAND)
+        try:
+            self._vision.begin_tick()
+            img = self._vision.capture(region)
+            if img is None or img.size == 0:
+                return None
+            import numpy as _np
+
+            data = _np.asarray(img, dtype=float).mean(axis=2)
+            # One brightness value per row: the BRIGHTEST pixel across the band,
+            # not the mean. The thumb is only about half the band wide, so a mean
+            # averages it down into the dark chrome around it -- measured on a
+            # real client that dropped the thumb from 262 qualifying rows to 26,
+            # i.e. below the detection floor. Max separates cleanly instead
+            # (chrome peaks around 30, the thumb around 200).
+            profile = data.max(axis=1)
+            # ...but max alone has no noise immunity: one bright pixel carries a
+            # whole row. Measured on the Home screen, where this band cuts through
+            # the promo banners, 81% of rows passed and a 177-row "thumb" was
+            # returned on artwork. So also require the row to be bright ACROSS the
+            # bar rather than at a point: a real thumb fills a contiguous third of
+            # the band, a banner spans all of it, and stray glow spans almost none.
+            # The width test is what tells those apart.
+            width = data.shape[1]
+            lit_per_row = (data > 80.0).sum(axis=1)
+            thumb_like = (lit_per_row >= max(3, width // 5)) & (lit_per_row <= width * 0.8)
+            bright = (profile > 80.0) & thumb_like
+            best_len = 0
+            best = None
+            run_start = None
+            for i, is_bright in enumerate(bright):
+                if is_bright and run_start is None:
+                    run_start = i
+                elif not is_bright and run_start is not None:
+                    if i - run_start > best_len:
+                        best_len, best = i - run_start, (run_start, i - 1)
+                    run_start = None
+            if run_start is not None and len(bright) - run_start > best_len:
+                best_len, best = len(bright) - run_start, (run_start, len(bright) - 1)
+            # A thumb is tall. Anything short is a stray highlight in the chrome;
+            # dragging from one of those would scroll nothing and, worse, would
+            # make "the thumb did not move" (our end-of-list test) fire early.
+            if best is None or best_len < max(20, int(region[3] * 0.05)):
+                return None
+            return (
+                int(region[0] + region[2] // 2),
+                int(region[1] + best[0]),
+                int(region[1] + best[1]),
+            )
+        except Exception as exc:
+            bot_logger.log_error(f"Events scrollbar probe failed: {exc}")
+            return None
+
+    def _on_events_page(self) -> bool:
+        """Is the Events blade actually open right now?
+
+        Every other click in this flow is aimed by a template match, so it cannot
+        fire on a screen that does not contain its target. The scrollbar drag is
+        the exception -- it is aimed by geometry -- so it needs this check to get
+        the same property. Without it a sweep that starts on Events and continues
+        after MTGA has moved on (a queue popping, matchmaking completing, a reward
+        overlay) keeps pressing and dragging at a fixed column on whatever screen
+        replaced it; in a match that column is over the battlefield, where a
+        press-drag is how you attack.
+        """
+        if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
+            return False
+        events_tpl = os.path.join(self._app_path("assets", "assert"), "events_tab.png")
+        return self._locate_image_center_in_scaled_arena_region(
+            events_tpl, "EVENTS_PAGE_PROBE", rel_region=(1150, 40, 770, 320),
+            confidence=0.74, timeout=0.8,
+        ) is not None
+
+    def _drag_events_scrollbar(self, dy_ref: int) -> bool:
+        """Drag the Events scrollbar thumb by `dy_ref` 1920-frame pixels.
+
+        Negative scrolls up. Returns True when the thumb actually moved, which is
+        also how the caller learns it has hit the end of the list -- no track
+        arithmetic needed, and it stays correct however MTGA sizes the bar.
+
+        MTGA's event list ignores the mouse wheel entirely (verified against a
+        live client: a synthetic wheel over the list, with the window focused,
+        leaves the scroll position bit-identical), so dragging the bar is not a
+        stylistic choice -- it is the only way to scroll this list.
+        """
+        if not self._on_events_page():
+            bot_logger.log_info("Events scroll: not on the Events page; not dragging.")
+            return False
+        # Fresh rect, like every clicking path takes (the cached one can be stale
+        # if the window moved, and a sweep runs for tens of seconds between
+        # matches). Cheap: ~0.07s measured.
+        arena = self._ensure_arena_region(force_reacquire=True)
+        if arena is None:
+            return False
+        before = self._locate_events_scrollbar_thumb()
+        if before is None:
+            return False
+        x, top, bottom = before
+        # Grab the middle of the thumb so a small detection error still lands on
+        # it rather than on the track above/below.
+        start_y = (top + bottom) // 2
+        # The bar tracks the cursor 1:1, so the reference delta only needs the
+        # arena's vertical scale applied.
+        dy = int(round(dy_ref * (arena[3] / 1080.0)))
+        if dy == 0:
+            return False
+        try:
+            if focus_mtga_window():
+                time.sleep(0.15)
+            self.input.move_abs(x, start_y)
+            time.sleep(0.12)
+            self.input.left_down()
+            time.sleep(0.12)
+            # Glide rather than jump: Unity drags follow motion events, and a
+            # single teleport can be swallowed as "no movement since press".
+            steps = 8
+            for step in range(1, steps + 1):
+                self.input.move_abs(x, start_y + int(dy * step / steps))
+                time.sleep(0.03)
+            time.sleep(0.12)
+        except Exception as exc:
+            # The queue loop runs this on a daemon thread with no handler of its
+            # own, so an input backend throwing here would kill queueing outright
+            # and the bot would just stop playing.
+            bot_logger.log_error(f"Events scroll drag failed: {exc}")
+            return False
+        finally:
+            # Always release, on every path out of the block above. A stuck-down
+            # button would turn every later click into a drag across the whole UI.
+            try:
+                self.input.left_up()
+            except Exception:
+                pass
+        time.sleep(0.45)
+        after = self._locate_events_scrollbar_thumb()
+        if after is None:
+            # We could not re-read the bar. That is NOT "the list ended" -- a
+            # frame caught mid-repaint says nothing about the scroll position --
+            # and reporting it as such used to abort a rewind halfway, leaving the
+            # sweep to start from the middle of the list and never see anything
+            # above that point. Say so distinctly instead.
+            bot_logger.log_info("Events scroll: lost sight of the scrollbar after dragging.")
+            return False
+        moved = abs(after[1] - before[1]) > 3
+        if not moved:
+            bot_logger.log_info("Events scroll: thumb did not move (end of list).")
+        return moved
+
+    def _scroll_events_to_top(self) -> bool:
+        """Rewind the list to the top. True when it is actually there.
+
+        Called before a sweep (so the sweep covers the whole list however the page
+        was left) and after a failed one (so the next attempt does not resume at
+        the bottom, where nothing is left to find). The return value matters: a
+        rewind that stopped early because a probe glitched leaves the sweep blind
+        to everything above that point, which is the exact failure the rewind
+        exists to prevent."""
+        for _ in range(self._EVENTS_SCROLL_MAX_STEPS + 2):
+            if self._stop_requested:
+                return False
+            before = self._locate_events_scrollbar_thumb()
+            if before is None:
+                return False
+            if not self._drag_events_scrollbar(-self._EVENTS_SCROLL_STEP * 2):
+                # Either we are at the top (success) or something went wrong; the
+                # thumb position tells us which, without trusting the drag's
+                # overloaded False.
+                after = self._locate_events_scrollbar_thumb()
+                return after is not None and after[1] <= before[1]
+        return True
+
+    def _find_event_banner_scrolling(
+        self, template: str, label: str, roi: tuple[int, int, int, int], confidence: float
+    ) -> bool:
+        """Click an event banner, scrolling the list down until it comes into view.
+
+        MTGA reorders the Events list as events come and go, so a banner that used
+        to be in the first row can end up below the fold -- which is exactly how
+        Starter Deck Duel went missing. Checks the visible page first, so a list
+        that already shows the banner (the normal case) costs nothing and the
+        scroll position is left alone.
+        """
+        if self._click_image_in_scaled_arena_region(
+            template, label, rel_region=roi, confidence=confidence, timeout=3.0
+        ):
+            return True
+        thumb = self._locate_events_scrollbar_thumb()
+        if thumb is None:
+            # No scrollbar -> the whole list is on screen and the banner is simply
+            # not there. Scrolling cannot help and there is nothing to drag.
+            bot_logger.log_info(
+                f"{label}: not visible and the list does not scroll; nothing further to try."
+            )
+            return False
+        step_ref = self._events_scroll_step(thumb)
+        deadline = time.time() + self._EVENTS_SCROLL_BUDGET_SEC
+        # Start from the top before stepping down. The list does not necessarily
+        # begin where we left it -- MTGA remembers a scroll position, and a
+        # previous pass may have left it below the banner, which a downward-only
+        # sweep can never recover. From the top, the sweep covers the whole list.
+        self._scroll_events_to_top()
+        if self._click_image_in_scaled_arena_region(
+            template, label, rel_region=roi, confidence=confidence, timeout=1.5
+        ):
+            bot_logger.log_info(f"{label}: found after scrolling back to the top.")
+            return True
+        for step in range(1, self._EVENTS_SCROLL_MAX_STEPS + 1):
+            if self._stop_requested:
+                return False
+            if time.time() > deadline:
+                bot_logger.log_info(
+                    f"{label}: giving up the scroll search after "
+                    f"{self._EVENTS_SCROLL_BUDGET_SEC:.0f}s ({step - 1} step(s)); "
+                    "the queue loop will try again."
+                )
+                break
+            if not self._drag_events_scrollbar(step_ref):
+                bot_logger.log_info(
+                    f"{label}: reached the end of the events list after {step - 1} scroll(s)."
+                )
+                break
+            if self._click_image_in_scaled_arena_region(
+                template, label, rel_region=roi, confidence=confidence, timeout=1.5
+            ):
+                bot_logger.log_info(f"{label}: found after {step} scroll step(s).")
+                return True
+        self._scroll_events_to_top()
+        return False
+
     def _navigate_starter_deck(self) -> bool:
         """Navigate Home -> Play -> Events -> In Progress -> Starter Deck Duel.
 
@@ -3681,7 +3991,15 @@ class Controller(ControllerSecondary):
         assets_dir = self._app_path("assets", "assert")
         play_btn = os.path.join(buttons_dir, "play_btn.png")
         events_tpl = os.path.join(assets_dir, "events_tab.png")
-        in_progress_tpl = os.path.join(assets_dir, "in_progress_anchor.PNG")
+        # The LABEL, not the old in_progress_anchor.PNG. That anchor was captured
+        # with the filter selected, so its dominant feature is the lit orange
+        # diamond -- which means it matched whichever row happened to be selected,
+        # normally "All". The bot clicked "All", logged "In Progress filter
+        # selected", and then searched the unfiltered list. Verified against a live
+        # client: the old anchor resolved to the All row while All was selected and
+        # to the In Progress row once In Progress was. Matching the text instead is
+        # state-independent.
+        in_progress_tpl = os.path.join(assets_dir, "in_progress_label.png")
         starter_tpl = os.path.join(assets_dir, "starter_deck.PNG")
 
         # ROIs in the 1920x1080 arena reference frame (scaled to the real arena).
@@ -3738,21 +4056,28 @@ class Controller(ControllerSecondary):
             return False
         time.sleep(0.8)
 
-        # 3) Best-effort "In Progress" filter. It only helps surface the banner
-        #    when the default Events view does not already show it, so a miss is
-        #    not a failure -- the banner match below is the real success gate.
+        # 3) "In Progress" filter. This is what keeps the list short enough to fit
+        #    on one page: with it applied the client shows only the events actually
+        #    in progress (Starter Deck Duel among them) and draws no scrollbar at
+        #    all, so the banner match below cannot be defeated by list length.
+        #    Still best-effort -- a miss means the filter is already applied, or
+        #    the row moved -- and the scrolling search below is the backstop.
         if self._click_image_in_scaled_arena_region(
-            in_progress_tpl, "STARTER_IN_PROGRESS", rel_region=in_progress_roi, confidence=0.66, timeout=1.5
+            in_progress_tpl, "STARTER_IN_PROGRESS", rel_region=in_progress_roi, confidence=0.80, timeout=1.5
         ):
             bot_logger.log_info("Starter: In Progress filter selected.")
-            time.sleep(0.8)
+            time.sleep(1.2)
         else:
-            bot_logger.log_info("Starter: In Progress filter not clicked (banner likely already visible).")
+            bot_logger.log_info(
+                "Starter: In Progress filter not clicked (already applied, or the row was not found)."
+            )
 
-        # 4) Starter Deck Duel banner on the left.
+        # 4) Starter Deck Duel banner on the left. Scrolls the list when it is not
+        #    on the visible page -- MTGA reorders Events, so the banner does not
+        #    stay in the first row.
         runtime_status.set_startup_phase("Looking for Starter Deck Duel")
-        if not self._click_image_in_scaled_arena_region(
-            starter_tpl, "STARTER_BANNER", rel_region=starter_banner_roi, confidence=0.72, timeout=3.0
+        if not self._find_event_banner_scrolling(
+            starter_tpl, "STARTER_BANNER", starter_banner_roi, 0.72
         ):
             bot_logger.log_error("Starter: Starter Deck Duel banner not found on screen.")
             return False

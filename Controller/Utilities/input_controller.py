@@ -64,6 +64,67 @@ class InputController:
         return
 
 
+class NullInputController(InputController):
+    """Swallows every input. For running the test suite (and anything else that
+    constructs a Controller without meaning to drive the machine).
+
+    This exists because it is genuinely easy to move the real mouse by accident:
+    a Controller schedules fire-and-forget timers (the card-prompt settle timer,
+    for one), and a test that arms one gets a real click a second or two later --
+    after the test has passed, at absolute screen coordinates, on whatever the
+    user happens to be doing. Measured before this backend existed: one full
+    `python -m unittest discover tests` produced 77 real clicks.
+
+    Reports a fixed cursor position rather than reading the real one, so nothing
+    downstream can accidentally depend on the user's actual pointer either.
+    """
+
+    def __init__(self, *, initial_position: Point = Point(0, 0)) -> None:
+        self._position = initial_position
+
+    def move_abs(self, x: int, y: int) -> None:
+        self._position = Point(int(x), int(y))
+
+    def move_rel(self, dx: int, dy: int) -> None:
+        self._position = Point(self._position.x + int(dx), self._position.y + int(dy))
+
+    def left_click(self, count: int = 1) -> None:
+        return
+
+    def left_down(self) -> None:
+        return
+
+    def left_up(self) -> None:
+        return
+
+    def tap_enter(self) -> None:
+        return
+
+    def tap_shift_enter(self) -> None:
+        return
+
+    def tap_tab(self) -> None:
+        return
+
+    def tap_delete(self) -> None:
+        return
+
+    def type_text(self, text: str) -> None:
+        return
+
+    def tap_escape(self) -> None:
+        return
+
+    def tap_printscreen(self) -> None:
+        return
+
+    def tap_win_printscreen(self) -> None:
+        return
+
+    def position(self) -> Point:
+        return self._position
+
+
 class PynputInputController(InputController):
     def __init__(self) -> None:
         try:
@@ -384,9 +445,14 @@ class YdotoolInputController(InputController):
 def create_input_controller(backend: str | None) -> InputController:
     """
     backend:
-      - "ydotool" / "pynput" / "auto" / None
+      - "ydotool" / "pynput" / "pyautogui" / "null" / "auto" / None
     """
     normalized = (backend or os.environ.get("MTGA_BOT_INPUT_BACKEND") or "auto").strip().lower()
+    # Checked before "auto" resolution so it cannot be reached by accident, and
+    # never selected by "auto": a bot that silently stopped clicking would look
+    # exactly like a bot that is stuck.
+    if normalized in ("null", "none", "noop"):
+        return NullInputController()
     if normalized in ("auto", ""):
         system = platform.system().lower()
         if system == "darwin":

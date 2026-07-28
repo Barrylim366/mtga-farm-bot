@@ -181,6 +181,14 @@ Place deck screenshot images in the account folder named by color letters:
 
 In Starter Deck Duel the deck is additionally re-checked before **every** queue, so when a quest completes mid-session the bot swaps to the colors of the next one instead of finishing the session on the deck it started with. The colors are resolved *after* that check (previously the just-completed quest's deck was replayed for one more match), and the bot verifies the deck chooser actually closed after submitting — a missed swap is now reported in `bot.log` instead of silently farming the wrong colors.
 
+Finding the **Starter Deck Duel** banner no longer depends on it being near the top of the Events list. The bot applies the **In Progress** filter, which normally cuts the list down to the events actually in progress so the banner fits on one page; if it is still not visible, the bot drags the list's scrollbar and re-checks after each step, then rewinds to the top if it never appears.
+
+> Fixed in this version: the **In Progress** filter was never actually applied. Its anchor image had been captured with the filter *selected*, so the lit orange marker dominated the match and it resolved to whichever row was selected — normally **All**. The bot clicked **All**, logged "In Progress filter selected", and then searched the full, unfiltered list. In that list Starter Deck Duel had drifted down far enough to be cut off by the bottom edge of the viewport, and since its image includes the title strip, a half-visible banner matches nothing. The filter is matched on its label text now, which reads the same selected or not.
+
+> Fixed in this version: running the test suite moved the real mouse and clicked. A Controller arms fire-and-forget timers (the card-prompt settle timer among them) that nothing cancels, so tests that built one produced real clicks seconds later, at absolute screen coordinates, on whatever was in front — 231 input events including 77 clicks per full run. Constructing a Controller without naming an input backend now gets an inert one; everything that actually drives Arena names its backend explicitly, so nothing changed for the bot itself. `MTGA_BOT_INPUT_BACKEND` still overrides.
+
+> Note on scrolling: MTGA's event list ignores the mouse wheel entirely, so the bot drags the scrollbar. The step is deliberately small — the bar is about a quarter of its track, so the list moves roughly four times as far as the bar, and a step wider than one banner can jump straight over the one being looked for.
+
 > Fixed in this version: the reward-popup handler mistook the event page's orange **Play** button for a **Claim** button (same corner, same shape). It pressed Play, which started the next match immediately and skipped the deck check — so the bot kept replaying its first deck even after the active quest changed colors. The handler now verifies it is not on the event page before clicking.
 
 ### Casting Logic
