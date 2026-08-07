@@ -342,6 +342,112 @@ def _creature_keywords(creature: dict) -> set[str]:
     return kws
 
 
+# --- Ward ---------------------------------------------------------------------
+# Ward is invisible in the GRE stream: MTGA raises a *client-side* "Are You Sure?
+# This target has Ward" confirm that emits no message at all. Answering No cancels
+# the spell and hands the same board back to the decision loop, which re-picks the
+# same target -- observed 2026-07-30 17:31-17:37, a Mortify aimed at Tolarian
+# Terror (Ward {2}) looped for six minutes across four turns.
+#
+# So the ward cost has to be read from the card and priced BEFORE we target:
+# affordable -> target it and pay, unaffordable -> pick something else.
+#
+# "Ward {2}" / "Ward {1}{U}" are payable with mana. "Ward--Pay 3 life" and
+# friends are not something this bot can drive, so they are priced as unpayable.
+# The reminder text ("...counter it unless that player pays {2}.") also contains a
+# mana symbol, which is why the pattern anchors on the word `ward` itself.
+_WARD_MANA_RE = re.compile(r"\bward\b\s*((?:\{[^}]+\}\s*)+)", re.IGNORECASE)
+_WARD_ANY_RE = re.compile(r"\bward\b", re.IGNORECASE)
+
+
+def ward_cost(grp_id) -> dict | None:
+    """Ward on this card, or None if it has none.
+
+    Returns `{"mana": int | None, "text": str}` where `mana` is the mana needed
+    to pay the ward, or None for a ward whose cost we cannot pay through the UI
+    (pay life, discard a card, ...). `{"mana": None}` therefore means "warded and
+    we must not target it", not "free".
+    """
+    if grp_id is None:
+        return None
+    try:
+        info = CardInfo.get_card_info(grp_id) or {}
+    except Exception:
+        return None
+    keywords = {str(k).lower() for k in (info.get("keywords") or [])}
+    oracle = str(info.get("oracleText") or "")
+    if "ward" not in keywords and not _WARD_ANY_RE.search(oracle):
+        return None
+    match = _WARD_MANA_RE.search(oracle)
+    if not match:
+        # Keyword says ward but we cannot read a cost (no oracle text offline, or
+        # a non-mana ward). Unknown cost is treated as unpayable on purpose: a
+        # countered removal spell is strictly worse than not casting it.
+        return {"mana": None, "text": oracle.strip()}
+    try:
+        mana = CardInfo.calculate_cmc(match.group(1).replace(" ", ""))
+    except Exception:
+        return {"mana": None, "text": oracle.strip()}
+    return {"mana": int(mana), "text": match.group(0).strip()}
+
+
+def creature_ward_cost(creature: dict) -> dict | None:
+    """`ward_cost` for a board object."""
+    if not isinstance(creature, dict):
+        return None
+    return ward_cost(creature.get("grpId"))
+
+
+def ward_is_affordable(creature: dict, ward_budget: int | None) -> bool:
+    """Can we pay this creature's ward with `ward_budget` mana left over?
+
+    `ward_budget is None` means the caller does not know how much mana will be
+    free after the spell is paid for; an unknown budget never *excludes* a
+    target (see `choose_removal_target`), it only deprioritizes it.
+    """
+    cost = creature_ward_cost(creature)
+    if cost is None:
+        return True
+    if ward_budget is None:
+        return True
+    if cost.get("mana") is None:
+        return False
+    return int(cost["mana"]) <= int(ward_budget)
+
+
+# Targets we pointed a spell at and then backed out of, keyed by
+# (spell grpId, target instanceId). Without this the decision loop is memoryless:
+# it re-derives the same "best" target from the same board every time, which is
+# exactly what turned one declined ward confirm into an endless cast loop.
+# Module-level because the AI (cast decision) and the Controller (target
+# selection) are separate objects that already share this module. Reset per match.
+_declined_targets: set[tuple[int, int]] = set()
+
+
+def note_declined_target(source_grp_id, target_id) -> None:
+    """Remember that targeting `target_id` with this spell was abandoned."""
+    if source_grp_id is None or target_id is None:
+        return
+    try:
+        _declined_targets.add((int(source_grp_id), int(target_id)))
+    except (TypeError, ValueError):
+        pass
+
+
+def is_declined_target(source_grp_id, target_id) -> bool:
+    if source_grp_id is None or target_id is None:
+        return False
+    try:
+        return (int(source_grp_id), int(target_id)) in _declined_targets
+    except (TypeError, ValueError):
+        return False
+
+
+def reset_declined_targets() -> None:
+    """Clear the decline list. Call at match end -- instanceIds are per-game."""
+    _declined_targets.clear()
+
+
 def can_kill(profile: dict, creature: dict) -> bool:
     kind = profile.get("kind")
     kws = _creature_keywords(creature)
@@ -493,8 +599,20 @@ def choose_removal_target(
     opponent_life: int | None = None,
     battlefield_zone_ids: set[int] | None = None,
     live_instance_ids: set[int] | None = None,
+    ward_budget: int | None = None,
+    source_grp_id: int | None = None,
 ) -> int | None:
-    """FACE_TARGET (-1) for lethal burn, a creature instanceId, or None."""
+    """FACE_TARGET (-1) for lethal burn, a creature instanceId, or None.
+
+    `ward_budget` is the mana that will still be untapped *after* this spell is
+    paid for. With a number, a warded creature we cannot pay for is dropped from
+    the candidates entirely -- targeting it would only get the spell countered.
+    With None (budget unknown) warded creatures are merely ranked last, and the
+    Controller's ward confirm makes the final call with a live mana reading.
+
+    `source_grp_id` enables the decline list: a target we already backed out of
+    with this spell is skipped, so a refused ward confirm cannot loop.
+    """
     if not profile:
         return None
     kind = profile.get("kind")
@@ -515,7 +633,25 @@ def choose_removal_target(
         game_objects, my_seat, battlefield_zone_ids, live_instance_ids
     )
     killable = [c for c in enemies if can_kill(profile, c)]
+    if source_grp_id is not None:
+        killable = [
+            c for c in killable
+            if not is_declined_target(source_grp_id, c.get("instanceId"))
+        ]
+    if ward_budget is not None:
+        killable = [c for c in killable if ward_is_affordable(c, ward_budget)]
     if not killable:
         return None
-    best = max(killable, key=lambda c: (effective_toughness(c), _stat(c.get("power"))))
+    # Biggest threat still wins -- paying a ward to kill the 5/5 beats killing a
+    # 2/2 for free. Being unwarded is only a tiebreak between equal bodies, and
+    # it is the tiebreak that matters when the budget is unknown, because then
+    # the warded one may still cost us the whole spell.
+    best = max(
+        killable,
+        key=lambda c: (
+            effective_toughness(c),
+            _stat(c.get("power")),
+            creature_ward_cost(c) is None,
+        ),
+    )
     return int(best["instanceId"])

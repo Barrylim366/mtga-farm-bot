@@ -10,6 +10,7 @@ from pathlib import Path
 
 from Controller.ControllerInterface import ControllerSecondary
 import AI.Utilities.RemovalLogic as RemovalLogic
+import AI.Utilities.CombatLogic as CombatLogic
 import AI.Utilities.FightLogic as FightLogic
 import AI.Utilities.CounterLogic as CounterLogic
 import AI.Utilities.CardInfo as CardInfo
@@ -237,6 +238,13 @@ class Controller(ControllerSecondary):
         # opponent's lands and the centre divider (~y 0.24-0.45), full width.
         self.opponent_battlefield_scan_p1 = (int(1920 * 0.10), int(1080 * 0.24))
         self.opponent_battlefield_scan_p2 = (int(1920 * 0.92), int(1080 * 0.45))
+        # Blocking needs no region of its own. Measured off 12 real
+        # runtime/debug/declare-block-* captures: during Step_DeclareBlock the
+        # attackers only edge forward towards the centre divider and stay well
+        # inside the opponent row above (y 285-425 against a region of 259-486),
+        # while our blockers ride up but stay inside ours (y 505-665 against
+        # 540-972). The earlier belief that attackers move to the middle of the
+        # board, out of reach of both regions, was an assumption and was wrong.
         # Central 'choose a card' overlay (graveyard/exile target choosers,
         # e.g. Zombify). First estimate -- NEEDS IN-GAME CALIBRATION.
         self.chooser_scan_p1 = (int(1920 * 0.20), int(1080 * 0.29))
@@ -353,6 +361,11 @@ class Controller(ControllerSecondary):
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
+        # {instanceId: epoch when it was proven unreachable}. A cast whose hand
+        # scan exhausted every retry is not worth re-sweeping for: each attempt
+        # costs ~6.6s of rope against a card the hand does not contain. Cleared
+        # per game, and per id as soon as the id is hovered or remapped.
+        self.__unreachable_cast_ids: dict[int, float] = {}
         self.__match_end_callback = None
         # Optional UI callback used to stop the bot from inside the controller
         # (e.g. when every configured account has finished its daily quests).
@@ -430,6 +443,17 @@ class Controller(ControllerSecondary):
         self.__last_group_req_ts = 0.0
         self.__group_req_active_until = 0.0
         self.__last_declare_blockers_ts = 0.0
+        # Calibration captures are bounded: one per block prompt would be ~30
+        # screenshots a session, and a handful is enough to measure the band.
+        self.__declare_block_captures = 0
+        self.__declare_block_capture_limit = 12
+        # Set the moment we decide to block, cleared once the blocks are
+        # submitted. While it is up, resolve() must keep its hands off the
+        # bottom-right button -- see __should_pause_for_declare_blocks.
+        self.__declaring_blocks_until = 0.0
+        # The ward confirm we are prepared to answer Yes to:
+        # {"target": instanceId, "source_grp": grpId, "mana": int, "ts": float}.
+        self.__ward_payment_ack = None
         self.__combat_recovery_key = None
         self.__combat_recovery_attempts = 0
         self.__declare_attackers_turn_key = ""
@@ -1517,6 +1541,12 @@ class Controller(ControllerSecondary):
     # this relies on MTGA's dialog always being centred at the same place in the
     # (scaled) arena region. Revisit if a No-button template is ever added.
     _ARE_YOU_SURE_NO_BASE = (1136, 629)
+    # The Yes plate, mirrored across the dialog's centre line (x=960) from the No
+    # plate above. Measured off runtime/debug/hand-select-20260730-173135's arena
+    # capture: Yes spans x 655-915, No spans x 1005-1265, both at y 600-658.
+    _ARE_YOU_SURE_YES_BASE = (784, 629)
+    # A ward acknowledgement older than this belongs to an earlier prompt.
+    _WARD_ACK_MAX_AGE_SEC = 25.0
 
     def _dismiss_are_you_sure_if_present(self, *, context: str) -> bool:
         """Answer MTGA's client-side "Are You Sure?" confirm, returning True if one
@@ -1528,11 +1558,16 @@ class Controller(ControllerSecondary):
         about to do something questionable, e.g. "Do you want to target Arahbo, the
         First Fang with Bulk Up?" -- doubling the OPPONENT's power.
 
-        We answer NO: it cancels the questionable action and lets the decision loop
-        pick again, so we can never confirm a bad play we did not understand. The
-        real cure is never raising it (see SELF_BUFF_GRPIDS); this is the net.
-        NOTE: a ward confirm ("pay the ward?") would also get a No here, which just
-        declines the removal -- revisit if that case ever shows up in a log.
+        The answer is No by default: it cancels the questionable action and lets
+        the decision loop pick again, so we can never confirm a bad play we did not
+        understand.
+
+        The one Yes case is a ward we already decided to pay for. That decision is
+        made in __note_ward_payment_ack, where the target and the spare mana are
+        both known -- the dialog itself says nothing this method could use, and
+        deciding here would mean reading the card off the screen. No ack, or a
+        stale one, still means No. Paying is then MTGA's problem: it raises a
+        PayCostsReq, which __handle_pay_costs_req already auto-pays.
         """
         tpl = os.path.join(self._buttons_dir(), "are_you_sure.png")
         if not os.path.exists(tpl):
@@ -1543,6 +1578,20 @@ class Controller(ControllerSecondary):
             confidence=0.80, timeout=0.6,
         ) is None:
             return False
+
+        ack = self.__consume_ward_payment_ack()
+        if ack is not None:
+            target, src = self._map_abs_point_to_arena(
+                self._ARE_YOU_SURE_YES_BASE, label="ARE_YOU_SURE_YES"
+            )
+            bot_logger.log_info(
+                f"{context}: 'Are You Sure?' dialog detected; paying ward {{{ack['mana']}}} "
+                f"on target {ack['target']} -- answering Yes at {target} ({src})."
+            )
+            self._click_abs(int(target[0]), int(target[1]), "ARE_YOU_SURE_YES")
+            time.sleep(0.6)
+            return True
+
         target, src = self._map_abs_point_to_arena(
             self._ARE_YOU_SURE_NO_BASE, label="ARE_YOU_SURE_NO"
         )
@@ -1550,8 +1599,59 @@ class Controller(ControllerSecondary):
             f"{context}: 'Are You Sure?' dialog detected; answering No at {target} ({src})."
         )
         self._click_abs(int(target[0]), int(target[1]), "ARE_YOU_SURE_NO")
+        # Whatever we just backed out of must not be re-picked identically, or the
+        # decision loop re-derives it from the unchanged board and we are back in
+        # front of this same dialog. Observed as a 4-turn Mortify loop on
+        # 2026-07-30 17:31-17:37.
+        self.__note_declined_pending_target(context)
         time.sleep(0.6)
         return True
+
+    def __consume_ward_payment_ack(self) -> dict | None:
+        """The ward we agreed to pay, if it is still the one on screen. One-shot.
+
+        The dialog looks identical whatever raised it, so a Yes is only safe when
+        this acknowledgement provably belongs to the prompt in front of us. A
+        false Yes confirms a play the bot did not understand (the same dialog
+        guards "target the OPPONENT's creature with this pump spell"); a false No
+        just costs one removal spell. Both checks below therefore fail to No.
+        """
+        ack = self.__ward_payment_ack
+        self.__ward_payment_ack = None
+        if not ack:
+            return None
+        if time.time() - ack.get("ts", 0.0) > self._WARD_ACK_MAX_AGE_SEC:
+            bot_logger.log_info(
+                f"WARD: ignoring stale payment ack for target {ack.get('target')}."
+            )
+            return None
+        pending_target = (self.__pending_target_select or {}).get("last_target")
+        if pending_target != ack.get("target"):
+            # The targeting this ack was made for is over (or moved on), so this
+            # dialog is about something else.
+            bot_logger.log_info(
+                f"WARD: payment ack was for target {ack.get('target')} but the "
+                f"pending target is {pending_target}; answering No instead."
+            )
+            return None
+        return ack
+
+    def __note_declined_pending_target(self, context: str) -> None:
+        """Blacklist the (spell, target) pair we just cancelled out of."""
+        try:
+            pending = self.__pending_target_select or {}
+            source_id = pending.get("source_id")
+            target_id = pending.get("last_target")
+            if target_id is None:
+                return
+            source_grp = self.__grp_id_for_instance(source_id)
+            RemovalLogic.note_declined_target(source_grp, target_id)
+            bot_logger.log_info(
+                f"{context}: declined target {target_id} for grp={source_grp}; "
+                f"it will not be re-picked this match."
+            )
+        except Exception as e:
+            bot_logger.log_error(f"Failed to record declined target: {e}")
 
     def _ensure_options_overlay_closed(self, *, context: str, max_attempts: int = 2) -> bool:
         if focus_mtga_window():
@@ -1688,7 +1788,11 @@ class Controller(ControllerSecondary):
         self,
         *,
         force_reacquire: bool = False,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        """Hand-row scan endpoints in screen space, or (None, None) if the arena
+        could not be located. Callers must abort on None: unmapped points are raw
+        desktop coordinates, so the scan would sweep the mouse across the desktop
+        outside the game, hover nothing, and fail three times over."""
         p1, s1 = self._map_abs_point_to_arena(
             self.hand_scan_p1,
             label="HAND_SCAN_P1",
@@ -1712,6 +1816,11 @@ class Controller(ControllerSecondary):
                 s2,
             )
         )
+        if "absolute_no_arena" in (s1, s2):
+            bot_logger.log_error(
+                "HAND_SCAN unavailable: arena_region could not be resolved; refusing to scan the desktop."
+            )
+            return None, None
         return p1, p2
 
     def _get_battlefield_scan_points_mapped(
@@ -4829,15 +4938,46 @@ class Controller(ControllerSecondary):
                 except Exception:
                     pass
 
-    def cast(self, card_id: int) -> None:
+    # How long an instance id stays suppressed after its hand scan gave up. Long
+    # enough that a re-driven decision cannot immediately pay for the sweep
+    # again, short enough that a card genuinely in hand -- just missed while the
+    # window was busy -- gets another honest try within the same turn.
+    __unreachable_cast_ttl_sec = 20.0
+
+    def _is_cast_suppressed(self, card_id: int) -> bool:
+        since = self.__unreachable_cast_ids.get(card_id)
+        if since is None:
+            return False
+        if (time.time() - since) >= self.__unreachable_cast_ttl_sec:
+            del self.__unreachable_cast_ids[card_id]
+            return False
+        return True
+
+    def clear_cast_suppression(self, card_id: int) -> None:
+        """The card was hovered after all -- it is in hand, so let it be cast."""
+        self.__unreachable_cast_ids.pop(card_id, None)
+
+    def cast(self, card_id: int) -> bool:
+        """True if the card was actually clicked. False means the click never
+        happened, and the caller must not leave the bot idling on it."""
+        if self._is_cast_suppressed(card_id):
+            # Re-sweeping costs ~6.6s per attempt against the rope for a card the
+            # hand demonstrably does not hold. Report the failure straight away so
+            # the decision loop passes priority instead of burning the turn.
+            bot_logger.log_error(
+                f"CAST_SUPPRESSED: card {card_id} was already proven unreachable; "
+                "not sweeping the hand again."
+            )
+            return False
         # MTGA sometimes emits a card's hover objectId a beat after our scan
         # passes it ("No hover update before bounds"), so a single pass can miss
         # a card that is really in hand. Retry a couple of times after a pause.
         for attempt in range(3):
             if self._stop_requested or self._suppress_selections:
-                return
+                return False
             if self._cast_once(card_id):
-                return
+                self.clear_cast_suppression(card_id)
+                return True
             if attempt < 2:
                 bot_logger.log_info(
                     f"CAST_RETRY: card {card_id} not hovered on attempt {attempt}; rescanning after pause."
@@ -4853,17 +4993,19 @@ class Controller(ControllerSecondary):
                 self._dismiss_are_you_sure_if_present(context=f"CAST_CARD id={card_id}")
                 time.sleep(0.8)
         if self._stop_requested or self._suppress_selections:
-            return
+            return False
         # All retries failed. Do NOT return silently: nothing we did changed the
         # game, so no fresh GameStateMessage arrives to re-trigger a decision and
         # the bot just idles until the rope (observed: 36s frozen while holding
         # Valorous Stance at 3 life). Surface it and let the decision loop have
         # another go from the current state.
+        self.__unreachable_cast_ids[card_id] = time.time()
         bot_logger.log_error(
             f"CAST_FAILED: card {card_id} could not be hovered after 3 attempts; "
             "re-driving the decision instead of idling."
         )
         self.__schedule_group_resume(1.0)
+        return False
 
     def _cast_once(self, card_id: int) -> bool:
         bot_logger.set_hover_logging(True)
@@ -4882,6 +5024,11 @@ class Controller(ControllerSecondary):
             # comment in cast() for why running that scan up front on every
             # attempt was too expensive to do speculatively.
             hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
+            if hand_p1 is None or hand_p2 is None:
+                bot_logger.log_error(
+                    f"CAST aborted: arena_region unavailable, refusing to scan the desktop for card {card_id}."
+                )
+                return False
             # Clear any stale hover events from previous scans
             self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
 
@@ -4958,6 +5105,10 @@ class Controller(ControllerSecondary):
                     if parsed is None:
                         continue
                     current_hovered_id = parsed
+                    # Seeing it proves it is in hand and reachable, so an earlier
+                    # give-up on this id was wrong -- do not hold it against a
+                    # card the mouse just passed over.
+                    self.clear_cast_suppression(current_hovered_id)
                     bot_logger.log_hover(current_hovered_id)
                     print(str(current_hovered_id) + '|' + str(card_id))
                 else:
@@ -5455,6 +5606,11 @@ class Controller(ControllerSecondary):
         bot_logger.set_hover_logging(True)
         try:
             hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
+            if hand_p1 is None or hand_p2 is None:
+                bot_logger.log_error(
+                    f"HAND_SELECT aborted: arena_region unavailable, refusing to scan the desktop for card {card_id}."
+                )
+                return False
             # Clear any stale hover events from previous scans
             self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
 
@@ -5552,6 +5708,11 @@ class Controller(ControllerSecondary):
         bot_logger.set_hover_logging(True)
         try:
             hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
+            if hand_p1 is None or hand_p2 is None:
+                bot_logger.log_error(
+                    f"HAND_SELECT_OFFSET aborted: arena_region unavailable, refusing to scan the desktop for card {card_id}."
+                )
+                return False
             p1 = (hand_p1[0], hand_p1[1] + y_offset)
             p2 = (hand_p2[0], hand_p2[1] + y_offset)
             if self._arena_region is not None:
@@ -5655,6 +5816,17 @@ class Controller(ControllerSecondary):
             )
         )
         return p1, p2
+
+    def select_attacking_creature(self, card_id: int, clicks: int = 1) -> bool:
+        """Select an attacking creature during Step_DeclareBlock.
+
+        This is just the opponent's row, and that is the finding rather than an
+        oversight: the attackers were expected to slide out of that region into
+        the middle of the board, and the declare-block captures show they do not
+        (see the note on the scan regions in __init__). Scanning the opponent
+        row is therefore both correct and cheaper than a region of our own.
+        """
+        return self.select_opponent_battlefield_permanent(card_id, clicks=clicks)
 
     def select_opponent_battlefield_permanent(self, card_id: int, clicks: int = 1) -> bool:
         """Select an opponent's permanent by hover-scanning the upper arena band
@@ -5763,6 +5935,11 @@ class Controller(ControllerSecondary):
     def resolve(self) -> None:
         if self.__should_pause_for_assign_damage():
             bot_logger.log_info("RESOLVE skipped: assign damage handler is active.")
+            return
+        if self.__should_pause_for_declare_blocks():
+            bot_logger.log_info(
+                "RESOLVE skipped: declaring blocks; this click would submit 'No Blocks'."
+            )
             return
         turn_info = self.updated_game_state.get_turn_info() or {}
         my_seat = self.__system_seat_id or turn_info.get('decisionPlayer') or 1
@@ -6077,6 +6254,33 @@ class Controller(ControllerSecondary):
 
     def __should_pause_for_assign_damage(self) -> bool:
         return bool(self.__assign_damage_in_progress and self._is_assign_damage_step_active())
+
+    def __should_pause_for_declare_blocks(self) -> bool:
+        """True while __execute_blocks is clicking out a block assignment.
+
+        resolve() clicks the bottom-right button, which during Step_DeclareBlock
+        reads "No Blocks" -- so the decision loop firing mid-assignment submits an
+        empty block step and combat damage resolves before we ever clicked a
+        blocker. That is not a theory: on 2026-07-30 every lethal-turn block but
+        one died this way (17:07:33.959 RESOLVE -> 17:07:34.301 Step_CombatDamage,
+        life 4 -> -1), and the "blocker not found" error that followed was the
+        scan hitting a board where combat was already over.
+
+        Deadline-bounded rather than a plain flag: if the executor thread dies,
+        the pause has to expire on its own or resolve() is muted for the rest of
+        the match, which would stall far worse than a missed block.
+        """
+        return time.time() < self.__declaring_blocks_until
+
+    def __begin_declare_blocks_pause(self) -> None:
+        """Mute resolve() for as long as a block assignment can legitimately take."""
+        # Timer start delay + the executor's own budget + the submit clicks.
+        self.__declaring_blocks_until = (
+            time.time() + 0.8 + self.__combat_blocks_budget_sec + 3.0
+        )
+
+    def __end_declare_blocks_pause(self) -> None:
+        self.__declaring_blocks_until = 0.0
 
     def __clear_assign_damage_state(self, reason: str) -> None:
         if self.__assign_damage_execution_thread is not None:
@@ -6500,6 +6704,7 @@ class Controller(ControllerSecondary):
         self._suppress_selections = False
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
+        self.__unreachable_cast_ids = {}
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
@@ -6540,6 +6745,7 @@ class Controller(ControllerSecondary):
         self._suppress_selections = False
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
+        self.__unreachable_cast_ids = {}
         self.__pending_target_select = None
         self.__last_target_select_source_id = None
         self.__last_target_select_ts = 0.0
@@ -6707,6 +6913,11 @@ class Controller(ControllerSecondary):
             self.__select_n_token_counter += 1
             self.__pending_target_select = None
             self.__my_timer_state = {}
+            # instanceIds are per-game, so a decline recorded in this match would
+            # blacklist an unrelated creature in the next one.
+            RemovalLogic.reset_declined_targets()
+            self.__ward_payment_ack = None
+            self.__end_declare_blocks_pause()
             remaining = self.get_account_switch_remaining_sec()
             if self._account_switch_interval > 0:
                 bot_logger.log_info(f"Account switch ETA: {remaining}s remaining.")
@@ -10383,6 +10594,85 @@ class Controller(ControllerSecondary):
                 best_id = int(cid)
         return best_id
 
+    def __available_mana_for_ward(self) -> int | None:
+        """Mana we could still produce right now, for pricing a ward.
+
+        By the time a SelectTargetsReq arrives the spell itself is already paid
+        for, so every mana source MTGA still offers is spare change available for
+        the ward. `ActionType_Activate_Mana` is the reading to trust here: it is
+        the game's own list of what can still be tapped, so it accounts for lands
+        MTGA auto-tapped for the cast, mana creatures, and summoning sickness --
+        none of which counting untapped lands off the board would get right.
+
+        Returns None when the actions list is unavailable, which callers read as
+        "budget unknown" rather than "no mana".
+        """
+        if self.__system_seat_id is None:
+            return None
+        try:
+            actions = self.updated_game_state.get_actions() or []
+        except Exception:
+            return None
+        if not actions:
+            return None
+        count = 0
+        for wrapper in actions:
+            if not isinstance(wrapper, dict):
+                continue
+            if wrapper.get("seatId") != self.__system_seat_id:
+                continue
+            action = wrapper.get("action") or {}
+            if action.get("actionType") == "ActionType_Activate_Mana":
+                count += 1
+        return count
+
+    def __note_ward_payment_ack(self, source_id, target_id) -> None:
+        """Record whether we are willing to pay `target_id`'s ward, if it has one.
+
+        This is what the "Are You Sure? This target has Ward" confirm reads to
+        decide Yes or No. The confirm itself carries no card data -- it is a
+        client-side dialog with no GRE message -- so the answer has to be decided
+        here, where the target and the mana are both known.
+        """
+        self.__ward_payment_ack = None
+        try:
+            game_objects = self.updated_game_state.get_game_objects() or []
+            target = next(
+                (o for o in game_objects
+                 if isinstance(o, dict) and o.get("instanceId") == target_id),
+                None,
+            )
+            if target is None:
+                return
+            cost = RemovalLogic.creature_ward_cost(target)
+            if cost is None:
+                return
+            budget = self.__available_mana_for_ward()
+            mana = cost.get("mana")
+            affordable = (
+                mana is not None and budget is not None and int(mana) <= int(budget)
+            )
+            source_grp = self.__grp_id_for_instance(source_id)
+            bot_logger.log_info(
+                f"WARD: target {target_id} has ward (mana={mana}, text={cost.get('text')!r}); "
+                f"spare mana={budget} -> {'pay it' if affordable else 'decline'}."
+            )
+            if affordable:
+                self.__ward_payment_ack = {
+                    "target": target_id,
+                    "source_grp": source_grp,
+                    "mana": int(mana),
+                    "ts": time.time(),
+                }
+            else:
+                # Nothing here can pay it, so the confirm will be answered No and
+                # the spell fizzles back to hand. Remember the pair now, or the
+                # next decision re-derives the same target from the same board --
+                # the loop that burnt four turns on 2026-07-30.
+                RemovalLogic.note_declined_target(source_grp, target_id)
+        except Exception as e:
+            bot_logger.log_error(f"WARD: failed to price ward for {target_id}: {e}")
+
     def __resolve_removal_target(self, source_id):
         """Decide whether a spell/ability on the stack should target an enemy
         creature. Returns a creature instanceId, RemovalLogic.FACE_TARGET (-1)
@@ -10410,6 +10700,7 @@ class Controller(ControllerSecondary):
             opp_life = RemovalLogic.opponent_life_from_players(
                 self.updated_game_state.get_players(), self.__system_seat_id
             )
+            ward_budget = self.__available_mana_for_ward()
             target = RemovalLogic.choose_removal_target(
                 profile,
                 game_objects,
@@ -10417,10 +10708,12 @@ class Controller(ControllerSecondary):
                 opponent_life=opp_life,
                 battlefield_zone_ids=(bf_ids or None),
                 live_instance_ids=live_ids,
+                ward_budget=ward_budget,
+                source_grp_id=grp_id,
             )
             bot_logger.log_info(
                 f"REMOVAL resolve: source={source_id} grp={grp_id} profile={profile} "
-                f"opp_life={opp_life} -> target={target}"
+                f"opp_life={opp_life} ward_budget={ward_budget} -> target={target}"
             )
             return target
         except Exception as e:
@@ -10501,8 +10794,16 @@ class Controller(ControllerSecondary):
         self.__last_target_select_source_id = source_id if source_id is not None else -1
         self.__last_target_select_ts = now
         self.__update_pending_target_select(source_id)
+        # Which creature this prompt is aimed at, so a cancelled confirm knows what
+        # to blacklist.
+        if self.__pending_target_select is not None:
+            self.__pending_target_select["last_target"] = creature_id
         selection_token = (self.__pending_target_select or {}).get("token")
         side = "friendly" if friendly else "enemy"
+        # Price the target's ward now, while the board and the mana are both
+        # readable; the confirm dialog that may follow carries neither.
+        if not friendly:
+            self.__note_ward_payment_ack(source_id, creature_id)
         bot_logger.log_info(f"{reason}: targeting {side} creature instanceId={creature_id}")
         self.__record_decision(
             "select_target", "target_creature",
@@ -10521,6 +10822,16 @@ class Controller(ControllerSecondary):
             if self.__pending_target_ready_to_submit():
                 self.__last_submit_targets_ts = time.time()
                 self.submit_selection(reason="creature_target_submit")
+                # Ward and other client-side confirms are raised by the submit and
+                # emit nothing, so nothing else will ever tell us they are there.
+                # Until this hook existed the dialog just sat on screen until some
+                # later cast attempt tripped over it ~10s down the rope.
+                threading.Timer(
+                    0.7,
+                    lambda: self._dismiss_are_you_sure_if_present(
+                        context=f"TARGET_SUBMIT id={creature_id}"
+                    ),
+                ).start()
 
         def _do_click(attempt: int = 0) -> None:
             if not _valid():
@@ -11500,26 +11811,327 @@ class Controller(ControllerSecondary):
         except Exception as e:
             bot_logger.log_error(f"Failed to handle target selection from game state: {e}")
 
+    # --- Combat, phase 1: shadow mode ---------------------------------------
+    # CombatLogic works out which creatures should attack and which attackers
+    # should be blocked, but nothing here touches the mouse yet: the bot still
+    # swings with everything and still declares no blocks. The decision is only
+    # written to bot.log and to the per-decision snapshots, so it can be checked
+    # against real matches before it is allowed to drive clicks. Disable with
+    # MTGA_COMBAT_SHADOW=0.
+    def __combat_shadow_enabled(self) -> bool:
+        value = str(os.environ.get("MTGA_COMBAT_SHADOW", "1")).strip().lower()
+        return value not in ("0", "false", "no", "off")
+
+    # --- Combat, phase 1b: actually declaring blocks -------------------------
+    # ON by default as of the 2026-07-29 trial: the decision itself was validated
+    # by replaying real logs (72% of block prompts produce a block, two otherwise
+    # lethal attacks survived) and the marked-damage fix removed the corrupt
+    # toughness readings that made ~15% of those assignments wrong. What has NOT
+    # been proven against the live client is that Escape cancels a half-finished
+    # assignment, which is the one path that could hang a turn -- so if a session
+    # shows stalls, this is the first suspect. Switch off with
+    # MTGA_COMBAT_BLOCKS=0.
+    #
+    # Attacking is NOT part of this phase: `all_attack()` stays. Replaying real
+    # logs showed selective attacking would decline to attack at all on ~31% of
+    # combats, which lengthens matches -- and matches that are lost already take
+    # longer than matches that are won, so the bot has nothing to gain there.
+    __combat_blocks_budget_sec = 12.0
+
+    def __combat_blocks_enabled(self) -> bool:
+        value = str(os.environ.get("MTGA_COMBAT_BLOCKS", "1")).strip().lower()
+        return value not in ("0", "false", "no", "off")
+
+    def __combat_debug_capture_enabled(self) -> bool:
+        value = str(os.environ.get("MTGA_COMBAT_BLOCK_CAPTURE", "1")).strip().lower()
+        return value not in ("0", "false", "no", "off")
+
+    def __combat_board_context(self) -> dict | None:
+        """Board inputs shared by both shadow decisions, or None if unavailable."""
+        if self.__system_seat_id is None:
+            return None
+        full_state = self.updated_game_state.get_full_state()
+        bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
+        players = self.updated_game_state.get_players()
+        return {
+            "game_objects": self.updated_game_state.get_game_objects() or [],
+            "my_seat": self.__system_seat_id,
+            # Same reason as the removal path: a merged gameObjects list keeps
+            # dead creatures at their old zoneId, so only the zone's own
+            # membership list proves a creature is still on the board.
+            "live_instance_ids": RemovalLogic.battlefield_instance_ids(full_state, bf_ids or None),
+            "my_life": CombatLogic.my_life_from_players(players, self.__system_seat_id),
+            "opp_life": RemovalLogic.opponent_life_from_players(players, self.__system_seat_id),
+        }
+
+    @staticmethod
+    def __combat_label(board: dict, instance_id: int) -> str:
+        """'313:Faerie 1/1' for logs. Local card data only -- never a network hit."""
+        creature = board.get(instance_id) or {}
+        name = ""
+        try:
+            info = CardInfo.get_card_info_local(creature.get("grpId")) or {}
+            name = str(info.get("name") or "")
+        except Exception:
+            name = ""
+        return "{}:{} {}/{}".format(
+            instance_id,
+            name or "?",
+            CombatLogic.power(creature),
+            CombatLogic.toughness(creature),
+        )
+
+    def __shadow_attack_decision(self, legal_attackers: list[dict]) -> dict | None:
+        """Log which attackers CombatLogic would declare. Never raises."""
+        if not self.__combat_shadow_enabled():
+            return None
+        try:
+            context = self.__combat_board_context()
+            if context is None:
+                return None
+            decision = CombatLogic.choose_attackers(
+                legal_attackers,
+                context["game_objects"],
+                context["my_seat"],
+                context["my_life"],
+                context["opp_life"],
+                live_instance_ids=context["live_instance_ids"],
+            )
+            board = CombatLogic.index_by_instance(
+                context["game_objects"], context["live_instance_ids"]
+            )
+            bot_logger.log_info(
+                "COMBAT_SHADOW attackers: would_attack=[{}] hold_back=[{}] "
+                "reason={!r} my_life={} opp_life={} counter_attack={} life_after={} "
+                "(NOT executed: still all_attack)".format(
+                    ", ".join(self.__combat_label(board, i) for i in decision["attackers"]),
+                    ", ".join(self.__combat_label(board, i) for i in decision["hold_back"]),
+                    decision["reason"],
+                    context["my_life"],
+                    context["opp_life"],
+                    decision["projected_counter_attack"],
+                    decision["projected_life_after"],
+                )
+            )
+            return decision
+        except Exception as e:
+            bot_logger.log_error(f"COMBAT_SHADOW attackers failed: {e}")
+            return None
+
+    def __shadow_block_decision(
+        self,
+        legal_blockers: list[dict],
+        attacking_ids: set[int] | None = None,
+    ) -> dict | None:
+        """Log which blocks CombatLogic would declare. Never raises."""
+        if not self.__combat_shadow_enabled():
+            return None
+        try:
+            context = self.__combat_board_context()
+            if context is None:
+                return None
+            decision = CombatLogic.choose_blocks(
+                legal_blockers,
+                context["game_objects"],
+                context["my_seat"],
+                context["my_life"],
+                live_instance_ids=context["live_instance_ids"],
+                attacking_instance_ids=attacking_ids,
+            )
+            board = CombatLogic.index_by_instance(
+                context["game_objects"], context["live_instance_ids"]
+            )
+            pairs = ", ".join(
+                "{} blocks {} [{}]".format(
+                    self.__combat_label(board, item["blocker"]),
+                    self.__combat_label(board, item["attacker"]),
+                    item["outcome"],
+                )
+                for item in decision["detail"]
+            )
+            bot_logger.log_info(
+                "COMBAT_SHADOW blocks: would_block=[{}] incoming={} unblocked={} "
+                "my_life={} lethal={} reason={!r} ({})".format(
+                    pairs,
+                    decision["incoming_damage"],
+                    decision["unblocked_damage"],
+                    decision["my_life"],
+                    decision["lethal_without_blocks"],
+                    decision["reason"],
+                    "will be executed" if self.__combat_blocks_enabled()
+                    else "NOT executed: MTGA_COMBAT_BLOCKS is off",
+                )
+            )
+            return decision
+        except Exception as e:
+            bot_logger.log_error(f"COMBAT_SHADOW blocks failed: {e}")
+            return None
+
+    def _write_declare_block_debug_bundle(self, *, shadow: dict | None, executing: bool) -> None:
+        """Capture the board at Step_DeclareBlock so the combat band can be measured.
+
+        This is the calibration input for `combat_band_scan_p1/p2`: the arena
+        capture shows where MTGA actually parked the attackers, and the JSON says
+        which instanceIds we were looking for. Runs whether or not blocks are
+        being executed, so a normal (blocks-off) farming session still produces
+        everything needed to turn blocks on. Never raises into the handler.
+        """
+        if not self.__combat_debug_capture_enabled():
+            return
+        if self.__declare_block_captures >= self.__declare_block_capture_limit:
+            return
+        try:
+            self.__declare_block_captures += 1
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            debug_dir = Path(bot_logger.ensure_debug_dir(f"declare-block-{stamp}"))
+            payload = {
+                "executing_blocks": executing,
+                "blocks_enabled": self.__combat_blocks_enabled(),
+                "combat_shadow": shadow,
+                "turn_info": self.updated_game_state.get_turn_info() or {},
+                "arena_region": list(self._arena_region) if self._arena_region is not None else None,
+                "raw_regions": {
+                    "battlefield": [list(self.battlefield_scan_p1), list(self.battlefield_scan_p2)],
+                    "opponent_battlefield": [
+                        list(self.opponent_battlefield_scan_p1),
+                        list(self.opponent_battlefield_scan_p2),
+                    ],
+                },
+            }
+            with (debug_dir / "declare_block_state.json").open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+            if self._vision is not None:
+                full = self._vision.capture(None)
+                self._vision.save_image(full, str(debug_dir / "full_screen.jpg"))
+                if self._arena_region is not None:
+                    arena_img = self._vision.capture(self._arena_region)
+                    self._vision.save_image(arena_img, str(debug_dir / "arena_region.png"))
+        except Exception as exc:
+            bot_logger.log_error(f"Failed to write declare-block debug bundle: {exc}")
+
+    def __execute_blocks(self, assignments: list[tuple[int, int]]) -> None:
+        """Declare the blocks CombatLogic picked, then submit.
+
+        Blocking in MTGA is click-the-blocker-then-click-the-attacker. The
+        blocker is still on our own row, but the attacker has moved into the
+        combat band, which is why the two selections use different regions.
+
+        The guiding rule is the same one the no-blocks path follows: never
+        freeze. Any failed selection abandons that one block and moves on, and
+        the submit click always happens -- a blocker that was never assigned
+        simply does not block, which is exactly today's behaviour.
+        """
+        declared = 0
+        try:
+            if self._suppress_selections or self._stop_requested:
+                return
+            # Re-arm from inside the executor too: the pause was started when the
+            # decision was taken, and the 0.8s hand-off plus a slow first scan can
+            # eat into it before the first click ever lands.
+            self.__begin_declare_blocks_pause()
+            deadline = time.time() + self.__combat_blocks_budget_sec
+            for blocker_id, attacker_id in assignments:
+                if self._suppress_selections or self._stop_requested:
+                    break
+                if time.time() > deadline:
+                    bot_logger.log_error(
+                        "DECLARE_BLOCKS budget spent after {}/{} block(s); submitting what is assigned.".format(
+                            declared, len(assignments)
+                        )
+                    )
+                    break
+                if not self.select_battlefield_permanent(blocker_id):
+                    bot_logger.log_error(
+                        f"DECLARE_BLOCKS: blocker {blocker_id} not found on our row; skipping this block."
+                    )
+                    continue
+                if not self.select_attacking_creature(attacker_id):
+                    bot_logger.log_error(
+                        f"DECLARE_BLOCKS: attacker {attacker_id} not found; "
+                        f"blocker {blocker_id} left unassigned."
+                    )
+                    # The blocker click armed a half-finished assignment. Drop it,
+                    # or it swallows the submit click and the turn stalls.
+                    self.input.tap_escape()
+                    time.sleep(0.2)
+                    continue
+                declared += 1
+                bot_logger.log_info(f"DECLARE_BLOCKS: {blocker_id} blocks {attacker_id}")
+        except Exception as e:
+            bot_logger.log_error(f"DECLARE_BLOCKS failed: {e}")
+        finally:
+            # Submit first, then let resolve() back in: the submit click and the
+            # RESOLVE click are the same button, so lifting the pause any earlier
+            # just reopens the race we came here to close.
+            self.__click_combat_submit_button(
+                "SUBMIT_BLOCKS" if declared else "NO_BLOCKS"
+            )
+            self.__end_declare_blocks_pause()
+
+    def __click_combat_submit_button(self, label: str) -> None:
+        """Press the bottom-right combat button ("No Blocks" / "Submit Blocks")."""
+        try:
+            if self._suppress_selections or self._stop_requested:
+                return
+            target, source = self._map_abs_point_to_arena(
+                self.main_br_button_coordinates,
+                label=label,
+                force_reacquire=True,
+                apply_correction=False,
+            )
+            if source == "absolute_no_arena":
+                bot_logger.log_error(f"{label} aborted: arena_region unavailable.")
+                return
+            bot_logger.log_click(target[0], target[1], label)
+            self.input.move_abs(target[0], target[1])
+            self.input.left_click(1)
+            time.sleep(0.6)
+            # Second click confirms through any first-strike/submit sub-step.
+            self.input.left_click(1)
+        except Exception as e:
+            bot_logger.log_error(f"{label} click failed: {e}")
+
     def __handle_declare_blockers_req(self, line: str) -> None:
-        """Defending step. No blocking logic yet -> declare NO blocks by clicking
-        the bottom-right combat button (which reads "No Blocks" here). Guiding
-        rule: never freeze; better to lose than to stall."""
+        """Defending step.
+
+        With MTGA_COMBAT_BLOCKS off (the default) this declares NO blocks by
+        clicking the bottom-right combat button, exactly as before. With it on,
+        CombatLogic's assignments are clicked out first and the same button then
+        submits them. Guiding rule either way: never freeze; better to lose than
+        to stall."""
         try:
             if self._suppress_selections or self._stop_requested:
                 return
             # Only act if the block decision is ours.
             start = line.find("{")
+            legal_blockers: list[dict] = []
+            attacking_ids: set[int] = set()
             if start != -1:
                 try:
                     payload = json.loads(line[start:])
                     messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
                     ours = False
                     for message in messages:
+                        if message.get("type") == "GREMessageType_GameStateMessage":
+                            # The GRE bundles the diffs that declared this combat
+                            # into the same message as the request. Reading the
+                            # attackers from here is the only fresh source we get:
+                            # `attackState` on the merged board is never cleared,
+                            # so there it means "attacked at some point", not now.
+                            for obj in (message.get("gameStateMessage") or {}).get("gameObjects", []) or []:
+                                if isinstance(obj, dict) and obj.get("attackState") and obj.get("instanceId") is not None:
+                                    attacking_ids.add(obj["instanceId"])
+                            continue
                         if message.get("type") != "GREMessageType_DeclareBlockersReq":
                             continue
                         seat_ids = message.get("systemSeatIds") or []
                         if self.__system_seat_id is None or self.__system_seat_id in seat_ids:
                             ours = True
+                            # MTGA hands us the full legal blocker->attacker graph
+                            # here, so no blocking restriction (flying, menace,
+                            # "can't block") ever has to be worked out by us.
+                            req = message.get("declareBlockersReq", {}) or {}
+                            legal_blockers.extend(req.get("blockers", []) or [])
                     if messages and not ours:
                         return
                 except Exception:
@@ -11528,32 +12140,46 @@ class Controller(ControllerSecondary):
             if now - self.__last_declare_blockers_ts < 2.0:
                 return
             self.__last_declare_blockers_ts = now
-            bot_logger.log_info("DeclareBlockersReq: declaring NO blocks (no blocking logic yet).")
-            self.__record_decision("blockers", "no_blocks", None)
+            shadow = self.__shadow_block_decision(legal_blockers, attacking_ids)
 
-            def _click_no_blocks() -> None:
+            assignments: list[tuple[int, int]] = []
+            if shadow and self.__combat_blocks_enabled():
                 try:
-                    if self._suppress_selections or self._stop_requested:
-                        return
-                    target, source = self._map_abs_point_to_arena(
-                        self.main_br_button_coordinates,
-                        label="NO_BLOCKS",
-                        force_reacquire=True,
-                        apply_correction=False,
-                    )
-                    if source == "absolute_no_arena":
-                        bot_logger.log_error("NO_BLOCKS aborted: arena_region unavailable.")
-                        return
-                    bot_logger.log_click(target[0], target[1], "NO_BLOCKS")
-                    self.input.move_abs(target[0], target[1])
-                    self.input.left_click(1)
-                    time.sleep(0.6)
-                    # Second click confirms through any first-strike/submit sub-step.
-                    self.input.left_click(1)
-                except Exception as e:
-                    bot_logger.log_error(f"NO_BLOCKS click failed: {e}")
+                    assignments = [
+                        (int(blocker), int(attacker))
+                        for blocker, attacker in (shadow.get("assignments") or [])
+                    ]
+                except (TypeError, ValueError) as e:
+                    bot_logger.log_error(f"DECLARE_BLOCKS: unusable assignments ({e}); falling back to no blocks.")
+                    assignments = []
 
-            threading.Timer(0.8, _click_no_blocks).start()
+            self._write_declare_block_debug_bundle(shadow=shadow, executing=bool(assignments))
+
+            if assignments:
+                bot_logger.log_info(
+                    "DeclareBlockersReq: declaring {} block(s): {}".format(
+                        len(assignments),
+                        ", ".join(f"{b}->{a}" for b, a in assignments),
+                    )
+                )
+                self.__record_decision(
+                    "blockers", "declare_blocks",
+                    {"assignments": [[b, a] for b, a in assignments]},
+                    extra={"combat_shadow": shadow},
+                )
+                # Synchronously, before the hand-off: the decision loop can fire
+                # inside the 0.8s gap, and a flag set inside the Timer would be
+                # set too late to stop it.
+                self.__begin_declare_blocks_pause()
+                threading.Timer(0.8, self.__execute_blocks, args=(assignments,)).start()
+                return
+
+            bot_logger.log_info("DeclareBlockersReq: declaring NO blocks.")
+            self.__record_decision(
+                "blockers", "no_blocks", None,
+                extra={"combat_shadow": shadow} if shadow else None,
+            )
+            threading.Timer(0.8, self.__click_combat_submit_button, args=("NO_BLOCKS",)).start()
         except Exception as e:
             bot_logger.log_error(f"Failed to handle DeclareBlockersReq: {e}")
 
@@ -11640,12 +12266,14 @@ class Controller(ControllerSecondary):
                 self.__preempt_stack_select_n_for_combat(
                     "DeclareAttackersReq: preempted stale stack SelectN prompt."
                 )
+                shadow = self.__shadow_attack_decision(attackers)
                 self.__record_decision(
                     "attackers", "declare_attackers_recovery",
                     {
                         "attacker_ids": list(self.__attack_target_attacker_ids),
                         "target_required": self.__attack_target_required,
                     },
+                    extra={"combat_shadow": shadow} if shadow else None,
                 )
                 # Give the normal decision path (settle timer -> AI.generate_move
                 # -> all_attack) a real chance to act first. A fixed 1.0s here
@@ -11886,9 +12514,40 @@ class Controller(ControllerSecondary):
             return False
 
     def __update_inst_id__grp_id_dict(self, object_dict_arr):
+        """Keep instanceId -> grpId current. The live game state is the authority
+        on what an id IS; this map only has to survive the gaps between messages.
+
+        This used to be insert-only, and MTGA recycles instanceIds: 477 was our
+        Mountain in one match and the opponent's Inspiration from Beyond (a
+        Sorcery) in the next. The frozen first sighting made the AI decide to
+        "play the Mountain", cast() then swept the hand for a card that was never
+        in it, and the decision was re-driven onto the same phantom until the
+        150s inactivity timer conceded the match. Three matches were lost that
+        way on 2026-08-02.
+
+        Absence still does not evict: a GameStateType_Diff carries only the
+        objects that changed, so an id missing from this batch must keep its last
+        known grpId. A sighting with no usable grpId (face-down/hidden objects
+        arrive as 0) is not evidence of a new identity either, so it is skipped
+        rather than allowed to blank a good value."""
         for object_dict in object_dict_arr:
-            if object_dict['instanceId'] not in self.__inst_id_grp_id_dict.keys():
-                self.__inst_id_grp_id_dict[object_dict['instanceId']] = object_dict['grpId']
+            if not isinstance(object_dict, dict):
+                continue
+            instance_id = object_dict.get('instanceId')
+            grp_id = object_dict.get('grpId')
+            if instance_id is None or not grp_id:
+                continue
+            previous = self.__inst_id_grp_id_dict.get(instance_id)
+            if previous == grp_id:
+                continue
+            if previous is not None:
+                bot_logger.log_info(
+                    f"INSTANCE_REMAP: instanceId={instance_id} grpId {previous} -> {grp_id}"
+                )
+                # The old identity is what the cast suppression below was keyed
+                # on. This id is a different card now, so it earns a clean slate.
+                self.__unreachable_cast_ids.pop(instance_id, None)
+            self.__inst_id_grp_id_dict[instance_id] = grp_id
 
     def __update_game_state(self, raw_dict: [str, str or int]):
         # Derive the local player's systemSeatId from incoming messages (if present)

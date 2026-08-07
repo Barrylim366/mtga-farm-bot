@@ -21,6 +21,32 @@ class Game:
     # STUCK_ACTION_RETRY_LIMIT below.
     _STUCK_MOVE_RETRY_LIMIT = 3
 
+    def _pass_priority_on_uncastable(
+        self, inst_id, turn_num, phase, step, decision_player
+    ) -> None:
+        """The cast's click never reached the game, so nothing about the state
+        will change and the AI will pick this same card again on the next tick.
+
+        STUCK_ACTION_RETRY_LIMIT cannot cover this: its counter is keyed on
+        turn/phase/step, so an advancing step rearms it and the loop restarts.
+        Left alone this burns the whole turn -- three matches on 2026-08-02 ran
+        the 150s inactivity timer out on a single phantom card. Passing priority
+        is always legal and always makes progress."""
+        self._debug(
+            f"CAST_UNAVAILABLE: card {inst_id} could not be cast; passing priority instead."
+        )
+        bot_logger.log_error(
+            f"CAST_UNAVAILABLE: move cast=[{inst_id}] could not be executed "
+            "(card not reachable in hand); passing priority to keep the turn moving."
+        )
+        # Record the pass, not the failed cast: leaving the cast's signature in
+        # place would let the breaker count a move that never ran.
+        self._last_move_signature = (
+            turn_num, phase, step, decision_player, 'resolve', (),
+        )
+        self._last_move_repeat_count = 1
+        self.controller.resolve()
+
     def __init__(self, controller: ControllerSecondary, ai: AIKernel, data_dir_prompt=None):
         self.ai = ai
         self.controller = controller
@@ -646,7 +672,10 @@ class Game:
                         self._debug(f"Cast {card_id_str}")
                 else:
                     self._debug(f"Cast {card_id_str}")
-                self.controller.cast(inst_id)
+                if self.controller.cast(inst_id) is False:
+                    self._pass_priority_on_uncastable(
+                        inst_id, turn_num, phase, step, decision_player
+                    )
             elif move_name == 'attack':
                 self._debug(f"Attacking with {move[move_name][0]}")
                 self.controller.attack(move[move_name][0])

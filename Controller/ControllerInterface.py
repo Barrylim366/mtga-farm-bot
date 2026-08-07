@@ -53,18 +53,20 @@ class ControllerKernel:
         """
         pass
 
-    def cast(self, card_id: int) -> None:
+    def cast(self, card_id: int) -> bool:
         """
-        Makes the blocker card block the attacker
+        Casts the card with the given id from the player's hand.
 
         Parameters:
             card_id (int): The id of a card in the player's hand
         Requires:
             The requirements to cast the card are met
         Ensures:
-            Specified card is cast
+            Returns True only if the card was actually clicked. False means no
+            click reached the game -- the caller must act on that rather than
+            wait for a game-state change that will never come.
         """
-        pass
+        return False
 
     def select_target(self, target_id: int) -> None:
         """
