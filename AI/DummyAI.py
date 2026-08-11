@@ -852,6 +852,16 @@ class DummyAI(AIKernel):
                             priority_removal = False
                             removal_profile = RemovalLogic.get_removal_profile(grp_id)
                             if removal_profile is not None:
+                                # Mana still free once this spell is paid for -- what
+                                # a ward would have to come out of. Without it the
+                                # bot happily aims removal at a warded creature it
+                                # cannot pay for, the client raises a confirm we then
+                                # decline, and the spell fizzles back to hand for the
+                                # decision loop to try again, forever.
+                                # Convoke creatures can pay for this spell, but not
+                                # for the ward triggered after it resolves onto the
+                                # stack. Price ward only from real mana sources.
+                                _ward_budget = max(0, total_mana - paid_cost)
                                 _rm_target = RemovalLogic.choose_removal_target(
                                     removal_profile,
                                     removal_game_objects,
@@ -859,6 +869,9 @@ class DummyAI(AIKernel):
                                     opponent_life=removal_opp_life,
                                     battlefield_zone_ids=removal_bf_ids,
                                     live_instance_ids=removal_live_ids,
+                                    ward_budget=_ward_budget,
+                                    ward_sources=list(sources),
+                                    source_grp_id=grp_id,
                                 )
                                 if _rm_target is None:
                                     # A non-permanent removal spell (instant/sorcery)
@@ -885,7 +898,7 @@ class DummyAI(AIKernel):
                                     )
                                     self._debug(
                                         f"Removal {card_name} target={_rm_target} (profile={removal_profile}, "
-                                        f"priority={priority_removal})."
+                                        f"priority={priority_removal}, ward_budget={_ward_budget})."
                                     )
                             # Pump-fight (e.g. Felling Blow): only cast it if we
                             # have a creature to buff AND an enemy it can then

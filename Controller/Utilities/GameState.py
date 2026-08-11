@@ -165,12 +165,48 @@ class GameState(GameStateSecondary):
 
         return [merged[item_key] for item_key in order if item_key in merged]
 
+    def __turn_number_advanced(self, updated_full_state: Dict) -> bool:
+        try:
+            new_turn = (updated_full_state.get("turnInfo") or {}).get("turnNumber")
+            old_turn = (self.game_dict.get("turnInfo") or {}).get("turnNumber")
+            if new_turn is None or old_turn is None:
+                return False
+            return int(new_turn) > int(old_turn)
+        except (TypeError, ValueError):
+            return False
+
+    def __clear_marked_damage(self) -> None:
+        """Drop `damage` from every merged game object.
+
+        Marked damage wears off in each turn's cleanup step, but the GRE never
+        says so: it sends `damage` when a creature is dealt some and then simply
+        stops sending the field once it is gone -- in a full match log the field
+        appears ~100 times and is *never* sent as 0, while the same objects
+        reappear in later diffs without it hundreds of times. Since a merge only
+        overwrites the keys it is handed, damage would otherwise stick for the
+        rest of the game and every `effective_toughness` reading would drift
+        further below the truth (removal targeting, fight logic and blocking all
+        read it). Same family as the stale zoneId / attackState problem.
+        """
+        game_objects = self.game_dict.get("gameObjects") or []
+        self.game_dict["gameObjects"] = [
+            {key: value for key, value in obj.items() if key != "damage"}
+            if isinstance(obj, dict) and "damage" in obj
+            else obj
+            for obj in game_objects
+        ]
+
     def update(self, updated_state: 'GameStateSecondary') -> None:
         updated_full_state = updated_state.get_full_state()
         if updated_full_state.get("type") == "GameStateType_Full":
             # A full snapshot starts a fresh baseline for the current match/game state.
             self.game_dict = dict(updated_full_state)
             return
+        # Before anything is merged, so that damage carried by *this* diff wins
+        # and so the clear still happens on a turn-change diff that mentions no
+        # game objects at all.
+        if self.__turn_number_advanced(updated_full_state):
+            self.__clear_marked_damage()
         previous_lists = {
             "zones": list(self.game_dict.get("zones", []) or []),
             "gameObjects": list(self.game_dict.get("gameObjects", []) or []),

@@ -1912,6 +1912,35 @@ class ConfigManager:
     def get_managed_accounts(self) -> list[dict]:
         return self._load_managed_accounts_from_dirs()
 
+    @staticmethod
+    def _account_name_aliases(accounts: list[dict]) -> dict[str, str]:
+        """{casefolded name or Arena name -> the account's credentials name}.
+
+        The play order is stored -- and resolved by the controller -- under the
+        credentials name, but Manage Accounts shows the Arena name, which for a
+        row saved before the two were merged is a different string. Accepting
+        both spellings is what keeps an order the user picked from the dialog's
+        dropdowns from being filtered out into an empty list."""
+        aliases = {}
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            name = str(acc.get("name", "")).strip()
+            if not name:
+                continue
+            screen = str(acc.get("screen_name", "")).strip()
+            if screen:
+                aliases.setdefault(screen.casefold(), name)
+        # Second pass so a credentials name always wins over another row's Arena
+        # name if the two happen to collide.
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            name = str(acc.get("name", "")).strip()
+            if name:
+                aliases[name.casefold()] = name
+        return aliases
+
     def save_managed_accounts(self, accounts: list[dict]) -> list[dict]:
         if not isinstance(accounts, list):
             return self.get_managed_accounts()
@@ -1921,6 +1950,21 @@ class ConfigManager:
         # Player.log exposes, so two accounts sharing one alias would resolve to
         # the same row and silently misattribute rotation + farmed gold.
         seen_aliases = set()
+        identities = []
+        for item in accounts[:10]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            alias = str(item.get("screen_name", "")).strip()
+            if name:
+                identities.append((name.casefold(), alias.casefold() if alias else ""))
+        for index, (name_key, alias_key) in enumerate(identities):
+            for other_index, (other_name, other_alias) in enumerate(identities):
+                if index != other_index and (
+                    (alias_key and alias_key == other_name)
+                    or (other_alias and name_key == other_alias)
+                ):
+                    raise ValueError("Account names and Arena screen names must be unique across accounts.")
         existing_accounts = self.get_managed_accounts()
         existing_by_name = {
             str(acc.get("name", "")).casefold(): str(acc.get("folder", "")).strip()
@@ -1985,7 +2029,12 @@ class ConfigManager:
 
         self.config["managed_accounts"] = []
         valid = {acc["name"].casefold() for acc in normalized}
-        order = [x for x in self.get_account_play_order() if x.casefold() in valid]
+        aliases = self._account_name_aliases(normalized)
+        order = []
+        for x in self.get_account_play_order():
+            canonical = aliases.get(str(x).strip().casefold())
+            if canonical and canonical.casefold() not in {o.casefold() for o in order}:
+                order.append(canonical)
         self.config["account_play_order"] = order
         # Drop a manual current-account pin whose account was renamed or deleted.
         # A stale pin is worse than none: _run_bot seeds it into the controller,
@@ -2036,20 +2085,20 @@ class ConfigManager:
     def set_account_play_order(self, order: list[str]) -> None:
         if not isinstance(order, list):
             return
-        valid_names = {acc["name"].casefold() for acc in self.get_managed_accounts() if acc.get("name")}
+        aliases = self._account_name_aliases(self.get_managed_accounts())
         cleaned = []
         seen = set()
         for item in order:
-            name = str(item).strip()
-            if not name:
+            # Store the credentials name even when the dialog handed us the Arena
+            # one: that is the identity the controller resolves the order against.
+            canonical = aliases.get(str(item).strip().casefold())
+            if not canonical:
                 continue
-            key = name.casefold()
+            key = canonical.casefold()
             if key in seen:
                 continue
-            if key not in valid_names:
-                continue
             seen.add(key)
-            cleaned.append(name)
+            cleaned.append(canonical)
         self.config["account_play_order"] = cleaned
         self._save_config()
 
@@ -7010,16 +7059,38 @@ class SwitchAccountWindow(tk.Toplevel):
 
     def _refresh_order_choices(self):
         names = []
+        # Both spellings a saved order can carry map to the label the row shows:
+        # its own display (Arena) name and the name it still has on disk. Without
+        # the second one, an order saved before the rows were renamed matches
+        # nothing here and every slot silently blanks itself -- and the next Save
+        # Order then writes that emptiness back to the config.
+        display_by_key = {}
         for row in self._accounts_data:
             name = (row.get("name", "") or "").strip()
-            if name and name not in names:
+            if not name:
+                continue
+            if name not in names:
                 names.append(name)
+            stored = (row.get("stored_name", "") or "").strip()
+            if stored:
+                display_by_key.setdefault(stored.casefold(), name)
+        for name in names:
+            display_by_key[name.casefold()] = name
         choices = [""] + names
         for combo in self._order_combos:
             combo.configure(values=choices)
+        used = set()
         for var in self._order_vars:
-            if var.get() and var.get() not in names:
+            current = (var.get() or "").strip()
+            if not current:
+                continue
+            display = display_by_key.get(current.casefold())
+            if not display or display.casefold() in used:
                 var.set("")
+                continue
+            used.add(display.casefold())
+            if display != current:
+                var.set(display)
 
     def _save_accounts(self):
         if not self._apply_details_to_selected(validate=False, show_error=False):
@@ -7073,11 +7144,12 @@ class SwitchAccountWindow(tk.Toplevel):
         order = [var.get().strip() for var in getattr(self, "_order_vars", [])]
         order = [item for item in order if item]
         self._config_manager.set_account_play_order(order)
+        canonical_order = self._config_manager.get_account_play_order()
         self._config_manager.set_account_cycle_index(0)
         parent = getattr(self._parent, "master", None)
         if parent and getattr(parent, "bot_running", False) and getattr(parent, "_controller", None):
             try:
-                parent._controller.set_account_play_order(order)
+                parent._controller.set_account_play_order(canonical_order)
                 parent._controller.set_account_cycle_index(0)
             except Exception:
                 pass
