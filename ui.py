@@ -2263,7 +2263,7 @@ class MTGBotUI(tk.Tk):
             "  • Resolution: any exact 16:9 window size\n"
             "\n"
             "Operating system:\n"
-            "  • Display scaling: 100%\n"
+            "  • Display scaling: any (100%, 125%, 150%, ...)\n"
             "\n"
             f"{supported_16x9_message()}\n"
             "\n"
@@ -4349,7 +4349,8 @@ class MTGBotUI(tk.Tk):
 
         lines = [result.message]
         lines.append(
-            "Required setup: MTGA visible in a fully visible windowed 16:9 size and OS display scaling set to 100%."
+            "Required setup: MTGA visible in a fully visible windowed 16:9 size. "
+            "Any OS display scaling is supported."
         )
         if result.debug_dir:
             lines.append(f"Debug bundle: {result.debug_dir}")
