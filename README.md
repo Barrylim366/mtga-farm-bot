@@ -31,7 +31,7 @@ Python dependencies are installed automatically by the launcher scripts:
 - `Options -> Video -> Language`: **English**
 - `Options -> Video -> Display Mode`: **Windowed**
 - `Options -> Video -> Resolution`: **any exact 16:9 windowed size**
-- OS display scaling: **100%**
+- OS display scaling: **any (the bot converts coordinates for scaled displays)**
 
 ## Quick Start
 
