@@ -345,11 +345,36 @@ class VisionEngine:
             return None
         if not os.path.exists(normalized):
             return None
-        image = cv2.imread(normalized, cv2.IMREAD_COLOR)
+        image = imread_unicode(normalized)
         if image is None:
             return None
         self._template_cache[normalized] = image
         return image
+
+
+def imread_unicode(path: str, flags: int | None = None) -> np.ndarray | None:
+    """cv2.imread that supports non-ASCII paths (e.g. Chinese folder names).
+
+    On Windows, cv2.imread internally uses an ANSI fopen, so any template or
+    image living under a path with non-ASCII characters silently fails to
+    load. Reading the file as raw bytes and decoding via cv2.imdecode keeps
+    the whole bot working regardless of the install folder name.
+    """
+    if cv2 is None:
+        return None
+    if flags is None:
+        flags = cv2.IMREAD_COLOR
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        image = cv2.imdecode(data, flags)
+        return image
+    except Exception:
+        try:
+            return cv2.imread(path, flags)
+        except Exception:
+            return None
 
 
 def cvt_rgb_to_bgr(img_rgb: np.ndarray) -> np.ndarray:
