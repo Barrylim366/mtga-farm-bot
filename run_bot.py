@@ -118,7 +118,8 @@ def main():
             },
         }
 
-    # MTGA must run windowed at 1920x1080 with 100% display scaling.
+    # MTGA must run windowed at an exact 16:9 size; any OS display scaling is
+    # supported (window rects are converted to physical pixels).
     # Monitor resolution can be anything; the bot maps into the MTGA window.
     screen_bounds = ((0, 0), (1920, 1080))
 
