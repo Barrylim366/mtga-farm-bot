@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import bot_logger
-from vision.vision import VisionEngine
+from vision.vision import VisionEngine, imread_unicode
 
 try:
     import cv2
@@ -131,15 +131,13 @@ class ArenaRegionProvider:
         if scaling_percent is not None:
             diagnostics["display_scaling_percent"] = scaling_percent
             if abs(int(scaling_percent) - 100) > 3:
-                return ArenaDetectionResult(
-                    ok=False,
-                    region=None,
-                    code="display_scaling_wrong",
-                    message=(
-                        f"Windows display scaling is {int(scaling_percent)}%. "
-                        "Set Windows display scaling to 100% and try again."
-                    ),
-                    diagnostics=diagnostics,
+                # Non-100% scaling is supported: the OS reports window rects
+                # in logical pixels for this (DPI-unaware) process, so the
+                # candidates below are converted to physical pixels before
+                # anchor verification / captures / clicks use them.
+                diagnostics["display_scaling_note"] = (
+                    "Non-100% display scaling detected; window coordinates are "
+                    "converted to physical pixels automatically."
                 )
 
         candidates = _list_mtga_window_rects_windows()
@@ -177,6 +175,28 @@ class ArenaRegionProvider:
                 region=region,
                 code="window_wrong_size",
                 message=self._window_size_message(rect.w, rect.h, screen_size=(rect.w, rect.h)),
+                diagnostics=diagnostics,
+            )
+
+        visible = _visible_screen_bounds_physical()
+        if visible is not None and (
+            rect.x < visible[0] - 4
+            or rect.y < visible[1] - 4
+            or rect.x + rect.w > visible[2] + 4
+            or rect.y + rect.h > visible[3] + 4
+        ):
+            return ArenaDetectionResult(
+                ok=False,
+                region=region,
+                code="window_off_screen",
+                message=(
+                    f"MTGA window is {rect.w}x{rect.h} at ({rect.x},{rect.y}), but the visible "
+                    f"screen is {visible[2] - visible[0]}x{visible[3] - visible[1]} -- part of the "
+                    "window is off-screen. "
+                    "On a scaled display the game window is enlarged by the OS, so lower the "
+                    "in-game windowed resolution (e.g. 1280x720 or 1600x900 at 150% scaling) "
+                    "until the whole window fits on screen, then run Arena Setup again."
+                ),
                 diagnostics=diagnostics,
             )
 
@@ -598,8 +618,8 @@ class ArenaRegionProvider:
                 region=None,
                 code="window_not_found",
                 message=(
-                    "MTGA window not found. Make sure MTGA is visible, runs in a windowed 16:9 client area, "
-                    "and that your display scaling is set to 100%."
+                    "MTGA window not found. Make sure MTGA is visible and runs in a "
+                    "windowed 16:9 client area. Any OS display scaling is supported."
                 ),
                 diagnostics=diagnostics,
             )
@@ -959,7 +979,7 @@ def _read_template_size(template_path: str) -> tuple[int, int] | None:
     if cv2 is None:
         return None
     try:
-        image = cv2.imread(template_path, cv2.IMREAD_COLOR)
+        image = imread_unicode(template_path)
     except Exception:
         return None
     if image is None:
@@ -971,12 +991,22 @@ def _read_template_size(template_path: str) -> tuple[int, int] | None:
 def _get_windows_display_scaling_percent() -> int | None:
     if os.name != "nt":
         return None
+
+    dpi = _query_system_dpi_aware()
+    if dpi is not None and dpi > 0:
+        return int(round((float(dpi) / 96.0) * 100.0))
+
+    # Fallback: per-user DPI applied by Windows (e.g. 144 at 150% scaling).
+    # Reliable for the primary display when the API query is unavailable.
     try:
-        user32 = ctypes.windll.user32
-        if hasattr(user32, "GetDpiForSystem"):
-            dpi = int(user32.GetDpiForSystem())
-            if dpi > 0:
-                return int(round((float(dpi) / 96.0) * 100.0))
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop\WindowMetrics"
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppliedDPI")
+            if value:
+                return int(round((float(value) / 96.0) * 100.0))
     except Exception:
         pass
 
@@ -992,6 +1022,80 @@ def _get_windows_display_scaling_percent() -> int | None:
                 return int(round((float(dpi_x) / 96.0) * 100.0))
         finally:
             user32.ReleaseDC(0, hdc)
+    except Exception:
+        pass
+    return None
+
+
+def _query_system_dpi_aware() -> int | None:
+    """Return the real system DPI (e.g. 144 at 150% scaling).
+
+    A DPI-unaware process normally sees a virtualized DPI of 96 even when the
+    display is scaled. Temporarily switching the calling thread to
+    per-monitor-aware (then restoring it) exposes the physical DPI without
+    changing the process-wide behavior of the rest of the bot.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetThreadDpiAwarenessContext.argtypes = [wintypes.HANDLE]
+        user32.SetThreadDpiAwarenessContext.restype = wintypes.HANDLE
+        user32.GetDpiForSystem.argtypes = []
+        user32.GetDpiForSystem.restype = ctypes.c_uint
+        per_monitor_v2 = ctypes.c_void_p(-4)
+        previous = user32.SetThreadDpiAwarenessContext(per_monitor_v2)
+        try:
+            dpi = int(user32.GetDpiForSystem())
+        finally:
+            user32.SetThreadDpiAwarenessContext(previous)
+        return dpi if dpi > 0 else None
+    except Exception:
+        return None
+
+
+def _with_physical_dpi(fn):
+    """Run ``fn`` with the calling thread temporarily per-monitor-DPI aware.
+
+    Window-rect queries (GetWindowRect/GetClientRect/ClientToScreen) return
+    coordinates in the caller's virtualized space when the caller is
+    DPI-unaware, which does not match the physical-pixel space used by screen
+    captures (mss) and mouse moves (pyautogui). Switching only this thread to
+    per-monitor-aware for the duration of the query (then restoring it) makes
+    those calls return true physical pixels without changing the process-wide
+    behavior of the rest of the bot.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetThreadDpiAwarenessContext.argtypes = [wintypes.HANDLE]
+        user32.SetThreadDpiAwarenessContext.restype = wintypes.HANDLE
+        per_monitor_v2 = ctypes.c_void_p(-4)
+        previous = user32.SetThreadDpiAwarenessContext(per_monitor_v2)
+    except Exception:
+        return fn()
+    try:
+        return fn()
+    finally:
+        user32.SetThreadDpiAwarenessContext(previous)
+
+
+def _visible_screen_bounds_physical() -> tuple[int, int, int, int] | None:
+    """Virtual screen bounds (left, top, right, bottom) in physical pixels.
+
+    Covers all monitors, so a 16:9 MTGA window on a secondary display is not
+    mistaken for an off-screen window just because it extends past the
+    primary monitor's origin/width.
+    """
+    try:
+        def _query() -> tuple[int, int, int, int]:
+            user32 = ctypes.windll.user32
+            left = int(user32.GetSystemMetrics(76))  # SM_XVIRTUALSCREEN
+            top = int(user32.GetSystemMetrics(77))  # SM_YVIRTUALSCREEN
+            width = int(user32.GetSystemMetrics(78))  # SM_CXVIRTUALSCREEN
+            height = int(user32.GetSystemMetrics(79))  # SM_CYVIRTUALSCREEN
+            return (left, top, left + width, top + height)
+
+        left, top, right, bottom = _with_physical_dpi(_query)
+        if right > left and bottom > top:
+            return (left, top, right, bottom)
     except Exception:
         pass
     return None
@@ -1131,36 +1235,45 @@ def _list_mtga_window_rects_windows() -> list[dict[str, Any]]:
 
 
 def _get_window_rect_windows(hwnd: int) -> WindowRect | None:
-    user32 = ctypes.windll.user32
-    rect = wintypes.RECT()
-    if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
-        return None
-    x = int(rect.left)
-    y = int(rect.top)
-    w = int(rect.right - rect.left)
-    h = int(rect.bottom - rect.top)
-    if w <= 0 or h <= 0:
-        return None
-    return WindowRect(x=x, y=y, w=w, h=h)
+    def _query() -> WindowRect | None:
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+            return None
+        x = int(rect.left)
+        y = int(rect.top)
+        w = int(rect.right - rect.left)
+        h = int(rect.bottom - rect.top)
+        if w <= 0 or h <= 0:
+            return None
+        return WindowRect(x=x, y=y, w=w, h=h)
+
+    # Query with a temporary per-monitor-DPI-aware context so the returned
+    # rect is in physical screen pixels (the coordinate space used by screen
+    # captures and mouse moves), regardless of the process DPI awareness.
+    return _with_physical_dpi(_query)
 
 
 def _get_client_rect_windows(hwnd: int) -> WindowRect | None:
-    user32 = ctypes.windll.user32
-    rect = wintypes.RECT()
-    if not user32.GetClientRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
-        return None
+    def _query() -> WindowRect | None:
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        if not user32.GetClientRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+            return None
 
-    top_left = wintypes.POINT(int(rect.left), int(rect.top))
-    bottom_right = wintypes.POINT(int(rect.right), int(rect.bottom))
-    if not user32.ClientToScreen(wintypes.HWND(hwnd), ctypes.byref(top_left)):
-        return None
-    if not user32.ClientToScreen(wintypes.HWND(hwnd), ctypes.byref(bottom_right)):
-        return None
+        top_left = wintypes.POINT(int(rect.left), int(rect.top))
+        bottom_right = wintypes.POINT(int(rect.right), int(rect.bottom))
+        if not user32.ClientToScreen(wintypes.HWND(hwnd), ctypes.byref(top_left)):
+            return None
+        if not user32.ClientToScreen(wintypes.HWND(hwnd), ctypes.byref(bottom_right)):
+            return None
 
-    x = int(top_left.x)
-    y = int(top_left.y)
-    w = int(bottom_right.x - top_left.x)
-    h = int(bottom_right.y - top_left.y)
-    if w <= 0 or h <= 0:
-        return None
-    return WindowRect(x=x, y=y, w=w, h=h)
+        x = int(top_left.x)
+        y = int(top_left.y)
+        w = int(bottom_right.x - top_left.x)
+        h = int(bottom_right.y - top_left.y)
+        if w <= 0 or h <= 0:
+            return None
+        return WindowRect(x=x, y=y, w=w, h=h)
+
+    return _with_physical_dpi(_query)
