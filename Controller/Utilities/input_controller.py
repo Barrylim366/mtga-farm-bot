@@ -290,6 +290,23 @@ class PyAutoGUIInputController(InputController):
         return Point(int(x), int(y))
 
 
+def _detect_desktop_bounds() -> tuple[tuple[int, int], tuple[int, int]] | None:
+    try:
+        import mss
+        with mss.mss() as sct:
+            if sct.monitors:
+                mon = sct.monitors[0]
+                left = int(mon.get("left", 0))
+                top = int(mon.get("top", 0))
+                width = int(mon.get("width", 0))
+                height = int(mon.get("height", 0))
+                if width > 1 and height > 1:
+                    return ((left, top), (left + width, top + height))
+    except Exception:
+        pass
+    return None
+
+
 class YdotoolInputController(InputController):
     """
     Uses `ydotool` + `ydotoold` to inject input (Wayland-friendly).
@@ -305,16 +322,9 @@ class YdotoolInputController(InputController):
     _KEY_PRINTSCREEN = 99
     _KEY_LEFTMETA = 125
 
-    # ydotool click codes: 0xC0 = left click (down then up), 0x40 = left down, 0x80 = left up
-    _BTN_LEFT_CLICK = "0xC0"
-    _BTN_LEFT_DOWN = "0x40"
-    _BTN_LEFT_UP = "0x80"
-
-    def __init__(self, *, initial_position: Point = Point(0, 0)) -> None:
+    def __init__(self) -> None:
         if shutil.which("ydotool") is None:
-            raise InputControllerError("`ydotool` not found in PATH")
-
-        self._pos = initial_position
+            raise InputControllerError("`ydotool` binary is not installed or not in PATH")
 
         uid = os.getuid()
         default_socket = f"/run/user/{uid}/.ydotool_socket"
@@ -338,9 +348,16 @@ class YdotoolInputController(InputController):
         if not os.access(socket_path, os.W_OK):
             raise InputControllerError(f"No permission to access ydotool socket `{socket_path}`")
 
-        self._screen_origin = Point(0, 0)
-        self._screen_size = Point(0, 0)  # width/height
+        detected = _detect_desktop_bounds()
+        if detected is not None:
+            (x0, y0), (x1, y1) = detected
+            self._screen_origin = Point(x0, y0)
+            self._screen_size = Point(x1 - x0, y1 - y0)
+        else:
+            self._screen_origin = Point(0, 0)
+            self._screen_size = Point(0, 0)  # width/height
         self._abs_max = 65535
+        self._pos = Point(0, 0)
 
     def _run(self, *args: str) -> None:
         try:
@@ -438,6 +455,20 @@ class YdotoolInputController(InputController):
         height = int(y1) - int(y0)
         if width <= 1 or height <= 1:
             raise InputControllerError(f"Invalid screen_bounds for ydotool: {screen_bounds!r}")
+
+        # If desktop bounds were auto-detected and are larger than the provided bounds
+        # (e.g. an ultrawide/multi-monitor desktop vs default 1920x1080 bounds),
+        # preserve the full desktop bounds so absolute ydotool coordinates map accurately.
+        detected = _detect_desktop_bounds()
+        if detected is not None:
+            (dx0, dy0), (dx1, dy1) = detected
+            det_w = dx1 - dx0
+            det_h = dy1 - dy0
+            if det_w > width or det_h > height:
+                self._screen_origin = Point(dx0, dy0)
+                self._screen_size = Point(det_w, det_h)
+                return
+
         self._screen_origin = Point(int(x0), int(y0))
         self._screen_size = Point(width, height)
 

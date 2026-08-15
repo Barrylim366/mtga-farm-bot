@@ -67,6 +67,21 @@ else
   echo "[INFO] Screenshot-Tool: $SCREENSHOT_TOOL"
 fi
 
+if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+  if ! command -v ydotool >/dev/null 2>&1; then
+    echo "[WARN] Wayland-Session erkannt, aber 'ydotool' fehlt."
+    echo "        Unter Wayland kann der Bot ohne ydotool keine Mausklicks senden."
+    echo "        Installation:"
+    install_hint "ydotool" "ydotool" "ydotool" "ydotool"
+    MISSING_SYSTEM_DEPS=1
+  else
+    if command -v systemctl >/dev/null 2>&1 && ! systemctl --user is-active --quiet ydotool; then
+      echo "[INFO] Starte ydotool.service für Wayland..."
+      systemctl --user start ydotool 2>/dev/null || true
+    fi
+  fi
+fi
+
 if [[ $MISSING_SYSTEM_DEPS -ne 0 ]]; then
   echo ""
   echo "[INFO] Bitte die oben genannten Pakete installieren und dann erneut starten."
