@@ -314,6 +314,10 @@ class YdotoolInputController(InputController):
     so we track position based on our own moves.
     """
 
+    _BTN_LEFT_CLICK = "0xC0"
+    _BTN_LEFT_DOWN = "0x40"
+    _BTN_LEFT_UP = "0x80"
+
     _KEY_ENTER = 28
     _KEY_LEFTSHIFT = 42
     _KEY_TAB = 15
