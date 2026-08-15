@@ -205,7 +205,8 @@ class PyAutoGUIInputController(InputController):
             self._pyautogui.PAUSE = 0.0
         except Exception:
             pass
-        self._verify_mouse_control()
+        if platform.system().lower() == "darwin":
+            self._verify_mouse_control()
 
     def _verify_mouse_control(self) -> None:
         """Fail fast with a clear message if macOS blocks synthetic mouse control."""
@@ -503,19 +504,21 @@ def create_input_controller(backend: str | None) -> InputController:
                     f"Auto backend failed on macOS. pyautogui error: {pyautogui_err}; pynput error: {e}"
                 ) from e
 
-        if platform.system().lower() == "linux" and shutil.which("ydotool") is not None:
-            ydotool_err: InputControllerError | None = None
+        if system == "linux":
+            # On Linux with X11 / XWayland (where Proton/Steam MTGA runs), PyAutoGUI
+            # communicates directly with the X11 server for instant, accurate clicking.
             try:
-                return YdotoolInputController()
-            except InputControllerError as e:
-                ydotool_err = e
+                return PyAutoGUIInputController()
+            except Exception:
+                pass
 
-            try:
-                return PynputInputController()
-            except InputControllerError as e:
-                raise InputControllerError(
-                    f"Auto backend failed. ydotool error: {ydotool_err}; pynput error: {e}"
-                ) from e
+            if shutil.which("ydotool") is not None:
+                try:
+                    return YdotoolInputController()
+                except Exception:
+                    pass
+
+            return PynputInputController()
 
         return PynputInputController()
 
