@@ -185,6 +185,23 @@ Finding the **Starter Deck Duel** banner no longer depends on it being near the 
 
 > Fixed in this version: the **In Progress** filter was never actually applied. Its anchor image had been captured with the filter *selected*, so the lit orange marker dominated the match and it resolved to whichever row was selected — normally **All**. The bot clicked **All**, logged "In Progress filter selected", and then searched the full, unfiltered list. In that list Starter Deck Duel had drifted down far enough to be cut off by the bottom edge of the viewport, and since its image includes the title strip, a half-visible banner matches nothing. The filter is matched on its label text now, which reads the same selected or not.
 
+> Fixed in this version: on brand new accounts (or accounts that have never entered Starter Deck Duel), the event is not listed under **In Progress**. The bot now automatically falls back to the **All** filter if the banner is missing under **In Progress** and waits for the page transition.
+
+> Fixed in this version: on a brand new account the bot reached the deck selection and then opened the deck's **card list** instead of picking a deck, and never found its way out. Measured against a fresh account, the event has *four* screens that a template matcher cannot tell apart — each is a single rounded pill in the bottom-right corner, and it is the same widget every time:
+>
+> | Screen | Bottom-right button |
+> | --- | --- |
+> | first entry, event not joined | green **Start** |
+> | joined, no deck chosen yet | **Choose Your Deck** (no Play button at all) |
+> | the 10-deck chooser grid | **Submit Deck** (plus **View Deck** bottom-left) |
+> | deck chosen, ready to queue | orange **Play** |
+>
+> At the 0.80 confidence the old code used, `event_play.png` matches *all four* of those pills and `submit_deck.PNG` matches all three landing pages, so the bot read the two first-time screens as the normal landing page. It then clicked the current-deck box coordinate — which on the first-time page is the **Inspect Event Decks** thumbnail — and landed in the read-only card list, a screen with no anchor it recognises. The arena-wide Submit-Deck search had the same failure mode from the other side: it matched **View Deck** in the opposite corner, which opens that same card list.
+>
+> Screens are now identified at 0.90 with two gates that do not rely on the shared pill: the chooser is anchored on the blue **View Deck** button, which exists on no other screen, and the three landing pages additionally require the top-left **Starter Deck Duel** header. That header matters because Home's Play button *is* the event page's Play button — the same widget, matching at 0.90 and even 0.95 — so without it the bot reads Home as the event page and starts clicking event coordinates there. From that, the bot walks the sequence explicitly (Start → Choose Your Deck → grid), never clicks grid coordinates on a screen it has not positively identified as the grid, restricts the Submit-Deck search to the bottom-right corner, and backs out of the card list via the top-left arrow if it ever ends up there.
+>
+> Also corrected while measuring the live grid: the fixed fallback coordinates for the 10 deck cards were the art's *bottom edge* rather than its center, so that fallback clicked the seam between a card and its name plate and selected nothing.
+
 > Fixed in this version: running the test suite moved the real mouse and clicked. A Controller arms fire-and-forget timers (the card-prompt settle timer among them) that nothing cancels, so tests that built one produced real clicks seconds later, at absolute screen coordinates, on whatever was in front — 231 input events including 77 clicks per full run. Constructing a Controller without naming an input backend now gets an inert one; everything that actually drives Arena names its backend explicitly, so nothing changed for the bot itself. `MTGA_BOT_INPUT_BACKEND` still overrides.
 
 > Note on scrolling: MTGA's event list ignores the mouse wheel entirely, so the bot drags the scrollbar. The step is deliberately small — the bar is about a quarter of its track, so the list moves roughly four times as far as the bar, and a step wider than one banner can jump straight over the one being looked for.

@@ -515,18 +515,6 @@ class Controller(ControllerSecondary):
         # failure must not permanently consume the one-shot and leave the switch
         # decision blind. Reset per account.
         self._home_quest_check_attempts = 0
-        # One-shot per account: whether _navigate_starter_deck's "chooser already
-        # open" fast path has been tried yet. That shortcut trusts the mere
-        # presence of a "Submit Deck" button as proof we landed directly on the
-        # Starter Deck Duel chooser -- but MTGA reuses that same button on other
-        # formats' deckbuilders too (e.g. Draft), so blindly trusting it on every
-        # queue cycle risks clicking the fixed Starter Deck Duel grid coordinates
-        # on an unrelated event's screen if the player has one open/in-progress.
-        # Limiting it to a single try per account matches the shortcut's actual
-        # purpose (MTGA drops a brand-new account directly onto this chooser
-        # the very first time only); every later cycle uses the verified
-        # Play > Events > banner-click navigation instead.
-        self._starter_picker_shortcut_tried = False
         # Anti-storm guard: consecutive account switches with no match played in
         # between. If it reaches the number of configured accounts, every account
         # already meets the criteria -> stop cycling (a logout/login loop is worse
@@ -4147,39 +4135,39 @@ class Controller(ControllerSecondary):
             # button instead of stalling.
             if self._queue_from_event_landing(target_colors):
                 return True
-            # Last resort: the very first time this event is entered (no deck
-            # ever picked for it yet on this account), MTGA drops the player
-            # directly onto the full-page deck-grid picker instead of the normal
-            # Home/Play-blade screens, so neither the Play button nor the Events
-            # tab is present there -- only try this once we have positively
-            # confirmed BOTH are missing (not just on the very first check of the
-            # session), and only once per account. "Submit Deck" is a generic
-            # button MTGA also shows on other formats' deckbuilders (e.g. Draft),
-            # so trusting it before ruling out normal navigation risks clicking
-            # the fixed Starter Deck Duel grid coordinates on an unrelated event
-            # the player has open/in-progress.
-            if not self._starter_picker_shortcut_tried:
-                self._starter_picker_shortcut_tried = True
-                if self._starter_deck_picker_open():
-                    bot_logger.log_info(
-                        "Starter: no Play/Events chrome found but deck picker is open; "
-                        "selecting quest deck directly (first-time entry)."
-                    )
-                    self._swap_starter_deck_for_quest(target_colors)
-                    return True
+            # Neither the Home Play button nor the Events tab is here. We may be
+            # parked on one of the event's own screens that has no Play button:
+            # the deck-chooser grid, or -- on an account that has never entered
+            # this event -- the first-time page whose pill reads "Start" or
+            # "Choose Your Deck". Those are all recoverable: finish picking the
+            # deck and queue from the event page.
+            # The grid anchor is "View Deck", which exists on no other MTGA screen,
+            # so unlike the old submit_deck.PNG probe this cannot fire on an
+            # unrelated event's deckbuilder -- hence no once-per-account gate.
+            screen = self._detect_starter_screen("STARTER_ENTRY_SCREEN")
+            if screen != self._STARTER_SCREEN_UNKNOWN:
+                bot_logger.log_info(
+                    f"Starter: no Play/Events chrome, but we are on the event's "
+                    f"'{screen}' screen; continuing the deck selection there."
+                )
+                self._swap_starter_deck_for_quest(target_colors)
+                # The swap leaves us on the event page with Play in the corner;
+                # press it here rather than via _queue_from_event_landing, which
+                # would run a second, redundant deck swap.
+                return self._press_starter_event_play()
             bot_logger.log_info("Starter: Events tab not found (not in Play blade yet); will retry.")
             return False
         time.sleep(0.8)
 
         # 3) "In Progress" filter. This is what keeps the list short enough to fit
-        #    on one page: with it applied the client shows only the events actually
-        #    in progress (Starter Deck Duel among them) and draws no scrollbar at
-        #    all, so the banner match below cannot be defeated by list length.
+        #    on one page when the event is already in progress.
         #    Still best-effort -- a miss means the filter is already applied, or
         #    the row moved -- and the scrolling search below is the backstop.
-        if self._click_image_in_scaled_arena_region(
-            in_progress_tpl, "STARTER_IN_PROGRESS", rel_region=in_progress_roi, confidence=0.80, timeout=1.5
-        ):
+        in_progress_point = self._locate_image_center_in_scaled_arena_region(
+            in_progress_tpl, "STARTER_IN_PROGRESS_LOCATE", rel_region=in_progress_roi, confidence=0.80, timeout=1.5
+        )
+        if in_progress_point is not None:
+            self._click_abs(in_progress_point[0], in_progress_point[1], "STARTER_IN_PROGRESS")
             bot_logger.log_info("Starter: In Progress filter selected.")
             time.sleep(1.2)
         else:
@@ -4191,24 +4179,62 @@ class Controller(ControllerSecondary):
         #    on the visible page -- MTGA reorders Events, so the banner does not
         #    stay in the first row.
         runtime_status.set_startup_phase("Looking for Starter Deck Duel")
-        if not self._find_event_banner_scrolling(
+        found_banner = self._find_event_banner_scrolling(
             starter_tpl, "STARTER_BANNER", starter_banner_roi, 0.72
-        ):
+        )
+
+        # 4.1) Fallback for new accounts: if Starter Deck Duel is not found under "In Progress"
+        #      (e.g. account has never played the event before, so it is not in progress yet),
+        #      switch to the "All" filter row and search again.
+        if not found_banner:
+            bot_logger.log_info(
+                "Starter: Starter Deck Duel banner not found under 'In Progress' filter. "
+                "Switching to 'All' filter."
+            )
+            runtime_status.set_startup_phase("Switching to All events filter")
+            all_tpl = os.path.join(assets_dir, "all_label.png")
+            all_clicked = False
+            if os.path.exists(all_tpl):
+                all_clicked = self._click_image_in_scaled_arena_region(
+                    all_tpl, "STARTER_ALL_FILTER", rel_region=in_progress_roi, confidence=0.75, timeout=1.5
+                )
+            if not all_clicked:
+                # If template for 'All' is not present or matching fails, click the 'All' filter row.
+                # In MTGA's Events sidebar, 'All' is the top filter row, directly above 'In Progress'.
+                # If we located 'In Progress', 'All' is ~65px above it (scaled); otherwise use
+                # the 1920x1080 reference center for the top filter row at (1600, 245).
+                if in_progress_point is not None:
+                    arena = self._ensure_arena_region(force_reacquire=False)
+                    arena_h = float(arena[3]) if arena is not None else 1080.0
+                    dy = int(round(65.0 * (arena_h / 1080.0)))
+                    all_x, all_y = in_progress_point[0], max(50, in_progress_point[1] - dy)
+                else:
+                    mapped, _ = self._map_abs_point_to_arena((1600, 245))
+                    all_x, all_y = mapped
+                self._click_abs(all_x, all_y, "STARTER_ALL_FILTER_FALLBACK")
+                bot_logger.log_info(f"Starter: clicked 'All' filter fallback at ({all_x}, {all_y}).")
+            time.sleep(1.2)
+
+            runtime_status.set_startup_phase("Looking for Starter Deck Duel in All Events")
+            found_banner = self._find_event_banner_scrolling(
+                starter_tpl, "STARTER_BANNER", starter_banner_roi, 0.72
+            )
+
+        if not found_banner:
             bot_logger.log_error("Starter: Starter Deck Duel banner not found on screen.")
             return False
-        time.sleep(1.0)
+        time.sleep(1.5)
 
         # 4.5) Swap to the quest-matched starter deck before pressing Play.
         self._swap_starter_deck_for_quest(target_colors)
 
-        # 5) Best-effort Play/Resume confirm. Clicking the "Resume" banner may
-        #    already launch the match, so a missing Play button is not a failure.
-        runtime_status.set_startup_phase("Pressing Play")
-        if self._click_image_in_scaled_arena_region(
+        # 5) Press the event page's Play button. Prefer event_play.png -- that IS
+        #    the button on this page; play_btn.png is the Home blade's Play and only
+        #    ever matched here by luck. Still best-effort: clicking the "Resume"
+        #    banner can launch the match outright, so a miss is not a failure.
+        if not self._press_starter_event_play() and not self._click_image_in_scaled_arena_region(
             play_btn, "STARTER_PLAY_CONFIRM", rel_region=play_confirm_roi, confidence=0.80, timeout=1.5
         ):
-            bot_logger.log_info("Starter: Play confirm button clicked.")
-        else:
             bot_logger.log_info("Starter: no separate Play button (likely launched from Resume).")
 
         bot_logger.log_info("Starter: Starter Deck Duel selected.")
@@ -4311,14 +4337,29 @@ class Controller(ControllerSecondary):
         "WU": 0, "WG": 1, "UB": 2, "UG": 3, "WR": 4, "BG": 5,
         "RG": 6, "BR": 7, "WB": 8, "UR": 9,
     }
-    # Card centers in the 1920x1080 reference frame (measured from the chooser).
-    _STARTER_DECK_COL_X = (187, 480, 773, 1066, 1359, 1652)
-    _STARTER_DECK_ROW_Y = (400, 705)
-    _STARTER_DECK_BOX_BASE = (1734, 640)       # current-deck box on the event page
-    _STARTER_SUBMIT_DECK_BASE = (1735, 1035)   # "Submit Deck" button in the chooser
+    # Card centers in the 1920x1080 reference frame, measured live against the
+    # chooser grid (2026-08-19) by locating all 10 deck art templates in a
+    # screenshot of it. The previous row values (510, 815) were the art's BOTTOM
+    # EDGE, not its center, so the fixed-grid fallback clicked the 2px seam
+    # between the card and its name plate and selected nothing.
+    _STARTER_DECK_COL_X = (183, 475, 767, 1059, 1353, 1645)
+    _STARTER_DECK_ROW_Y = (386, 700)
+    _STARTER_DECK_BOX_BASE = (1730, 655)       # current-deck box on the event page
+    _STARTER_SUBMIT_DECK_BASE = (1730, 1006)   # "Submit Deck" button in the chooser
     # Bottom-right Play button ROI on the Starter Deck Duel event landing page
     # (1920x1080 reference frame). Shared by every event_play.png probe/click.
+    # Also where Start / Choose Your Deck / Submit Deck render -- MTGA reuses the
+    # same slot for all of them, which is exactly why they need distinguishing by
+    # template rather than by position (see _detect_starter_screen).
     _EVENT_PLAY_ROI = (1400, 900, 520, 180)
+    # Bottom-LEFT pill slot, same reference frame: only the deck chooser puts a
+    # button here ("View Deck"), which makes it the one unambiguous anchor for
+    # "the chooser grid is on screen".
+    _STARTER_VIEW_DECK_ROI = (60, 920, 460, 160)
+    # Top-left "Starter Deck Duel" header, same reference frame. Wide enough for
+    # both title positions: the first-time pages indent it past a back arrow, the
+    # normal landing page starts flush left.
+    _STARTER_TITLE_ROI = (20, 100, 700, 110)
     # Search area for the reward popup's Claim button, same reference frame.
     # NOTE: this deliberately overlaps _EVENT_PLAY_ROI above -- both buttons live
     # in the bottom-right corner and claim.png matches the event Play button, so
@@ -4327,14 +4368,87 @@ class Controller(ControllerSecondary):
     # tests can assert that overlap still holds (tests/test_reward_popup_guard.py).
     _REWARD_CLAIM_ROI = (1450, 850, 470, 230)
 
-    def _on_starter_event_landing_page(self, label: str) -> bool:
-        """True if the event's Play button is visible, i.e. we are on the Starter
-        Deck Duel landing page (not the deck-chooser grid)."""
-        event_play = os.path.join(self._buttons_dir(), "event_play.png")
-        return os.path.exists(event_play) and self._locate_image_center_in_scaled_arena_region(
-            event_play, label, rel_region=self._EVENT_PLAY_ROI,
-            confidence=0.80, timeout=1.0,
+    # --- Starter Deck Duel screen identification --------------------------
+    #
+    # The event has FOUR screens that all look alike to a template matcher: one
+    # orange/green rounded pill in the bottom-right corner, nothing else stable.
+    #   "start"       first-time entry, event not joined yet -> green "Start"
+    #   "choose_deck" joined but no deck picked yet          -> "Choose Your Deck"
+    #   "chooser"     the 10-deck grid                       -> "View Deck" + "Submit Deck"
+    #   "play"        deck picked, ready to queue            -> orange "Play"
+    #
+    # Measured live (2026-08-19) on a fresh account, matching every template
+    # against a screenshot of every screen. At 0.80 -- the confidence the old code
+    # used -- event_play.png matches ALL FOUR pills, and submit_deck.PNG matches
+    # the three landing pages. That is the whole bug: on a new account the bot
+    # read "start"/"choose_deck" as "play", clicked the deck-box coordinate, which
+    # on the first-time page is the "Inspect Event Decks" thumbnail, and landed in
+    # the read-only card list -- a screen with no anchor at all, where it then
+    # spun forever. At 0.90 every template matches exactly one screen.
+    _STARTER_SCREEN_CONFIDENCE = 0.90
+    _STARTER_SCREEN_PLAY = "play"
+    _STARTER_SCREEN_START = "start"
+    _STARTER_SCREEN_CHOOSE_DECK = "choose_deck"
+    _STARTER_SCREEN_CHOOSER = "chooser"
+    _STARTER_SCREEN_UNKNOWN = "unknown"
+    # Any screen that is the event's own landing page, i.e. one press away from
+    # queueing. _dismiss_reward_popup must refuse to "claim" on all of these.
+    _STARTER_LANDING_SCREENS = (
+        _STARTER_SCREEN_PLAY, _STARTER_SCREEN_START, _STARTER_SCREEN_CHOOSE_DECK,
+    )
+
+    def _starter_template_visible(
+        self, name: str, label: str, roi: tuple[int, int, int, int]
+    ) -> bool:
+        """True if button template `name` is on screen inside `roi`."""
+        path = os.path.join(self._buttons_dir(), name)
+        if not os.path.exists(path):
+            return False
+        return self._locate_image_center_in_scaled_arena_region(
+            path, label, rel_region=roi,
+            confidence=self._STARTER_SCREEN_CONFIDENCE, timeout=1.0,
         ) is not None
+
+    def _detect_starter_screen(self, label: str) -> str:
+        """Which Starter Deck Duel screen is on screen, as a _STARTER_SCREEN_* value.
+
+        Two gates, because the pill button alone is not enough:
+
+        1. The chooser is probed first, via the bottom-LEFT "View Deck" pill. It
+           is the only button unique to one screen, and being blue it stays clean
+           even at low confidence, so the orange pills can never shadow it.
+        2. The three landing pages then require the top-left "Starter Deck Duel"
+           header. Their pill is literally the same widget as HOME's Play button
+           -- measured live, event_play.png matches Home at 0.90 and even 0.95, so
+           no threshold separates them. Without this gate the bot reads Home as
+           the event page and starts clicking the event's deck-box coordinate
+           there. The header scores >=0.97 on all three landing pages and <=0.42
+           on Home, the chooser and in-game.
+        """
+        for tpl in ("view_deck.png", "view_deck_active.png"):
+            if self._starter_template_visible(tpl, f"{label}_CHOOSER", self._STARTER_VIEW_DECK_ROI):
+                return self._STARTER_SCREEN_CHOOSER
+        if not self._starter_template_visible("event_title.png", f"{label}_TITLE", self._STARTER_TITLE_ROI):
+            return self._STARTER_SCREEN_UNKNOWN
+        for tpl, screen in (
+            ("event_play.png", self._STARTER_SCREEN_PLAY),
+            ("event_start.png", self._STARTER_SCREEN_START),
+            ("choose_your_deck.png", self._STARTER_SCREEN_CHOOSE_DECK),
+        ):
+            if self._starter_template_visible(tpl, f"{label}_{screen.upper()}", self._EVENT_PLAY_ROI):
+                return screen
+        return self._STARTER_SCREEN_UNKNOWN
+
+    def _on_starter_event_landing_page(self, label: str) -> bool:
+        """True if we are on one of the event's landing pages, i.e. a single click
+        in the bottom-right corner would join/queue.
+
+        Used both as the reward-popup guard (claim.png matches those pills, so a
+        blind click there starts a match with the wrong deck) and by the deck-swap
+        flow. Covers the first-time "Start" / "Choose Your Deck" pages too, not
+        just "Play" -- clicking them has the same consequence.
+        """
+        return self._detect_starter_screen(label) in self._STARTER_LANDING_SCREENS
 
     def _starter_deck_grid_point(self, deck_code: str) -> tuple[int, int] | None:
         """Base-1920 (x, y) of a deck's card in the chooser grid, or None."""
@@ -4347,31 +4461,145 @@ class Controller(ControllerSecondary):
         return (self._STARTER_DECK_COL_X[col], self._STARTER_DECK_ROW_Y[row])
 
     def _starter_deck_picker_open(self) -> bool:
-        """True if the Starter Deck Duel deck-grid chooser is currently on
-        screen. The Submit Deck button only renders while that chooser is
-        open, so its presence is a reliable, deck-independent anchor -- used
-        both to verify the chooser opened after a deck-box click, and to
-        detect the first-time entry case where MTGA shows this chooser
-        directly (see _swap_starter_deck_for_quest and _navigate_starter_deck).
+        """True if the Starter Deck Duel deck-grid chooser is currently on screen.
+
+        Anchored on the bottom-left "View Deck" pill, which exists ONLY on the
+        chooser. The previous version probed submit_deck.PNG over the whole arena
+        at 0.72; measured live, that template matches the orange pill on every
+        landing page too (Start / Choose Your Deck / Play), so the probe reported
+        "chooser open" on screens that had no grid at all.
         """
-        submit_btn = os.path.join(self._buttons_dir(), "submit_deck.PNG")
-        # 0.72 (not 0.80): this is a detection-only probe, not a click target --
-        # measured live, the Submit Deck template only scores ~0.78 at this
-        # window's actual scale (0.80 made this probe never fire at all,
-        # leaving the bot unable to tell it was already on the chooser).
-        # Matches the threshold already used for the similarly-purposed
-        # STARTER_BANNER anchor above.
-        return os.path.exists(submit_btn) and self._locate_image_center_in_scaled_arena_region(
-            submit_btn, "STARTER_DECK_CHOOSER_PROBE", rel_region=None, confidence=0.72, timeout=2.0,
-        ) is not None
+        return self._detect_starter_screen("STARTER_DECK_CHOOSER_PROBE") == self._STARTER_SCREEN_CHOOSER
+
+    # How many screen transitions _open_starter_deck_chooser will drive before
+    # giving up. A brand-new account needs two (Start -> Choose Your Deck ->
+    # chooser); the spare steps cover one back-out from an unknown screen.
+    _STARTER_CHOOSER_MAX_STEPS = 5
+    # Unknown screens get exactly ONE back-out attempt. Retrying is only useful
+    # for a screen the back arrow actually leaves (the event's own card list); on
+    # any other screen -- Decks, Store, a load transition -- the arrow does
+    # nothing and each retry costs a full five-template probe sweep (~12s
+    # measured) on the queue loop. One try, then hand back to the caller, whose
+    # Home > Play > Events navigation is the correct recovery for those.
+    _STARTER_CHOOSER_MAX_BACKOUTS = 1
+
+    def _open_starter_deck_chooser(self) -> bool:
+        """Get from wherever we are onto the deck-chooser grid. True once there.
+
+        Drives the event's screen sequence explicitly instead of assuming one
+        layout. On a brand-new account the event has not been joined yet, so the
+        grid is two presses away (Start, then Choose Your Deck) and the
+        current-deck box does not exist -- clicking its coordinate there hits
+        "Inspect Event Decks" and drops the bot into the read-only card list.
+        """
+        backouts = 0
+        for step in range(self._STARTER_CHOOSER_MAX_STEPS):
+            if self._stop_requested:
+                return False
+            screen = self._detect_starter_screen(f"STARTER_SCREEN_{step}")
+            if screen == self._STARTER_SCREEN_CHOOSER:
+                if step:
+                    bot_logger.log_info(f"Starter: deck chooser reached after {step} step(s).")
+                else:
+                    bot_logger.log_info("Starter: deck chooser already on screen.")
+                return True
+
+            if screen == self._STARTER_SCREEN_PLAY:
+                # A deck is already selected: the small deck box opens the grid.
+                box_target, box_src = self._map_abs_point_to_arena(
+                    self._STARTER_DECK_BOX_BASE, label="STARTER_DECK_BOX"
+                )
+                bot_logger.log_info(
+                    f"Starter: on the Play landing page; opening the deck chooser via the deck box "
+                    f"base={self._STARTER_DECK_BOX_BASE} -> {box_target} ({box_src})."
+                )
+                self._click_abs(box_target[0], box_target[1], "STARTER_DECK_BOX")
+                time.sleep(1.5)
+                continue
+
+            if screen == self._STARTER_SCREEN_START:
+                # First-time entry: the event is not joined yet. Press Start; MTGA
+                # stays on this page and swaps the pill to "Choose Your Deck".
+                bot_logger.log_info(
+                    "Starter: event not joined yet (Start button); pressing Start to join."
+                )
+                if not self._click_starter_button("event_start.png", "STARTER_EVENT_START"):
+                    return False
+                time.sleep(2.0)
+                continue
+
+            if screen == self._STARTER_SCREEN_CHOOSE_DECK:
+                # Joined, but no deck picked yet -- the deck slot is an empty "+".
+                bot_logger.log_info(
+                    "Starter: no deck selected yet; pressing 'Choose Your Deck' to open the grid."
+                )
+                if not self._click_starter_button("choose_your_deck.png", "STARTER_CHOOSE_YOUR_DECK"):
+                    return False
+                time.sleep(2.0)
+                continue
+
+            # Unknown screen. The realistic case is the read-only card list
+            # reached by "Inspect Event Decks" / "View Deck": it has no anchor
+            # this bot knows, so the only way out is the top-left back arrow.
+            if backouts >= self._STARTER_CHOOSER_MAX_BACKOUTS:
+                bot_logger.log_error(
+                    "Starter: still on an unrecognized screen after backing out; keeping the "
+                    "current deck and letting navigation retry from Home."
+                )
+                return False
+            backouts += 1
+            bot_logger.log_info(
+                "Starter: unrecognized event screen (possibly the deck card list); "
+                "backing out via the top-left back arrow."
+            )
+            self._click_starter_back_arrow()
+            time.sleep(1.8)
+
+        bot_logger.log_error(
+            f"Starter: could not reach the deck chooser in {self._STARTER_CHOOSER_MAX_STEPS} steps; "
+            "keeping the current deck."
+        )
+        return False
+
+    def _click_starter_button(self, template: str, label: str) -> bool:
+        """Click one of the event's bottom-right pill buttons by template."""
+        path = os.path.join(self._buttons_dir(), template)
+        if not os.path.exists(path):
+            bot_logger.log_error(f"Starter: button template {template} is missing; cannot continue.")
+            return False
+        if self._click_image_in_scaled_arena_region(
+            path, label, rel_region=self._EVENT_PLAY_ROI,
+            confidence=self._STARTER_SCREEN_CONFIDENCE, timeout=1.5,
+        ):
+            return True
+        bot_logger.log_error(f"Starter: {template} was detected but no longer clickable.")
+        return False
+
+    def _press_starter_event_play(self) -> bool:
+        """Press the event page's own Play button to enter the queue."""
+        runtime_status.set_startup_phase("Pressing Play")
+        if self._click_starter_button("event_play.png", "STARTER_EVENT_PLAY"):
+            bot_logger.log_info("Starter: queued from the event page via Play.")
+            time.sleep(1.0)
+            return True
+        bot_logger.log_error("Starter: the event Play button was not clickable; will retry.")
+        return False
+
+    def _click_starter_back_arrow(self) -> None:
+        """Click the '< Starter Deck Duel' back arrow in the top-left corner."""
+        back_target, back_src = self._map_abs_point_to_arena(
+            (95, 90), label="STARTER_CHOOSER_BACK_ARROW"
+        )
+        bot_logger.log_info(f"Starter: clicking back arrow at {back_target} ({back_src}).")
+        self._click_abs(back_target[0], back_target[1], "STARTER_CHOOSER_BACK_ARROW")
 
     def _swap_starter_deck_for_quest(self, target_colors: str) -> None:
         """Change the selected starter deck to one matching the quest colors.
 
         Best-effort: a miss leaves the current deck in place -- we never block the
-        queue. Flow: click the current-deck box to open the chooser, click the
-        quest deck at its fixed grid position, then Submit Deck. All clicks are by
-        coordinate (the fixed alphabetical grid), which is robust to window scale.
+        queue. Flow: reach the deck-chooser grid from whichever of the event's
+        screens we are on (_open_starter_deck_chooser), click the quest deck, then
+        Submit Deck.
         """
         desired_tpl = self._choose_starter_deck_template(target_colors)
         if not desired_tpl:
@@ -4385,74 +4613,33 @@ class Controller(ControllerSecondary):
             )
             return
 
-        # 1) Open the deck chooser by clicking the current-deck box (fixed square,
-        #    same position regardless of which deck art it currently shows) --
-        #    but only if the chooser isn't already open. The very first time this
-        #    event is entered (no deck ever picked for it yet) MTGA drops the
-        #    player directly onto this full-page deck grid instead of the normal
-        #    event-detail page with a small deck box, so clicking the deck-box
-        #    coordinate here would either miss or land on an unrelated deck card.
-        # The Submit Deck button only renders while the chooser is open, so its
-        # presence is a reliable, deck-independent anchor for "already open".
         submit_btn = os.path.join(self._buttons_dir(), "submit_deck.PNG")
 
-        # Reliably tell the two entry screens apart. The EVENT page shows the
-        # orange "Play" button (and a small current-deck box); the deck GRID shows
-        # "Submit Deck" instead. The Submit-Deck probe alone can FALSE-POSITIVE on
-        # the Play button (both are orange rounded buttons), which made the bot
-        # think it was already on the grid, skip opening it, click grid coordinates
-        # over the event art, and then hit "Play" -> it kept the current deck
-        # (e.g. Reckless Raid). So: if the event Play button is visible, we are on
-        # the event page and MUST click the deck box to open the grid.
-        on_event_page = self._on_starter_event_landing_page("STARTER_SWAP_EVENT_PROBE")
-
-        if on_event_page or not self._starter_deck_picker_open():
-            box_target, box_src = self._map_abs_point_to_arena(
-                self._STARTER_DECK_BOX_BASE, label="STARTER_DECK_BOX"
-            )
-            bot_logger.log_info(
-                f"Starter: opening deck chooser via deck box base={self._STARTER_DECK_BOX_BASE} "
-                f"-> {box_target} ({box_src}) (on_event_page={on_event_page})."
-            )
-            self._click_abs(box_target[0], box_target[1], "STARTER_DECK_BOX")
-            time.sleep(1.3)
-
-            # 1b) Verify the chooser actually opened before clicking the fixed grid
-            # position blindly. The grid is open only if the event Play button is
-            # GONE and Submit Deck is present -- checking Submit alone can
-            # false-positive on Play, so if Play is still visible the box click did
-            # not land and we abort (keep current deck) instead of clicking grid
-            # coordinates over the event page.
-            still_event = self._on_starter_event_landing_page("STARTER_SWAP_EVENT_PROBE2")
-            if still_event or not self._starter_deck_picker_open():
-                bot_logger.log_error(
-                    "Starter: deck chooser did not open (still on event page / Submit Deck not found); "
-                    "keeping current deck."
-                )
-                return
-        else:
-            bot_logger.log_info("Starter: deck chooser already open (first-time deck pick); skipping box click.")
+        # 1) Reach the chooser grid. This walks the event's screen sequence
+        #    (Start -> Choose Your Deck -> grid on a fresh account, or one deck-box
+        #    click when a deck is already selected) instead of inferring the screen
+        #    from a single ambiguous template, and backs out of the read-only card
+        #    list if we somehow ended up there.
+        if not self._open_starter_deck_chooser():
+            return
 
         # 2) Select the quest deck. Prefer locating the deck's art thumbnail in the
         #    grid by image match (robust to layout/scale/reordering, and clicks the
         #    ACTUAL card) and click there; fall back to the fixed alphabetical grid
-        #    coordinate only if the template isn't confidently found. This is why a
-        #    miss used to land on the wrong deck (e.g. Rakdos sits right below WG in
-        #    the same column, so any vertical drift picked it).
-        # Multi-scale match: the deck thumbnails render at a slightly different
-        # pixel size than the templates once the arena capture is normalized
-        # (DPI/normalization), which single-scale matchTemplate can't handle.
-        # Verified offline that the templates hit score ~1.0 at the right scale.
+        #    coordinate only if the template isn't confidently found.
         deck_scales = [round(0.5 + 0.05 * i, 2) for i in range(21)]  # 0.5 .. 1.5
         deck_point = self._locate_image_center_in_scaled_arena_region(
             desired_tpl, f"STARTER_DECK_MATCH_{desired_name}",
             rel_region=None, confidence=0.80, timeout=3.0, scales=deck_scales,
         )
         if deck_point is not None:
+            arena = self._ensure_arena_region(force_reacquire=False)
+            arena_h = float(arena[3]) if arena is not None else 1080.0
+            click_y = deck_point[1] + int(round(60.0 * (arena_h / 1080.0)))
             bot_logger.log_info(
-                f"Starter: located deck {desired_name} by image at {deck_point}; clicking the card."
+                f"Starter: located deck {desired_name} by image at {deck_point}; clicking selection strip at ({deck_point[0]}, {click_y})."
             )
-            self._click_abs(deck_point[0], deck_point[1], f"STARTER_DECK_PICK_{desired_name}")
+            self._click_abs(deck_point[0], click_y, f"STARTER_DECK_PICK_{desired_name}")
         else:
             deck_target, deck_src = self._map_abs_point_to_arena(
                 grid_base, label=f"STARTER_DECK_PICK_{desired_name}"
@@ -4462,12 +4649,19 @@ class Controller(ControllerSecondary):
                 f"-> {deck_target} ({deck_src})."
             )
             self._click_abs(deck_target[0], deck_target[1], f"STARTER_DECK_PICK_{desired_name}")
-        time.sleep(0.8)
+        time.sleep(1.2)
 
-        # 3) Confirm via Submit Deck. Prefer the template (exact), fall back to the
-        #    fixed button position.
+        # 3) Confirm via Submit Deck. Prefer the template, fall back to the fixed
+        #    button position.
+        #    The search is confined to _EVENT_PLAY_ROI (bottom-RIGHT). The chooser
+        #    also has a "View Deck" pill in the bottom-LEFT corner, and searching
+        #    the whole arena at 0.80 matched THAT instead -- observed live: the bot
+        #    clicked View Deck, opened the read-only card list, and never got out,
+        #    which is the "double-click lands inside the deck" symptom. Restricting
+        #    the region makes that miss impossible regardless of confidence.
         if os.path.exists(submit_btn) and self._click_image_in_scaled_arena_region(
-            submit_btn, "STARTER_SUBMIT_DECK", rel_region=None, confidence=0.80, timeout=1.5,
+            submit_btn, "STARTER_SUBMIT_DECK", rel_region=self._EVENT_PLAY_ROI,
+            confidence=self._STARTER_SCREEN_CONFIDENCE, timeout=1.5,
         ):
             bot_logger.log_info("Starter: submitted deck (template).")
         else:
@@ -4479,25 +4673,27 @@ class Controller(ControllerSecondary):
                 f"-> {sub_target} ({sub_src})."
             )
             self._click_abs(sub_target[0], sub_target[1], "STARTER_SUBMIT_DECK")
-        time.sleep(1.2)
+        time.sleep(2.0)
 
-        # 4) Verify the chooser actually closed. If it did not, the submit missed
-        #    and the deck was NOT changed -- the caller then queues with whatever
-        #    deck was selected before, silently farming the wrong colors. We do not
-        #    retry the click here (the submit coordinate overlaps the event page's
-        #    Play button ROI, so a blind retry on the event page would queue a
-        #    match); we make the failure visible instead, and the next queue cycle
-        #    attempts the swap again from a known screen.
-        # Event page FIRST: on the happy path it matches almost immediately, which
-        # short-circuits the 2s chooser probe. The other order paid that full 2s on
-        # every successful swap -- i.e. on every queue cycle -- to prove a negative.
-        if not self._on_starter_event_landing_page(
-            "STARTER_SWAP_DONE_PROBE"
-        ) and self._starter_deck_picker_open():
+        # 4) Verify we left the chooser and reached a landing page. Submitting
+        #    returns to the event page with the new deck in the box and "Play" in
+        #    the corner; anything else means the submit did not take, so back out
+        #    rather than leaving the bot parked on an unrecognized screen.
+        screen = self._detect_starter_screen("STARTER_SWAP_VERIFY")
+        if screen == self._STARTER_SCREEN_PLAY:
+            bot_logger.log_info(f"Starter: deck {desired_name} submitted; event page ready to queue.")
+        elif screen == self._STARTER_SCREEN_CHOOSER:
             bot_logger.log_error(
-                f"Starter: deck chooser still open after submit; deck {desired_name} may NOT "
-                "have been applied."
+                "Starter: still on the deck chooser after submitting; backing out to the event page."
             )
+            self._click_starter_back_arrow()
+            time.sleep(1.5)
+        elif screen == self._STARTER_SCREEN_UNKNOWN:
+            bot_logger.log_error(
+                "Starter: unrecognized screen after submitting the deck; backing out."
+            )
+            self._click_starter_back_arrow()
+            time.sleep(1.5)
 
     def _run_post_login_routine(self, account: dict, all_accounts: list[dict]) -> bool:
         if self._stop_requested:
@@ -7514,7 +7710,6 @@ class Controller(ControllerSecondary):
         self._cached_quests = []
         self._cached_active_quest_id = ""
         self._cached_active_colors = ""
-        self._starter_picker_shortcut_tried = False
         # A switch really happened, so the logout works -> clear the failed-attempt
         # guard, and count this switch for the anti-storm guard (which asks "have we
         # cycled through every account without playing a single match?").
