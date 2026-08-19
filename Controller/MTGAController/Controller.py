@@ -284,7 +284,12 @@ class Controller(ControllerSecondary):
             "stack_scan_fallback_p1": self.stack_scan_fallback_p1,
             "stack_scan_fallback_p2": self.stack_scan_fallback_p2,
             "log_out_focus_coors": self.home_play_button_coors,
-            "log_out_btn_coors": (1716, 851),
+            # "Log Out" is a CENTERED text link on the Options overlay, measured
+            # at (959, 667) in the 1920x1080 reference frame from a live capture
+            # (runtime/debug/20260819-142001). The old (1716, 851) was the legacy
+            # bottom-right layout and lands on empty background -- which is why
+            # this fallback logged out zero times in 11 attempts.
+            "log_out_btn_coors": (959, 667),
             "log_out_ok_btn_coors": (1875, 809),
         }
         self._loaded_click_targets = {}
@@ -716,7 +721,8 @@ class Controller(ControllerSecondary):
         self._login_delete_delay_sec = 5.0
         # Keep loaded/seeded logout points; only fallback if still missing.
         if self.log_out_btn_coors is None:
-            self.log_out_btn_coors = (1716, 851)
+            # Centered Options text link; see the click_targets default above.
+            self.log_out_btn_coors = (959, 667)
         if self.log_out_ok_btn_coors is None:
             self.log_out_ok_btn_coors = (1875, 809)
         if self.log_out_focus_coors is None:
@@ -8365,11 +8371,27 @@ class Controller(ControllerSecondary):
         # layout (the link is centered, not bottom-right), and clicking the wrong
         # spot first used to dismiss the menu before the image fallback ran. Only
         # fall back to coords if the template can't be found.
+        # The match MUST be scale-tolerant. With rel_region=None the search region
+        # is the arena itself and the "rescaled" pass normalizes to 1920x1080, so
+        # on a 1920-wide client nothing is rescaled at all and only scale 1.0 is
+        # ever tried. Measured against a live 1920x1080 Options overlay, the
+        # template scores 0.549 at 1.0 and 0.950 at 1.10 -- so the search could
+        # never match, and every attempt fell through to the coords below.
+        # That is not theoretical: across the whole recorded history the image
+        # match hit once (on a 2048x1152 client, 2026-07-28) and produced the only
+        # successful logout, while the coordinate fallback ran 11 times and
+        # produced none.
         logout_img = os.path.join(self._buttons_dir(), "log_out_btn.png")
-        if self._click_image_in_scaled_arena_region(
-            logout_img, "LOG_OUT_BTN_IMG", rel_region=None, confidence=0.80, timeout=2.5,
-        ):
-            bot_logger.log_info("Account switch: LOG_OUT_BTN clicked via image match.")
+        logout_scales = [round(0.7 + 0.05 * i, 2) for i in range(17)]  # 0.70 .. 1.50
+        logout_point = self._locate_image_center_in_scaled_arena_region(
+            logout_img, "LOG_OUT_BTN_IMG", rel_region=None,
+            confidence=0.80, timeout=2.5, scales=logout_scales,
+        )
+        if logout_point is not None:
+            bot_logger.log_info(
+                f"Account switch: LOG_OUT_BTN located by image at {logout_point}; clicking."
+            )
+            self._click_abs(int(logout_point[0]), int(logout_point[1]), "LOG_OUT_BTN")
         else:
             log_out_target, log_out_source = self._resolve_target_from_queue_anchor_rebase(
                 config_key="log_out_btn",
