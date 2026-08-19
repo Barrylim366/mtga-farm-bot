@@ -4161,6 +4161,14 @@ class Controller(ControllerSecondary):
                 # press it here rather than via _queue_from_event_landing, which
                 # would run a second, redundant deck swap.
                 return self._press_starter_event_play()
+            # Nothing recognizable is on screen: no Home Play button, no Events
+            # tab, and none of the event's own screens. The common cause after an
+            # account switch is one of MTGA's post-login announcements covering
+            # Home. This is the right place to clear one -- every navigation
+            # anchor has already been ruled out, so a dismissal here cannot steal
+            # a click from a legitimate screen.
+            if self._dismiss_blocking_announcement("STARTER_NAV"):
+                return False
             bot_logger.log_info("Starter: Events tab not found (not in Play blade yet); will retry.")
             return False
         time.sleep(0.8)
@@ -4580,6 +4588,91 @@ class Controller(ControllerSecondary):
             return True
         bot_logger.log_error(f"Starter: {template} was detected but no longer clickable.")
         return False
+
+    # Confidence for the announcement "Okay" button. Deliberately high: measured
+    # live, okay_btn.png scores 0.798 on the Starter Deck Duel landing page's
+    # orange Start/Play pill and 0.780 on a Claim button, but 0.970 on a real
+    # announcement popup. At 0.80 -- the threshold used elsewhere -- a whole-arena
+    # search would click Play and start a match with the wrong deck.
+    _ANNOUNCEMENT_OKAY_CONFIDENCE = 0.90
+    # Scale band, same reasoning as the logout template: the search region is
+    # normalized to 1920x1080 and MTGA's popup chrome does not scale with the
+    # window, so the apparent size goes as 1920/W.
+    _ANNOUNCEMENT_SCALES = tuple(round(0.45 + 0.05 * i, 2) for i in range(32))
+
+    def _dismiss_blocking_announcement(self, context: str) -> bool:
+        """Clear a post-login announcement that covers the whole UI. True if we
+        did something and the caller should re-read the screen.
+
+        MTGA queues these after a login -- observed live after an account switch:
+        "Banned Standard Cards" (an Okay button) followed by a set promo ("The
+        Hobbit -- Available Now!", whose only button is "Get Started!", which
+        opens the Store). They hide Home entirely, so navigation finds no anchor
+        and the queue loop spins; measured, the bot sat in that loop for 2.5
+        minutes until the popups were cleared by hand.
+
+        Two steps, in this order:
+        1. Click "Okay" if it is on screen. Only a popup that offers a plain
+           acknowledge button is dismissed this way.
+        2. Otherwise press ESC. That closes the promo overlays, which have no
+           acknowledge button -- and crucially avoids their call-to-action, which
+           would navigate into the Store rather than dismissing anything.
+
+        Both are safe on a normal screen: step 1 is gated on a high-confidence
+        template and step 2 on Home merely opens (and the next call closes) the
+        Options overlay. Callers must only use this once every navigation anchor
+        has been ruled out.
+        """
+        if self._stop_requested:
+            return False
+        okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
+        if os.path.exists(okay_img):
+            point = self._locate_image_center_in_scaled_arena_region(
+                okay_img, f"{context}_ANNOUNCE_OKAY", rel_region=None,
+                confidence=self._ANNOUNCEMENT_OKAY_CONFIDENCE, timeout=1.5,
+                scales=list(self._ANNOUNCEMENT_SCALES),
+            )
+            if point is not None:
+                bot_logger.log_info(
+                    f"{context}: announcement popup detected; clicking Okay at {point}."
+                )
+                self._click_abs(point[0], point[1], f"{context}_ANNOUNCE_OKAY")
+                time.sleep(1.5)
+                return True
+        # No acknowledge button. ESC closes the promo overlays; do NOT click their
+        # "Get Started!"-style button, which goes to the Store.
+        if focus_mtga_window():
+            time.sleep(0.2)
+        bot_logger.log_info(
+            f"{context}: no anchor and no Okay button; pressing ESC to clear a possible overlay."
+        )
+        self.input.tap_escape()
+        time.sleep(1.2)
+        # ESC on an unobstructed screen OPENS the Options overlay instead of
+        # closing anything, and leaving it open would hide Home from the next
+        # navigation pass -- the dead-end would then repeat forever, toggling
+        # Options on and off. So check for it and undo immediately.
+        if self._options_overlay_visible():
+            bot_logger.log_info(
+                f"{context}: ESC opened the Options overlay, so nothing was covering the "
+                "screen; closing it again."
+            )
+            self.input.tap_escape()
+            time.sleep(0.9)
+            return False
+        return True
+
+    def _options_overlay_visible(self) -> bool:
+        """True if the Options overlay is the anchor currently on screen."""
+        try:
+            detection = self._arena_region_provider.detect(write_debug_on_fail=False)
+        except Exception:
+            return False
+        if detection.ok and detection.region is not None:
+            self._arena_region = detection.region
+            self._last_good_arena_region = detection.region
+            self._last_good_arena_region_ts = time.time()
+        return detection.matched_anchor == "options_anchor.png"
 
     def _press_starter_event_play(self) -> bool:
         """Press the event page's own Play button to enter the queue."""
@@ -8381,8 +8474,18 @@ class Controller(ControllerSecondary):
         # match hit once (on a 2048x1152 client, 2026-07-28) and produced the only
         # successful logout, while the coordinate fallback ran 11 times and
         # produced none.
+        # Range chosen from the two known data points rather than by feel. The
+        # search region is normalized to 1920x1080, and MTGA renders this overlay
+        # at a roughly CONSTANT pixel size instead of scaling it with the window,
+        # so the apparent size in that space goes as 1920/W and the scale needed is
+        # about 1.10 * 1920 / W. That fits both observations: 1.10 measured on a
+        # native 1920 client, and ~1.03 for the 2048x1152 client where the one
+        # historical success matched at 1.0. Across the 16:9 widths MTGA is run at
+        # that means 1.65 (1280) down to 0.55 (3840), so a narrow band silently
+        # excludes whole resolutions -- 0.70..1.50 would still have failed for
+        # 1280, 1366, 3200 and 3840. 0.45..2.00 covers ~1050..4700 px wide windows.
         logout_img = os.path.join(self._buttons_dir(), "log_out_btn.png")
-        logout_scales = [round(0.7 + 0.05 * i, 2) for i in range(17)]  # 0.70 .. 1.50
+        logout_scales = [round(0.45 + 0.05 * i, 2) for i in range(32)]  # 0.45 .. 2.00
         logout_point = self._locate_image_center_in_scaled_arena_region(
             logout_img, "LOG_OUT_BTN_IMG", rel_region=None,
             confidence=0.80, timeout=2.5, scales=logout_scales,
