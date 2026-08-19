@@ -5146,6 +5146,37 @@ class Controller(ControllerSecondary):
     # window was busy -- gets another honest try within the same turn.
     __unreachable_cast_ttl_sec = 20.0
 
+    # Per-attempt hand-sweep pacing for cast(), as (step_px, dwell_sec).
+    #
+    # The scan can only identify a card from MTGA's hover events, and a sweep
+    # that crosses a card too quickly can pass it without one ever being emitted
+    # -- the hover is logged only after a client->server->log round trip, so it
+    # is not synchronous with the mouse. Observed live (match 317f7a5d,
+    # 2026-08-19): all three attempts re-ran the SAME 1000 px/s sweep and each
+    # took exactly 2.0s to cross the whole hand without a single hover line, so
+    # the bot passed priority on 9 consecutive decisions, never played a land,
+    # and sat there until MTGA's 150s inactivity timer expired twice.
+    #
+    # Retrying identically cannot discover anything the first pass missed, so
+    # each attempt now sweeps slower and in finer steps. The cost only lands when
+    # a sweep is already failing: the loop stops the moment the target is hovered,
+    # so a healthy hand still resolves at attempt 0 speed.
+    #
+    # Budget: the sweep line spans the full 1920-wide frame, so one pass costs
+    # 1920/step * dwell -- 1.92s, 4.32s, 6.58s = 12.8s of sweeping, up from 3x
+    # 1.92s = 5.8s. On top of that each attempt pays a fixed ~6.6s (window focus,
+    # the 0.5s reset settle, the ~1.6s "Are You Sure?" probe and the 0.8s pause
+    # between attempts), which is why the per-attempt sweep is kept modest: the
+    # whole of cast() must stay far away from MTGA's 150s inactivity timer, whose
+    # expiry is what actually lost the game in the post-mortem. It also runs under
+    # __decision_exec_lock, which DROPS rather than queues a decision that arrives
+    # while it is held, so a longer sweep widens the window where an incoming
+    # request is discarded and left to __maybe_wake_stalled_decision.
+    _CAST_SWEEP_PACING = ((10, 0.01), (8, 0.018), (7, 0.024))
+    # Fixed per-attempt overhead outside the sweep itself, measured from the
+    # sleeps and probes in _cast_once/cast. Only used to assert the budget.
+    _CAST_ATTEMPT_FIXED_COST_SEC = 6.6
+
     def _is_cast_suppressed(self, card_id: int) -> bool:
         since = self.__unreachable_cast_ids.get(card_id)
         if since is None:
@@ -5174,15 +5205,17 @@ class Controller(ControllerSecondary):
         # MTGA sometimes emits a card's hover objectId a beat after our scan
         # passes it ("No hover update before bounds"), so a single pass can miss
         # a card that is really in hand. Retry a couple of times after a pause.
-        for attempt in range(3):
+        for attempt in range(len(self._CAST_SWEEP_PACING)):
             if self._stop_requested or self._suppress_selections:
                 return False
-            if self._cast_once(card_id):
+            if self._cast_once(card_id, attempt=attempt):
                 self.clear_cast_suppression(card_id)
                 return True
-            if attempt < 2:
+            if attempt < len(self._CAST_SWEEP_PACING) - 1:
+                next_step, next_dwell = self._CAST_SWEEP_PACING[attempt + 1]
                 bot_logger.log_info(
-                    f"CAST_RETRY: card {card_id} not hovered on attempt {attempt}; rescanning after pause."
+                    f"CAST_RETRY: card {card_id} not hovered on attempt {attempt}; "
+                    f"rescanning after pause at {next_step}px/{next_dwell}s per step."
                 )
                 # Only probe for the "Are You Sure?" dialog once a cast attempt has
                 # actually failed to hover the card -- that is the evidence something
@@ -5203,13 +5236,16 @@ class Controller(ControllerSecondary):
         # another go from the current state.
         self.__unreachable_cast_ids[card_id] = time.time()
         bot_logger.log_error(
-            f"CAST_FAILED: card {card_id} could not be hovered after 3 attempts; "
-            "re-driving the decision instead of idling."
+            f"CAST_FAILED: card {card_id} could not be hovered after "
+            f"{len(self._CAST_SWEEP_PACING)} attempts; re-driving the decision instead of idling."
         )
         self.__schedule_group_resume(1.0)
         return False
 
-    def _cast_once(self, card_id: int) -> bool:
+    def _cast_once(self, card_id: int, *, attempt: int = 0) -> bool:
+        step_px, dwell_sec = self._CAST_SWEEP_PACING[
+            min(max(attempt, 0), len(self._CAST_SWEEP_PACING) - 1)
+        ]
         bot_logger.set_hover_logging(True)
         try:
             if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
@@ -5281,7 +5317,7 @@ class Controller(ControllerSecondary):
 
                 # Inner loop: move until log updates or bounds hit
                 while not self.log_reader.has_new_line(self.patterns['hover_id']):
-                    step_dx = self.cast_card_dist * direction
+                    step_dx = step_px * direction
                     pos = self.input.position()
                     next_x = pos.x + step_dx
                     # Follow a (potentially sloped) scan line from p1 -> p2 to better match fanned hands.
@@ -5293,7 +5329,7 @@ class Controller(ControllerSecondary):
                     desired_y = int(round(start_y + t * (end_y - start_y)))
                     dy = desired_y - pos.y
                     self.input.move_rel(step_dx, dy)
-                    time.sleep(self.cast_speed)
+                    time.sleep(dwell_sec)
 
                     # Check bounds inside inner loop too
                     current_x = self.input.position().x
@@ -5316,7 +5352,9 @@ class Controller(ControllerSecondary):
                 else:
                     # Break outer loop if we hit bounds without finding new log line
                     bot_logger.log_error(
-                        f"SCAN_STOPPED: No hover update before bounds (target={card_id}, start=({start_x},{start_y}), end=({end_x},{end_y}))"
+                        f"SCAN_STOPPED: No hover update before bounds (target={card_id}, "
+                        f"start=({start_x},{start_y}), end=({end_x},{end_y}), "
+                        f"attempt={attempt}, pacing={step_px}px/{dwell_sec}s)"
                     )
                     current_pos = self.input.position()
                     self._write_hand_select_debug_bundle(
@@ -6994,8 +7032,41 @@ class Controller(ControllerSecondary):
 
     def __parse_hover_id_line(self, line):
         """
-        Extracts `objectId` from hover log lines, filtering to our seat if possible.
-        MTGA logs sometimes emit full JSON lines, sometimes fragments like `"objectId": 123`.
+        Extracts the hovered `objectId` from a hover log line, or None.
+
+        Only lines that actually describe a hover may yield an id. The bug this
+        closes: a GRE message line with no hover in it at all -- a
+        GameStateMessage, say, which is packed with ids -- used to fall through to
+        a nested-dict walk and then a regex, so the scan could adopt some
+        unrelated object as "the card under the cursor".
+
+        Two hover shapes occur, measured over a real 21MB Player.log:
+
+        - Bare fragments (`"objectId": 123` on their own line): 1382 of them, and
+          all 1382 sit inside an OUTGOING `ClientToGREUIMessage` block -- a
+          message this client sends when the local player hovers. They are
+          therefore our own hovers by construction, with no exceptions, and they
+          are the shape that supplies ~97% of the scan's identifications.
+        - Compact incoming `greToClientEvent` UIMessages carrying `onHover`: 782,
+          i.e. the remaining ~3%.
+
+        NOTE on seat filtering. The compact shape has two seat fields,
+        `systemSeatIds` on the message and `seatIds` on the uiMessage, and they
+        are always complementary. In the OUTGOING shape the equivalent fields are
+        unambiguous (`systemSeatId` is the sender, i.e. the hoverer; `seatIds` is
+        the recipient), but which of the two marks the HOVERER once the server
+        relays a hover to us could not be established from the logs: correlating
+        by object ownership is useless because the opponent's hand cards are
+        hoverable face-down objects, and a set-overlap correlation against
+        known-own hovers came out 65:57, i.e. no signal. So this deliberately
+        does NOT filter by seat: a filter with unproven polarity would, if
+        inverted, drop our own hovers and keep only foreign ones -- turning an
+        intermittent failure into a permanent one. The residual risk of adopting a
+        foreign hover from this 3% tail is small: instance ids are unique per
+        game, so a foreign id can never equal the card we are looking for, and the
+        scan simply keeps sweeping. Resolving the polarity needs a controlled
+        experiment (hover a known card by hand, with the opponent still), not more
+        log archaeology.
         """
         if not line:
             return None
@@ -7003,29 +7074,17 @@ class Controller(ControllerSecondary):
             start = line.find("{")
             if start != -1:
                 payload = json.loads(line[start:])
-                # Prefer UI hover messages with seatIds filtering.
                 messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
-                for msg in messages:
-                    ui_msg = msg.get("uiMessage") if isinstance(msg, dict) else None
-                    if not ui_msg:
-                        continue
-                    seat_ids = ui_msg.get("seatIds", [])
-                    if isinstance(seat_ids, list) and self.__system_seat_id is not None:
-                        if self.__system_seat_id not in seat_ids:
+                if messages:
+                    for msg in messages:
+                        ui_msg = msg.get("uiMessage") if isinstance(msg, dict) else None
+                        if not isinstance(ui_msg, dict):
                             continue
-                    hover = ui_msg.get("onHover", {})
-                    if isinstance(hover, dict) and isinstance(hover.get("objectId"), int):
-                        return hover["objectId"]
-                # Fallback: Look for the first objectId key in nested dicts.
-                stack = [payload]
-                while stack:
-                    cur = stack.pop()
-                    if isinstance(cur, dict):
-                        if "objectId" in cur and isinstance(cur["objectId"], int):
-                            return cur["objectId"]
-                        stack.extend(cur.values())
-                    elif isinstance(cur, list):
-                        stack.extend(cur)
+                        hover = ui_msg.get("onHover")
+                        if isinstance(hover, dict) and isinstance(hover.get("objectId"), int):
+                            return hover["objectId"]
+                    # GRE traffic with no hover in it. Never mine an id out of it.
+                    return None
         except Exception:
             pass
         m = re.search(r'"objectId"\s*:\s*(\d+)', line)
