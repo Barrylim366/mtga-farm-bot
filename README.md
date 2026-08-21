@@ -105,13 +105,15 @@ The bot auto-selects the best available input backend per platform:
 
 | Platform | Default | Fallback |
 |---|---|---|
-| Linux | `ydotool` (if installed) | `pynput` |
+| Linux | `pyautogui` | `ydotool` (if installed), then `pynput` |
 | macOS | `pyautogui` | `pynput` |
-| Windows | `pyautogui` | `pynput` |
+| Windows | `pynput` | — |
 
-Override via environment variable: `MTGA_BOT_INPUT_BACKEND=auto|pyautogui|pynput|ydotool`
+Override via environment variable: `MTGA_BOT_INPUT_BACKEND=auto|pyautogui|pynput|ydotool|null`
 
 `ydotool` requires `ydotoold` daemon to be running and is recommended for Linux Wayland sessions.
+
+Typing (account e-mail and password during an account switch) always goes through `pynput`, even on the `pyautogui` backend: `pyautogui` types by posting hardcoded **US**-layout key codes, which the OS re-interprets against the layout that is actually active. On a German QWERTZ keyboard that turned `@` into `"`, swapped y/z and mangled `-`/`_`, so logins failed with no visible reason. `pynput` inserts the literal character and is therefore layout-independent.
 
 ### Calibration (optional)
 

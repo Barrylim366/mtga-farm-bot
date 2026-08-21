@@ -205,8 +205,33 @@ class PyAutoGUIInputController(InputController):
             self._pyautogui.PAUSE = 0.0
         except Exception:
             pass
+        self._unicode_keyboard = self._make_unicode_keyboard()
         if platform.system().lower() == "darwin":
             self._verify_mouse_control()
+
+    @staticmethod
+    def _make_unicode_keyboard():
+        """A pynput keyboard used *only* for typing text. None if unavailable.
+
+        pyautogui's `typewrite` maps every character to a hardcoded US-layout
+        virtual keycode and posts that keycode; the OS then resolves it against
+        whatever keyboard layout is currently *active*. On a German (QWERTZ)
+        Mac that means `@` (US shift+2) comes out as `"`, y/z are swapped and
+        `-`/`_` are mangled -- so account e-mails and passwords were typed
+        wrong, silently, and the login just failed. Characters missing from
+        pyautogui's table entirely (umlauts, ...) are dropped without a word.
+
+        pynput inserts the literal character instead: it uses
+        CGEventKeyboardSetUnicodeString on macOS and remaps the keymap on X11,
+        both independent of the active layout. Mouse handling stays on
+        pyautogui, which is accurate and fast on both platforms.
+        """
+        try:
+            from pynput import keyboard
+
+            return keyboard.Controller()
+        except Exception:
+            return None
 
     def _verify_mouse_control(self) -> None:
         """Fail fast with a clear message if macOS blocks synthetic mouse control."""
@@ -265,7 +290,22 @@ class PyAutoGUIInputController(InputController):
         self._pyautogui.press("delete")
 
     def type_text(self, text: str) -> None:
-        self._pyautogui.typewrite(text or "", interval=0)
+        text = text or ""
+        if not text:
+            return
+        if self._unicode_keyboard is None:
+            # No pynput at all: layout-correct typing is impossible here, but
+            # typing nothing is worse than typing something.
+            self._pyautogui.typewrite(text, interval=0)
+            return
+        try:
+            self._unicode_keyboard.type(text)
+        except Exception as e:
+            # Deliberately no typewrite() fallback: pynput types character by
+            # character, so a mid-string failure has already put part of the
+            # text into the field and retyping the whole string would duplicate
+            # it. A visible error beats a silently half-typed password.
+            raise InputControllerError(f"Failed to type text: {e}") from e
 
     def tap_escape(self) -> None:
         self._pyautogui.press("esc")
