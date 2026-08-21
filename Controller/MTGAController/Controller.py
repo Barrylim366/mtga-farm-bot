@@ -3555,11 +3555,37 @@ class Controller(ControllerSecondary):
 
         Clicks a fixed 1920-frame coordinate (not a template match, which only
         works when Home is already the active tab) and verifies we actually landed
-        on Home (its anchor then matches). Returns True only if Home was reached."""
+        on Home (its anchor then matches). Returns True only if Home was reached.
+
+        The click is refused unless the nav bar is actually on screen, because
+        (104, 39) is only the Home tab there. On the match-end screen the same
+        pixel is the OPPONENT'S NAME, and clicking it opens Arena's player menu
+        and then "Report a Player" -- a modal with a Submit Report button, over a
+        real player, that no image probe recognises. Live on 2026-08-21 this
+        happened exactly so: three GO_HOME clicks at 18:47:46/52/59 (all three
+        already flagged `risky` by the click recorder) while the end screen was
+        still up, and the bot then sat behind that dialog for fifteen minutes,
+        failing every screen probe, until the match it had queued was lost on the
+        rope. Submitting a false report against a real person was one stray click
+        away, so this gate is a safety check first and a stall fix second.
+        """
         if self._stop_requested:
             return False
         arena = self._ensure_arena_region(force_reacquire=True)
         if arena is None:
+            return False
+        # The Profile tab: present on every main screen, absent in a match and on
+        # the match-end screen. Its presence is what makes (104, 39) the Home tab.
+        nav_anchor = self._app_path("assets", "assert", "global_anchor.png")
+        if self._locate_image_center_in_scaled_arena_region(
+            nav_anchor, "GO_HOME_NAVBAR_CHECK", rel_region=(0, 0, 760, 260),
+            confidence=0.75, timeout=1.5,
+        ) is None:
+            bot_logger.log_info(
+                "GO_HOME refused: the nav bar is not on screen, so (104, 39) is not "
+                "the Home tab -- on the match-end screen it is the opponent's name, "
+                "which opens the Report a Player dialog."
+            )
             return False
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
         self._click_abs(int(point[0]), int(point[1]), "GO_HOME")
