@@ -7,6 +7,7 @@ import AI.Utilities.CardPolicy as CardPolicy
 import AI.Utilities.CounterLogic as CounterLogic
 import AI.Utilities.FightLogic as FightLogic
 import AI.Utilities.LifegainLogic as LifegainLogic
+import AI.Utilities.LegendRule as LegendRule
 import traceback
 from datetime import datetime
 
@@ -821,6 +822,28 @@ class DummyAI(AIKernel):
                         if CardPolicy.is_unsupported_to_cast(grp_id):
                             self._debug(
                                 f"Skipping {card_name}: in-resolution chooser not implemented yet."
+                            )
+                            continue
+                        # A second copy of a legend we already control is legal,
+                        # so MTGA offers it -- and then blocks the cast behind a
+                        # client-side "Are You Sure?" that no GRE message
+                        # announces. Observed live: the cast never lands, three
+                        # sweeps burn the rope, and the card ends up suppressed
+                        # as unreachable. Confirming would be no better (CR
+                        # 704.5j bins one of the two right after), so never pick
+                        # it in the first place.
+                        _legend_dupe = LegendRule.duplicate_legend_in_play(
+                            cast_instance_id=instance_id,
+                            game_objects=removal_game_objects,
+                            my_seat=my_seat,
+                            battlefield_zone_ids=_own_bf,
+                            live_instance_ids=removal_live_ids,
+                        )
+                        if _legend_dupe is not None:
+                            self._debug(
+                                f"LEGEND_RULE: skipping {card_name} (inst={instance_id}); "
+                                f"we already control the same legend (inst={_legend_dupe}). "
+                                "Casting it would only bin one of the two."
                             )
                             continue
                         mana_cost_str = card_info.get('manaCost', '')
