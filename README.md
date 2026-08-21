@@ -310,6 +310,8 @@ If auto-detection fails, the UI prompts for a manual file selection on startup.
 
 When something goes wrong the bot saves debug bundles under `runtime/debug/<timestamp>/` containing screenshots, the log tail, and a state dump. The entire `runtime/` tree is gitignored.
 
+`MTGA_RUNTIME_DIR` moves that whole tree — logs, debug bundles, records, status, card cache — somewhere else, which is how the test suite stops writing into the live bot's artefacts. It used to: one suite run put around a thousand lines of fixture output ("CAST_FAILED: card 999 …") into `runtime/analysis/history.log` while a real match was being played, and truncated `runtime/logs/bot.log`, because the tests build real Controllers and a Controller's constructor resets the status file. Those artefacts are the first thing you read when debugging live behaviour, so polluting them costs exactly when it matters. The catch found while fixing it: `bot_logger` resolved its log path once, into a module constant at import time, and is pulled in transitively before any test code runs — so the override could not reach it and the redirect silently did nothing for the biggest offender. Runtime paths are therefore resolved per call, never frozen at import, and `tests/test_runtime_isolation.py` asserts it by writing a real log line and checking the repo's `bot.log` was not touched.
+
 ### Decision snapshots
 
 For post-mortem debugging of *play* decisions (why did the bot pass, attack, or pick that target?), the bot records one structured snapshot per decision under `runtime/debug/matches/<utc>_<matchId>/`:

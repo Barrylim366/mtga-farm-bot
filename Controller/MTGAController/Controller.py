@@ -6970,7 +6970,7 @@ class Controller(ControllerSecondary):
                 json.dump(payload, handle, indent=2)
 
             try:
-                with open(bot_logger.BOT_LOG_FILE, "r", encoding="utf-8", errors="replace") as handle:
+                with open(bot_logger.get_bot_log_path(), "r", encoding="utf-8", errors="replace") as handle:
                     handle.seek(0, os.SEEK_END)
                     size = handle.tell()
                     start = max(0, size - 120000)

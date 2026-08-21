@@ -47,7 +47,16 @@ def _maybe_prune_debug_bundles(base: Path) -> None:
 
 
 def _resolve_bot_log_path() -> str:
-    """Resolve the repo-local runtime bot.log location."""
+    """Resolve the runtime bot.log location, honouring MTGA_RUNTIME_DIR.
+
+    Resolved per call rather than frozen into a module constant at import time.
+    That constant made the runtime-dir override useless here: bot_logger is
+    pulled in transitively by LogReader before anything gets a chance to set the
+    variable, so the path was already baked in and the test suite wrote (and
+    truncated) the live bot.log no matter what. Path resolution is a dict lookup
+    plus a mkdir on an existing directory; _write_lines opens the file on every
+    call anyway.
+    """
     try:
         return str(runtime_file("logs", "bot.log"))
     except Exception:
@@ -55,7 +64,11 @@ def _resolve_bot_log_path() -> str:
         return "bot.log"
 
 
-BOT_LOG_FILE = _resolve_bot_log_path()
+def get_bot_log_path() -> str:
+    """Where bot.log is right now. Call this instead of caching the result --
+    the module-level constant this replaces is what made MTGA_RUNTIME_DIR
+    unusable for anything importing bot_logger transitively."""
+    return _resolve_bot_log_path()
 
 
 def init_bot_log():
@@ -89,8 +102,9 @@ def ensure_debug_dir(subdir: str | None = None) -> str:
 
 def _write_lines(mode: str, lines: list[str]) -> None:
     global _fallback_warning_printed
+    target = _resolve_bot_log_path()
     try:
-        with open(BOT_LOG_FILE, mode, encoding="utf-8") as f:
+        with open(target, mode, encoding="utf-8") as f:
             for line in lines:
                 f.write(line)
         return
@@ -105,7 +119,7 @@ def _write_lines(mode: str, lines: list[str]) -> None:
         if not _fallback_warning_printed:
             _fallback_warning_printed = True
             print(
-                f"[bot_logger] Warning: failed writing '{BOT_LOG_FILE}', using local 'bot.log' fallback."
+                f"[bot_logger] Warning: failed writing '{target}', using local 'bot.log' fallback."
             )
     except Exception:
         # Intentionally swallow logger errors so gameplay loop stays alive.
