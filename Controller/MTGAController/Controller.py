@@ -753,6 +753,9 @@ class Controller(ControllerSecondary):
         # Bumped by every non-cast hover scan; a cast sweep compares it before
         # and after to know whether it had the shared hover queue to itself.
         self._other_hover_scan_seq = 0
+        # Where the last hover-scan selection clicked, so a click that is logged
+        # but has no effect can still be measured against a screenshot.
+        self._last_selection_click: dict | None = None
         self._arena_reactivate_ts = 0.0
         self._arena_correction_xy: tuple[int, int] = (0, 0)
         self._logout_play_origin: tuple[int, int] | None = None
@@ -1572,6 +1575,87 @@ class Controller(ControllerSecondary):
         except Exception:
             pass
         bot_logger.log_error(f"Hand select debug bundle saved: {debug_dir}")
+
+    # How long the target prompt gets to close before the click counts as missed.
+    # Generous: the answer travels client -> server -> client, and a prompt that
+    # is genuinely answered clears well inside this.
+    _TARGET_CLICK_CHECK_DELAY_SEC = 2.5
+
+    def _schedule_target_click_check(self, *, card_id: int, label: str) -> None:
+        """Photograph the board if a target click did not close the prompt.
+
+        Diagnostic only -- it clicks nothing and changes no decision. Runs on a
+        timer so the selection flow is not slowed by the wait.
+        """
+        def _check() -> None:
+            try:
+                if self._stop_requested or self._suppress_selections:
+                    return
+                if self.__pending_target_select is None:
+                    return  # the click worked, nothing to look at
+                bot_logger.log_error(
+                    f"TARGET_CLICK_INEFFECTIVE: {label} clicked for card {card_id} "
+                    f"but a target selection is still pending "
+                    f"{self._TARGET_CLICK_CHECK_DELAY_SEC:.1f}s later -- the click "
+                    "probably missed the card. Bundle has the board and the point."
+                )
+                self._write_target_click_debug_bundle(card_id=card_id, label=label)
+            except Exception as e:
+                bot_logger.log_error(f"TARGET_CLICK check failed: {e}")
+
+        try:
+            threading.Timer(self._TARGET_CLICK_CHECK_DELAY_SEC, _check).start()
+        except Exception:
+            pass
+
+    def _write_target_click_debug_bundle(self, *, card_id: int, label: str) -> None:
+        """Photograph a target click that was made and had no effect.
+
+        The hover scan proves the cursor was over the right object -- MTGA named
+        it -- yet the target prompt can stay open anyway, and nothing in the log
+        distinguishes "clicked the card" from "clicked 20px past its edge". Live
+        on 2026-08-21: Scorching Dragonfire's only legal target was correctly
+        chosen (creature 285, `can_hit_face: False`), SELECT_OPP_BATTLEFIELD_ITEM
+        clicked at arena-relative (852, 314), and the prompt was still up 40s
+        later, so every following hand sweep was blind (MTGA emits no hand hovers
+        while a target is pending) and the bot came within seconds of an
+        emergency concede. select_opponent_battlefield_permanent's own docstring
+        calls its scan band "a first estimate [that] needs in-game calibration";
+        this is what a calibration can be measured from.
+        """
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        debug_dir = Path(bot_logger.ensure_debug_dir(f"target-click-{stamp}"))
+        click = dict(self._last_selection_click or {})
+        try:
+            point = click.get("point")
+            arena = click.get("arena") or self._arena_region
+            rel = None
+            if point and arena:
+                rel = [int(point[0]) - int(arena[0]), int(point[1]) - int(arena[1])]
+            payload = {
+                "card_id": int(card_id),
+                "label": label,
+                "click_point_screen": list(point) if point else None,
+                # The measurable number: where the click landed inside the game
+                # frame, to be compared against the card in the screenshot.
+                "click_point_arena_relative": rel,
+                "arena_region": arena,
+                "pending_target_select": self.__pending_target_select,
+                "state": str(self._get_state_from_log()),
+                "turn_info": self.updated_game_state.get_turn_info() or {},
+            }
+            with open(debug_dir / "target_click_state.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str)
+        except Exception:
+            pass
+        try:
+            self._vision.begin_tick()
+            if self._arena_region:
+                img = self._vision.capture(self._arena_region)
+                self._vision.save_image(img, str(debug_dir / "arena_region.png"))
+        except Exception:
+            pass
+        bot_logger.log_error(f"Target click debug bundle saved: {debug_dir}")
 
     def _write_casting_option_debug_bundle(
         self,
@@ -6677,6 +6761,11 @@ class Controller(ControllerSecondary):
                 label="OPP_BATTLEFIELD_ITEM",
                 max_scan_sec=4.0,
             ):
+                # The click landed on *something* -- but a target prompt that is
+                # still open after it means it was not the card. Check off-thread
+                # so the selection flow is not delayed, and only photograph the
+                # failure, not the many clicks that work.
+                self._schedule_target_click_check(card_id=card_id, label="OPP_BATTLEFIELD_ITEM")
                 return True
             bot_logger.log_error(
                 f"Opponent battlefield select failed for card_id={card_id} "
@@ -6903,6 +6992,16 @@ class Controller(ControllerSecondary):
                 bot_logger.log_click(
                     x, y, f"SELECT_{label} (id={card_id})", arena=self._arena_region
                 )
+                # Remember where we clicked. A selection click that is logged but
+                # has no effect is otherwise unmeasurable after the fact -- see
+                # _write_target_click_debug_bundle.
+                self._last_selection_click = {
+                    "point": (int(x), int(y)),
+                    "label": label,
+                    "card_id": int(card_id),
+                    "arena": self._arena_region,
+                    "ts": time.time(),
+                }
                 for _ in range(max(1, int(clicks))):
                     self.input.left_click(1)
                     time.sleep(0.1)
