@@ -71,6 +71,13 @@ class Controller(ControllerSecondary):
     # start_game_from_home_screen). After this many failed attempts the bot gives
     # up reading and just plays, rather than dipping to Home forever.
     _HOME_QUEST_CHECK_MAX_ATTEMPTS = 3
+    # Horizontal limits of the hand sweep, in the 1920-wide reference frame. See
+    # the long note at the hand_scan_p1 assignment for how these were measured.
+    # Kept as class constants because a saved calibration_config.json overrides
+    # the instance defaults, and _clamp_hand_scan_x re-applies them there too --
+    # a config from before 2026-08-21 carries the old full-width 0..1920 band.
+    _HAND_SCAN_MIN_X = 220
+    _HAND_SCAN_MAX_X = 1700
 
     def __init__(
         self,
@@ -244,8 +251,8 @@ class Controller(ControllerSecondary):
         # rel x <= 170 and none ever landed above 1572. 220..1700 therefore
         # excludes all known misfires without cutting a single observed real
         # click, and keeps a wide margin to the buttons on the right.
-        self.hand_scan_p1 = (220, 1050)
-        self.hand_scan_p2 = (1700, 1050)
+        self.hand_scan_p1 = (self._HAND_SCAN_MIN_X, 1050)
+        self.hand_scan_p2 = (self._HAND_SCAN_MAX_X, 1050)
         self.battlefield_scan_p1 = (
             int(1920 * 0.10),
             int(1080 * 0.50),
@@ -334,6 +341,10 @@ class Controller(ControllerSecondary):
             if "opponent_avatar" in click_targets:
                 self.opponent_avatar_coors = (click_targets["opponent_avatar"]["x"], click_targets["opponent_avatar"]["y"])
             if "hand_scan_points" in click_targets:
+                # Taken verbatim here on purpose. The band is narrowed later, in
+                # _validate_loaded_click_targets, because the legacy-absolute
+                # profile is detected from these very values being > 1920 --
+                # clamping them at this point would erase that signal.
                 self.hand_scan_p1 = (click_targets["hand_scan_points"]["p1"]["x"], click_targets["hand_scan_points"]["p1"]["y"])
                 self.hand_scan_p2 = (click_targets["hand_scan_points"]["p2"]["x"], click_targets["hand_scan_points"]["p2"]["y"])
             if "battlefield_scan_points" in click_targets:
@@ -848,8 +859,8 @@ class Controller(ControllerSecondary):
             and 0 <= int(hs_p2[0]) <= 1920 and 0 <= int(hs_p2[1]) <= 1080
         )
         if not hand_valid:
-            self.hand_scan_p1 = (0, 1050)
-            self.hand_scan_p2 = (1920, 1050)
+            self.hand_scan_p1 = (self._HAND_SCAN_MIN_X, 1050)
+            self.hand_scan_p2 = (self._HAND_SCAN_MAX_X, 1050)
             bot_logger.log_info(
                 f"Hand scan points fallback to 1920 defaults: p1={self.hand_scan_p1} p2={self.hand_scan_p2}"
             )
@@ -864,6 +875,40 @@ class Controller(ControllerSecondary):
             pass
         if self._legacy_absolute_click_profile:
             bot_logger.log_info("Detected legacy absolute click profile from loaded calibration values.")
+        # Narrow the loaded band to the hand row, last, so it wins over both the
+        # config and the fallback above. Every calibration_config.json written
+        # before 2026-08-21 stores 0..1920, the full window width, and that is
+        # the sweep that clicked the player avatar at rel x=120, opened MTGA's
+        # graveyard viewer over the board and lost a match on the rope. No real
+        # hand card was recorded outside _HAND_SCAN_MIN_X.._HAND_SCAN_MAX_X in
+        # 1988 samples, so the clamp cannot cut a card off, whereas trusting the
+        # stored value costs games.
+        #
+        # Unconditional on purpose. Clamping x would in principle hide the
+        # legacy-absolute signal (x > 1920), but not here: the hand_valid check
+        # above has already replaced any out-of-frame band with the defaults, so
+        # the detection at that point is unreachable for these two points and
+        # the values reaching this line are always within 0..1920 anyway.
+        # Skipping the clamp for legacy profiles would only leave a hole -- a
+        # legacy install whose *other* points are absolute but whose hand band
+        # is a valid 0..1920 would keep sweeping the full width.
+        self._clamp_hand_scan_band()
+
+    def _clamp_hand_scan_band(self) -> None:
+        """Pull hand_scan_p1/p2 back into the safe horizontal band."""
+        lo, hi = self._HAND_SCAN_MIN_X, self._HAND_SCAN_MAX_X
+        for attr in ("hand_scan_p1", "hand_scan_p2"):
+            try:
+                x, y = self.hand_scan_p1 if attr == "hand_scan_p1" else self.hand_scan_p2
+                clamped = max(lo, min(hi, int(x)))
+            except Exception:
+                continue
+            if clamped != int(x):
+                setattr(self, attr, (clamped, y))
+                bot_logger.log_info(
+                    f"Hand scan {attr} clamped to the hand row: x={int(x)} -> {clamped} "
+                    f"(safe band {lo}..{hi}; recalibrate if your layout really differs)"
+                )
 
     def _infer_legacy_origin_from_loaded_targets(self) -> tuple[int, int] | None:
         ct = self._loaded_click_targets or {}
@@ -1527,6 +1572,64 @@ class Controller(ControllerSecondary):
         except Exception:
             pass
         bot_logger.log_error(f"Hand select debug bundle saved: {debug_dir}")
+
+    def _write_casting_option_debug_bundle(
+        self,
+        *,
+        reason: str,
+        label: str,
+        base_point: tuple[int, int],
+        target_point: tuple[int, int] | None,
+        option_summaries: list[str],
+        tried: list[tuple[int, int]] | None = None,
+    ) -> None:
+        """Photograph the casting-time "Choose One" dialog we are clicking at.
+
+        Every base_point in __handle_casting_time_options_req is a measured
+        guess, and a wrong one is invisible in the log: the click is recorded,
+        the dialog just never closes. Live on 2026-08-21, Eaten Alive ("sacrifice
+        a creature or pay {3}{B}") took three clicks at (1775, 978) and stayed
+        open until the retries ran out, so the spell was never cast. Without a
+        picture of the dialog there is nothing to measure the correct point
+        against, which is the whole reason this bundle exists.
+        """
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        debug_dir = Path(bot_logger.ensure_debug_dir(f"casting-option-{stamp}"))
+        try:
+            payload = {
+                "reason": reason,
+                "label": label,
+                "choice_base_point_1920": [int(base_point[0]), int(base_point[1])],
+                # The whole candidate list, so the picture can be checked against
+                # every point that was tried rather than just the last one.
+                "tried_points_1920": [
+                    [int(p[0]), int(p[1])] for p in (tried or [base_point])
+                ],
+                "choice_target_point_screen": (
+                    [int(target_point[0]), int(target_point[1])]
+                    if target_point is not None
+                    else None
+                ),
+                "options": list(option_summaries),
+                "arena_region": self._arena_region,
+                "state": str(self._get_state_from_log()),
+                "turn_info": self.updated_game_state.get_turn_info() or {},
+            }
+            with open(debug_dir / "casting_option_state.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
+        try:
+            self._vision.begin_tick()
+            if self._arena_region:
+                arena_img = self._vision.capture(self._arena_region)
+                self._vision.save_image(arena_img, str(debug_dir / "arena_region.png"))
+            else:
+                full = self._vision.capture(None)
+                self._vision.save_image(full, str(debug_dir / "full_screen.jpg"))
+        except Exception:
+            pass
+        bot_logger.log_error(f"Casting option debug bundle saved: {debug_dir}")
 
     def _write_hand_overlay_debug_bundle(
         self,
@@ -10586,6 +10689,29 @@ class Controller(ControllerSecondary):
     # game moves on and never rain onto the battlefield behind the overlay.
     __CASTING_TIME_OPTION_MAX_RETRIES = 2
 
+    # Where the "choose an additional cost" dialog's buttons might be, tried in
+    # order, in the 1920x1080 arena frame.
+    #
+    # A list rather than one point because the single point this replaces was
+    # wrong and the retries could not tell: all three clicks went to the same
+    # spot. Live on 2026-08-21, Eaten Alive ("sacrifice a creature or pay
+    # {3}{B}") was clicked 3x at (1775, 978), the dialog stayed open through
+    # every one of them, the retries ran out and the spell was never cast --
+    # the AI had already picked its target and simply lost the card.
+    #
+    # The candidates: the original bottom-right button position first, since it
+    # is the only one ever observed working for some card; then the two
+    # mid-screen plate positions, because a ChooseOrCost is structurally the
+    # same "pick one of two" prompt as CastingTimeOptionType_Modal, which this
+    # same handler places at (750, 505) and (1185, 505). Cheapest-cost-first is
+    # not attempted: which plate is the sacrifice is unknown, and paying the
+    # mana still casts the spell, which beats losing it.
+    #
+    # Every click is gated on the dialog still being open (checked before the
+    # move and again after the settle sleep), so a candidate that misses costs
+    # a click into the overlay, and the sweep stops the moment one lands.
+    _CHOOSE_OR_COST_CANDIDATES = ((1775, 978), (750, 505), (1185, 505))
+
     def __handle_casting_time_options_req(self, line: str) -> None:
         # Kicker & friends: after clicking a card with optional casting-time
         # costs, MTGA blocks the cast behind a mid-screen "Choose One" dialog
@@ -10660,18 +10786,21 @@ class Controller(ControllerSecondary):
             # Kicker-style options render as mid-screen plates. Pick accordingly.
             if is_choose_or_cost:
                 label = "CASTING_TIME_OPTION_SACRIFICE"
-                base_point = (1775, 978)  # bottom-right "Sacrifice a creature" button
-                choice_desc = "sacrifice-a-creature (bottom button)"
+                base_point = self._CHOOSE_OR_COST_CANDIDATES[0]
+                candidates = list(self._CHOOSE_OR_COST_CANDIDATES)
+                choice_desc = "cheapest additional cost (candidate sweep)"
             elif prefer_second_modal:
                 # Two mode plates side by side (indestructible left, destroy right).
                 # Click the RIGHT plate (the "destroy" mode). Measured centre in the
                 # 1920x1080 arena frame; mirrors the left plate at (750, 505).
                 label = "CASTING_TIME_OPTION_MODAL_SECOND"
                 base_point = (1185, 505)
+                candidates = [base_point]
                 choice_desc = "second/right modal option (e.g. Valorous Stance destroy)"
             else:
                 label = "CASTING_TIME_OPTION_PLAIN"
                 base_point = (750, 505)   # leftmost (plain, non-kicked) plate
+                candidates = [base_point]
                 choice_desc = "plain (non-kicked) version"
             bot_logger.log_info(
                 "CASTING_TIME_OPTIONS detected: options=[{}] — choosing {}.".format(
@@ -10717,10 +10846,15 @@ class Controller(ControllerSecondary):
                             f"CASTING_TIME_OPTION: dialog resolved before retry {attempt}; stopping."
                         )
                         return
-                    target, source = self._map_abs_point_to_arena(base_point, label=label)
+                    # Walk the candidate list instead of re-clicking one point:
+                    # a repeat only helps a click that was swallowed, never a
+                    # point that is not on the button at all.
+                    point = candidates[min(attempt, len(candidates) - 1)]
+                    target, source = self._map_abs_point_to_arena(point, label=label)
                     bot_logger.log_info(
-                        f"CASTING_TIME_OPTION click (attempt {attempt}): base={base_point} "
-                        f"target={target} source={source}"
+                        f"CASTING_TIME_OPTION click (attempt {attempt}, "
+                        f"candidate {min(attempt, len(candidates) - 1) + 1}/{len(candidates)}): "
+                        f"base={point} target={target} source={source}"
                     )
                     bot_logger.log_click(target[0], target[1], label)
                     self.input.move_abs(target[0], target[1])
@@ -10747,7 +10881,13 @@ class Controller(ControllerSecondary):
                         # on (badly) rather than idling into the priority rope.
                         threading.Timer(
                             1.6,
-                            lambda: self.__clear_casting_time_options_wait("retries exhausted"),
+                            lambda: self.__give_up_on_casting_time_options(
+                                label=label,
+                                base_point=point,
+                                target_point=target,
+                                option_summaries=option_summaries,
+                                tried=list(candidates),
+                            ),
                         ).start()
                 except Exception as e:
                     # Never leave the pause armed on a crash -- it would block
@@ -10763,6 +10903,43 @@ class Controller(ControllerSecondary):
             threading.Timer(1.0, lambda: _click_option(0)).start()
         except Exception as e:
             bot_logger.log_error(f"Failed to handle CastingTimeOptionsReq: {e}")
+
+    def __give_up_on_casting_time_options(
+        self,
+        *,
+        label: str,
+        base_point: tuple[int, int],
+        target_point: tuple[int, int] | None,
+        option_summaries: list[str],
+        tried: list[tuple[int, int]] | None = None,
+    ) -> None:
+        """Release the decision pause, but photograph the dialog first.
+
+        Reaching here means every click missed: the dialog is still up, so the
+        spell was paid for and never cast, and the bot is about to play on as if
+        nothing happened. That is exactly the state worth a picture -- the
+        screenshot is what a corrected base_point can be measured from.
+        """
+        try:
+            if self.__casting_time_options_still_open():
+                bot_logger.log_error(
+                    f"CASTING_TIME_OPTION_UNANSWERED: {label} exhausted every candidate "
+                    f"({tried if tried else [base_point]}; last target={target_point}) and the "
+                    "dialog is still open -- none of these points is on the button. "
+                    f"options=[{'; '.join(option_summaries) or 'unparsed'}]"
+                )
+                self._write_casting_option_debug_bundle(
+                    reason="retries_exhausted_dialog_still_open",
+                    label=label,
+                    base_point=base_point,
+                    target_point=target_point,
+                    option_summaries=option_summaries,
+                    tried=list(tried) if tried else None,
+                )
+        except Exception as e:
+            bot_logger.log_error(f"CASTING_TIME_OPTION give-up capture failed: {e}")
+        finally:
+            self.__clear_casting_time_options_wait("retries exhausted")
 
     def __handle_select_targets_req(self, line: str) -> None:
         try:

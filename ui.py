@@ -1556,9 +1556,11 @@ class ConfigManager:
                 "attack_all": {"x": 1755, "y": 944},
                 "opponent_avatar": {"x": 1286, "y": 216},
                 "assign_damage_done": {"x": 1280, "y": 720},
+                # Hand row only, not the full window width -- see the note at
+                # Controller.hand_scan_p1 for why the edges are dangerous.
                 "hand_scan_points": {
-                    "p1": {"x": 0, "y": 1050},
-                    "p2": {"x": 1920, "y": 1050}
+                    "p1": {"x": 220, "y": 1050},
+                    "p2": {"x": 1700, "y": 1050}
                 }
             }
         }

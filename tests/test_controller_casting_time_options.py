@@ -383,5 +383,137 @@ class CastingTimeOptionsRetryTest(unittest.TestCase):
         self.assertEqual(self.c.input.clicks, 0)
 
 
+EATEN_ALIVE_GRP_ID = 93885
+
+
+class ChooseOrCostCandidateSweepTest(unittest.TestCase):
+    """A ChooseOrCost dialog must not be answered by the same point three times.
+
+    Live on 2026-08-21, turn 19: the AI picked Eaten Alive ("As an additional
+    cost to cast this spell, sacrifice a creature or pay {3}{B}. Exile target
+    creature or planeswalker."), chose its target, and the handler clicked
+    (1775, 978) three times 1.6s apart. Every click was logged, the dialog
+    stayed open through all of them ("Deferring decision; casting-time Choose
+    One dialog still open"), the retries ran out and the spell was simply lost.
+    Repeating one point can only rescue a swallowed click, never a point that is
+    not on the button -- so the retries walk the candidate list instead.
+    """
+
+    def setUp(self):
+        self.c = make_controller()
+        seed_state(self.c)
+        self.timers = []
+        self.points = []
+        outer = self
+
+        class RecordingTimer(FakeTimer):
+            def __init__(self, delay, fn, *args, **kwargs):
+                super().__init__(delay, fn, *args, **kwargs)
+                outer.timers.append(self)
+
+        self.timer_patch = mock.patch.object(controller_module.threading, "Timer", RecordingTimer)
+        self.timer_patch.start()
+        self.addCleanup(self.timer_patch.stop)
+        # Record the 1920-frame point each attempt asks for.
+        self.c._map_abs_point_to_arena = lambda point, label=None: (
+            outer.points.append(tuple(point)) or (1000, 500),
+            "test",
+        )
+        self.c._write_casting_option_debug_bundle = lambda **k: outer.bundles.append(k)
+        self.bundles = []
+        self.c._Controller__handle_casting_time_options_req(
+            casting_time_options_line(
+                option_type="CastingTimeOptionType_ChooseOrCost",
+                grp_id=EATEN_ALIVE_GRP_ID,
+            )
+        )
+
+    def fire_next(self):
+        for timer in reversed(self.timers):
+            if timer.started and not timer.cancelled and not getattr(timer, "fired", False):
+                timer.fired = True
+                timer.fn()
+                return True
+        return False
+
+    def test_each_attempt_tries_a_different_point(self):
+        while self.fire_next():
+            pass
+        self.assertEqual(
+            self.points,
+            list(Controller._CHOOSE_OR_COST_CANDIDATES),
+            "the retries repeated a point instead of trying the next candidate",
+        )
+
+    def test_the_first_candidate_is_the_previously_shipped_point(self):
+        """Ordering matters: the point that was there before goes first, so a
+        card this already worked for keeps working."""
+        self.fire_next()
+        self.assertEqual(self.points, [(1775, 978)])
+
+    def test_the_sweep_stops_as_soon_as_the_dialog_closes(self):
+        self.fire_next()
+        self.assertEqual(self.c.input.clicks, 1)
+        apply_resolution_diff(self.c)
+        while self.fire_next():
+            pass
+        self.assertEqual(
+            self.c.input.clicks, 1,
+            "a later candidate fired after the dialog was answered -- that click "
+            "lands on the battlefield",
+        )
+
+    def test_exhausting_every_candidate_photographs_the_dialog(self):
+        """The failure has no other visible symptom: the clicks are all logged
+        and the spell just never gets cast, so the screenshot is the only way to
+        measure where the button really is."""
+        while self.fire_next():
+            pass
+        self.assertEqual(len(self.bundles), 1, "no debug bundle for an unanswered dialog")
+        self.assertEqual(self.bundles[0]["reason"], "retries_exhausted_dialog_still_open")
+        self.assertEqual(
+            list(self.bundles[0]["tried"]), list(Controller._CHOOSE_OR_COST_CANDIDATES)
+        )
+
+    def test_a_dialog_that_resolves_is_not_photographed(self):
+        self.fire_next()
+        apply_resolution_diff(self.c)
+        while self.fire_next():
+            pass
+        self.assertEqual(self.bundles, [], "screenshot taken for a dialog that worked")
+
+    def test_the_pause_is_released_even_after_every_candidate_missed(self):
+        while self.fire_next():
+            pass
+        self.assertFalse(
+            self.c._Controller__should_pause_for_casting_time_options(),
+            "a dialog we cannot answer must not pause decisions forever",
+        )
+
+    def test_a_modal_dialog_still_uses_its_single_measured_plate(self):
+        """The candidate sweep is for ChooseOrCost only; the modal plates are
+        measured and must not start wandering."""
+        c = make_controller()
+        seed_state(c)
+        points = []
+        c._map_abs_point_to_arena = lambda point, label=None: (
+            points.append(tuple(point)) or (1000, 500), "test",
+        )
+        timers = []
+
+        class T(FakeTimer):
+            def __init__(self, delay, fn, *a, **k):
+                super().__init__(delay, fn, *a, **k)
+                timers.append(self)
+
+        with mock.patch.object(controller_module.threading, "Timer", T):
+            c._Controller__handle_casting_time_options_req(casting_time_options_line())
+            for timer in list(timers):
+                if timer.started and not timer.cancelled:
+                    timer.fn()
+        self.assertTrue(points)
+        self.assertEqual(set(points), {(750, 505)}, "modal plate point drifted")
+
+
 if __name__ == "__main__":
     unittest.main()

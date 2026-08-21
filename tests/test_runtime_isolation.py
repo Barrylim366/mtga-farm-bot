@@ -84,7 +84,7 @@ class RuntimeIsolationTest(unittest.TestCase):
             Path(runtime_paths.get_runtime_root()).resolve(), Path(probe).resolve()
         )
 
-    def test_an_empty_override_falls_back_to_the_app_root(self):
+    def _without_override(self):
         original = os.environ.get(runtime_paths.RUNTIME_DIR_ENV)
         self.addCleanup(
             lambda: os.environ.__setitem__(runtime_paths.RUNTIME_DIR_ENV, original)
@@ -92,10 +92,44 @@ class RuntimeIsolationTest(unittest.TestCase):
             else os.environ.pop(runtime_paths.RUNTIME_DIR_ENV, None)
         )
         os.environ[runtime_paths.RUNTIME_DIR_ENV] = "   "
+
+    def test_the_production_default_is_the_app_root(self):
         self.assertEqual(
-            Path(runtime_paths.get_runtime_root()).resolve(),
+            runtime_paths.default_runtime_root().resolve(),
             (Path(runtime_paths.get_app_root()) / "runtime").resolve(),
         )
+
+    def test_an_empty_override_still_avoids_the_live_runtime_dir(self):
+        """With no usable override, a test process must NOT fall back to the
+        app root -- that is the live bot's runtime dir.
+
+        This is the hole that made the whole redirect optional. The suite is
+        started as `python -m unittest discover tests`, which sets top_level_dir
+        to tests/, so the `tests` package is never imported and its __init__
+        never sets the variable. The only reason it ever looked isolated is that
+        tests/test_combat_blocks.py imports `tests.test_combat_shadow`, pulling
+        the package in mid-run -- and 'test_cast_stall_guards' sorts before
+        'test_combat_blocks', so its fixtures (card 999) were appended to the
+        live bot.log of a bot that was playing at the time.
+        """
+        self._without_override()
+        root = Path(runtime_paths.get_runtime_root()).resolve()
+        self.assertNotEqual(root, runtime_paths.default_runtime_root().resolve())
+        self.assertTrue(
+            runtime_paths._running_under_test_runner(),
+            "the test-runner guard does not recognise this runner, so an "
+            "unset MTGA_RUNTIME_DIR would write into the live runtime dir",
+        )
+
+    def test_the_log_path_survives_losing_the_override(self):
+        """End-to-end version of the above: the guard has to hold for the
+        artefact that actually got polluted."""
+        self._without_override()
+        repo_log = Path(runtime_paths.get_repo_root()) / "runtime" / "logs" / "bot.log"
+        before = repo_log.stat().st_mtime_ns if repo_log.exists() else None
+        bot_logger.log_info("runtime isolation probe (no override)")
+        after = repo_log.stat().st_mtime_ns if repo_log.exists() else None
+        self.assertEqual(before, after, f"a test log line touched {repo_log}")
 
 
 if __name__ == "__main__":
