@@ -60,6 +60,21 @@ class _FakeInput:
     def left_click(self, n=1):
         pass
 
+    # _click_abs uses the down/up pair, not left_click. Missing them is how this
+    # harness used to blow up with AttributeError instead of failing cleanly --
+    # see the screen-isolation note in make_controller.
+    def left_down(self):
+        pass
+
+    def left_up(self):
+        pass
+
+    def tap_enter(self):
+        pass
+
+    def tap_shift_enter(self):
+        pass
+
 
 def make_controller() -> Controller:
     f = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
@@ -77,6 +92,16 @@ def make_controller() -> Controller:
     # Recovering from a blind sweep needs a real arena region and a real click;
     # neither exists here. Tests that care about it override this.
     c._reactivate_arena_window = lambda **k: False
+    # Keep the suite off the real screen. Without these, the blind-sweep
+    # recovery path runs genuine template matching against whatever is on the
+    # monitor: when MTGA happened to be showing a Done button, the match
+    # succeeded, _click_abs was called for real and the harness died with
+    # AttributeError. That looked exactly like a flaky test -- it failed only
+    # while the bot was running and passed in five reruns after it stopped -- and
+    # cost a round of chasing a timing bug that did not exist. A unit test must
+    # not be able to see the screen at all.
+    c._locate_image_center_in_scaled_arena_region = lambda *a, **k: None
+    c._click_image_in_scaled_arena_region = lambda *a, **k: False
     return c
 
 

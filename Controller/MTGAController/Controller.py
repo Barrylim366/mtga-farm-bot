@@ -1639,6 +1639,10 @@ class Controller(ControllerSecondary):
                 # The measurable number: where the click landed inside the game
                 # frame, to be compared against the card in the screenshot.
                 "click_point_arena_relative": rel,
+                # Which sample of the sweep matched, and how far in. A match on
+                # the first samples cannot have been caused by this sweep.
+                "sweep_sample": click.get("sample"),
+                "sweep_elapsed_sec": click.get("elapsed_sec"),
                 "arena_region": arena,
                 "pending_target_select": self.__pending_target_select,
                 "state": str(self._get_state_from_log()),
@@ -7047,8 +7051,10 @@ class Controller(ControllerSecondary):
         self.input.move_abs(reset_x, reset_y)
         time.sleep(0.1)
 
+        sample = 0
         for y in range(y_min, y_max + 1, step):
             for x in range(x_min, x_max + 1, step):
+                sample += 1
                 if self._stop_requested or self._suppress_selections:
                     bot_logger.log_info(f"{label}_ABORTED: stop/suppress requested")
                     return False
@@ -7082,7 +7088,23 @@ class Controller(ControllerSecondary):
                     "card_id": int(card_id),
                     "arena": self._arena_region,
                     "ts": time.time(),
+                    # Which sample of the sweep produced the match. A hover is not
+                    # synchronous with the mouse (client -> server -> log round
+                    # trip), so an event emitted for an EARLIER cursor position
+                    # can arrive late, pass the has_new_line check and be credited
+                    # to wherever the cursor is now. The sample index is what
+                    # makes that visible: a match on sample 1-2 means the verdict
+                    # was reached before the sweep had covered any ground.
+                    "sample": sample,
+                    "elapsed_sec": round(time.time() - start_ts, 3),
                 }
+                if sample <= 2:
+                    bot_logger.log_error(
+                        f"SELECT_{label}_EARLY_MATCH: card {card_id} was reported on "
+                        f"sample {sample} at ({x},{y}), {time.time() - start_ts:.2f}s "
+                        "into the sweep -- too early for a hover this sweep caused, "
+                        "so this is probably a late event from an earlier position."
+                    )
                 for _ in range(max(1, int(clicks))):
                     self.input.left_click(1)
                     time.sleep(0.1)
