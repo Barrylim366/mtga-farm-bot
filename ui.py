@@ -2166,10 +2166,26 @@ class MTGBotUI(tk.Tk):
         threading.Thread(target=self._check_for_update_worker, daemon=True).start()
 
     def _check_for_update_worker(self) -> None:
+        import bot_logger
+
         try:
             result = update_checker.check_for_updates()
-        except Exception:
+        except Exception as exc:
+            bot_logger.log_error(f"Update check crashed: {exc}")
             return
+        # A silent no-update is indistinguishable from a broken check, so leave
+        # a trace either way - this is the only way to diagnose "the bot never
+        # offered me an update" reports after the fact.
+        if result.error:
+            bot_logger.log_info(f"Update check ({result.kind}) skipped: {result.error}")
+        elif result.update_available:
+            bot_logger.log_info(
+                f"Update available ({result.kind}): "
+                f"{result.current_version or result.local_sha[:8]} -> "
+                f"{result.latest_version or result.remote_sha[:8]}"
+            )
+        else:
+            bot_logger.log_info(f"Update check ({result.kind}): already up to date.")
         if result.update_available:
             self.after(0, lambda: self._on_update_available(result))
 
@@ -2198,6 +2214,10 @@ class MTGBotUI(tk.Tk):
         self.after(0, lambda: self._on_update_applied(update_result))
 
     def _on_update_applied(self, update_result: "update_checker.UpdateResult") -> None:
+        import bot_logger
+
+        log = bot_logger.log_info if update_result.success else bot_logger.log_error
+        log(f"Update apply: success={update_result.success} - {update_result.message}")
         if not update_result.success:
             messagebox.showerror("Update Failed", update_result.message, parent=self)
             return

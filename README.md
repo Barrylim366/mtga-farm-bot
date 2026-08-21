@@ -90,12 +90,12 @@ python -m venv .venv
 
 The bot checks GitHub for a newer version on startup and, when one is found, a dialog offers to install it and restarts the bot automatically. There are two channels, picked automatically:
 
-- **Git installs** (started from a `git clone` of this repository): the check works off git commit history (not the version number below), only fetches when the remote is actually ahead of local, and installs via a fast-forward `git pull`. If you have local, uncommitted changes in the bot folder, the update is aborted rather than overwriting them, and the dialog lists which file(s) are affected.
-- **ZIP / website installs** (no `.git` folder): the bot compares its local `version.py` against the one on the `main` branch at GitHub. If `main` has a newer version, it downloads the branch archive and overlays it onto the install folder. The archive only contains tracked source files, so user data (`runtime/`, `Accounts/`, `.venv/`, `credentials.txt`, …) is never touched.
+- **Git installs** (started from a `git clone` of this repository): the check works off git commit history (not the version number below), only fetches when the remote is actually ahead of local, and installs via a fast-forward `git pull`. If you have local, uncommitted changes to *tracked* files in the bot folder, the update is aborted rather than overwriting them, and the dialog lists which file(s) are affected. Untracked files (your venv, notes, …) never block an update.
+- **ZIP / website installs** (no `.git` folder): the bot compares its local `version.py` against the one on the `main` branch at GitHub. If `main` has a newer version, it downloads the branch archive and overlays it onto the install folder. The archive only contains tracked source files, so user data (`runtime/`, `Accounts/`, `.venv/`, `.venv-macos/`, `credentials.txt`, …) is never touched. Executable bits on the launcher scripts are preserved, so `start_macos.command` / `start_linux.sh` stay double-clickable after an update.
 
-Either check is silently skipped when there's no network access. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
+Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.1.3`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.2.1`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
 
 ## Configuration
 

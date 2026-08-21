@@ -16,6 +16,8 @@ __pycache__/
 
 # Local environment
 .venv/
+# macOS launcher venv (+ its timestamped backups) live inside the repo folder
+.venv-macos*/
 *.log
 runtime/
 

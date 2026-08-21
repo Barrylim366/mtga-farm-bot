@@ -16,6 +16,9 @@ from pathlib import Path
 from runtime_paths import get_app_root, get_repo_root
 
 _GIT_TIMEOUT_SECONDS = 6
+# `git fetch` talks to GitHub; 6s is not enough for a cold TLS handshake or a
+# credential helper that has to unlock a keychain (seen on macOS).
+_GIT_NETWORK_TIMEOUT_SECONDS = 30
 
 # --- Release channel (used when the install is NOT a git checkout) ----------
 # Non-git installs (e.g. users who downloaded a ZIP from GitHub/a website)
@@ -34,7 +37,7 @@ _VERSION_RE = re.compile(r"""__version__\s*=\s*['"]([^'"]+)['"]""")
 
 # Belt-and-suspenders: GitHub's archive already omits git-ignored user data,
 # but never let a stray archive entry clobber these local files/dirs.
-_OVERLAY_SKIP = {".git", ".venv", "runtime", "Accounts", "credentials.txt", ".claude"}
+_OVERLAY_SKIP = {".git", ".venv", ".venv-macos", "runtime", "Accounts", "credentials.txt", ".claude"}
 
 
 def _run_git(args: list[str], timeout: int = _GIT_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
@@ -91,7 +94,7 @@ def check_for_update() -> UpdateCheckResult:
             return UpdateCheckResult(update_available=False, error=local_proc.stderr.strip())
         local_sha = local_proc.stdout.strip()
 
-        fetch_proc = _run_git(["fetch", "--quiet", "origin", branch])
+        fetch_proc = _run_git(["fetch", "--quiet", "origin", branch], timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if fetch_proc.returncode != 0:
             return UpdateCheckResult(update_available=False, error=fetch_proc.stderr.strip())
 
@@ -234,7 +237,12 @@ def apply_update(branch: str) -> UpdateResult:
     try:
         req_before = str(req_path.read_text(encoding="utf-8")) if req_path.exists() else None
 
-        status_proc = _run_git(["status", "--porcelain"])
+        # Only *tracked* changes can be clobbered by a pull, and only those
+        # should block the update. Untracked files must not: the macOS launcher
+        # creates `.venv-macos/` inside the repo folder, which older clones do
+        # not have in .gitignore - counting it as "dirty" made the update abort
+        # on every single macOS git install.
+        status_proc = _run_git(["status", "--porcelain", "--untracked-files=no"])
         if status_proc.returncode == 0 and status_proc.stdout.strip():
             dirty_files = [line[3:].strip() for line in status_proc.stdout.splitlines() if line.strip()]
             file_list = "\n".join(dirty_files[:10])
@@ -290,6 +298,28 @@ def _archive_top_dir(extract_root: Path) -> Path | None:
     return entries[0] if len(entries) == 1 else None
 
 
+def _zip_executables(zip_path: Path) -> set[str]:
+    """Rel paths (below the archive's top folder) that GitHub stored as +x.
+
+    `zipfile.extractall` drops Unix permission bits, so the extracted copies of
+    `start_macos.command` / `*.sh` come out non-executable and the launcher a
+    macOS/Linux user double-clicks would stop working after an update. The bits
+    are still in the archive, so read them back and re-apply them below.
+    """
+    executables: set[str] = set()
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for info in zf.infolist():
+                if info.is_dir() or not (info.external_attr >> 16) & 0o111:
+                    continue
+                parts = info.filename.split("/")[1:]  # strip the top folder
+                if parts:
+                    executables.add("/".join(parts))
+    except (zipfile.BadZipFile, OSError):
+        return set()
+    return executables
+
+
 def _atomic_overlay(src: Path, dest: Path) -> None:
     """Copies src onto dest atomically so a crash can't leave a half-written file.
 
@@ -341,6 +371,8 @@ def apply_zip_update(download_url: str = _ARCHIVE_URL) -> UpdateResult:
                 # silently copying the wrapper folder and reporting success.
                 return UpdateResult(success=False, message="Unexpected archive layout; update aborted.")
 
+            executables = _zip_executables(zip_path)
+
             # Overlay every file from the archive onto the install directory.
             for src in source_root.rglob("*"):
                 rel = src.relative_to(source_root)
@@ -352,6 +384,9 @@ def apply_zip_update(download_url: str = _ARCHIVE_URL) -> UpdateResult:
                 else:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     _atomic_overlay(src, dest)
+                    if os.name != "nt" and rel.as_posix() in executables:
+                        mode = dest.stat().st_mode
+                        dest.chmod(mode | ((mode & 0o444) >> 2))
 
         req_after = str(req_path.read_text(encoding="utf-8")) if req_path.exists() else None
         requirements_changed = req_before != req_after
