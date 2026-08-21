@@ -5673,6 +5673,83 @@ class Controller(ControllerSecondary):
         )
         return focused
 
+    # Cancel's centre in the 1920x1080 game frame, measured from a live capture
+    # of the dialog (runtime screenshot, 2026-08-21 19:54). Submit Report sits
+    # ~325px to its right at (1122, 875) -- far enough that a template match on
+    # the left half cannot be confused for it.
+    _REPORT_PLAYER_CANCEL_POINT_1920 = (797, 875)
+
+    def _dismiss_report_player_dialog(self, *, context: str) -> bool:
+        """Close Arena's "Report a Player" dialog by pressing Cancel.
+
+        This dialog is not a game prompt and nothing in the game log announces
+        it, so the bot cannot see it: every screen probe simply fails while it is
+        up. It happened twice on 2026-08-21. The first time the trigger was
+        found and blocked (a blind Home-tab click landing on the opponent's name
+        on the match-end screen, see _navigate_to_home). The second time, at
+        19:53, there was NO logged click between the last DISMISS_END_SCREEN and
+        the open dialog -- so the trigger is still unknown, and a second guard on
+        a specific click path would not have helped.
+
+        Hence this: a net that does not depend on knowing how the dialog opened.
+        It is worth having even though the stall alone is survivable, because
+        this particular window has a Submit Report button on it, aimed at a real
+        person. Only Cancel is ever clicked; Submit is never a target, and the
+        search region for the button deliberately excludes it.
+
+        Runs only from _dismiss_blocking_overlay, i.e. after a full hand sweep
+        came back blind with MTGA's window active -- not on a timer, so a normal
+        match never pays for it.
+        """
+        title = self._app_path("assets", "assert", "report_player_title.png")
+        if not os.path.exists(title):
+            return False
+        if self._locate_image_center_in_scaled_arena_region(
+            title, f"REPORT_DIALOG_PROBE({context})",
+            rel_region=(600, 140, 720, 140),
+            confidence=0.80, timeout=1.0,
+        ) is None:
+            return False
+        bot_logger.log_error(
+            f"REPORT_DIALOG_DETECTED({context}): Arena's Report a Player dialog is "
+            "covering the board. Clicking Cancel -- never Submit."
+        )
+        cancel = self._app_path("assets", "assert", "report_player_cancel.png")
+        clicked = False
+        if os.path.exists(cancel):
+            # Left of centre only: Submit Report starts around x=988, and this
+            # template is 285px wide, so no match for it can fit in this band.
+            clicked = bool(self._click_image_in_scaled_arena_region(
+                cancel, f"REPORT_DIALOG_CANCEL({context})",
+                rel_region=(600, 820, 400, 110),
+                confidence=0.80, timeout=1.0,
+            ))
+        if not clicked:
+            # The title matched, so the dialog is up and Cancel is where it was
+            # measured. Fixed point rather than giving up: leaving this dialog
+            # open is what cost the match and left Submit one stray click away.
+            arena = self._ensure_arena_region()
+            if arena is None:
+                bot_logger.log_error(
+                    f"REPORT_DIALOG_CANCEL({context}): no arena region; refusing to "
+                    "click at an absolute desktop position."
+                )
+                return False
+            point = self._map_base_point_into_arena(
+                arena, self._REPORT_PLAYER_CANCEL_POINT_1920
+            )
+            bot_logger.log_info(
+                f"REPORT_DIALOG_CANCEL({context}): button template did not match; "
+                f"using the measured Cancel position {self._REPORT_PLAYER_CANCEL_POINT_1920}."
+            )
+            self._click_abs(int(point[0]), int(point[1]), f"REPORT_DIALOG_CANCEL({context})")
+            clicked = True
+        time.sleep(0.8)
+        bot_logger.log_info(
+            f"REPORT_DIALOG_DETECTED({context}): Cancel clicked; no report was submitted."
+        )
+        return clicked
+
     def _dismiss_blocking_overlay(self, *, context: str) -> bool:
         """Close a card-viewer overlay that is covering the board. True if one
         was clicked away.
@@ -5694,6 +5771,10 @@ class Controller(ControllerSecondary):
         if time.time() < self.__group_req_active_until:
             # A scry/modal handler owns this prompt and will answer it itself.
             return False
+        # Checked first: of everything that can cover the hand, this is the only
+        # one that can do harm outside the game.
+        if self._dismiss_report_player_dialog(context=context):
+            return True
         for name in ("scry_done.png", "assign_damage_done.png"):
             tpl = os.path.join(self._buttons_dir(), name)
             if not os.path.exists(tpl):
