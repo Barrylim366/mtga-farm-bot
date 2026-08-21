@@ -300,6 +300,92 @@ class BlindSweepTest(unittest.TestCase):
         self.assertEqual(c.input.moves, [], "clicked outside the game window")
 
 
+class BlindSweepRecoveryPickerTest(unittest.TestCase):
+    """A blind sweep has two different causes and the focus state separates them.
+
+    An inactive window cannot emit hover events at all. An ACTIVE one that still
+    reports nothing is covered by an overlay the hand sits behind -- observed
+    2026-08-21 with MTGA's graveyard viewer up: the recovery kept 'reactivating'
+    a window that was never inactive, for ten minutes, until the rope ran out."""
+
+    def setUp(self):
+        self.c = make_controller()
+        self.calls = []
+        self.c._dismiss_blocking_overlay = lambda **k: (
+            self.calls.append("overlay") or self.overlay_result
+        )
+        self.c._reactivate_arena_window = lambda **k: (
+            self.calls.append("reactivate") or False
+        )
+        self.overlay_result = True
+
+    def cast(self, focus):
+        with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \
+             patch("Controller.MTGAController.Controller.get_focus_state", return_value=focus), \
+             patch("time.sleep", return_value=None):
+            return self.c.cast(999)
+
+    def test_an_active_window_means_an_overlay(self):
+        self.cast({"mtga_is_foreground": True})
+        self.assertEqual(self.calls, ["overlay"], "clicked at the window instead of the overlay")
+
+    def test_an_inactive_window_is_reactivated(self):
+        self.cast({"mtga_is_foreground": False})
+        self.assertEqual(self.calls, ["reactivate"])
+
+    def test_an_unknown_focus_state_tries_both(self):
+        """Non-Windows, or the probe failing: try the harmless image probe first,
+        then fall back."""
+        self.overlay_result = False
+        self.cast({"platform": "non_windows"})
+        self.assertEqual(self.calls, ["overlay", "reactivate"])
+
+    def test_a_failed_overlay_dismissal_falls_through(self):
+        self.overlay_result = False
+        self.cast({"mtga_is_foreground": True})
+        self.assertEqual(self.calls, ["overlay", "reactivate"])
+
+    def test_recovery_runs_once_per_cast(self):
+        self.cast({"mtga_is_foreground": True})
+        self.assertEqual(self.calls.count("overlay"), 1)
+
+
+class OverlayDismissalGuardsTest(unittest.TestCase):
+    """The dismissal is a click on the board -- it must respect the same gates
+    every other click path does."""
+
+    def setUp(self):
+        self.c = make_controller()
+        self.clicked = []
+        self.c._click_image_in_scaled_arena_region = lambda *a, **k: (
+            self.clicked.append(a[1] if len(a) > 1 else "?") or True
+        )
+
+    def test_it_clicks_when_nothing_forbids_it(self):
+        self.assertIs(self.c._dismiss_blocking_overlay(context="t"), True)
+        self.assertEqual(len(self.clicked), 1)
+
+    def test_it_stands_down_while_selections_are_suppressed(self):
+        self.c._suppress_selections = True
+        self.assertIs(self.c._dismiss_blocking_overlay(context="t"), False)
+        self.assertEqual(self.clicked, [])
+
+    def test_it_stands_down_while_a_group_prompt_owns_the_mouse(self):
+        import time as _time
+        self.c._Controller__group_req_active_until = _time.time() + 6.0
+        self.assertIs(self.c._dismiss_blocking_overlay(context="t"), False)
+        self.assertEqual(self.clicked, [])
+
+    def test_it_stands_down_when_stopping(self):
+        self.c._stop_requested = True
+        self.assertIs(self.c._dismiss_blocking_overlay(context="t"), False)
+        self.assertEqual(self.clicked, [])
+
+    def test_no_match_means_no_click_and_a_logged_failure(self):
+        self.c._click_image_in_scaled_arena_region = lambda *a, **k: False
+        self.assertIs(self.c._dismiss_blocking_overlay(context="t"), False)
+
+
 class StackScanMappingTest(unittest.TestCase):
     """The stack scan was the one hover scan handed its region unmapped: with
     MTGA windowed at x=1519 it drove the cursor to (1248, 190) and (672, 136),

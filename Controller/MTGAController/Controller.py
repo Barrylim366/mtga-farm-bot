@@ -227,8 +227,25 @@ class Controller(ControllerSecondary):
         self.log_out_ok_btn_coors = None
         self.log_out_focus_coors = None
         
-        self.hand_scan_p1 = (0, 1050)
-        self.hand_scan_p2 = (1920, 1050)
+        # Hand-row sweep band, NOT the full window width. The sweep used to run
+        # rel x=0 -> 1920, which crosses two zones that hold nothing castable and
+        # everything dangerous: on the left the player avatar and the
+        # graveyard/exile piles, on the right the Next button and the auto-pass
+        # arrow. That matters because a hover is not synchronous with the mouse
+        # (client -> server -> log round trip), so a late event can report the
+        # target card while the cursor has already moved on -- and the sweep then
+        # clicks wherever it currently is. Observed 2026-08-21: a cast click for
+        # card 281 landed at rel x=120, on the avatar next to the graveyard pile,
+        # which opened MTGA's graveyard viewer. That overlay covers the board, so
+        # every later sweep hovered nothing (with the window correctly focused),
+        # the bot burned its rope and lost the match on the timer.
+        # Bounds measured from 1988 recorded hand clicks: real ones run 272..1572
+        # (1st pct 280, 99th 1480), while every one of the 18 misfires sat at
+        # rel x <= 170 and none ever landed above 1572. 220..1700 therefore
+        # excludes all known misfires without cutting a single observed real
+        # click, and keeps a wide margin to the buttons on the right.
+        self.hand_scan_p1 = (220, 1050)
+        self.hand_scan_p2 = (1700, 1050)
         self.battlefield_scan_p1 = (
             int(1920 * 0.10),
             int(1080 * 0.50),
@@ -5443,6 +5460,51 @@ class Controller(ControllerSecondary):
         )
         return focused
 
+    def _dismiss_blocking_overlay(self, *, context: str) -> bool:
+        """Close a card-viewer overlay that is covering the board. True if one
+        was clicked away.
+
+        Reached when a sweep crossed the whole hand row and MTGA reported no
+        hover at all WHILE ITS WINDOW WAS ACTIVE. An inactive window explains
+        that; an active one does not, and the remaining explanation is that
+        something is drawn on top of the hand -- MTGA does not report hovers for
+        cards behind a modal overlay. Observed 2026-08-21: the graveyard viewer,
+        opened by a mis-aimed cast click, stayed up while the bot swept blind
+        until the rope expired and the match was lost.
+
+        Reuses the scry/surveil Done template: measured against the real
+        graveyard viewer, its Done button sits at exactly the position the
+        SCRY_DONE clicks already use (game-frame 960/876), so one template
+        covers all three overlays."""
+        if self._stop_requested or self._suppress_selections:
+            return False
+        if time.time() < self.__group_req_active_until:
+            # A scry/modal handler owns this prompt and will answer it itself.
+            return False
+        for name in ("scry_done.png", "assign_damage_done.png"):
+            tpl = os.path.join(self._buttons_dir(), name)
+            if not os.path.exists(tpl):
+                continue
+            # Same generous bottom-centre band the scry Done click uses: the
+            # button sits at slightly different heights per overlay.
+            if self._click_image_in_scaled_arena_region(
+                tpl, f"BLOCKING_OVERLAY_DONE({context})",
+                rel_region=(700, 820, 520, 240),
+                confidence=0.78, timeout=1.0,
+            ):
+                bot_logger.log_info(
+                    f"BLOCKING_OVERLAY({context}): dismissed an overlay covering the "
+                    f"board via {name}; the hand should be reachable again."
+                )
+                time.sleep(0.6)
+                return True
+        bot_logger.log_error(
+            f"BLOCKING_OVERLAY({context}): the sweep was blind with MTGA active, but "
+            "no Done button was found -- whatever covers the hand is not a card "
+            "viewer. Debug bundle has the screenshot."
+        )
+        return False
+
     def _is_cast_suppressed(self, card_id: int) -> bool:
         since = self.__unreachable_cast_ids.get(card_id)
         if since is None:
@@ -5490,14 +5552,30 @@ class Controller(ControllerSecondary):
                 # clicking at it again will not help either, and each attempt
                 # costs rope.
                 reactivated = True
+                focus = get_focus_state()
                 bot_logger.log_error(
                     f"CAST_NO_HOVER_EVENTS: card {card_id} sweep {attempt} saw zero "
-                    f"hover events; MTGA is not receiving mouse input. "
-                    f"focus_state={get_focus_state()}"
+                    f"hover events; MTGA is not reporting the mouse. "
+                    f"focus_state={focus}"
                 )
-                recovered = self._reactivate_arena_window(context=f"CAST_CARD id={card_id}")
+                # Two different faults produce an identical blind sweep, and the
+                # focus state is what tells them apart. An inactive window cannot
+                # emit hover events at all; an ACTIVE one that still reports
+                # nothing is being covered by an overlay the hand sits behind.
+                # Treating the second as the first is what made the recovery a
+                # no-op for ten minutes on 2026-08-21: it kept "reactivating" a
+                # window that was never inactive.
+                recovered = False
+                if focus.get("mtga_is_foreground") is not False:
+                    recovered = self._dismiss_blocking_overlay(
+                        context=f"CAST_CARD id={card_id}"
+                    )
+                if not recovered:
+                    recovered = self._reactivate_arena_window(
+                        context=f"CAST_CARD id={card_id}"
+                    )
                 bot_logger.log_info(
-                    f"CAST_REACTIVATION: card {card_id} window_active={recovered}; "
+                    f"CAST_RECOVERY: card {card_id} recovered={recovered}; "
                     "retrying the sweep."
                 )
             if attempt < len(self._CAST_SWEEP_PACING) - 1:
@@ -5687,7 +5765,14 @@ class Controller(ControllerSecondary):
             clicked = current_hovered_id == card_id
             if clicked:
                 click_pos = self.input.position()
-                bot_logger.log_click(click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})")
+                # Log the arena region with it: without it clicks.jsonl only has
+                # absolute pixels, and working out whether a click landed on the
+                # hand row or on the graveyard pile next to it means reconstructing
+                # the window position from neighbouring entries.
+                bot_logger.log_click(
+                    click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})",
+                    arena=self._arena_region,
+                )
                 time.sleep(0.5)
                 self.input.left_click(1)
                 time.sleep(0.1)
@@ -6276,7 +6361,10 @@ class Controller(ControllerSecondary):
                     return False
 
             click_pos = self.input.position()
-            bot_logger.log_click(click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})")
+            bot_logger.log_click(
+                click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})",
+                arena=self._arena_region,
+            )
             for _ in range(max(1, int(clicks))):
                 self.input.left_click(1)
                 time.sleep(0.1)
@@ -6683,7 +6771,9 @@ class Controller(ControllerSecondary):
                 bot_logger.log_hover(parsed)
                 if parsed != card_id:
                     continue
-                bot_logger.log_click(x, y, f"SELECT_{label} (id={card_id})")
+                bot_logger.log_click(
+                    x, y, f"SELECT_{label} (id={card_id})", arena=self._arena_region
+                )
                 for _ in range(max(1, int(clicks))):
                     self.input.left_click(1)
                     time.sleep(0.1)
