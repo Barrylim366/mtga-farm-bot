@@ -66,7 +66,10 @@ def make_controller() -> Controller:
     f.close()
     c = Controller(f.name)
     c.input = _FakeInput()
-    c._get_hand_scan_points_mapped = lambda **k: ((0, 0), (0, 0))
+    # A real span, not a degenerate point: with p1 == p2 the sweep exits on its
+    # first bounds check without ever moving, so "the sweep saw nothing" would
+    # be true for the wrong reason and no test would exercise the sweep at all.
+    c._get_hand_scan_points_mapped = lambda **k: ((0, 0), (200, 0))
     c._ensure_options_overlay_closed = lambda **k: True
     c._write_hand_select_debug_bundle = lambda **k: None
     c.log_reader.has_new_line = lambda pattern: False
@@ -88,10 +91,11 @@ def sweep_sees_hand(c, hover_ids=(111,)) -> None:
 
     def start_of_sweep(pattern):
         # Every sweep crosses the hand row afresh, so every sweep sees these
-        # hovers again -- the scans clear this flag exactly once up front.
+        # hovers again. Hooked on the flag clear because the hand sweeps clear it
+        # exactly once, up front -- note __select_object_in_region clears it per
+        # grid cell instead, so this helper does not model that scan.
         queue[:] = [f'"objectId": {int(i)}' for i in hover_ids]
 
-    c._get_hand_scan_points_mapped = lambda **k: ((0, 0), (200, 0))
     c.log_reader.clear_new_line_flag = start_of_sweep
     c.log_reader.has_new_line = lambda pattern: bool(queue)
     c.log_reader.get_latest_line_containing_pattern = lambda pattern: queue.pop(0)
@@ -235,7 +239,50 @@ class BlindSweepTest(unittest.TestCase):
     def test_a_blind_sweep_tries_to_reactivate_the_window(self):
         """Sweeping harder cannot fix input never reaching the game."""
         self.cast(999)
-        self.assertEqual(len(self.reactivations), len(self.c._CAST_SWEEP_PACING))
+        self.assertEqual(
+            len(self.reactivations), 1,
+            "recovery is once per cast: if the window did not come back the first "
+            "time, clicking at it again only burns rope",
+        )
+
+    def test_the_sweep_evidence_says_blind(self):
+        self.cast(999)
+        self.assertEqual(self.c._last_sweep_evidence, "blind")
+
+    def test_a_sweep_that_never_ran_is_not_called_blind(self):
+        """The distinction that matters. An early exit -- a stuck options
+        overlay, a missing arena region, another flow signalling the scan to
+        stand down -- says nothing about whether MTGA is answering. Treating it
+        as blind would fire the recovery CLICK into the prompt whose handler
+        just asked the scan to get out of the way."""
+        self.c._ensure_options_overlay_closed = lambda **k: False
+        self.assertIs(self.cast(999), False)
+        self.assertEqual(self.c._last_sweep_evidence, "unknown")
+        self.assertEqual(self.reactivations, [], "clicked while a prompt was up")
+
+    def test_an_aborted_sweep_is_not_called_blind(self):
+        """__group_req_active_until is how the scry/modal handlers tell a running
+        scan to stop moving the mouse."""
+        import time as _time
+        self.c._Controller__group_req_active_until = _time.time() + 6.0
+        self.assertIs(self.cast(999), False)
+        self.assertEqual(self.c._last_sweep_evidence, "unknown")
+        self.assertEqual(self.reactivations, [])
+
+    def test_a_concurrent_hover_scan_makes_the_verdict_inconclusive(self):
+        """The hover queue is shared and the selection flows run their scans from
+        timer threads. One draining the queue under our sweep must not be read as
+        'MTGA is unresponsive'."""
+        real = self.c.log_reader.has_new_line
+
+        def has_new_line(pattern):
+            self.c._note_hover_scan("OTHER")  # stand-in for a concurrent scan
+            return real(pattern)
+
+        self.c.log_reader.has_new_line = has_new_line
+        self.cast(999)
+        self.assertEqual(self.c._last_sweep_evidence, "unknown")
+        self.assertEqual(self.reactivations, [])
 
     def test_a_sweep_that_saw_the_hand_is_left_alone(self):
         """The window is demonstrably live, so there is nothing to reactivate."""
@@ -298,6 +345,47 @@ class StackScanMappingTest(unittest.TestCase):
         )
         self.assertIs(moved, False)
         self.assertEqual(self.c.input.moves, [])
+
+
+class EveryHoverScanRefusesDesktopTest(unittest.TestCase):
+    """The hand scan has refused to run unmapped for a while; the other four
+    hover scans captured the mapping source and then ignored it, so with no arena
+    region they still swept raw 1920-space coordinates across the desktop -- the
+    same defect, in four more places."""
+
+    def setUp(self):
+        self.c = make_controller()
+        self.c._ensure_arena_region = lambda **k: None
+        self.c._arena_region = None
+
+    def assert_refused(self, call):
+        self.assertIs(call(999), False)
+        self.assertEqual(self.c.input.moves, [], "the mouse was moved without an arena")
+
+    def test_stack(self):
+        self.assert_refused(self.c.select_stack_item)
+
+    def test_battlefield(self):
+        self.assert_refused(self.c.select_battlefield_permanent)
+
+    def test_opponent_battlefield(self):
+        self.assert_refused(self.c.select_opponent_battlefield_permanent)
+
+    def test_chooser(self):
+        self.assert_refused(self.c.select_chooser_card)
+
+    def test_the_mappers_all_report_the_failure(self):
+        for name, kwargs in (
+            ("_get_battlefield_scan_points_mapped", {}),
+            ("_get_opponent_battlefield_scan_points_mapped", {}),
+            ("_get_chooser_scan_points_mapped", {}),
+            ("_get_stack_scan_points_mapped", {"fallback": False}),
+            ("_get_stack_scan_points_mapped", {"fallback": True}),
+            # The hand mapper is stubbed by make_controller; it has its own
+            # coverage in HandScanRefusesDesktopTest.
+        ):
+            with self.subTest(mapper=name):
+                self.assertEqual(getattr(self.c, name)(**kwargs), (None, None))
 
 
 class HandScanRefusesDesktopTest(unittest.TestCase):

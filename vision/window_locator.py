@@ -885,7 +885,7 @@ class ArenaRegionProvider:
 
 _focus_user32 = None
 _focus_kernel32 = None
-_focus_fail_logged_ts = 0.0
+_focus_fail_logged: dict[tuple[int, int], float] = {}
 _FOCUS_FAIL_LOG_THROTTLE_SEC = 5.0
 # How long to wait for the (asynchronous) activation to actually land before
 # calling the focus attempt failed.
@@ -928,6 +928,10 @@ def _focus_win_api():
         user32.IsIconic.restype = wintypes.BOOL
         user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
         user32.GetWindowTextW.restype = ctypes.c_int
+        user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        user32.WindowFromPoint.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+        user32.GetAncestor.restype = wintypes.HWND
         kernel32.GetCurrentThreadId.argtypes = []
         kernel32.GetCurrentThreadId.restype = wintypes.DWORD
         _focus_user32, _focus_kernel32 = user32, kernel32
@@ -984,6 +988,38 @@ def get_focus_state(expected_size: tuple[int, int] = (1920, 1080)) -> dict[str, 
         return {"error": str(e)}
 
 
+def point_belongs_to_mtga(
+    point: tuple[int, int],
+    expected_size: tuple[int, int] = (1920, 1080),
+) -> bool:
+    """Is this screen pixel actually MTGA's, or is another window covering it?
+
+    Fails OPEN: if we cannot tell (non-Windows, no MTGA window found, API
+    error), the caller keeps its previous behaviour. Only a positive
+    identification of a DIFFERENT top-level window returns False."""
+    if os.name != "nt":
+        return True
+    try:
+        user32, _kernel32 = _focus_win_api()
+        if user32 is None:
+            return True
+        selected = _pick_best_windows_candidate(
+            _list_mtga_window_rects_windows(), expected_size
+        )
+        mtga_hwnd = int((selected or {}).get("hwnd") or 0)
+        if not mtga_hwnd:
+            return True
+        pt = wintypes.POINT(int(point[0]), int(point[1]))
+        at_point = _hwnd_value(user32.WindowFromPoint(pt))
+        if not at_point:
+            return True
+        GA_ROOT = 2
+        root = _hwnd_value(user32.GetAncestor(wintypes.HWND(at_point), GA_ROOT))
+        return (root or at_point) == mtga_hwnd
+    except Exception:
+        return True
+
+
 def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
     """Make the MTGA window the active one. True only if that is VERIFIED.
 
@@ -995,8 +1031,13 @@ def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
     scan kept sweeping an inactive window forever. Two fixes: borrow the
     foreground thread's input queue via AttachThreadInput, which is the
     documented way to be allowed to set foreground at all, and verify the
-    result instead of assuming it."""
-    global _focus_fail_logged_ts
+    result instead of assuming it.
+
+    Caveat worth knowing: AttachThreadInput ties us to the foreground thread's
+    input queue for the three calls below, so a wedged foreground window could
+    in principle stall this -- and it runs on the decision thread, under the
+    decision lock. Not observed; it is the price of being permitted the
+    foreground change at all."""
     if os.name != "nt":
         return False
     try:
@@ -1016,12 +1057,11 @@ def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
         if foreground == hwnd:
             return True
 
-        SW_RESTORE = 9
+        # No SW_RESTORE branch on purpose: _list_mtga_window_rects_windows
+        # skips iconic windows, so a minimized MTGA never reaches this point --
+        # it fails the candidate search above instead.
         SW_SHOW = 5
-        if user32.IsIconic(target):
-            user32.ShowWindow(target, SW_RESTORE)
-        else:
-            user32.ShowWindow(target, SW_SHOW)
+        user32.ShowWindow(target, SW_SHOW)
 
         our_tid = kernel32.GetCurrentThreadId()
         fg_tid = 0
@@ -1050,9 +1090,16 @@ def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
             now = _hwnd_value(user32.GetForegroundWindow())
         if now == hwnd:
             return True
+        # Throttle per (target, blocker) pair, not globally: a single global
+        # timestamp let one caller's failure hide a different window stealing
+        # focus somewhere else, which is the very thing this line exists to show.
         ts = time.time()
-        if (ts - _focus_fail_logged_ts) >= _FOCUS_FAIL_LOG_THROTTLE_SEC:
-            _focus_fail_logged_ts = ts
+        key = (hwnd, now)
+        if (ts - _focus_fail_logged.get(key, 0.0)) >= _FOCUS_FAIL_LOG_THROTTLE_SEC:
+            _focus_fail_logged[key] = ts
+            if len(_focus_fail_logged) > 32:
+                _focus_fail_logged.clear()
+                _focus_fail_logged[key] = ts
             bot_logger.log_error(
                 "FOCUS_MTGA_FAILED: MTGA window (hwnd={}, '{}') is still not the "
                 "foreground window (foreground hwnd={}, '{}'). Hover events will "

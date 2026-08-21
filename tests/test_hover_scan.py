@@ -180,14 +180,18 @@ class CastSweepBackoffTests(unittest.TestCase):
 
         Sweep time alone understates the cost: each attempt also pays a fixed
         overhead (window focus, the reset settle, the "Are You Sure?" probe, the
-        inter-attempt pause) that the code documents as ~6.6s. Budgeting only the
-        sweeps would let the pacing grow while the real figure quietly doubled.
+        inter-attempt pause) that the code documents per attempt, plus the
+        one-off inactive-window recovery. Budgeting only the sweeps would let the
+        pacing grow while the real figure quietly doubled.
         """
         width = 1920.0
         sweeping = sum(
             (width / step) * dwell for step, dwell in Controller._CAST_SWEEP_PACING
         )
-        fixed = len(Controller._CAST_SWEEP_PACING) * Controller._CAST_ATTEMPT_FIXED_COST_SEC
+        fixed = (
+            len(Controller._CAST_SWEEP_PACING) * Controller._CAST_ATTEMPT_FIXED_COST_SEC
+            + Controller._CAST_REACTIVATION_COST_SEC
+        )
         total = sweeping + fixed
         self.assertLess(
             total, 45.0,
