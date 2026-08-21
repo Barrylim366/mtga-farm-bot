@@ -39,8 +39,9 @@ class _Pos:
 
 
 class _FakeInput:
-    """Cursor never moves and no hover ever arrives, so the hand scan exits via
-    SCAN_STOPPED and _cast_once returns False without a real MTGA window."""
+    """Cursor moves only as told and no hover ever arrives, so the hand scan
+    exits via SCAN_STOPPED and _cast_once returns False without a real MTGA
+    window."""
 
     def __init__(self):
         self._pos = _Pos(0, 0)
@@ -54,7 +55,7 @@ class _FakeInput:
         self._pos = _Pos(x, y)
 
     def move_rel(self, dx, dy):
-        self._pos = _Pos(self._pos.x, self._pos.y)
+        self._pos = _Pos(self._pos.x + dx, self._pos.y + dy)
 
     def left_click(self, n=1):
         pass
@@ -70,7 +71,30 @@ def make_controller() -> Controller:
     c._write_hand_select_debug_bundle = lambda **k: None
     c.log_reader.has_new_line = lambda pattern: False
     c.log_reader.clear_new_line_flag = lambda pattern: None
+    # Recovering from a blind sweep needs a real arena region and a real click;
+    # neither exists here. Tests that care about it override this.
+    c._reactivate_arena_window = lambda **k: False
     return c
+
+
+def sweep_sees_hand(c, hover_ids=(111,)) -> None:
+    """Let the fake sweep observe MTGA reporting these hovers, in order.
+
+    A sweep that hovers SOMETHING -- even a card we were not looking for -- is
+    the only kind that says anything about the hand's contents. Without this the
+    fixture's sweeps are blind (MTGA never processed the mouse), which is a
+    different failure and deliberately no longer earns a suppression."""
+    queue: list[str] = []
+
+    def start_of_sweep(pattern):
+        # Every sweep crosses the hand row afresh, so every sweep sees these
+        # hovers again -- the scans clear this flag exactly once up front.
+        queue[:] = [f'"objectId": {int(i)}' for i in hover_ids]
+
+    c._get_hand_scan_points_mapped = lambda **k: ((0, 0), (200, 0))
+    c.log_reader.clear_new_line_flag = start_of_sweep
+    c.log_reader.has_new_line = lambda pattern: bool(queue)
+    c.log_reader.get_latest_line_containing_pattern = lambda pattern: queue.pop(0)
 
 
 def call_private(controller, name, *args):
@@ -119,6 +143,7 @@ class InstanceIdRemapTest(unittest.TestCase):
         card now, so making it serve the old card's sentence would skip a cast
         that is perfectly legal."""
         self.update([{"instanceId": 477, "grpId": 95197}])
+        sweep_sees_hand(self.c)
         with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \
              patch("time.sleep", return_value=None):
             self.c.cast(477)
@@ -130,6 +155,9 @@ class InstanceIdRemapTest(unittest.TestCase):
 class CastSuppressionTest(unittest.TestCase):
     def setUp(self):
         self.c = make_controller()
+        # The suppression is evidence-based: it only applies to sweeps that
+        # actually observed the hand. See BlindSweepTest for the other case.
+        sweep_sees_hand(self.c)
 
     def cast(self, card_id):
         with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \
@@ -173,6 +201,103 @@ class CastSuppressionTest(unittest.TestCase):
              patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \
              patch("time.sleep", return_value=None):
             self.assertIs(self.c.cast(999), True)
+
+
+class BlindSweepTest(unittest.TestCase):
+    """A sweep that sees zero hovers is not evidence about the hand.
+
+    The 2026-08-21 session: from 15:56:58 on, every cast sweep reported
+    SCAN_STOPPED with not one hover event, because MTGA's window was no longer
+    the active one and Unity only emits hover events for the active window. The
+    bot swept the hand blind for ten minutes, passed priority every turn, and
+    lost a match it was winning -- while marking each card 'unreachable' on
+    evidence it never had."""
+
+    def setUp(self):
+        self.c = make_controller()
+        self.reactivations = []
+        self.c._reactivate_arena_window = lambda **k: (
+            self.reactivations.append(k.get("context")) or False
+        )
+
+    def cast(self, card_id):
+        with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \
+             patch("time.sleep", return_value=None):
+            return self.c.cast(card_id)
+
+    def test_a_blind_sweep_does_not_suppress_the_card(self):
+        self.assertIs(self.cast(999), False)
+        self.assertFalse(
+            self.c._is_cast_suppressed(999),
+            "a card was banned on the strength of a sweep that observed nothing",
+        )
+
+    def test_a_blind_sweep_tries_to_reactivate_the_window(self):
+        """Sweeping harder cannot fix input never reaching the game."""
+        self.cast(999)
+        self.assertEqual(len(self.reactivations), len(self.c._CAST_SWEEP_PACING))
+
+    def test_a_sweep_that_saw_the_hand_is_left_alone(self):
+        """The window is demonstrably live, so there is nothing to reactivate."""
+        sweep_sees_hand(self.c)
+        self.cast(999)
+        self.assertEqual(self.reactivations, [])
+        self.assertTrue(self.c._is_cast_suppressed(999))
+
+    def test_reactivation_refuses_to_click_the_desktop(self):
+        c = make_controller()
+        c._ensure_arena_region = lambda **k: None
+        with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \
+             patch("time.sleep", return_value=None):
+            self.assertIs(Controller._reactivate_arena_window(c, context="test"), False)
+        self.assertEqual(c.input.moves, [], "clicked outside the game window")
+
+
+class StackScanMappingTest(unittest.TestCase):
+    """The stack scan was the one hover scan handed its region unmapped: with
+    MTGA windowed at x=1519 it drove the cursor to (1248, 190) and (672, 136),
+    i.e. across whatever else was on the desktop, and could never hover a
+    stack item."""
+
+    def setUp(self):
+        self.c = make_controller()
+        self.c._arena_region = (1519, 128, 1920, 1080)
+        self.c._ensure_arena_region = lambda **k: self.c._arena_region
+
+    def test_the_scan_region_is_mapped_into_the_arena(self):
+        p1, p2 = self.c._get_stack_scan_points_mapped(fallback=False)
+        self.assertGreaterEqual(p1[0], 1519)
+        self.assertGreaterEqual(p1[1], 128)
+        self.assertLessEqual(p2[0], 1519 + 1920)
+        self.assertLessEqual(p2[1], 128 + 1080)
+
+    def test_the_fallback_region_is_mapped_too(self):
+        p1, p2 = self.c._get_stack_scan_points_mapped(fallback=True)
+        self.assertGreaterEqual(p1[0], 1519)
+        self.assertLessEqual(p2[0], 1519 + 1920)
+
+    def test_no_arena_means_no_scan(self):
+        self.c._ensure_arena_region = lambda **k: None
+        self.assertEqual(self.c._get_stack_scan_points_mapped(fallback=False), (None, None))
+        self.assertIs(self.c.select_stack_item(999), False)
+        self.assertEqual(self.c.input.moves, [], "the mouse was dragged across the desktop")
+
+    def test_an_unmapped_region_is_refused_by_the_scan_itself(self):
+        """Defence in depth: even if a caller forgets to map, the sweep must not
+        leave the window."""
+        moved = call_private(
+            self.c,
+            "select_object_in_region",
+            999,
+            (100, 200),
+            (900, 600),
+            80,
+            1,
+            "TEST_ITEM",
+            None,
+        )
+        self.assertIs(moved, False)
+        self.assertEqual(self.c.input.moves, [])
 
 
 class HandScanRefusesDesktopTest(unittest.TestCase):
