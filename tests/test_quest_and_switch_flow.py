@@ -261,6 +261,140 @@ class AccountSwitchTimingTests(_QuestLogTestBase):
         self.assertEqual(self.queue_starts, [])
 
 
+class StaleQuestCountTests(_QuestLogTestBase):
+    """An account may only be declared finished on its OWN quest read.
+
+    Live on 2026-08-22, all five accounts: MTGA logged no fresh quests block
+    within the 30s prime window, so the read fell back to the newest block in
+    the tail -- the PREVIOUS session's, written after that session had cleared
+    its quests, i.e. "0 incomplete". With the threshold at 3 (clear them all)
+    that reads as "this account is done": the bot logged straight back out of
+    every account in ~30s, played nothing, and was on its way to "all accounts
+    completed this round" -- which now also powers the PC off.
+
+    The count itself is still used for deck colours and the UI. Only the
+    switch decision requires proof that the block is this account's own.
+    """
+
+    def _quests_mode(self, *, main=3, wins=0):
+        c = self.controller
+        c._account_switch_mode = "quests"
+        c._account_switch_enabled = True
+        c._account_switch_main_quests = main
+        c._account_switch_daily_wins = wins
+        return c
+
+    def _yesterdays_cleared_log(self):
+        """What a finished previous session leaves behind: an empty quest list."""
+        self.append(match_auth_block("venturaa"))
+        self.append("<== QuestGetQuests " + json.dumps({"quests": []}) + "\n")
+
+    def test_a_leftover_empty_block_does_not_finish_the_account(self):
+        c = self._quests_mode()
+        self._yesterdays_cleared_log()
+        # Exactly the live sequence: Start captures the floor, no fresh block
+        # arrives within the prime window, the floor is dropped, and the read
+        # falls back to the tail -- which still holds yesterday's empty block.
+        c._quests_session_floor_offset = os.path.getsize(self.log_path)
+        c._quests_authoritative_floor = c._quests_session_floor_offset
+        c._quests_session_floor_offset = 0
+        c.refresh_quests_cache()
+        self.assertEqual(c._last_valid_quest_active_incomplete, 0,
+                         "the count is still read (deck colours, UI)")
+        self.assertFalse(c._quest_count_confirmed_fresh)
+        self.assertFalse(c._account_switch_due(), "logged out on a stale read")
+
+    def test_the_account_finishes_once_mtga_logs_its_own_block(self):
+        c = self._quests_mode()
+        self._yesterdays_cleared_log()
+        c._quests_authoritative_floor = os.path.getsize(self.log_path)
+        c.refresh_quests_cache()
+        self.assertFalse(c._account_switch_due())
+        # Now this account's real (also empty -> all done) block arrives.
+        self.append("<== QuestGetQuests " + json.dumps({"quests": []}) + "\n")
+        c.refresh_quests_cache()
+        self.assertTrue(c._quest_count_confirmed_fresh)
+        self.assertTrue(c._account_switch_due())
+
+    def test_an_open_quest_still_keeps_the_bot_playing(self):
+        c = self._quests_mode()
+        self.append(match_auth_block("venturaa"))
+        c._quests_valid_from_offset = os.path.getsize(self.log_path)
+        self.append(quests_block(GOLGARI))
+        c.refresh_quests_cache()
+        self.assertTrue(c._quest_count_confirmed_fresh)
+        self.assertEqual(c._last_valid_quest_active_incomplete, 1)
+        self.assertFalse(c._account_switch_due())
+
+    def test_freshness_is_sticky_so_between_match_reads_keep_working(self):
+        """Once a block past the boundary exists, later ungated tail reads are
+        this account's too -- otherwise quests mode would switch exactly once
+        per account and then never again."""
+        c = self._quests_mode()
+        self.append(match_auth_block("venturaa"))
+        c._quests_valid_from_offset = os.path.getsize(self.log_path)
+        self.append(quests_block(GOLGARI))
+        c.refresh_quests_cache()
+        self.assertTrue(c._quest_count_confirmed_fresh)
+        # Identity latched -> the gate is off and the read is a plain tail read.
+        c._current_account_screen_name = "venturaa"
+        c._identity_from_config = False
+        self.append("<== QuestGetQuests " + json.dumps({"quests": []}) + "\n")
+        c.refresh_quests_cache()
+        self.assertTrue(c._quest_count_confirmed_fresh)
+        self.assertTrue(c._account_switch_due())
+
+    def test_an_ungated_read_is_trusted_when_the_block_is_past_the_boundary(self):
+        """The plain-tail path must judge freshness by WHERE the block sits, not
+        by which branch read it."""
+        c = self._quests_mode()
+        self.append(match_auth_block("venturaa"))
+        c._quests_valid_from_offset = os.path.getsize(self.log_path)
+        c._current_account_screen_name = "venturaa"  # gate off: plain tail read
+        c._identity_from_config = False
+        self.assertFalse(c._quests_block_exists_past_boundary())
+        self.append(quests_block(GOLGARI))
+        self.assertTrue(c._quests_block_exists_past_boundary())
+
+    def test_a_rotated_log_is_trusted_rather_than_stale_forever(self):
+        """MTGA rotates Player.log on restart. A file shorter than the boundary
+        is a new log, which by definition holds only this session."""
+        c = self._quests_mode()
+        self.append(quests_block(GOLGARI))
+        c._quests_valid_from_offset = os.path.getsize(self.log_path) + 5_000_000
+        self.assertTrue(c._quests_block_exists_past_boundary())
+
+    def test_no_boundary_at_all_means_nothing_to_distrust(self):
+        c = self._quests_mode()
+        c._quests_valid_from_offset = 0
+        c._quests_session_floor_offset = 0
+        self.assertTrue(c._quests_block_exists_past_boundary())
+
+    def test_an_unreadable_log_counts_as_stale(self):
+        """The expensive mistake is the false yes, so failure answers 'no'."""
+        c = self._quests_mode()
+        c._quests_valid_from_offset = 10
+        c._get_log_size = lambda *a, **k: (_ for _ in ()).throw(OSError("gone"))
+        self.assertFalse(c._quests_block_exists_past_boundary())
+
+    def test_a_switch_resets_the_proof_for_the_incoming_account(self):
+        c = self._quests_mode()
+        c._quest_count_confirmed_fresh = True
+        c._reset_state_for_incoming_account()
+        self.assertFalse(c._quest_count_confirmed_fresh)
+        self.assertIsNone(c._last_valid_quest_active_incomplete)
+
+    def test_a_stale_read_does_not_retire_the_home_quest_one_shot(self):
+        """Retiring it on a stale count is what made the bad state permanent for
+        the account: no further Home dip, so no chance of a real read."""
+        c = self._quests_mode()
+        self._yesterdays_cleared_log()
+        c._quests_authoritative_floor = os.path.getsize(self.log_path)
+        c.refresh_quests_cache()
+        self.assertIsNotNone(c._last_valid_quest_active_incomplete)
+        self.assertFalse(c._quest_count_confirmed_fresh)
+
+
 class SwitchOwnershipTests(_QuestLogTestBase):
     """Only the thread that CLAIMED the switch slot may hand it back.
 
@@ -389,6 +523,32 @@ class SessionStartTests(_QuestLogTestBase):
         self.controller._stop_requested = True
         self.controller.begin_session()
         self.assertFalse(self.controller._stop_requested)
+
+    def test_the_prime_fallback_leaves_a_boundary_behind(self):
+        """The whole stale-count fix hangs off this one assignment surviving.
+
+        prime_quests_for_new_session drops _quests_session_floor_offset in its
+        finally -- deliberately, so normal tail reads resume. A first attempt at
+        the fix reused that field and was therefore inert in exactly the case it
+        was written for: by the time the fallback read ran, the boundary was 0
+        and yesterday's block looked perfectly current.
+        """
+        c = self.controller
+        self.append(match_auth_block("venturaa"))
+        self.append("<== QuestGetQuests " + json.dumps({"quests": []}) + "\n")
+        size = os.path.getsize(self.log_path)
+        # Drive the timeout path without touching the screen or waiting 30s.
+        c._QUESTS_PRIME_TIMEOUT = 0.0
+        c._ensure_arena_region = lambda *a, **k: (0, 0, 1920, 1080)
+        c._dismiss_reward_popup = lambda *a, **k: None
+        c._navigate_to_home = lambda *a, **k: True
+        c._get_state_from_log = lambda: BotState.HOME
+        self.assertFalse(c.prime_quests_for_new_session(), "expected the fallback")
+        self.assertEqual(c._quests_session_floor_offset, 0, "the gate must reopen")
+        self.assertGreaterEqual(c._quests_authoritative_floor, size)
+        # ...and the fallback count must not be usable as "account finished".
+        self.assertEqual(c._last_valid_quest_active_incomplete, 0)
+        self.assertFalse(c._quest_count_confirmed_fresh)
 
     def test_priming_does_not_resurrect_a_stopped_session(self):
         """Priming polls and clicks; if it cleared the flag itself, a Stop that

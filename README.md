@@ -153,6 +153,8 @@ Account switching can be toggled on/off live from the main window without restar
 
 Rotation always continues from the account actually logged in, so it never wastes a switch logging back into the same account, and the order stays intact even after a failed switch.
 
+> Fixed in this version: in quests mode the bot could log straight back out of every account without playing a single match. MTGA only writes the quest list on Home, and if no fresh block arrives within the 30-second prime window the read falls back to the newest block already in the log — which is the *previous* session's, written after that session had cleared its quests, so it parses as "0 quests left". With the threshold at 3 ("clear them all") that reads as "this account is finished", and the bot switched again immediately. Measured on 2026-08-22: five accounts, ~30 seconds each, zero matches, heading straight for the end-of-round stop — which now also powers the PC off. The count is still read for deck colours and the UI, but the switch decision now needs proof that the block was logged past this session's (or this switch's) boundary; without it the bot keeps playing and keeps dipping to Home until MTGA logs a real one. `SWITCH CHECK` says `STALE - not this account's own read` while that is the case.
+
 #### Shut down the PC when the round is done
 
 **Manage Accounts** has an opt-in checkbox, **Shut down PC when all accounts are done**, right below the switch settings it depends on. With it ticked, the end-of-round stop described above also powers the machine off — so an overnight run of every account ends with the PC off instead of idling at Home until morning.

@@ -532,6 +532,26 @@ class Controller(ControllerSecondary):
         # what "switch if the account already meets the criteria at start" needs.
         # None means "not read yet" -> never switch on a guess.
         self._last_valid_quest_active_incomplete: int | None = None
+        # Did that count come from a quests block MTGA logged for THIS account in
+        # THIS session -- or from a leftover block in the log tail?
+        #
+        # The distinction decides whether the account may be declared finished.
+        # Both quest reads fall back to an ungated tail read when no fresh block
+        # arrives (prime_quests_for_new_session after its 30s timeout,
+        # _refresh_quests_from_home while polling), and the newest block in that
+        # tail is the PREVIOUS session's -- written after its quests were cleared,
+        # so it parses as "0 incomplete". With threshold 3 (= clear them all) that
+        # reads as "this account is done" the moment the bot starts.
+        #
+        # Seen live on 2026-08-22: no fresh block within 30s on any account, so the
+        # bot logged straight back out of every one of them in ~30s each, played
+        # nothing, and was heading for "all accounts completed this round" -- which
+        # now also powers the PC off. Deck-colour choice and the UI may keep using
+        # a stale list; the switch decision may not.
+        self._quest_count_confirmed_fresh = False
+        # Per-read flag set by _extract_latest_quests: was the block it returned
+        # provably written past the session/switch boundary?
+        self._last_quests_read_was_fresh = False
         # After an account switch, only quests blocks written PAST this log offset
         # belong to the incoming account. The previous account's block lingers in
         # the 600KB log tail, so gating the read to this offset (until the new
@@ -539,6 +559,12 @@ class Controller(ControllerSecondary):
         # account's and then rejecting the real block as stale. 0 = read the tail
         # normally (startup / already latched).
         self._quests_valid_from_offset = 0
+        # Where this account's turn began in the log. Same offsets as the two
+        # gates above, but this one is never cleared: both of those are working
+        # state, dropped as soon as the read they guard is over -- and a dropped
+        # boundary is precisely what let a previous session's block pass as this
+        # account's. Read only by _quests_block_exists_past_boundary.
+        self._quests_authoritative_floor = 0
         # Set in begin_session(): the gold read must ignore the previous session's
         # tail, which holds other accounts' balances. See _read_latest_inventory_gold.
         # None means "not armed yet" -- 0 is a legitimate floor (empty log).
@@ -2579,6 +2605,40 @@ class Controller(ControllerSecondary):
     def _last_scene_is_store(self) -> bool:
         return self._get_last_scene_name() == "Store"
 
+    def _quests_block_exists_past_boundary(self) -> bool:
+        """Has MTGA logged a quests block since this session/account began?
+
+        Answers the one question an ungated tail read cannot: the tail always
+        holds *a* block, but it may be the previous session's. Anything that
+        cannot be established counts as "no" -- the caller uses this to decide
+        whether an account may be declared finished, and the expensive mistake
+        is the false yes (log out of an account that never played).
+        """
+        boundary = max(
+            int(self._quests_valid_from_offset or 0),
+            int(self._quests_session_floor_offset or 0),
+            int(self._quests_authoritative_floor or 0),
+        )
+        if boundary <= 0:
+            # No boundary was ever captured (e.g. the log had rotated at start),
+            # so there is nothing to distrust the tail against.
+            return True
+        try:
+            # MTGA rotates Player.log on restart; a file shorter than the
+            # boundary is a NEW log, which by definition holds only this
+            # session -- otherwise the answer would be "stale" forever.
+            if self._get_log_size(self._log_path) < boundary:
+                return True
+            window = self._read_log_since(
+                self._log_path,
+                start_offset=boundary,
+                max_bytes=2_000_000,
+                prefer_newest=True,
+            )
+        except Exception:
+            return False
+        return '"quests"' in (window or "")
+
     def _extract_latest_quests(self) -> list[dict] | None:
         """Latest quests block from the log, or None when none is available.
 
@@ -2600,6 +2660,8 @@ class Controller(ControllerSecondary):
         # identity at login time used to end this gate early, dropping the read back
         # to a plain tail that can still contain the OUTGOING account's quests block
         # -- i.e. the new account would start on the old account's quests.
+        # Assume not-fresh; only a block provably past the boundary flips this.
+        self._last_quests_read_was_fresh = False
         if self._quests_valid_from_offset > 0 and (
             self._current_account_screen_name is None or self._identity_from_config
         ):
@@ -2609,6 +2671,8 @@ class Controller(ControllerSecondary):
                 max_bytes=2_000_000,
                 prefer_newest=True,
             )
+            # Everything in this window was written after the switch began.
+            self._last_quests_read_was_fresh = True
         elif self._quests_session_floor_offset > 0:
             # Session priming: only blocks logged since Start was pressed count.
             log_tail = self._read_log_since(
@@ -2617,8 +2681,15 @@ class Controller(ControllerSecondary):
                 max_bytes=2_000_000,
                 prefer_newest=True,
             )
+            self._last_quests_read_was_fresh = True
         else:
             log_tail = self._read_log_tail(self._log_path)
+            # An ungated tail read reaches back into previous sessions, so the
+            # block it finds may predate this account's turn. It is still the
+            # right thing to USE (it is the newest we have), but whether it may
+            # count as evidence that the account cleared its quests depends on
+            # where it sits relative to the boundary -- so ask separately.
+            self._last_quests_read_was_fresh = self._quests_block_exists_past_boundary()
         if not log_tail:
             return None
         idx = log_tail.rfind('"quests"')
@@ -3474,6 +3545,19 @@ class Controller(ControllerSecondary):
             1 for v in view
             if not (v.get("goal") and v.get("progress", 0) >= v.get("goal", 0))
         )
+        # ...but only a block written past the session/switch boundary proves the
+        # count belongs to THIS account's turn. Sticky once earned: from then on
+        # the boundary is behind us, so the ordinary between-match tail reads are
+        # this account's too and quest-mode switching stays live.
+        if self._last_quests_read_was_fresh and not self._quest_count_confirmed_fresh:
+            self._quest_count_confirmed_fresh = True
+            bot_logger.log_info(
+                "Quest count confirmed fresh for '{}': {} daily quest(s) still open "
+                "(the account may now be judged finished).".format(
+                    self._current_account_key(),
+                    self._last_valid_quest_active_incomplete,
+                )
+            )
 
         # This Home read has the account's real Gold balance in the adjacent
         # InventoryInfo event; refresh the farmed-gold delta from it (covers wins
@@ -3536,6 +3620,8 @@ class Controller(ControllerSecondary):
         self._cached_active_quest_id = ""
         self._cached_active_colors = ""
         self._last_valid_quest_active_incomplete = None
+        self._quest_count_confirmed_fresh = False
+        self._last_quests_read_was_fresh = False
         self._home_quest_check_done = False
         self._home_quest_check_attempts = 0
         self._quests_last_valid_read_ts = 0.0
@@ -3584,6 +3670,10 @@ class Controller(ControllerSecondary):
             self.refresh_quests_cache()
             return False
         self._quests_session_floor_offset = self._get_log_size(self._log_path)
+        # The fallback below drops _quests_session_floor_offset on purpose (normal
+        # tail reads resume). This copy survives, so a count parsed out of a block
+        # from before this line can still be recognised as not ours.
+        self._quests_authoritative_floor = self._quests_session_floor_offset
         bot_logger.log_info(
             "Quest prime: ignoring quests logged before this start (floor offset={}); "
             "waiting up to {:.0f}s for a fresh block.".format(
@@ -5269,8 +5359,12 @@ class Controller(ControllerSecondary):
             # we have exhausted the bounded retries). A single transient Home-nav
             # failure otherwise leaves the switch decision permanently blind.
             self._home_quest_check_attempts += 1
+            # A count read out of a leftover tail block does not retire the
+            # one-shot either: it is exactly the read that must not be acted on,
+            # so keep dipping to Home until MTGA logs a real one (or the bounded
+            # retries run out).
             if (
-                self._last_valid_quest_active_incomplete is not None
+                self._quest_count_confirmed_fresh
                 or self._home_quest_check_attempts >= self._HOME_QUEST_CHECK_MAX_ATTEMPTS
             ):
                 self._home_quest_check_done = True
@@ -5287,7 +5381,14 @@ class Controller(ControllerSecondary):
                     self._current_account_key(),
                     self._account_switch_enabled,
                     self._account_switch_mode,
-                    remaining if remaining is not None else "unknown",
+                    (
+                        "unknown" if remaining is None
+                        # Spell out WHY a present count is being ignored -- the
+                        # symptom (bot plays on with 0 quests left) otherwise
+                        # looks like the threshold is being disregarded.
+                        else remaining if self._quest_count_confirmed_fresh
+                        else f"{remaining} (STALE - not this account's own read)"
+                    ),
                     remaining_target,
                     self._daily_wins_this_account,
                     self._account_switch_daily_wins,
@@ -8152,6 +8253,15 @@ class Controller(ControllerSecondary):
                 if remaining is None:
                     # Quest state not read from Home yet -> never switch on a guess.
                     return False
+                if not self._quest_count_confirmed_fresh:
+                    # A count IS available, but it came from a block that may
+                    # predate this account's turn -- typically the previous
+                    # session's, logged after its quests were cleared, i.e. a
+                    # confident "0 left". Playing on costs a few matches on an
+                    # account that may already be done; believing it logs out of
+                    # every account in seconds and ends the round having played
+                    # nothing. Keep playing until MTGA logs a real block.
+                    return False
                 # The threshold means "clear the account's daily quests", NOT "do
                 # exactly N quests": MTGA hands out 1 daily quest/day (up to 3 held),
                 # so an account may have only 1 or 2 to do. Completed quests drop out
@@ -8586,6 +8696,8 @@ class Controller(ControllerSecondary):
         # forget the previous account's absolute count and re-arm the one-shot
         # Home quest check.
         self._last_valid_quest_active_incomplete = None
+        self._quest_count_confirmed_fresh = False
+        self._last_quests_read_was_fresh = False
         self._home_quest_check_done = False
         self._home_quest_check_attempts = 0
         # Drop the outgoing account's cached quest view so nothing (UI, deck-color
@@ -8806,6 +8918,9 @@ class Controller(ControllerSecondary):
         # logout then fails -- the gate only applies while the screenName is
         # unlatched, and on failure we keep the current account's identity.
         self._quests_valid_from_offset = self._get_log_size(self._log_path)
+        # Same boundary, but kept past the point where the gate above turns off
+        # (it stops applying as soon as the incoming screenName is latched).
+        self._quests_authoritative_floor = self._quests_valid_from_offset
         # NOTE: the per-account state resets (win count, quest state, cached quest
         # view, identity) are deliberately NOT done here. They belong to the
         # INCOMING account, and the logout below can fail and leave us on the
