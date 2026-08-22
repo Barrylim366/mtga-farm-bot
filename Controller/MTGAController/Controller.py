@@ -581,6 +581,9 @@ class Controller(ControllerSecondary):
         # boundary is precisely what let a previous session's block pass as this
         # account's. Read only by _quests_block_exists_past_boundary.
         self._quests_authoritative_floor = 0
+        # Last time the queue loop saw a match actually start. Drives the
+        # stuck-queue probe in _probe_report_dialog_if_queue_is_stuck.
+        self._queue_progress_ts = 0.0
         # Set in begin_session(): the gold read must ignore the previous session's
         # tail, which holds other accounts' balances. See _read_latest_inventory_gold.
         # None means "not armed yet" -- 0 is a legitimate floor (empty log).
@@ -8686,6 +8689,60 @@ class Controller(ControllerSecondary):
             self._queue_spam_thread = threading.Thread(target=self._queue_spam_loop, daemon=True)
             self._queue_spam_thread.start()
 
+    # How long the queue loop may tick without ever reaching a match before it
+    # suspects something is covering the screen. Matchmaking itself is fast; a
+    # minute and a half of clicking Play with nothing happening is not normal.
+    _QUEUE_STALL_REPORT_PROBE_SEC = 90.0
+
+    def _probe_report_dialog_if_queue_is_stuck(self) -> None:
+        """Close Arena's Report a Player dialog if it is what blocks the queue.
+
+        The dialog is not a game event -- nothing in Player.log announces it --
+        so while it is up the bot just fails every screen probe in silence. The
+        existing net for it hangs off _dismiss_blocking_overlay, which only runs
+        after a blind HAND SWEEP; between matches that path is never taken, and
+        the bot clicks Play into the dialog forever.
+
+        Live on 2026-08-22: it opened at ~13:51 on TEUBAT's match-end screen and
+        was still up 28 minutes later, the whole time logging STARTER_PLAY probes
+        that could not match. Both of the earlier occurrences had a click that
+        plausibly triggered it; this one had no logged click for six minutes
+        beforehand, which is why the answer is a net here rather than another
+        guard on a click path -- we cannot predict what opens it.
+
+        Deliberately probes ONLY the report dialog, not the Done-button templates
+        _dismiss_blocking_overlay also tries: this runs on Home, where a
+        false-positive Done match would click into the live UI. The report probe
+        confirms the dialog by its title template before touching anything, so
+        the worst case is a wasted screen search.
+        """
+        try:
+            if self._stop_queue_spam or self._stop_requested:
+                return
+            now = time.time()
+            # A match starting IS progress -- restart the clock and go quiet.
+            if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
+                self._queue_progress_ts = now
+                return
+            if not getattr(self, "_queue_progress_ts", 0.0):
+                self._queue_progress_ts = now
+                return
+            if now - self._queue_progress_ts < self._QUEUE_STALL_REPORT_PROBE_SEC:
+                return
+            # Re-arm before probing, so a probe that finds nothing costs one
+            # search per interval instead of one per tick.
+            self._queue_progress_ts = now
+            bot_logger.log_info(
+                "QUEUE_STALL_PROBE: {:.0f}s of queueing with no match; checking for "
+                "Arena's Report a Player dialog.".format(
+                    self._QUEUE_STALL_REPORT_PROBE_SEC
+                )
+            )
+            self._dismiss_report_player_dialog(context="QUEUE_STALL")
+        except Exception as exc:
+            # A recovery probe must never be the thing that kills the queue loop.
+            bot_logger.log_error(f"QUEUE_STALL_PROBE failed: {exc}")
+
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
             if self._account_switch_in_progress:
@@ -8727,6 +8784,7 @@ class Controller(ControllerSecondary):
                 bot_logger.log_info("Account switch due; performing switch now.")
                 threading.Thread(target=self._perform_account_switch, daemon=True).start()
                 return
+            self._probe_report_dialog_if_queue_is_stuck()
             self.start_game_from_home_screen()
             time.sleep(3.0)
 

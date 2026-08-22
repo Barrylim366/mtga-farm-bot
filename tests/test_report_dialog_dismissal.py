@@ -16,6 +16,7 @@ tests below pin down that Submit can never be the thing that gets clicked.
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +24,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 
 # Measured from the live capture of the dialog (1920x1080 game frame).
 CANCEL_CENTRE = (797, 875)
@@ -133,6 +135,87 @@ class BlockingOverlayChecksTheDialogFirstTest(unittest.TestCase):
         self.c._stop_requested = True
         self.assertFalse(self.c._dismiss_blocking_overlay(context="TEST"))
         self.assertEqual(self.order, [])
+
+
+class StuckQueueProbeTest(unittest.TestCase):
+    """The net has to reach the place the bot actually gets stuck.
+
+    _dismiss_blocking_overlay only runs after a blind HAND SWEEP, i.e. during a
+    match. On 2026-08-22 the dialog opened on TEUBAT's match-end screen instead:
+    the queue loop then clicked Play into it for 28 minutes, logging screen
+    probes that could not match, and the net never ran because no hand sweep
+    ever happened. Unlike the two earlier occurrences there was no logged click
+    for six minutes beforehand, so guarding another click path would not have
+    helped -- hence a probe keyed on "the queue is getting nowhere".
+    """
+
+    def setUp(self):
+        self.c = make_controller()
+        self.probes = []
+        self.c._dismiss_report_player_dialog = lambda **k: (
+            self.probes.append(k.get("context")) or True
+        )
+        self.c._get_state_from_log = lambda: "HOME"
+        self.c._queue_progress_ts = 0.0
+
+    def _tick(self, *, seconds_ago):
+        self.c._queue_progress_ts = time.time() - seconds_ago
+        self.c._probe_report_dialog_if_queue_is_stuck()
+
+    def test_a_short_wait_between_matches_is_not_probed(self):
+        self._tick(seconds_ago=10)
+        self.assertEqual(self.probes, [], "probed during a normal queue wait")
+
+    def test_a_long_stall_is_probed(self):
+        self._tick(seconds_ago=200)
+        self.assertEqual(self.probes, ["QUEUE_STALL"])
+
+    def test_a_started_match_resets_the_clock(self):
+        self.c._get_state_from_log = lambda: BotState.IN_GAME
+        self._tick(seconds_ago=200)
+        self.assertEqual(self.probes, [], "probed while a match was running")
+        self.assertGreater(self.c._queue_progress_ts, time.time() - 5)
+
+    def test_the_probe_does_not_repeat_every_tick(self):
+        """One screen search per interval, not one per 3-second tick."""
+        self._tick(seconds_ago=200)
+        self.c._probe_report_dialog_if_queue_is_stuck()
+        self.c._probe_report_dialog_if_queue_is_stuck()
+        self.assertEqual(len(self.probes), 1)
+
+    def test_the_first_tick_only_starts_the_clock(self):
+        self.c._queue_progress_ts = 0.0
+        self.c._probe_report_dialog_if_queue_is_stuck()
+        self.assertEqual(self.probes, [])
+        self.assertGreater(self.c._queue_progress_ts, 0.0)
+
+    def test_a_stop_request_silences_the_probe(self):
+        self.c._stop_requested = True
+        self._tick(seconds_ago=200)
+        self.assertEqual(self.probes, [])
+
+    def test_it_never_reaches_the_done_button_templates(self):
+        """On Home a false-positive Done match would click into the live UI, so
+        this path probes the title-gated report dialog and nothing else."""
+        overlay_calls = []
+        self.c._dismiss_blocking_overlay = lambda **k: overlay_calls.append(k)
+        self._tick(seconds_ago=200)
+        self.assertEqual(overlay_calls, [])
+
+    def test_a_throwing_probe_cannot_kill_the_queue_loop(self):
+        def boom(**kwargs):
+            raise RuntimeError("screen search exploded")
+
+        self.c._dismiss_report_player_dialog = boom
+        self._tick(seconds_ago=200)  # must not raise
+
+    def test_the_queue_loop_calls_the_probe(self):
+        """Pins the wiring, not just the helper -- the helper existing while
+        nothing calls it is exactly the bug this fixes."""
+        import inspect
+
+        src = inspect.getsource(Controller._queue_spam_loop)
+        self.assertIn("_probe_report_dialog_if_queue_is_stuck", src)
 
 
 class TemplateAssetsExistTest(unittest.TestCase):
