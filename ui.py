@@ -11,6 +11,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, 
 import json
 import threading
 import runtime_status
+import shutdown_scheduler
 import update_checker
 from version import __version__ as APP_VERSION
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
@@ -1539,6 +1540,12 @@ class ConfigManager:
             "account_switch_mode": "time",
             "account_switch_main_quests": 0,   # 0-3 main quests to complete
             "account_switch_daily_wins": 0,    # 0-15 daily wins to reach
+            # Opt-in: power the PC off once every configured account has hit
+            # those two thresholds and the round ends by itself. Off by default
+            # -- an unattended shutdown is the one action the user cannot undo
+            # from the UI, so it only ever happens because they asked for it.
+            # Quests mode only; time mode never completes a round.
+            "shutdown_pc_when_round_complete": False,
             # Estimated gold credited per match won in the "Current Session"
             # per-account gold list (the real reward is not in the log). 0 = only
             # count completed-quest gold, no per-win estimate.
@@ -1769,6 +1776,15 @@ class ConfigManager:
         except (TypeError, ValueError):
             return
         self.config["account_switch_daily_wins"] = max(0, min(15, value))
+        self._save_config()
+
+    def get_shutdown_pc_when_round_complete(self) -> bool:
+        # Anything other than a stored True reads as off. A corrupt or
+        # hand-edited value must never be the reason a machine powers down.
+        return self.config.get("shutdown_pc_when_round_complete") is True
+
+    def set_shutdown_pc_when_round_complete(self, enabled: bool) -> None:
+        self.config["shutdown_pc_when_round_complete"] = bool(enabled)
         self._save_config()
 
     def get_gold_per_win(self) -> int:
@@ -4537,12 +4553,9 @@ class MTGBotUI(tk.Tk):
                 # so a normal finish isn't mistaken for a crash/freeze.
                 reason_s = str(reason or "").lower()
                 if "account" in reason_s and "complet" in reason_s:
-                    self.after(0, lambda: messagebox.showinfo(
-                        "Round complete",
-                        "All configured accounts have finished their daily quests.\n\n"
-                        "The bot stopped because there are no more accounts to play.",
-                        parent=self,
-                    ))
+                    # Queued after the _stop_bot above, so the bot is already
+                    # down by the time a shutdown can be armed.
+                    self.after(0, self._announce_round_complete)
 
             controller.set_stop_bot_callback(_on_controller_stop)
 
@@ -4559,6 +4572,67 @@ class MTGBotUI(tk.Tk):
             except Exception:
                 pass
             self.after(0, lambda msg=err_msg: self._handle_bot_error(msg))
+
+    def _announce_round_complete(self):
+        """Tell the user the rotation finished -- and power the PC off if asked.
+
+        Reached from exactly one place: the controller stopping itself because
+        every configured account has hit its quest and daily-win thresholds. A
+        manual Stop, a crash or a time-mode rotation never gets here, which is
+        what keeps the shutdown from firing on anything but a real finish.
+        """
+        import bot_logger
+
+        text = (
+            "All configured accounts have finished their daily quests.\n\n"
+            "The bot stopped because there are no more accounts to play."
+        )
+        try:
+            wants_shutdown = bool(
+                self.config_manager.get_shutdown_pc_when_round_complete()
+            )
+        except Exception:
+            wants_shutdown = False
+        if not wants_shutdown:
+            messagebox.showinfo("Round complete", text, parent=self)
+            return
+        delay = shutdown_scheduler.DEFAULT_DELAY_SEC
+        if not shutdown_scheduler.schedule_shutdown(
+            delay, comment="Burning Lotus: all accounts finished their dailies."
+        ):
+            # Never silently swallow this: the user went to bed expecting the
+            # machine to be off, and it will not be.
+            bot_logger.log_error(
+                "ROUND_COMPLETE_SHUTDOWN_FAILED: could not schedule the shutdown."
+            )
+            messagebox.showwarning(
+                "Round complete",
+                text + "\n\nThe automatic shutdown could NOT be started -- "
+                "please power the PC off yourself.",
+                parent=self,
+            )
+            return
+        bot_logger.log_info(
+            f"Round complete: PC shutdown scheduled in {delay}s (opt-in setting)."
+        )
+        cancel = messagebox.askyesno(
+            "Round complete - shutting down",
+            text
+            + f"\n\nThis PC will shut down in {delay // 60} minutes.\n\n"
+            "Cancel the shutdown?",
+            parent=self,
+        )
+        if cancel:
+            if shutdown_scheduler.cancel_shutdown():
+                bot_logger.log_info("Scheduled shutdown cancelled by the user.")
+                messagebox.showinfo("Cancelled", "The PC will stay on.", parent=self)
+            else:
+                messagebox.showwarning(
+                    "Could not cancel",
+                    "The shutdown could not be cancelled. Run 'shutdown /a' in a "
+                    "command prompt to stop it.",
+                    parent=self,
+                )
 
     def _handle_bot_error(self, error_msg):
         self._stop_bot()
@@ -6722,18 +6796,88 @@ class SwitchAccountWindow(tk.Toplevel):
         )
         return btn
 
+    def _build_shutdown_toggle(self, y: int) -> None:
+        """Canvas checkbox: power the PC off when the whole rotation is done.
+
+        Saved on the click, not on the block's Save button. The two settings
+        next to it are typed values that need a Save to be read back, but a
+        checkbox that looks ticked and is not stored would, for this particular
+        setting, mean a machine still running at 6am -- or one that powers off
+        when the user did not ask. The visible state is always the stored one.
+        """
+        c = self._theme
+        cv = self._canvas
+        enabled = bool(self._config_manager.get_shutdown_pc_when_round_complete())
+        self.shutdown_when_done_var = tk.BooleanVar(value=enabled)
+        box = 14
+        self._shutdown_box_item = cv.create_rectangle(
+            26, y, 26 + box, y + box,
+            fill=c["entry_bg"], outline=c["widget_border"], width=1,
+        )
+        self._shutdown_tick_item = cv.create_text(
+            26 + box // 2, y + box // 2 - 1,
+            text="X", fill=c["text"], font=("Segoe UI", 10, "bold"), anchor="center",
+        )
+        self._shutdown_label_item = cv.create_text(
+            50, y - 1,
+            text="Shut down PC when all accounts are done",
+            fill=c["text"], font=("Segoe UI", 9), anchor="nw",
+        )
+        # Say plainly that this rides on quests mode -- in time mode the round
+        # never ends, so the checkbox would look armed and never do anything.
+        cv.create_text(
+            26, y + 18,
+            text="(quests mode only; a 2 min warning lets you cancel)",
+            fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw",
+        )
+        for item in (self._shutdown_box_item, self._shutdown_tick_item, self._shutdown_label_item):
+            cv.tag_bind(item, "<Button-1>", self._toggle_shutdown_when_round_complete)
+            cv.tag_bind(item, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
+            cv.tag_bind(item, "<Leave>", lambda _e: cv.configure(cursor=""))
+        self._refresh_shutdown_toggle_state()
+
+    def _toggle_shutdown_when_round_complete(self, _event=None) -> None:
+        enabled = not bool(self.shutdown_when_done_var.get())
+        self._config_manager.set_shutdown_pc_when_round_complete(enabled)
+        # Read the stored value back rather than trusting the flip: if the save
+        # failed, the box must not claim the PC will power off.
+        self.shutdown_when_done_var.set(
+            bool(self._config_manager.get_shutdown_pc_when_round_complete())
+        )
+        self._refresh_shutdown_toggle_state()
+        if self.shutdown_when_done_var.get() and not shutdown_scheduler.is_supported():
+            messagebox.showwarning(
+                "Not available here",
+                "Automatic shutdown is only implemented for Windows. The setting "
+                "is saved, but nothing will power off on this system.",
+                parent=self,
+            )
+
+    def _refresh_shutdown_toggle_state(self) -> None:
+        try:
+            on = bool(self.shutdown_when_done_var.get())
+            self._canvas.itemconfigure(
+                self._shutdown_tick_item, state="normal" if on else "hidden"
+            )
+        except Exception:
+            pass
+
     def _build_ui(self):
         c = self._theme
         cv = self._canvas
         self._content = cv
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
-        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=94)
+        # switch_block carries a third row (the shutdown opt-in), so it is 32px
+        # taller than the two-row version and everything below it moved down by
+        # the same 32. The window itself needs no change: _apply_content_minsize
+        # fits it to the canvas content, which still ends above the 820 floor.
+        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=126)
         # The separate Alias row is gone (one Arena Name field now does both jobs),
         # so accounts_block is back to its pre-Alias height and order_block back to
         # its pre-Alias y -- the -30 that undoes the +30 that row cost.
-        self._create_manage_group_panel("accounts_block", x=16, y=136, width=428, height=410)
-        self._create_manage_group_panel("order_block", x=16, y=558, width=428, height=220)
+        self._create_manage_group_panel("accounts_block", x=16, y=168, width=428, height=410)
+        self._create_manage_group_panel("order_block", x=16, y=590, width=428, height=220)
 
         # Row 1: switch trigger mode (time vs quests, mutually exclusive) + time.
         cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
@@ -6770,14 +6914,18 @@ class SwitchAccountWindow(tk.Toplevel):
             command=self._save_switch_settings,
             primary=True,
         )
+        # Row 3: what happens after the LAST account finishes. It belongs here
+        # rather than in the general settings because it only ever fires on the
+        # end of an account rotation, which is configured in this very block.
+        self._build_shutdown_toggle(y=106)
 
-        cv.create_text(26, 146, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
-        cv.create_text(26, 174, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(62, 174, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(208, 174, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 178, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
+        cv.create_text(26, 206, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(62, 206, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(208, 206, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
 
         self._table_rows = []
-        row_y_start = 194
+        row_y_start = 226
         row_step = 20
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
@@ -6798,27 +6946,27 @@ class SwitchAccountWindow(tk.Toplevel):
         # that appeared nowhere in Arena. The Arena name is the only identity the
         # Player.log exposes, so it is the one that has to be right; the label is
         # now just the same string.
-        cv.create_text(26, 404, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 436, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         name_entry = self._make_entry(self, textvariable=self.account_name_var, width=24)
         name_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 402, anchor="nw", window=name_entry)
-        cv.create_text(280, 404, text="(as shown in Arena)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_window(104, 434, anchor="nw", window=name_entry)
+        cv.create_text(280, 436, text="(as shown in Arena)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
 
-        cv.create_text(26, 434, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 466, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         email_entry = self._make_entry(self, textvariable=self.account_email_var, width=34)
         email_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 432, anchor="nw", window=email_entry)
+        cv.create_window(104, 464, anchor="nw", window=email_entry)
 
-        cv.create_text(26, 464, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 496, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         password_entry = self._make_entry(self, textvariable=self.account_pw_var, width=34, show="*")
         password_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 462, anchor="nw", window=password_entry)
+        cv.create_window(104, 494, anchor="nw", window=password_entry)
 
         self._create_manage_canvas_button(
             name="save_row",
             text="Save Row",
             x=26,
-            y=498,
+            y=530,
             body_w=104,
             body_h=30,
             command=self._save_selected_account,
@@ -6829,7 +6977,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="delete_row",
             text="Delete Row",
             x=134,
-            y=498,
+            y=530,
             body_w=104,
             body_h=30,
             command=self._clear_selected_account_row,
@@ -6840,15 +6988,15 @@ class SwitchAccountWindow(tk.Toplevel):
             name="save_accounts",
             text="Save Accounts",
             x=244,
-            y=498,
+            y=530,
             body_w=158,
             body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(26, 570, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
-        cv.create_line(22, 587, 438, 587, fill=c["table_border"], width=1)
+        cv.create_text(26, 602, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
+        cv.create_line(22, 619, 438, 619, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
@@ -6858,7 +7006,7 @@ class SwitchAccountWindow(tk.Toplevel):
             col = idx // 5
             row = idx % 5
             lx, cx = col_x[col]
-            y = 594 + row * 24
+            y = 626 + row * 24
             cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
@@ -6873,13 +7021,13 @@ class SwitchAccountWindow(tk.Toplevel):
             self._order_vars.append(var)
             self._order_combos.append(combo)
         # vertical divider between columns
-        cv.create_line(230, 590, 230, 716, fill=c["table_border"], width=1)
+        cv.create_line(230, 622, 230, 748, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
             x=26,
-            y=726,
+            y=758,
             body_w=140,
             body_h=34,
             command=self._save_account_play_order,
@@ -6889,7 +7037,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="close_bottom",
             text="Back",
             x=246,
-            y=726,
+            y=758,
             body_w=120,
             body_h=34,
             command=self.destroy,

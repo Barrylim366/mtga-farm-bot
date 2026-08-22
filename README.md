@@ -153,6 +153,17 @@ Account switching can be toggled on/off live from the main window without restar
 
 Rotation always continues from the account actually logged in, so it never wastes a switch logging back into the same account, and the order stays intact even after a failed switch.
 
+#### Shut down the PC when the round is done
+
+**Manage Accounts** has an opt-in checkbox, **Shut down PC when all accounts are done**, right below the switch settings it depends on. With it ticked, the end-of-round stop described above also powers the machine off — so an overnight run of every account ends with the PC off instead of idling at Home until morning.
+
+It is off by default and saved the moment you click it, not on **Save**. The guard rails matter more than the feature:
+
+- It fires on exactly one event — the controller stopping itself with *all accounts completed this round*. A manual **Stop**, a crash, a failed switch or a time-mode rotation never reaches it (time mode has no end of round at all, which is why the checkbox says so).
+- The shutdown is always **delayed by two minutes** and announced in a pop-up with a **Cancel** button; a zero delay is clamped up rather than honoured, so there is always a window to abort. Cancelling by hand works too: `shutdown /a`.
+- If arming the shutdown fails, you get a warning telling you to power off yourself, rather than silence — the failure mode of a silent miss is finding the machine still running hours later.
+- Windows only. On macOS/Linux the setting saves but warns that nothing will power off.
+
 A switch that becomes due while a match is running or while matchmaking is in progress is **deferred**, not skipped: it is carried out on the first moment between matches. This also covers the end-of-round stop, which previously could end the session in the middle of a game the bot had just started.
 
 If the logout never reaches the login screen three times in a row — usually a mis-calibrated **Log Out** button or a changed Arena layout — the bot stops attempting to switch for the rest of the session and keeps playing the current account instead of looping through failed logouts. It says so once in `bot.log`, pointing at the calibration.
