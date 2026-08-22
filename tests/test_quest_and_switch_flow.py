@@ -395,6 +395,125 @@ class StaleQuestCountTests(_QuestLogTestBase):
         self.assertFalse(c._quest_count_confirmed_fresh)
 
 
+class TwoPhaseRoundTests(_QuestLogTestBase):
+    """Quests first on every account, THEN wins on every account.
+
+    With both thresholds set the old rule demanded quests AND wins from an
+    account before leaving it, so the last account's daily quests were only
+    banked after hours of win grinding on the first -- and if the session was
+    cut short in between, they were never banked at all. Quests expire at the
+    daily reset; wins do not. So the round is two passes: clear everyone's
+    quests, then go round again for the wins, then stop (and shut down, if that
+    is switched on).
+
+    With only ONE threshold set there is a single pass and nothing changes.
+    """
+
+    def _controller(self, *, main, wins, accounts=("a", "b")):
+        c = self.controller
+        c._account_switch_mode = "quests"
+        c._account_switch_enabled = True
+        c._account_switch_main_quests = main
+        c._account_switch_daily_wins = wins
+        c._quest_count_confirmed_fresh = True
+        c._last_valid_quest_active_incomplete = 0  # quests cleared
+        c._load_accounts_from_dirs = lambda: [{"name": n} for n in accounts]
+        c._resolve_account_play_order = lambda a: list(range(len(accounts)))
+        c._known_account_count = len(accounts)
+        c._current_account_screen_name = accounts[0]
+        return c
+
+    def test_the_quest_pass_leaves_an_account_before_its_wins(self):
+        c = self._controller(main=3, wins=4)
+        self.assertEqual(c._switch_phase, "quests")
+        self.assertEqual(c._daily_wins_this_account, 0)
+        self.assertTrue(c._account_switch_due(), "waited for wins during the quest pass")
+
+    def test_the_win_pass_ignores_the_quests_and_waits_for_wins(self):
+        c = self._controller(main=3, wins=4)
+        c._switch_phase = "wins"
+        self.assertFalse(c._account_switch_due())
+        c._session_wins_by_account["a"] = 4
+        self.assertTrue(c._account_switch_due())
+
+    def test_wins_from_the_quest_pass_are_not_re_farmed(self):
+        """The account is revisited, and _daily_wins_this_account is zeroed on
+        every switch -- so without a session-wide tally it would start from 0."""
+        c = self._controller(main=3, wins=4)
+        c._session_wins_by_account["a"] = 4  # earned while clearing its quests
+        c._daily_wins_this_account = 0       # reset by the switch back in
+        c._switch_phase = "wins"
+        self.assertTrue(c._account_switch_due())
+
+    def test_only_wins_configured_is_a_single_pass(self):
+        c = self._controller(main=0, wins=2)
+        self.assertFalse(c._account_switch_due())
+        c._daily_wins_this_account = 2
+        self.assertTrue(c._account_switch_due())
+
+    def test_only_quests_configured_is_a_single_pass(self):
+        c = self._controller(main=3, wins=0)
+        self.assertTrue(c._account_switch_due())
+        c._last_valid_quest_active_incomplete = 1
+        self.assertFalse(c._account_switch_due())
+
+    def _run_switch(self, c, *, completed):
+        """Drive _perform_account_switch far enough to see the phase decision.
+
+        The quest-pass case deliberately falls THROUGH that decision into the
+        real logout, so the screen has to be sealed off first -- an unstubbed run
+        searched the live MTGA window and took 50s (see CLAUDE.md: unit tests must
+        not see the screen). Clearing the Log Out coordinates makes the switch
+        abort cleanly on the very next check, which is all this needs.
+        """
+        c._completed_account_keys = set(completed)
+        c._get_state_from_log = lambda: BotState.HOME
+        c._locate_image_center_in_scaled_arena_region = lambda *a, **k: None
+        c._click_image_in_scaled_arena_region = lambda *a, **k: False
+        c._ensure_arena_region = lambda *a, **k: (0, 0, 1920, 1080)
+        c.log_out_btn_coors = None
+        c.log_out_ok_btn_coors = None
+        self.queue_starts = []
+        c.start_queueing = lambda: self.queue_starts.append(True)
+        stops: list = []
+        c.set_stop_bot_callback(stops.append)
+        c._perform_account_switch()
+        return stops
+
+    def test_finishing_the_quest_pass_starts_the_win_pass_instead_of_stopping(self):
+        c = self._controller(main=3, wins=4)
+        stops = self._run_switch(c, completed={"a", "b"})
+        self.assertEqual(stops, [], "ended the session with no wins farmed")
+        self.assertEqual(c._switch_phase, "wins")
+        self.assertEqual(c._completed_account_keys, set(), "win pass started half-done")
+        self.assertFalse(c._stop_requested)
+
+    def test_finishing_the_win_pass_ends_the_round(self):
+        c = self._controller(main=3, wins=4)
+        c._switch_phase = "wins"
+        stops = self._run_switch(c, completed={"a", "b"})
+        self.assertEqual(len(stops), 1)
+        self.assertTrue(c._stop_requested)
+
+    def test_a_single_criterion_round_still_ends_on_the_first_pass(self):
+        for main, wins in ((3, 0), (0, 4)):
+            with self.subTest(main=main, wins=wins):
+                self.setUp()
+                c = self._controller(main=main, wins=wins)
+                stops = self._run_switch(c, completed={"a", "b"})
+                self.assertEqual(len(stops), 1, "kept going with nothing left to do")
+
+    def test_a_new_session_starts_back_at_the_quest_pass(self):
+        """Otherwise a Start after a completed round resumes in the win pass and
+        skips the quests the daily reset has meanwhile handed out."""
+        c = self._controller(main=3, wins=4)
+        c._switch_phase = "wins"
+        c._session_wins_by_account = {"a": 4, "b": 4}
+        c.begin_session()
+        self.assertEqual(c._switch_phase, "quests")
+        self.assertEqual(c._session_wins_by_account, {})
+
+
 class SwitchOwnershipTests(_QuestLogTestBase):
     """Only the thread that CLAIMED the switch slot may hand it back.
 

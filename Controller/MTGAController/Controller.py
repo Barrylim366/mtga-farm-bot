@@ -524,6 +524,22 @@ class Controller(ControllerSecondary):
         # driven purely by absolute main-quest completion (see _account_switch_due).
         self._daily_wins_this_account = 0
         self._win_counted_this_match = False
+        # Wins the bot has seen per account across the WHOLE session, so a win
+        # earned before a switch is not re-farmed after it. _daily_wins_this_account
+        # is reset on every switch by design (it answers "on this visit"); the
+        # two-phase round below revisits each account, and without this an account
+        # would have to earn its wins twice.
+        self._session_wins_by_account: dict[str, int] = {}
+        # Which half of a two-phase round we are in: "quests" or "wins".
+        #
+        # Only meaningful when BOTH thresholds are configured. The criteria are
+        # then run as two passes over the accounts -- clear everyone's daily
+        # quests first, then go round again for the wins -- rather than demanding
+        # both from an account before leaving it. The quests are the part that
+        # expires at the daily reset, so they get banked on every account before
+        # the open-ended win grinding starts. With only one threshold set there is
+        # a single pass and this stays "quests".
+        self._switch_phase = "quests"
         # ABSOLUTE quest state for the account-switch decision: the number of
         # still-incomplete daily quests from the last VALID Home read (None until
         # we have read one). MTGA holds up to _DAILY_QUEST_SLOTS daily quests and
@@ -5376,11 +5392,14 @@ class Controller(ControllerSecondary):
             remaining = self._last_valid_quest_active_incomplete
             remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
             bot_logger.log_info(
-                "SWITCH CHECK (account='{}'): enabled={} mode={} | daily quests remaining={} "
+                "SWITCH CHECK (account='{}'): enabled={} mode={}/{} | daily quests remaining={} "
                 "need<={} | wins(session)={} need>={} | attempt={} | due={}".format(
                     self._current_account_key(),
                     self._account_switch_enabled,
                     self._account_switch_mode,
+                    # Which pass of the round we are in (only two-phase when both
+                    # thresholds are set, but always worth seeing in the log).
+                    self._switch_phase,
                     (
                         "unknown" if remaining is None
                         # Spell out WHY a present count is being ignored -- the
@@ -5390,7 +5409,7 @@ class Controller(ControllerSecondary):
                         else f"{remaining} (STALE - not this account's own read)"
                     ),
                     remaining_target,
-                    self._daily_wins_this_account,
+                    self._wins_seen_for_current_account(),
                     self._account_switch_daily_wins,
                     self._home_quest_check_attempts,
                     self._account_switch_due(),
@@ -5521,6 +5540,12 @@ class Controller(ControllerSecondary):
         session is starting' an explicit act of the start path, instead of a side
         effect buried in a quest helper -- and makes it a no-op to call twice."""
         self._stop_requested = False
+        # A new session always starts at the beginning of the round: pass 1
+        # (quests), nobody finished yet, no wins banked. Without this a Start
+        # after a completed round would resume in the win pass and skip the
+        # quests that the daily reset has meanwhile handed out again.
+        self._switch_phase = "quests"
+        self._session_wins_by_account = {}
         # Floor for the gold-balance read. The log tail still holds the balances
         # of whichever accounts the PREVIOUS session rotated through, and an
         # InventoryInfo entry does not say who it belongs to -- taking one of
@@ -7815,8 +7840,14 @@ class Controller(ControllerSecondary):
         if self.__last_match_won is True and not self._win_counted_this_match:
             self._daily_wins_this_account += 1
             self._win_counted_this_match = True
+            key = self._current_account_key()
+            if key:
+                self._session_wins_by_account[key] = (
+                    self._session_wins_by_account.get(key, 0) + 1
+                )
             bot_logger.log_info(
-                f"Daily win counted: {self._daily_wins_this_account} win(s) this account."
+                f"Daily win counted: {self._daily_wins_this_account} win(s) this account "
+                f"({self._wins_seen_for_current_account()} this session)."
             )
         # Refresh farmed gold from the real balance after every match, so the
         # outgoing account's value is current when a switch fires next. The reward
@@ -8208,6 +8239,23 @@ class Controller(ControllerSecondary):
     def get_account_switch_daily_wins(self) -> int:
         return self._account_switch_daily_wins
 
+    def _wins_seen_for_current_account(self) -> int:
+        """Wins this account has earned under the bot THIS SESSION.
+
+        Not just this visit: the two-phase round comes back to every account for
+        its wins, and _daily_wins_this_account is zeroed on each switch, so wins
+        banked in the quest pass would otherwise have to be earned all over
+        again. Falls back to the per-visit counter when the account has no
+        identity to key on.
+        """
+        key = self._current_account_key()
+        if not key:
+            return self._daily_wins_this_account
+        return max(
+            self._daily_wins_this_account,
+            int(self._session_wins_by_account.get(key, 0)),
+        )
+
     def _account_switch_due(self) -> bool:
         # Master switch off -> never switch, whatever the thresholds/accounts are.
         if not self._account_switch_enabled:
@@ -8246,6 +8294,25 @@ class Controller(ControllerSecondary):
             # play can't become an endless logout/login loop -- it just plays on.
             if self._known_account_count and self._switches_without_match >= self._known_account_count:
                 return False
+            # Two-phase round: with both thresholds set, each pass judges the
+            # accounts on ONE criterion. Pass 1 banks every account's daily
+            # quests, pass 2 goes round again for the wins. The phase is advanced
+            # in _perform_account_switch, where the end of a pass is detected.
+            both_configured = (
+                self._account_switch_main_quests > 0
+                and self._account_switch_daily_wins > 0
+            )
+            if both_configured and self._switch_phase == "wins":
+                # Quests were cleared in pass 1; this pass is wins only.
+                return (
+                    self._wins_seen_for_current_account()
+                    >= self._account_switch_daily_wins
+                )
+            if both_configured and self._switch_phase == "quests":
+                # Wins are pass 2's problem -- leave as soon as the quests are in.
+                wins_required = 0
+            else:
+                wins_required = self._account_switch_daily_wins
             if self._account_switch_main_quests <= 0:
                 main_ok = True
             else:
@@ -8270,7 +8337,7 @@ class Controller(ControllerSecondary):
                 # many); a lower threshold tolerates that many still pending.
                 remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
                 main_ok = remaining <= remaining_target
-            wins_ok = self._daily_wins_this_account >= self._account_switch_daily_wins
+            wins_ok = self._wins_seen_for_current_account() >= wins_required
             return main_ok and wins_ok
         # Time mode (default): switch every N minutes.
         if self._account_switch_interval <= 0:
@@ -8961,15 +9028,41 @@ class Controller(ControllerSecondary):
                 and self._known_account_count
                 and len(self._completed_account_keys) >= self._known_account_count
             ):
-                bot_logger.log_info(
-                    "Round complete: all {} configured account(s) finished this session "
-                    "({}); stopping the bot instead of switching.".format(
-                        self._known_account_count,
-                        sorted(self._completed_account_keys),
+                # With both thresholds configured this is only the end of the
+                # FIRST pass (every account's daily quests are banked). Start the
+                # second pass -- the same accounts again, judged on wins -- rather
+                # than ending the session half-done.
+                if (
+                    self._account_switch_main_quests > 0
+                    and self._account_switch_daily_wins > 0
+                    and self._switch_phase == "quests"
+                ):
+                    banked = sorted(self._completed_account_keys)
+                    self._switch_phase = "wins"
+                    self._completed_account_keys = set()
+                    self._pending_completed_key = None
+                    self._switches_without_match = 0
+                    bot_logger.log_info(
+                        "Quest pass complete on all {} account(s) ({}); starting the "
+                        "win pass ({} win(s) per account, wins already earned this "
+                        "session count).".format(
+                            self._known_account_count,
+                            banked,
+                            self._account_switch_daily_wins,
+                        )
                     )
-                )
-                self._request_stop_bot("all accounts completed this round")
-                return
+                    # Fall through: the switch itself still happens, so the win
+                    # pass starts on the next account instead of idling here.
+                else:
+                    bot_logger.log_info(
+                        "Round complete: all {} configured account(s) finished this session "
+                        "({}); stopping the bot instead of switching.".format(
+                            self._known_account_count,
+                            sorted(self._completed_account_keys),
+                        )
+                    )
+                    self._request_stop_bot("all accounts completed this round")
+                    return
             if not self.log_out_btn_coors or not self.log_out_ok_btn_coors:
                 self._abort_switch_and_resume("missing calibrated Log Out button(s)")
                 queued_after_login = True
