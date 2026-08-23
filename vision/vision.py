@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -21,6 +24,27 @@ try:
     import mss
 except Exception:  # pragma: no cover - optional dependency at runtime
     mss = None
+
+
+# One screen capture at a time, process-wide.
+#
+# On KDE/Wayland the only working backend is `spectacle`, which is a
+# single-instance application: a second invocation does not take its own shot,
+# it blocks. The bot runs ~100 threads that all want to see, so the invocations
+# pile up -- measured 2026-08-23, three `spectacle -b -n -f -o /tmp/mtga_shot_*`
+# processes hanging at once while *every* thread in the bot went silent for 48s
+# mid-match (no log line at all, not even the periodic arena reacquire), the
+# turn timer ran out, and the debug bundle being written stopped after its JSON
+# with both screenshots missing. Killing the stuck processes released it
+# immediately.
+#
+# So: serialise, and let parallel callers share one frame instead of queueing
+# for their own. The shared frame is read-only by convention -- every consumer
+# either template-matches it or slices a view out of it.
+_CAPTURE_LOCK = threading.Lock()
+_FRAME_TTL_SEC = 0.12
+_last_frame: "np.ndarray | None" = None
+_last_frame_ts = 0.0
 
 
 @dataclass(frozen=True)
@@ -181,6 +205,23 @@ class VisionEngine:
         return False
 
     def _grab_full_frame(self) -> np.ndarray | None:
+        """A frame, shared with whoever asked in the last _FRAME_TTL_SEC."""
+        global _last_frame, _last_frame_ts
+        fresh = _last_frame
+        if fresh is not None and time.time() - _last_frame_ts <= _FRAME_TTL_SEC:
+            return fresh
+        with _CAPTURE_LOCK:
+            # Another thread may have refreshed it while we waited for the lock;
+            # that is the whole point of holding one.
+            if _last_frame is not None and time.time() - _last_frame_ts <= _FRAME_TTL_SEC:
+                return _last_frame
+            frame = self._grab_full_frame_uncached()
+            if frame is not None:
+                _last_frame = frame
+                _last_frame_ts = time.time()
+            return frame
+
+    def _grab_full_frame_uncached(self) -> np.ndarray | None:
         if mss is not None and time.time() >= self._mss_failed_until:
             try:
                 if self._mss_instance is None:
@@ -278,7 +319,6 @@ class VisionEngine:
 
     def _grab_via_linux_tool(self) -> np.ndarray | None:
         import shutil
-        import subprocess
         import tempfile
 
         if cv2 is None:
@@ -290,13 +330,33 @@ class VisionEngine:
                 fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="mtga_shot_")
                 os.close(fd)
                 full_cmd = [arg.replace("__OUT__", tmp_path) for arg in cmd]
+                # Popen rather than run(), so a tool that ignores its own
+                # deadline can be killed by *process group*. A plain
+                # run(timeout=...) kills the child it spawned, and spectacle
+                # leaves a grandchild behind that keeps holding the
+                # single-instance slot -- which is how three of them ended up
+                # hanging at once and froze the bot.
                 try:
-                    proc = subprocess.run(
+                    proc = subprocess.Popen(
                         full_cmd,
-                        capture_output=True,
-                        timeout=10.0,
-                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        start_new_session=True,
                     )
+                except Exception:
+                    return None
+                try:
+                    proc.communicate(timeout=8.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                    try:
+                        proc.communicate(timeout=2.0)
+                    except Exception:
+                        pass
+                    return None
                 except Exception:
                     return None
                 if proc.returncode != 0:
