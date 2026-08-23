@@ -27,11 +27,14 @@ Accounts/*
 
 # IDE and local tooling
 .idea/
-.claude/
+# Local Claude Code state (settings, locks) stays out, but the skills are
+# project documentation -- they describe how to operate this bot, not machine
+# state -- so they are tracked.
+.claude/*
+!.claude/skills/
 
 # Internal AI/session files
 learning.md
-CLAUDE.md
 AGENTS.md
 
 

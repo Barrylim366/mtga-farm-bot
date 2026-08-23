@@ -39,7 +39,14 @@ RT = get_runtime_root()
 # output names the problem instead of just proving "something matched".
 SIGNATURES = {
     "rope (turn timer ran out)": r"MY_TIMER_CRITICAL",
-    "blind hand sweep": r"Scanned entire hand area but did not find",
+    # Match what reaches bot.log. The obvious phrase, "Scanned entire hand area
+    # but did not find", lives in a bare print() (Controller.py) and goes to
+    # stdout only -- a pattern on it silently reports zero for the single most
+    # common failure the bot has. It did exactly that here for a whole day.
+    "blind hand sweep (nothing covering it)":
+        r"the sweep was blind with MTGA active, but no Done button",
+    "blind hand sweep (overlay cleared)":
+        r"dismissed an overlay covering the board",
     "stuck action loop": r"STUCK_ACTION_RETRY_LIMIT",
     "cast abandoned": r"CASTING_TIME_OPTION_UNANSWERED",
     "ineffective target click": r"TARGET_CLICK_INEFFECTIVE",
