@@ -22,8 +22,7 @@ something happened.
 ```
 tail -F -n 0 "<repo>/runtime/logs/bot.log" 2>/dev/null | grep -E --line-buffered \
 "Round complete|ROUND_COMPLETE|Quest pass complete|Account switching disabled|\
-REPORT_DIALOG_DETECTED|emergency concede|Traceback|Bot stop requested|\
-Quest count confirmed fresh"
+emergency concede|Traceback|Bot stop requested|Quest count confirmed fresh"
 ```
 
 Use `persistent: true`. `tail -F` (not `-f`) so it survives the log being
@@ -61,10 +60,12 @@ intervene, which no log tail answers:
 
 ## Tuning the Monitor filter — two traps that have both fired here
 
-- **Match the log tag, not the prose.** `Report a Player` matched the GO_HOME
-  *refusal* message, whose explanatory text mentions the dialog it prevents — so
-  a working safety feature paged as an emergency. Grep `REPORT_DIALOG_DETECTED`.
-  The same bug once matched "no longer **critical**", the recovery message.
+- **Match the log tag, not the prose.** A filter on `critical` matched
+  "no longer **critical**" — the *recovery* message — so the timer coming back
+  from the rope paged as the emergency it had just left. An earlier one matched
+  `Report a Player` against a *refusal* message whose explanatory text merely
+  mentioned the dialog it had prevented. Grep the tag the code emits, never a
+  phrase from the sentence around it.
 - **Drop transient noise.** `Arena region unavailable during reacquire` and
   `REWARD_CLAIM_*: image not found` fire in bursts during match loads and mean
   nothing on their own. A filter that pages on every one of them trains you to
@@ -76,19 +77,52 @@ rather than living with the noise.
 ## Triage: read the artefacts, not the log
 
 `runtime/` already holds the evidence, written per event. Reading megabytes of
-log by hand is the slow, wrong path. See CLAUDE.md for the full list; the ones
-that resolve most questions:
+log by hand is the slow, wrong path. The `debug-artefacts` skill has the full
+list; the ones that resolve most questions:
 
 | Question | Artefact |
 |---|---|
 | Why did it make *that* play? | `runtime/debug/matches/<utc>_<id>/snapshots.jsonl`, `board.txt` |
 | Did it click the wrong place? | `runtime/debug/clicks.jsonl` (raw + arena-mapped, `decision_seq` joins to the decision) |
 | Why did a card just vanish? | `runtime/debug/casting-option-*/` (screenshot + every point tried) |
-| Target click did nothing? | `runtime/debug/target-click-*/` (click point **arena-relative**, measurable against the card in the screenshot) |
 | What happened overnight? | `runtime/analysis/alerts.log`, `runtime/records/<session>/match-*.json` |
 
-For a UI-state question, take a screenshot and *look* — several hours have been
-lost to theories that one screenshot would have killed.
+## Screenshot first, log second
+
+For anything about what the client is *showing*, take a screenshot and look
+before forming a theory. This is not a tiebreaker of last resort; on 2026-08-23
+it answered five questions in one step each, while log-grepping produced two
+wrong hypotheses on the way:
+
+| Symptom | What the log suggested | What the screenshot showed |
+|---|---|---|
+| Bot idle in combat, `all_attack=[]` | "declare-attack bug" | the **Library overlay** covering the whole board |
+| `Start Bot` did nothing | — | a **DEFEAT** screen waiting on `[Click to Continue]` |
+| Same again after a restart | — | a **750 gold reward** popup |
+| "No decision for 163s, frozen?" | freeze | the **login screen** — the switch had never logged in |
+| Login failing | "wrong credentials?" | `giacomo...`**q**`mail.de` — a mistyped `@` |
+
+How to take one (`mss` alone returns black on this Wayland session; the engine's
+own fallback chain handles it):
+
+```python
+import sys; sys.path.insert(0, ".")
+from vision.vision import VisionEngine
+import cv2
+f = VisionEngine().capture()          # None means every backend failed
+arena = f[193:1273, 760:2680]         # the MTGA window inside a 3440x1440 screen
+cv2.imwrite("/tmp/shot.png", cv2.resize(arena, (1300, 731)))
+```
+
+Two things learned the hard way:
+
+- **Crop and zoom before measuring a click target.** A full-screen downscale
+  hides an 80px error. Read coordinates off a 3-4x crop of the region, then map
+  back: `screen = (760 + arena_x, 193 + arena_y)`.
+- **Capture deliberately, not continuously.** Each capture shells out to
+  `spectacle`, which is single-instance — firing two in quick succession makes
+  one return nothing, and the bot's own vision competes for the same tool. One
+  capture per question, and pull several crops out of that one frame.
 
 ## Intervening
 
@@ -102,14 +136,20 @@ When it is real:
 1. **Wait for `[MATCH_END]`.** Stopping mid-match loses the match — MTGA ropes
    the abandoned game out. The only thing that outranks this is a bot about to
    do something irreversible (see below).
-2. **Stop from the UI**, never by killing the process: `Stop Bot` at (210, 464).
+2. **Stop from the UI**, never by killing the process: press `Stop Bot`. Measure
+   the button before clicking -- its position depends on the window, and the
+   coordinates that were hardcoded here were wrong by ~80px on the Linux box
+   (measured 2026-08-23: `Stop Bot` at (179, 385), `Start Bot` at (179, 328)).
+   Capture the panel via `VisionEngine().capture()` and read them off.
    Verify `Status: Stopped` before touching anything.
 3. Diagnose from the artefacts, fix, `python -m unittest discover tests`.
 4. **Restart the UI process.** Pressing `Start Bot` does *not* reload changed
-   code — the running `ui.py` must be restarted:
-   `pythonw.exe ui.py` from the repo root.
+   code — the running `ui.py` must be restarted. Windows: `pythonw.exe ui.py`
+   from the repo root. Linux: `setsid nohup .venv/bin/python ui.py &` so it
+   outlives the shell that started it.
 5. Clear whatever MTGA is showing (defeat screen, reward popup) — a leftover
-   screen blocks the next start — then `Start Bot` at (210, 404).
+   screen blocks the next start; a `DEFEAT` screen with `[Click to Continue]`
+   really does sit there and wait — then press `Start Bot`.
 6. Confirm it is really playing again before standing down: a fresh
    `[MATCH_END]`, or `last decision` staying fresh across two snapshots.
 
@@ -117,8 +157,9 @@ When it is real:
 
 If **Shut down PC when all accounts are done** is enabled, a false
 "round complete" powers the machine off with the user away. If the bot is
-rotating through accounts without playing, stop it *now* and run `shutdown /a`
-(harmless when nothing is pending — it just returns non-zero).
+rotating through accounts without playing, stop it *now* and cancel the
+shutdown: `shutdown /a` on Windows, `shutdown -c` on Linux (both are harmless
+when nothing is pending).
 
 That exact sequence happened on 2026-08-22: a stale quest read made all five
 accounts look finished, ~30 seconds each, no matches played, heading straight
