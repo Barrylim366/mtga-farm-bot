@@ -59,6 +59,16 @@ history to reason from, not the behaviour of the running bot — and the gap is
 open again with no diagnostics on it. Anything brought back comes back alone,
 with a session of watching behind it.
 
+**A silent bot is not necessarily a stuck bot.** `LOG_LINE_UNTERMINATED` /
+`LOG_LINE_TAIL_DISCARDED` (watchdog signature `log_line_torn`) mean a
+`Player.log` line arrived without its terminator. One line carries several GRE
+messages and can be tens of kilobytes, so a tear used to destroy every message
+behind it -- on 2026-08-23 that was the `ActionsAvailableReq` handing the turn
+back, after which MTGA wrote nothing more (it was waiting for the bot) and the
+bot sat on a 16-second-old picture with its own clock running. If the bot looks
+frozen, compare its last state against `Player.log`'s real tail (msgIds,
+`priorityPlayer`, `decisionPlayer`) before looking at the click path.
+
 Grep for the lines that actually reach `bot.log`: **not** "Scanned entire hand area
 but did not find" — that phrase only exists in a bare `print()`
 (`Controller.py`), never reaches the log, and a pattern on it reports a clean

@@ -72,6 +72,11 @@ ALERT_SIGNATURES: tuple[tuple[str, tuple[str, ...], float], ...] = (
     # so the timer-based stall detector never sees this as a stall -- this
     # is the only signal that surfaces it.
     ("stuck_action", ("STUCK_ACTION_RETRY_LIMIT",), 15.0),
+    # A Player.log line that arrived without its terminator. Either MTGA died
+    # mid-write, or a tear stalled past the buffer window -- both were
+    # completely invisible before, and a tear is what silently froze the bot
+    # on 2026-08-23 (see LogReader.__follow).
+    ("log_line_torn", ("LOG_LINE_UNTERMINATED", "LOG_LINE_TAIL_DISCARDED"), 30.0),
     ("no_scryfall_land", ("No Scryfall data for land",), 60.0),
     ("no_card_info", ("No card info for grpId",), 60.0),
     ("timer_critical", ("MY_TIMER_CRITICAL", "TimerType_Inactivity remaining=0"), 20.0),

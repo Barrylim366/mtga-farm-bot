@@ -8,6 +8,16 @@ import bot_logger
 
 class LogReader:
     LOG_UPDATE_SPEED = 0.1
+    # A single GreToClientEvent line carries *several* GRE messages and can be
+    # tens of kilobytes (56 KB measured), so MTGA's write is nowhere near
+    # atomic and readline() happily returns the first few thousand characters
+    # of one. Such a fragment is worse than useless: it matches the pattern,
+    # replaces the newest line for it, and then fails to parse -- taking every
+    # message behind the tear with it. A line is therefore held back until its
+    # terminator arrives. Only if nothing at all follows for this long is the
+    # buffer released anyway, so a genuinely last unterminated line (MTGA
+    # exiting mid-write) is not swallowed forever.
+    PARTIAL_LINE_FLUSH_SEC = 5.0
 
     @staticmethod
     def _default_player_log_path() -> str:
@@ -70,11 +80,56 @@ class LogReader:
 
     def __follow(self, the_file):
         the_file.seek(0, 2)
+        partial = ""
+        last_data_at = 0.0
+        # Seeking to the end can land *inside* a line MTGA is still writing. Its
+        # tail then arrives newline-terminated and is indistinguishable from a
+        # whole line -- but it starts mid-JSON, still matches the pattern, and
+        # fails to parse exactly like the tear this buffering exists to prevent.
+        # A real line starts with the JSON object or with Unity's `[...]` prefix,
+        # so anything else can only be a tail.
+        expect_first_line = True
         while not self.__stop_monitor:
-            line = the_file.readline()
-            if not line:
+            chunk = the_file.readline()
+            if not chunk:
+                if partial and (time.time() - last_data_at) >= self.PARTIAL_LINE_FLUSH_SEC:
+                    # Nothing at all has arrived for the whole window, so this is
+                    # not a slow write -- MTGA is gone (it can exit mid-line).
+                    # Release the buffer rather than sit on it for the session.
+                    bot_logger.log_error(
+                        f"LOG_LINE_UNTERMINATED: releasing {len(partial)} buffered "
+                        f"characters after {self.PARTIAL_LINE_FLUSH_SEC:.0f}s of silence "
+                        "without a line terminator."
+                    )
+                    line, partial = partial, ""
+                    expect_first_line = False
+                    yield line
+                    continue
                 time.sleep(self.LOG_UPDATE_SPEED)
                 continue
+            # Measured from the last data, not from the start of the line: a slow
+            # write that is still making progress must never be cut open, and a
+            # buffer can only be held while MTGA keeps writing to it.
+            last_data_at = time.time()
+            partial += chunk
+            if not partial.endswith("\n"):
+                # MTGA is still writing this line. Yielding now would hand a
+                # truncated JSON message to the callbacks -- measured on
+                # 2026-08-23: 3996 characters of a 27804-character line whose
+                # last message was the ActionsAvailableReq that passed the turn
+                # back to us. The bot kept waiting for a stack that had already
+                # resolved, its own clock ran, and the match had to be conceded
+                # by hand.
+                continue
+            line, partial = partial, ""
+            if expect_first_line:
+                expect_first_line = False
+                if not line.lstrip().startswith(("{", "[")):
+                    bot_logger.log_info(
+                        f"LOG_LINE_TAIL_DISCARDED: started reading {len(line)} "
+                        "characters into a line MTGA was already writing."
+                    )
+                    continue
             yield line
 
     def __monitor_log_file(self):
