@@ -20,7 +20,15 @@ if ROOT not in sys.path:
 import shutdown_scheduler
 
 
-class ScheduleShutdownTest(unittest.TestCase):
+class _SchedulerTestBase(unittest.TestCase):
+    """Records the argv the module would run, with the platform pinned.
+
+    The platform has to be forced rather than read off sys.platform: both
+    branches must be checked on whichever OS the suite happens to run on.
+    """
+
+    windows = True
+
     def setUp(self):
         self.calls = []
         self._real_run = shutdown_scheduler._run
@@ -29,8 +37,23 @@ class ScheduleShutdownTest(unittest.TestCase):
         shutdown_scheduler.is_supported = lambda: True
         self.addCleanup(setattr, shutdown_scheduler, "_run", self._real_run)
         self.addCleanup(setattr, shutdown_scheduler, "is_supported", self._real_supported)
+        for name, value in (("_is_windows", self.windows), ("_is_linux", not self.windows)):
+            self.addCleanup(setattr, shutdown_scheduler, name, getattr(shutdown_scheduler, name))
+            setattr(shutdown_scheduler, name, lambda v=value: v)
 
-    def test_a_delay_is_always_passed_to_windows(self):
+    def delay_arg(self) -> int:
+        """The scheduled delay of the last call, in seconds."""
+        args = self.calls[0]
+        if self.windows:
+            return int(args[3])
+        self.assertTrue(args[2].startswith("+"), args)
+        return int(args[2][1:]) * 60
+
+
+class ScheduleShutdownWindowsTest(_SchedulerTestBase):
+    windows = True
+
+    def test_the_delay_is_passed_in_seconds(self):
         shutdown_scheduler.schedule_shutdown(120)
         self.assertEqual(self.calls[0][:3], ["shutdown", "/s", "/t"])
         self.assertEqual(self.calls[0][3], "120")
@@ -42,12 +65,12 @@ class ScheduleShutdownTest(unittest.TestCase):
                 self.calls.clear()
                 shutdown_scheduler.schedule_shutdown(requested)
                 self.assertGreaterEqual(
-                    int(self.calls[0][3]), shutdown_scheduler.MIN_DELAY_SEC
+                    self.delay_arg(), shutdown_scheduler.MIN_DELAY_SEC
                 )
 
     def test_a_garbage_delay_falls_back_to_the_default(self):
         shutdown_scheduler.schedule_shutdown("soon")  # type: ignore[arg-type]
-        self.assertEqual(int(self.calls[0][3]), shutdown_scheduler.DEFAULT_DELAY_SEC)
+        self.assertEqual(self.delay_arg(), shutdown_scheduler.DEFAULT_DELAY_SEC)
 
     def test_the_comment_is_truncated_so_the_command_is_not_rejected(self):
         shutdown_scheduler.schedule_shutdown(60, comment="x" * 900)
@@ -56,16 +79,90 @@ class ScheduleShutdownTest(unittest.TestCase):
     def test_cancelling_uses_the_abort_flag(self):
         shutdown_scheduler.cancel_shutdown()
         self.assertEqual(self.calls[0], ["shutdown", "/a"])
+        self.assertEqual(shutdown_scheduler.cancel_command_hint(), "shutdown /a")
+
+
+class ScheduleShutdownLinuxTest(_SchedulerTestBase):
+    """The Linux flags: `-h +<minutes>`, cancelled with `-c`."""
+
+    windows = False
+
+    def test_the_delay_is_passed_in_minutes(self):
+        shutdown_scheduler.schedule_shutdown(120)
+        self.assertEqual(self.calls[0][:3], ["shutdown", "-h", "+2"])
+
+    def test_the_wall_broadcast_is_suppressed(self):
+        """A denied set-wall-message must not cost us the whole shutdown."""
+        shutdown_scheduler.schedule_shutdown(120)
+        self.assertIn("--no-wall", self.calls[0])
+
+    def test_a_sub_minute_delay_never_becomes_an_instant_shutdown(self):
+        """`+0` means "now" -- rounding down would delete the abort window."""
+        for requested in (0, -5, 1, 30, 59):
+            with self.subTest(requested=requested):
+                self.calls.clear()
+                shutdown_scheduler.schedule_shutdown(requested)
+                self.assertEqual(self.calls[0][2], "+1")
+                self.assertGreaterEqual(
+                    self.delay_arg(), shutdown_scheduler.MIN_DELAY_SEC
+                )
+
+    def test_the_minute_delay_is_rounded_up_not_down(self):
+        """Firing earlier than asked would shorten the user's abort window."""
+        shutdown_scheduler.schedule_shutdown(121)
+        self.assertEqual(self.calls[0][2], "+3")
+
+    def test_a_garbage_delay_falls_back_to_the_default(self):
+        shutdown_scheduler.schedule_shutdown("soon")  # type: ignore[arg-type]
+        self.assertEqual(self.delay_arg(), shutdown_scheduler.DEFAULT_DELAY_SEC)
+
+    def test_the_comment_is_not_passed_as_a_wall_message(self):
+        shutdown_scheduler.schedule_shutdown(120, comment="x" * 900)
+        self.assertEqual(self.calls[0], ["shutdown", "-h", "+2", "--no-wall"])
+
+    def test_cancelling_uses_the_cancel_flag(self):
+        shutdown_scheduler.cancel_shutdown()
+        self.assertEqual(self.calls[0], ["shutdown", "-c"])
+        self.assertEqual(shutdown_scheduler.cancel_command_hint(), "shutdown -c")
+
+
+class PlatformSupportTest(unittest.TestCase):
+    def _pin(self, *, windows, linux, have_binary=True):
+        for name, value in (
+            ("_is_windows", windows),
+            ("_is_linux", linux),
+            ("_have_shutdown_binary", have_binary),
+        ):
+            self.addCleanup(setattr, shutdown_scheduler, name, getattr(shutdown_scheduler, name))
+            setattr(shutdown_scheduler, name, lambda v=value: v)
+
+    def test_windows_is_supported(self):
+        self._pin(windows=True, linux=False)
+        self.assertTrue(shutdown_scheduler.is_supported())
+
+    def test_linux_is_supported_when_the_binary_exists(self):
+        self._pin(windows=False, linux=True)
+        self.assertTrue(shutdown_scheduler.is_supported())
+
+    def test_linux_without_a_shutdown_binary_is_not_supported(self):
+        self._pin(windows=False, linux=True, have_binary=False)
+        self.assertFalse(shutdown_scheduler.is_supported())
+
+    def test_macos_is_not_supported(self):
+        """`shutdown` needs root there, which a background run cannot get."""
+        self._pin(windows=False, linux=False)
+        self.assertFalse(shutdown_scheduler.is_supported())
 
     def test_nothing_is_executed_on_an_unsupported_platform(self):
-        shutdown_scheduler.is_supported = lambda: False
+        calls = []
+        self.addCleanup(setattr, shutdown_scheduler, "_run", shutdown_scheduler._run)
+        shutdown_scheduler._run = lambda args: (calls.append(args) or True)
+        self._pin(windows=False, linux=False)
         self.assertFalse(shutdown_scheduler.schedule_shutdown(120))
         self.assertFalse(shutdown_scheduler.cancel_shutdown())
-        self.assertEqual(self.calls, [], "ran shutdown.exe off Windows")
+        self.assertEqual(calls, [], "ran a shutdown command on an unsupported OS")
 
     def test_a_failing_subprocess_is_reported_not_raised(self):
-        shutdown_scheduler._run = self._real_run
-        shutdown_scheduler.is_supported = lambda: True
         # A command that cannot exist -- _run must swallow the OSError.
         self.assertFalse(shutdown_scheduler._run(["definitely-not-a-real-binary-xyz"]))
 

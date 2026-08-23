@@ -4627,10 +4627,14 @@ class MTGBotUI(tk.Tk):
                 bot_logger.log_info("Scheduled shutdown cancelled by the user.")
                 messagebox.showinfo("Cancelled", "The PC will stay on.", parent=self)
             else:
+                try:
+                    hint = shutdown_scheduler.cancel_command_hint()
+                except Exception:
+                    hint = "shutdown /a"
                 messagebox.showwarning(
                     "Could not cancel",
-                    "The shutdown could not be cancelled. Run 'shutdown /a' in a "
-                    "command prompt to stop it.",
+                    "The shutdown could not be cancelled. Run "
+                    f"'{hint}' in a terminal to stop it.",
                     parent=self,
                 )
 
@@ -6848,8 +6852,8 @@ class SwitchAccountWindow(tk.Toplevel):
         if self.shutdown_when_done_var.get() and not shutdown_scheduler.is_supported():
             messagebox.showwarning(
                 "Not available here",
-                "Automatic shutdown is only implemented for Windows. The setting "
-                "is saved, but nothing will power off on this system.",
+                "Automatic shutdown is implemented for Windows and Linux only. "
+                "The setting is saved, but nothing will power off on this system.",
                 parent=self,
             )
 

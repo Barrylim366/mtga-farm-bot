@@ -95,7 +95,7 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.2.2`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.3.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
 
 ## Configuration
 
@@ -162,9 +162,9 @@ Rotation always continues from the account actually logged in, so it never waste
 It is off by default and saved the moment you click it, not on **Save**. The guard rails matter more than the feature:
 
 - It fires on exactly one event — the controller stopping itself with *all accounts completed this round*, i.e. the end of the last pass (quests only, wins only, or quests-then-wins, depending on which thresholds are set). A manual **Stop**, a crash, a failed switch or a time-mode rotation never reaches it (time mode has no end of round at all, which is why the checkbox says so).
-- The shutdown is always **delayed by two minutes** and announced in a pop-up with a **Cancel** button; a zero delay is clamped up rather than honoured, so there is always a window to abort. Cancelling by hand works too: `shutdown /a`.
+- The shutdown is always **delayed by two minutes** and announced in a pop-up with a **Cancel** button; a zero delay is clamped up rather than honoured, so there is always a window to abort. Cancelling by hand works too: `shutdown /a` on Windows, `shutdown -c` on Linux.
 - If arming the shutdown fails, you get a warning telling you to power off yourself, rather than silence — the failure mode of a silent miss is finding the machine still running hours later.
-- Windows only. On macOS/Linux the setting saves but warns that nothing will power off.
+- Works on **Windows and Linux**. Windows gets `shutdown /s /t <seconds>`; Linux hands systemd `shutdown -h +<minutes>` (rounded up, so the delay is never shorter than announced) with `--no-wall`, because the wall broadcast is a separate permission that can be denied where powering off is allowed. An unprivileged Linux call goes through logind/polkit, which grants power-off to the active desktop session without a password — on a headless or locked-down system it can be refused, and then you get the same warning as any other failure to arm. On macOS the setting saves but warns that nothing will power off: its `shutdown` needs root, which a background run cannot get.
 
 A switch that becomes due while a match is running or while matchmaking is in progress is **deferred**, not skipped: it is carried out on the first moment between matches. This also covers the end-of-round stop, which previously could end the session in the middle of a game the bot had just started.
 
