@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -883,167 +882,10 @@ class ArenaRegionProvider:
         bot_logger.log_error(f"Arena setup debug bundle saved: {debug_dir}")
         return str(debug_dir)
 
-_focus_user32 = None
-_focus_kernel32 = None
-_focus_fail_logged: dict[tuple[int, int], float] = {}
-_FOCUS_FAIL_LOG_THROTTLE_SEC = 5.0
-# How long to wait for the (asynchronous) activation to actually land before
-# calling the focus attempt failed.
-_FOCUS_VERIFY_TIMEOUT_SEC = 0.4
-
-
-def _focus_win_api():
-    """Private user32/kernel32 handles with the prototypes this module needs.
-
-    Deliberately built with ctypes.WinDLL instead of ctypes.windll so the
-    restypes we set here cannot leak into other users of the cached
-    ``windll.user32`` function objects (pyautogui/pygetwindow call some of the
-    same entry points). GetForegroundWindow MUST be typed: its default int
-    restype truncates a pointer-sized HWND on 64-bit Windows, so every handle
-    comparison against it would silently compare garbage."""
-    global _focus_user32, _focus_kernel32
-    if os.name != "nt":
-        return None, None
-    if _focus_user32 is None or _focus_kernel32 is None:
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        user32.GetForegroundWindow.argtypes = []
-        user32.GetForegroundWindow.restype = wintypes.HWND
-        user32.GetWindowThreadProcessId.argtypes = [
-            wintypes.HWND,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-        user32.AttachThreadInput.restype = wintypes.BOOL
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.restype = wintypes.BOOL
-        user32.BringWindowToTop.argtypes = [wintypes.HWND]
-        user32.BringWindowToTop.restype = wintypes.BOOL
-        user32.SetActiveWindow.argtypes = [wintypes.HWND]
-        user32.SetActiveWindow.restype = wintypes.HWND
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.ShowWindow.restype = wintypes.BOOL
-        user32.IsIconic.argtypes = [wintypes.HWND]
-        user32.IsIconic.restype = wintypes.BOOL
-        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-        user32.GetWindowTextW.restype = ctypes.c_int
-        user32.WindowFromPoint.argtypes = [wintypes.POINT]
-        user32.WindowFromPoint.restype = wintypes.HWND
-        user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
-        user32.GetAncestor.restype = wintypes.HWND
-        kernel32.GetCurrentThreadId.argtypes = []
-        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-        _focus_user32, _focus_kernel32 = user32, kernel32
-    return _focus_user32, _focus_kernel32
-
-
-def _window_title(user32, hwnd: int) -> str:
-    if not hwnd:
-        return ""
-    try:
-        buff = ctypes.create_unicode_buffer(512)
-        user32.GetWindowTextW(wintypes.HWND(hwnd), buff, 512)
-        return str(buff.value or "").strip()
-    except Exception:
-        return ""
-
-
-def _hwnd_value(handle) -> int:
-    """HWND restype yields an int, or None for NULL."""
-    try:
-        return int(handle or 0)
-    except Exception:
-        return 0
-
-
-def get_focus_state(expected_size: tuple[int, int] = (1920, 1080)) -> dict[str, Any]:
-    """Who owns the keyboard/mouse focus right now, and is that MTGA?
-
-    This is pure diagnosis and never changes focus. It exists because an
-    inactive MTGA window is invisible in every other artefact we write: Unity
-    only emits the hover events the hand scan depends on while its window is
-    active, so a scan over an inactive window sweeps the whole hand, hovers
-    nothing, and looks exactly like a coordinate bug (observed 2026-08-21:
-    ~10 minutes of blind sweeps, one lost match)."""
-    if os.name != "nt":
-        return {"platform": "non_windows"}
-    try:
-        user32, _kernel32 = _focus_win_api()
-        if user32 is None:
-            return {"platform": "non_windows"}
-        foreground = _hwnd_value(user32.GetForegroundWindow())
-        selected = _pick_best_windows_candidate(
-            _list_mtga_window_rects_windows(), expected_size
-        )
-        mtga_hwnd = int((selected or {}).get("hwnd") or 0)
-        return {
-            "foreground_hwnd": foreground,
-            "foreground_title": _window_title(user32, foreground),
-            "mtga_hwnd": mtga_hwnd,
-            "mtga_title": str((selected or {}).get("title") or ""),
-            "mtga_is_foreground": bool(mtga_hwnd) and foreground == mtga_hwnd,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def point_belongs_to_mtga(
-    point: tuple[int, int],
-    expected_size: tuple[int, int] = (1920, 1080),
-) -> bool:
-    """Is this screen pixel actually MTGA's, or is another window covering it?
-
-    Fails OPEN: if we cannot tell (non-Windows, no MTGA window found, API
-    error), the caller keeps its previous behaviour. Only a positive
-    identification of a DIFFERENT top-level window returns False."""
-    if os.name != "nt":
-        return True
-    try:
-        user32, _kernel32 = _focus_win_api()
-        if user32 is None:
-            return True
-        selected = _pick_best_windows_candidate(
-            _list_mtga_window_rects_windows(), expected_size
-        )
-        mtga_hwnd = int((selected or {}).get("hwnd") or 0)
-        if not mtga_hwnd:
-            return True
-        pt = wintypes.POINT(int(point[0]), int(point[1]))
-        at_point = _hwnd_value(user32.WindowFromPoint(pt))
-        if not at_point:
-            return True
-        GA_ROOT = 2
-        root = _hwnd_value(user32.GetAncestor(wintypes.HWND(at_point), GA_ROOT))
-        return (root or at_point) == mtga_hwnd
-    except Exception:
-        return True
-
-
 def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
-    """Make the MTGA window the active one. True only if that is VERIFIED.
-
-    The old version fired ShowWindow/BringWindowToTop/SetForegroundWindow and
-    returned True unconditionally. Windows silently refuses a foreground change
-    requested by a process that does not already own the foreground window --
-    so once the user clicked away (or a mis-mapped scan dragged the cursor over
-    another window), this was a no-op that still reported success, and the hand
-    scan kept sweeping an inactive window forever. Two fixes: borrow the
-    foreground thread's input queue via AttachThreadInput, which is the
-    documented way to be allowed to set foreground at all, and verify the
-    result instead of assuming it.
-
-    Caveat worth knowing: AttachThreadInput ties us to the foreground thread's
-    input queue for the three calls below, so a wedged foreground window could
-    in principle stall this -- and it runs on the decision thread, under the
-    decision lock. Not observed; it is the price of being permitted the
-    foreground change at all."""
     if os.name != "nt":
         return False
     try:
-        user32, kernel32 = _focus_win_api()
-        if user32 is None or kernel32 is None:
-            return False
         candidates = _list_mtga_window_rects_windows()
         selected = _pick_best_windows_candidate(candidates, expected_size)
         if selected is None:
@@ -1051,66 +893,15 @@ def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
         hwnd = int(selected.get("hwnd") or 0)
         if hwnd <= 0:
             return False
-        target = wintypes.HWND(hwnd)
-
-        foreground = _hwnd_value(user32.GetForegroundWindow())
-        if foreground == hwnd:
-            return True
-
-        # No SW_RESTORE branch on purpose: _list_mtga_window_rects_windows
-        # skips iconic windows, so a minimized MTGA never reaches this point --
-        # it fails the candidate search above instead.
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
         SW_SHOW = 5
-        user32.ShowWindow(target, SW_SHOW)
-
-        our_tid = kernel32.GetCurrentThreadId()
-        fg_tid = 0
-        if foreground:
-            fg_tid = int(
-                user32.GetWindowThreadProcessId(wintypes.HWND(foreground), None) or 0
-            )
-        attached = False
-        if fg_tid and fg_tid != our_tid:
-            attached = bool(user32.AttachThreadInput(our_tid, fg_tid, True))
-        try:
-            user32.BringWindowToTop(target)
-            user32.SetForegroundWindow(target)
-            user32.SetActiveWindow(target)
-        finally:
-            if attached:
-                user32.AttachThreadInput(our_tid, fg_tid, False)
-
-        # SetForegroundWindow only POSTS the activation; reading the foreground
-        # window straight afterwards still returns the old one and would report a
-        # false failure (measured: the switch landed, this check did not see it).
-        now = _hwnd_value(user32.GetForegroundWindow())
-        deadline = time.time() + _FOCUS_VERIFY_TIMEOUT_SEC
-        while now != hwnd and time.time() < deadline:
-            time.sleep(0.02)
-            now = _hwnd_value(user32.GetForegroundWindow())
-        if now == hwnd:
-            return True
-        # Throttle per (target, blocker) pair, not globally: a single global
-        # timestamp let one caller's failure hide a different window stealing
-        # focus somewhere else, which is the very thing this line exists to show.
-        ts = time.time()
-        key = (hwnd, now)
-        if (ts - _focus_fail_logged.get(key, 0.0)) >= _FOCUS_FAIL_LOG_THROTTLE_SEC:
-            _focus_fail_logged[key] = ts
-            if len(_focus_fail_logged) > 32:
-                _focus_fail_logged.clear()
-                _focus_fail_logged[key] = ts
-            bot_logger.log_error(
-                "FOCUS_MTGA_FAILED: MTGA window (hwnd={}, '{}') is still not the "
-                "foreground window (foreground hwnd={}, '{}'). Hover events will "
-                "not be emitted while it is inactive.".format(
-                    hwnd,
-                    str(selected.get("title") or ""),
-                    now,
-                    _window_title(user32, now),
-                )
-            )
-        return False
+        user32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
+        user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOW)
+        user32.BringWindowToTop(wintypes.HWND(hwnd))
+        user32.SetForegroundWindow(wintypes.HWND(hwnd))
+        user32.SetActiveWindow(wintypes.HWND(hwnd))
+        return True
     except Exception:
         return False
 

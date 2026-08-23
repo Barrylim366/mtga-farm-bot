@@ -22,12 +22,7 @@ from actions.actions import run_action
 from actions.navigation_flow import build_post_login_navigation_actions
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
 from vision.vision import VisionEngine
-from vision.window_locator import (
-    ArenaRegionProvider,
-    focus_mtga_window,
-    get_focus_state,
-    point_belongs_to_mtga,
-)
+from vision.window_locator import ArenaRegionProvider, focus_mtga_window
 import bot_logger
 import debug_recorder
 import runtime_status
@@ -71,13 +66,6 @@ class Controller(ControllerSecondary):
     # start_game_from_home_screen). After this many failed attempts the bot gives
     # up reading and just plays, rather than dipping to Home forever.
     _HOME_QUEST_CHECK_MAX_ATTEMPTS = 3
-    # Horizontal limits of the hand sweep, in the 1920-wide reference frame. See
-    # the long note at the hand_scan_p1 assignment for how these were measured.
-    # Kept as class constants because a saved calibration_config.json overrides
-    # the instance defaults, and _clamp_hand_scan_x re-applies them there too --
-    # a config from before 2026-08-21 carries the old full-width 0..1920 band.
-    _HAND_SCAN_MIN_X = 220
-    _HAND_SCAN_MAX_X = 1700
 
     def __init__(
         self,
@@ -234,25 +222,8 @@ class Controller(ControllerSecondary):
         self.log_out_ok_btn_coors = None
         self.log_out_focus_coors = None
         
-        # Hand-row sweep band, NOT the full window width. The sweep used to run
-        # rel x=0 -> 1920, which crosses two zones that hold nothing castable and
-        # everything dangerous: on the left the player avatar and the
-        # graveyard/exile piles, on the right the Next button and the auto-pass
-        # arrow. That matters because a hover is not synchronous with the mouse
-        # (client -> server -> log round trip), so a late event can report the
-        # target card while the cursor has already moved on -- and the sweep then
-        # clicks wherever it currently is. Observed 2026-08-21: a cast click for
-        # card 281 landed at rel x=120, on the avatar next to the graveyard pile,
-        # which opened MTGA's graveyard viewer. That overlay covers the board, so
-        # every later sweep hovered nothing (with the window correctly focused),
-        # the bot burned its rope and lost the match on the timer.
-        # Bounds measured from 1988 recorded hand clicks: real ones run 272..1572
-        # (1st pct 280, 99th 1480), while every one of the 18 misfires sat at
-        # rel x <= 170 and none ever landed above 1572. 220..1700 therefore
-        # excludes all known misfires without cutting a single observed real
-        # click, and keeps a wide margin to the buttons on the right.
-        self.hand_scan_p1 = (self._HAND_SCAN_MIN_X, 1050)
-        self.hand_scan_p2 = (self._HAND_SCAN_MAX_X, 1050)
+        self.hand_scan_p1 = (0, 1050)
+        self.hand_scan_p2 = (1920, 1050)
         self.battlefield_scan_p1 = (
             int(1920 * 0.10),
             int(1080 * 0.50),
@@ -341,10 +312,6 @@ class Controller(ControllerSecondary):
             if "opponent_avatar" in click_targets:
                 self.opponent_avatar_coors = (click_targets["opponent_avatar"]["x"], click_targets["opponent_avatar"]["y"])
             if "hand_scan_points" in click_targets:
-                # Taken verbatim here on purpose. The band is narrowed later, in
-                # _validate_loaded_click_targets, because the legacy-absolute
-                # profile is detected from these very values being > 1920 --
-                # clamping them at this point would erase that signal.
                 self.hand_scan_p1 = (click_targets["hand_scan_points"]["p1"]["x"], click_targets["hand_scan_points"]["p1"]["y"])
                 self.hand_scan_p2 = (click_targets["hand_scan_points"]["p2"]["x"], click_targets["hand_scan_points"]["p2"]["y"])
             if "battlefield_scan_points" in click_targets:
@@ -589,9 +556,6 @@ class Controller(ControllerSecondary):
         # boundary is precisely what let a previous session's block pass as this
         # account's. Read only by _quests_block_exists_past_boundary.
         self._quests_authoritative_floor = 0
-        # Last time the queue loop saw a match actually start. Drives the
-        # stuck-queue probe in _probe_report_dialog_if_queue_is_stuck.
-        self._queue_progress_ts = 0.0
         # Set in begin_session(): the gold read must ignore the previous session's
         # tail, which holds other accounts' balances. See _read_latest_inventory_gold.
         # None means "not armed yet" -- 0 is a legitimate floor (empty log).
@@ -796,20 +760,6 @@ class Controller(ControllerSecondary):
         self._arena_region_missing_logged_ts = 0.0
         self._arena_region_cached_reuse_logged_ts = 0.0
         self._hand_select_debug_logged_ts = 0.0
-        # Did the last hand sweep see MTGA report ANY hover? Zero hovers over a
-        # full sweep is a different failure than "the card is not in hand": it
-        # means the game never processed the mouse at all. Assume the good case
-        # until a sweep proves otherwise.
-        # "hover" (MTGA answered), "blind" (a full sweep, no answer at all) or
-        # "unknown" (the sweep never ran, or a concurrent scan ate the events).
-        self._last_sweep_evidence = "unknown"
-        # Bumped by every non-cast hover scan; a cast sweep compares it before
-        # and after to know whether it had the shared hover queue to itself.
-        self._other_hover_scan_seq = 0
-        # Where the last hover-scan selection clicked, so a click that is logged
-        # but has no effect can still be measured against a screenshot.
-        self._last_selection_click: dict | None = None
-        self._arena_reactivate_ts = 0.0
         self._arena_correction_xy: tuple[int, int] = (0, 0)
         self._logout_play_origin: tuple[int, int] | None = None
         self._navigation_verify_failures = 0
@@ -915,8 +865,8 @@ class Controller(ControllerSecondary):
             and 0 <= int(hs_p2[0]) <= 1920 and 0 <= int(hs_p2[1]) <= 1080
         )
         if not hand_valid:
-            self.hand_scan_p1 = (self._HAND_SCAN_MIN_X, 1050)
-            self.hand_scan_p2 = (self._HAND_SCAN_MAX_X, 1050)
+            self.hand_scan_p1 = (0, 1050)
+            self.hand_scan_p2 = (1920, 1050)
             bot_logger.log_info(
                 f"Hand scan points fallback to 1920 defaults: p1={self.hand_scan_p1} p2={self.hand_scan_p2}"
             )
@@ -931,40 +881,6 @@ class Controller(ControllerSecondary):
             pass
         if self._legacy_absolute_click_profile:
             bot_logger.log_info("Detected legacy absolute click profile from loaded calibration values.")
-        # Narrow the loaded band to the hand row, last, so it wins over both the
-        # config and the fallback above. Every calibration_config.json written
-        # before 2026-08-21 stores 0..1920, the full window width, and that is
-        # the sweep that clicked the player avatar at rel x=120, opened MTGA's
-        # graveyard viewer over the board and lost a match on the rope. No real
-        # hand card was recorded outside _HAND_SCAN_MIN_X.._HAND_SCAN_MAX_X in
-        # 1988 samples, so the clamp cannot cut a card off, whereas trusting the
-        # stored value costs games.
-        #
-        # Unconditional on purpose. Clamping x would in principle hide the
-        # legacy-absolute signal (x > 1920), but not here: the hand_valid check
-        # above has already replaced any out-of-frame band with the defaults, so
-        # the detection at that point is unreachable for these two points and
-        # the values reaching this line are always within 0..1920 anyway.
-        # Skipping the clamp for legacy profiles would only leave a hole -- a
-        # legacy install whose *other* points are absolute but whose hand band
-        # is a valid 0..1920 would keep sweeping the full width.
-        self._clamp_hand_scan_band()
-
-    def _clamp_hand_scan_band(self) -> None:
-        """Pull hand_scan_p1/p2 back into the safe horizontal band."""
-        lo, hi = self._HAND_SCAN_MIN_X, self._HAND_SCAN_MAX_X
-        for attr in ("hand_scan_p1", "hand_scan_p2"):
-            try:
-                x, y = self.hand_scan_p1 if attr == "hand_scan_p1" else self.hand_scan_p2
-                clamped = max(lo, min(hi, int(x)))
-            except Exception:
-                continue
-            if clamped != int(x):
-                setattr(self, attr, (clamped, y))
-                bot_logger.log_info(
-                    f"Hand scan {attr} clamped to the hand row: x={int(x)} -> {clamped} "
-                    f"(safe band {lo}..{hi}; recalibrate if your layout really differs)"
-                )
 
     def _infer_legacy_origin_from_loaded_targets(self) -> tuple[int, int] | None:
         ct = self._loaded_click_targets or {}
@@ -1576,15 +1492,6 @@ class Controller(ControllerSecondary):
                 "scan_end": [int(scan_end[0]), int(scan_end[1])],
                 "current_pos": [int(current_pos[0]), int(current_pos[1])] if current_pos is not None else None,
                 "current_hovered_id": current_hovered_id,
-                # Which window actually owns the input. A sweep over an inactive
-                # MTGA window gets no hover events from Unity and therefore looks
-                # exactly like a coordinate bug -- without this field the two are
-                # indistinguishable after the fact.
-                "focus": get_focus_state(),
-                # Cast-sweep state: "hover" (MTGA answered), "blind" (a full
-                # sweep, no answer) or "unknown". Only meaningful for the
-                # cast_scan_* reasons; the select paths do not set it.
-                "last_cast_sweep_evidence": self._last_sweep_evidence,
                 "pending_select_n": self.__pending_select_n,
                 "select_n_in_progress": self.__select_n_in_progress,
                 # An open search/order window is the one state that makes a hand
@@ -1634,149 +1541,6 @@ class Controller(ControllerSecondary):
         except Exception:
             pass
         bot_logger.log_error(f"Hand select debug bundle saved: {debug_dir}")
-
-    # How long the target prompt gets to close before the click counts as missed.
-    # Generous: the answer travels client -> server -> client, and a prompt that
-    # is genuinely answered clears well inside this.
-    _TARGET_CLICK_CHECK_DELAY_SEC = 2.5
-
-    def _schedule_target_click_check(self, *, card_id: int, label: str) -> None:
-        """Photograph the board if a target click did not close the prompt.
-
-        Diagnostic only -- it clicks nothing and changes no decision. Runs on a
-        timer so the selection flow is not slowed by the wait.
-        """
-        def _check() -> None:
-            try:
-                if self._stop_requested or self._suppress_selections:
-                    return
-                if self.__pending_target_select is None:
-                    return  # the click worked, nothing to look at
-                bot_logger.log_error(
-                    f"TARGET_CLICK_INEFFECTIVE: {label} clicked for card {card_id} "
-                    f"but a target selection is still pending "
-                    f"{self._TARGET_CLICK_CHECK_DELAY_SEC:.1f}s later -- the click "
-                    "probably missed the card. Bundle has the board and the point."
-                )
-                self._write_target_click_debug_bundle(card_id=card_id, label=label)
-            except Exception as e:
-                bot_logger.log_error(f"TARGET_CLICK check failed: {e}")
-
-        try:
-            threading.Timer(self._TARGET_CLICK_CHECK_DELAY_SEC, _check).start()
-        except Exception:
-            pass
-
-    def _write_target_click_debug_bundle(self, *, card_id: int, label: str) -> None:
-        """Photograph a target click that was made and had no effect.
-
-        The hover scan proves the cursor was over the right object -- MTGA named
-        it -- yet the target prompt can stay open anyway, and nothing in the log
-        distinguishes "clicked the card" from "clicked 20px past its edge". Live
-        on 2026-08-21: Scorching Dragonfire's only legal target was correctly
-        chosen (creature 285, `can_hit_face: False`), SELECT_OPP_BATTLEFIELD_ITEM
-        clicked at arena-relative (852, 314), and the prompt was still up 40s
-        later, so every following hand sweep was blind (MTGA emits no hand hovers
-        while a target is pending) and the bot came within seconds of an
-        emergency concede. select_opponent_battlefield_permanent's own docstring
-        calls its scan band "a first estimate [that] needs in-game calibration";
-        this is what a calibration can be measured from.
-        """
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        debug_dir = Path(bot_logger.ensure_debug_dir(f"target-click-{stamp}"))
-        click = dict(self._last_selection_click or {})
-        try:
-            point = click.get("point")
-            arena = click.get("arena") or self._arena_region
-            rel = None
-            if point and arena:
-                rel = [int(point[0]) - int(arena[0]), int(point[1]) - int(arena[1])]
-            payload = {
-                "card_id": int(card_id),
-                "label": label,
-                "click_point_screen": list(point) if point else None,
-                # The measurable number: where the click landed inside the game
-                # frame, to be compared against the card in the screenshot.
-                "click_point_arena_relative": rel,
-                # Which sample of the sweep matched, and how far in. A match on
-                # the first samples cannot have been caused by this sweep.
-                "sweep_sample": click.get("sample"),
-                "sweep_elapsed_sec": click.get("elapsed_sec"),
-                "arena_region": arena,
-                "pending_target_select": self.__pending_target_select,
-                "state": str(self._get_state_from_log()),
-                "turn_info": self.updated_game_state.get_turn_info() or {},
-            }
-            with open(debug_dir / "target_click_state.json", "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, default=str)
-        except Exception:
-            pass
-        try:
-            self._vision.begin_tick()
-            if self._arena_region:
-                img = self._vision.capture(self._arena_region)
-                self._vision.save_image(img, str(debug_dir / "arena_region.png"))
-        except Exception:
-            pass
-        bot_logger.log_error(f"Target click debug bundle saved: {debug_dir}")
-
-    def _write_casting_option_debug_bundle(
-        self,
-        *,
-        reason: str,
-        label: str,
-        base_point: tuple[int, int],
-        target_point: tuple[int, int] | None,
-        option_summaries: list[str],
-        tried: list[tuple[int, int]] | None = None,
-    ) -> None:
-        """Photograph the casting-time "Choose One" dialog we are clicking at.
-
-        Every base_point in __handle_casting_time_options_req is a measured
-        guess, and a wrong one is invisible in the log: the click is recorded,
-        the dialog just never closes. Live on 2026-08-21, Eaten Alive ("sacrifice
-        a creature or pay {3}{B}") took three clicks at (1775, 978) and stayed
-        open until the retries ran out, so the spell was never cast. Without a
-        picture of the dialog there is nothing to measure the correct point
-        against, which is the whole reason this bundle exists.
-        """
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        debug_dir = Path(bot_logger.ensure_debug_dir(f"casting-option-{stamp}"))
-        try:
-            payload = {
-                "reason": reason,
-                "label": label,
-                "choice_base_point_1920": [int(base_point[0]), int(base_point[1])],
-                # The whole candidate list, so the picture can be checked against
-                # every point that was tried rather than just the last one.
-                "tried_points_1920": [
-                    [int(p[0]), int(p[1])] for p in (tried or [base_point])
-                ],
-                "choice_target_point_screen": (
-                    [int(target_point[0]), int(target_point[1])]
-                    if target_point is not None
-                    else None
-                ),
-                "options": list(option_summaries),
-                "arena_region": self._arena_region,
-                "state": str(self._get_state_from_log()),
-                "turn_info": self.updated_game_state.get_turn_info() or {},
-            }
-            with open(debug_dir / "casting_option_state.json", "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-        except Exception:
-            pass
-        try:
-            self._vision.begin_tick()
-            if self._arena_region:
-                arena_img = self._vision.capture(self._arena_region)
-                self._vision.save_image(arena_img, str(debug_dir / "arena_region.png"))
-            else:
-                full = self._vision.capture(None)
-                self._vision.save_image(full, str(debug_dir / "full_screen.jpg"))
-        except Exception:
-            pass
-        bot_logger.log_error(f"Casting option debug bundle saved: {debug_dir}")
 
     def _write_hand_overlay_debug_bundle(
         self,
@@ -1946,13 +1710,8 @@ class Controller(ControllerSecondary):
             bot_logger.log_error(f"Failed to record declined target: {e}")
 
     def _ensure_options_overlay_closed(self, *, context: str, max_attempts: int = 2) -> bool:
-        # The settle pause is unconditional. focus_mtga_window() now reports
-        # whether the window truly became active instead of always claiming
-        # success, and a failed attempt is precisely when the input that follows
-        # needs the extra beat -- gating the sleep on it would rush exactly the
-        # cases that were already going wrong.
-        focus_mtga_window()
-        time.sleep(0.2)
+        if focus_mtga_window():
+            time.sleep(0.2)
         last_anchor = None
         for attempt in range(1, max_attempts + 1):
             detection = self._arena_region_provider.detect(write_debug_on_fail=False)
@@ -2124,9 +1883,7 @@ class Controller(ControllerSecondary):
         self,
         *,
         force_reacquire: bool = False,
-    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
-        """(None, None) if the arena could not be located -- see
-        _get_hand_scan_points_mapped for why an unmapped scan is never run."""
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
         p1, s1 = self._map_abs_point_to_arena(
             self.battlefield_scan_p1,
             label="BATTLEFIELD_SCAN_P1",
@@ -2150,56 +1907,6 @@ class Controller(ControllerSecondary):
                 s2,
             )
         )
-        if "absolute_no_arena" in (s1, s2):
-            bot_logger.log_error(
-                "BATTLEFIELD_SCAN unavailable: arena_region could not be resolved; "
-                "refusing to scan the desktop."
-            )
-            return None, None
-        return p1, p2
-
-    def _get_stack_scan_points_mapped(
-        self,
-        *,
-        fallback: bool,
-        force_reacquire: bool = False,
-    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
-        """Stack/prompt scan endpoints in screen space, or (None, None) if the
-        arena could not be located.
-
-        These used to be handed to the scan raw, unlike every other scan region
-        (hand, battlefield, opponent battlefield), which map through the arena
-        origin. With MTGA windowed at x=1519 that sent the cursor to (1248, 190)
-        and (672, 136) -- across Explorer and the always-on-top bot panel,
-        hundreds of pixels left of the game -- so the stack scan could never
-        find anything (STACK_ITEM_FAILED / STACK_ITEM_FALLBACK_TIMEOUT) and
-        dragged the mouse out of the window while doing it."""
-        raw_p1 = self.stack_scan_fallback_p1 if fallback else self.stack_scan_p1
-        raw_p2 = self.stack_scan_fallback_p2 if fallback else self.stack_scan_p2
-        label = "STACK_SCAN_FALLBACK" if fallback else "STACK_SCAN"
-        p1, s1 = self._map_abs_point_to_arena(
-            raw_p1,
-            label=f"{label}_P1",
-            force_reacquire=force_reacquire,
-            apply_correction=False,
-        )
-        p2, s2 = self._map_abs_point_to_arena(
-            raw_p2,
-            label=f"{label}_P2",
-            force_reacquire=False,
-            apply_correction=False,
-        )
-        bot_logger.log_info(
-            "{} mapped: arena={} raw_p1={} raw_p2={} mapped_p1={} mapped_p2={} src_p1={} src_p2={}".format(
-                label, self._arena_region, raw_p1, raw_p2, p1, p2, s1, s2
-            )
-        )
-        if "absolute_no_arena" in (s1, s2):
-            bot_logger.log_error(
-                f"{label} unavailable: arena_region could not be resolved; "
-                "refusing to scan the desktop."
-            )
-            return None, None
         return p1, p2
 
     @staticmethod
@@ -3766,37 +3473,11 @@ class Controller(ControllerSecondary):
 
         Clicks a fixed 1920-frame coordinate (not a template match, which only
         works when Home is already the active tab) and verifies we actually landed
-        on Home (its anchor then matches). Returns True only if Home was reached.
-
-        The click is refused unless the nav bar is actually on screen, because
-        (104, 39) is only the Home tab there. On the match-end screen the same
-        pixel is the OPPONENT'S NAME, and clicking it opens Arena's player menu
-        and then "Report a Player" -- a modal with a Submit Report button, over a
-        real player, that no image probe recognises. Live on 2026-08-21 this
-        happened exactly so: three GO_HOME clicks at 18:47:46/52/59 (all three
-        already flagged `risky` by the click recorder) while the end screen was
-        still up, and the bot then sat behind that dialog for fifteen minutes,
-        failing every screen probe, until the match it had queued was lost on the
-        rope. Submitting a false report against a real person was one stray click
-        away, so this gate is a safety check first and a stall fix second.
-        """
+        on Home (its anchor then matches). Returns True only if Home was reached."""
         if self._stop_requested:
             return False
         arena = self._ensure_arena_region(force_reacquire=True)
         if arena is None:
-            return False
-        # The Profile tab: present on every main screen, absent in a match and on
-        # the match-end screen. Its presence is what makes (104, 39) the Home tab.
-        nav_anchor = self._app_path("assets", "assert", "global_anchor.png")
-        if self._locate_image_center_in_scaled_arena_region(
-            nav_anchor, "GO_HOME_NAVBAR_CHECK", rel_region=(0, 0, 760, 260),
-            confidence=0.75, timeout=1.5,
-        ) is None:
-            bot_logger.log_info(
-                "GO_HOME refused: the nav bar is not on screen, so (104, 39) is not "
-                "the Home tab -- on the match-end screen it is the opponent's name, "
-                "which opens the Report a Player dialog."
-            )
             return False
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
         self._click_abs(int(point[0]), int(point[1]), "GO_HOME")
@@ -4151,8 +3832,8 @@ class Controller(ControllerSecondary):
         bot_logger.log_info(
             f"Match-end recovery: screen unrecognized for {self._unknown_screen_strikes} tries; clicking continue to advance."
         )
-        focus_mtga_window()
-        time.sleep(0.2)
+        if focus_mtga_window():
+            time.sleep(0.2)
         for ty in (continue_y, center_y):
             if self._stop_requested:
                 break
@@ -4376,8 +4057,8 @@ class Controller(ControllerSecondary):
         if dy == 0:
             return False
         try:
-            focus_mtga_window()
-            time.sleep(0.15)
+            if focus_mtga_window():
+                time.sleep(0.15)
             self.input.move_abs(x, start_y)
             time.sleep(0.12)
             self.input.left_down()
@@ -5080,8 +4761,8 @@ class Controller(ControllerSecondary):
                 return True
         # No acknowledge button. ESC closes the promo overlays; do NOT click their
         # "Get Started!"-style button, which goes to the Store.
-        focus_mtga_window()
-        time.sleep(0.2)
+        if focus_mtga_window():
+            time.sleep(0.2)
         bot_logger.log_info(
             f"{context}: no anchor and no Okay button; pressing ESC to clear a possible overlay."
         )
@@ -5733,218 +5414,7 @@ class Controller(ControllerSecondary):
     _CAST_SWEEP_PACING = ((10, 0.01), (8, 0.018), (7, 0.024))
     # Fixed per-attempt overhead outside the sweep itself, measured from the
     # sleeps and probes in _cast_once/cast. Only used to assert the budget.
-    # Includes the two focus attempts per attempt (_ensure_options_overlay_closed
-    # and _cast_once), which now wait up to _FOCUS_VERIFY_TIMEOUT_SEC each for
-    # the activation to land instead of returning immediately.
-    _CAST_ATTEMPT_FIXED_COST_SEC = 7.4
-    # The blind-sweep recovery, charged once per cast() and not per attempt:
-    # focus probe + click + settle + verification.
-    _CAST_REACTIVATION_COST_SEC = 1.5
-
-    # Inert spot for the reactivation click: the empty background strip at the
-    # left edge of the arena, in 1920-space. It carries no card, no button and
-    # no avatar in any game state, so the worst a click there can do is cancel a
-    # pending selection -- which is already what we want when input is not
-    # reaching the game.
-    _ARENA_REACTIVATE_POINT_1920 = (24, 540)
-    _ARENA_REACTIVATE_MIN_INTERVAL_SEC = 3.0
-
-    def _reactivate_arena_window(self, *, context: str) -> bool:
-        """Get MTGA back to being the active window. True if verified active.
-
-        A sweep that produced zero hover events means MTGA never saw the mouse,
-        and the usual reason is that its window is not the active one (Unity
-        only emits hover events for the active window). focus_mtga_window()
-        cannot always win that from a background process, so fall back to the
-        one thing Windows always honours: a real click inside the window."""
-        # Never click while another flow owns the mouse or the match is over:
-        # the click is a recovery, not a move, and the prompts that set these
-        # flags are exactly the ones a stray board click would corrupt.
-        if self._stop_requested or self._suppress_selections:
-            return False
-        if time.time() < self.__group_req_active_until:
-            bot_logger.log_info(
-                f"ARENA_REACTIVATE({context}) deferred: a group/modal prompt owns "
-                "the mouse right now."
-            )
-            return False
-        if focus_mtga_window():
-            bot_logger.log_info(
-                f"ARENA_REACTIVATE({context}): MTGA window focused via window API."
-            )
-            time.sleep(0.2)
-            return True
-        now = time.time()
-        if (now - self._arena_reactivate_ts) < self._ARENA_REACTIVATE_MIN_INTERVAL_SEC:
-            bot_logger.log_info(
-                f"ARENA_REACTIVATE({context}) throttled: last attempt "
-                f"{now - self._arena_reactivate_ts:.1f}s ago."
-            )
-            return False
-        target, source = self._map_abs_point_to_arena(
-            self._ARENA_REACTIVATE_POINT_1920,
-            label=f"ARENA_REACTIVATE({context})",
-            force_reacquire=True,
-            apply_correction=False,
-        )
-        if source == "absolute_no_arena":
-            bot_logger.log_error(
-                f"ARENA_REACTIVATE({context}) aborted: arena_region unavailable, "
-                "refusing to click the desktop."
-            )
-            return False
-        # The premise of this click is that MTGA is not the active window -- so
-        # something else may well be sitting on top of it, and this point is the
-        # one closest to whatever is to the left of the game. Clicking a foreign
-        # window would hand it the focus we are trying to take back, so ask the
-        # OS what is actually at that pixel first.
-        if not point_belongs_to_mtga(target):
-            bot_logger.log_error(
-                f"ARENA_REACTIVATE({context}) aborted: {target} is covered by another "
-                f"window, clicking it would not reach MTGA. focus_state={get_focus_state()}"
-            )
-            return False
-        self._arena_reactivate_ts = time.time()
-        bot_logger.log_click(
-            target[0], target[1], f"ARENA_REACTIVATE({context})",
-            source=source, arena=self._arena_region,
-        )
-        runtime_status.touch_input(f"ARENA_REACTIVATE({context})", target)
-        self.input.move_abs(target[0], target[1])
-        self.input.left_click(1)
-        time.sleep(0.35)
-        focused = focus_mtga_window()
-        bot_logger.log_info(
-            f"ARENA_REACTIVATE({context}): clicked arena background at {target}; "
-            f"mtga_focused={focused} focus_state={get_focus_state()}"
-        )
-        return focused
-
-    # Cancel's centre in the 1920x1080 game frame, measured from a live capture
-    # of the dialog (runtime screenshot, 2026-08-21 19:54). Submit Report sits
-    # ~325px to its right at (1122, 875) -- far enough that a template match on
-    # the left half cannot be confused for it.
-    _REPORT_PLAYER_CANCEL_POINT_1920 = (797, 875)
-
-    def _dismiss_report_player_dialog(self, *, context: str) -> bool:
-        """Close Arena's "Report a Player" dialog by pressing Cancel.
-
-        This dialog is not a game prompt and nothing in the game log announces
-        it, so the bot cannot see it: every screen probe simply fails while it is
-        up. It happened twice on 2026-08-21. The first time the trigger was
-        found and blocked (a blind Home-tab click landing on the opponent's name
-        on the match-end screen, see _navigate_to_home). The second time, at
-        19:53, there was NO logged click between the last DISMISS_END_SCREEN and
-        the open dialog -- so the trigger is still unknown, and a second guard on
-        a specific click path would not have helped.
-
-        Hence this: a net that does not depend on knowing how the dialog opened.
-        It is worth having even though the stall alone is survivable, because
-        this particular window has a Submit Report button on it, aimed at a real
-        person. Only Cancel is ever clicked; Submit is never a target, and the
-        search region for the button deliberately excludes it.
-
-        Runs only from _dismiss_blocking_overlay, i.e. after a full hand sweep
-        came back blind with MTGA's window active -- not on a timer, so a normal
-        match never pays for it.
-        """
-        title = self._app_path("assets", "assert", "report_player_title.png")
-        if not os.path.exists(title):
-            return False
-        if self._locate_image_center_in_scaled_arena_region(
-            title, f"REPORT_DIALOG_PROBE({context})",
-            rel_region=(600, 140, 720, 140),
-            confidence=0.80, timeout=1.0,
-        ) is None:
-            return False
-        bot_logger.log_error(
-            f"REPORT_DIALOG_DETECTED({context}): Arena's Report a Player dialog is "
-            "covering the board. Clicking Cancel -- never Submit."
-        )
-        cancel = self._app_path("assets", "assert", "report_player_cancel.png")
-        clicked = False
-        if os.path.exists(cancel):
-            # Left of centre only: Submit Report starts around x=988, and this
-            # template is 285px wide, so no match for it can fit in this band.
-            clicked = bool(self._click_image_in_scaled_arena_region(
-                cancel, f"REPORT_DIALOG_CANCEL({context})",
-                rel_region=(600, 820, 400, 110),
-                confidence=0.80, timeout=1.0,
-            ))
-        if not clicked:
-            # The title matched, so the dialog is up and Cancel is where it was
-            # measured. Fixed point rather than giving up: leaving this dialog
-            # open is what cost the match and left Submit one stray click away.
-            arena = self._ensure_arena_region()
-            if arena is None:
-                bot_logger.log_error(
-                    f"REPORT_DIALOG_CANCEL({context}): no arena region; refusing to "
-                    "click at an absolute desktop position."
-                )
-                return False
-            point = self._map_base_point_into_arena(
-                arena, self._REPORT_PLAYER_CANCEL_POINT_1920
-            )
-            bot_logger.log_info(
-                f"REPORT_DIALOG_CANCEL({context}): button template did not match; "
-                f"using the measured Cancel position {self._REPORT_PLAYER_CANCEL_POINT_1920}."
-            )
-            self._click_abs(int(point[0]), int(point[1]), f"REPORT_DIALOG_CANCEL({context})")
-            clicked = True
-        time.sleep(0.8)
-        bot_logger.log_info(
-            f"REPORT_DIALOG_DETECTED({context}): Cancel clicked; no report was submitted."
-        )
-        return clicked
-
-    def _dismiss_blocking_overlay(self, *, context: str) -> bool:
-        """Close a card-viewer overlay that is covering the board. True if one
-        was clicked away.
-
-        Reached when a sweep crossed the whole hand row and MTGA reported no
-        hover at all WHILE ITS WINDOW WAS ACTIVE. An inactive window explains
-        that; an active one does not, and the remaining explanation is that
-        something is drawn on top of the hand -- MTGA does not report hovers for
-        cards behind a modal overlay. Observed 2026-08-21: the graveyard viewer,
-        opened by a mis-aimed cast click, stayed up while the bot swept blind
-        until the rope expired and the match was lost.
-
-        Reuses the scry/surveil Done template: measured against the real
-        graveyard viewer, its Done button sits at exactly the position the
-        SCRY_DONE clicks already use (game-frame 960/876), so one template
-        covers all three overlays."""
-        if self._stop_requested or self._suppress_selections:
-            return False
-        if time.time() < self.__group_req_active_until:
-            # A scry/modal handler owns this prompt and will answer it itself.
-            return False
-        # Checked first: of everything that can cover the hand, this is the only
-        # one that can do harm outside the game.
-        if self._dismiss_report_player_dialog(context=context):
-            return True
-        for name in ("scry_done.png", "assign_damage_done.png"):
-            tpl = os.path.join(self._buttons_dir(), name)
-            if not os.path.exists(tpl):
-                continue
-            # Same generous bottom-centre band the scry Done click uses: the
-            # button sits at slightly different heights per overlay.
-            if self._click_image_in_scaled_arena_region(
-                tpl, f"BLOCKING_OVERLAY_DONE({context})",
-                rel_region=(700, 820, 520, 240),
-                confidence=0.78, timeout=1.0,
-            ):
-                bot_logger.log_info(
-                    f"BLOCKING_OVERLAY({context}): dismissed an overlay covering the "
-                    f"board via {name}; the hand should be reachable again."
-                )
-                time.sleep(0.6)
-                return True
-        bot_logger.log_error(
-            f"BLOCKING_OVERLAY({context}): the sweep was blind with MTGA active, but "
-            "no Done button was found -- whatever covers the hand is not a card "
-            "viewer. Debug bundle has the screenshot."
-        )
-        return False
+    _CAST_ATTEMPT_FIXED_COST_SEC = 6.6
 
     def _is_cast_suppressed(self, card_id: int) -> bool:
         since = self.__unreachable_cast_ids.get(card_id)
@@ -5974,51 +5444,12 @@ class Controller(ControllerSecondary):
         # MTGA sometimes emits a card's hover objectId a beat after our scan
         # passes it ("No hover update before bounds"), so a single pass can miss
         # a card that is really in hand. Retry a couple of times after a pause.
-        saw_hand = False
-        reactivated = False
         for attempt in range(len(self._CAST_SWEEP_PACING)):
             if self._stop_requested or self._suppress_selections:
                 return False
             if self._cast_once(card_id, attempt=attempt):
                 self.clear_cast_suppression(card_id)
                 return True
-            evidence = self._last_sweep_evidence
-            saw_hand = saw_hand or evidence == "hover"
-            if evidence == "blind" and not reactivated:
-                # The sweep crossed the whole hand row and MTGA reported not one
-                # hover -- not even of a card we were not looking for. That is
-                # not "the card is elsewhere", that is the game not processing
-                # our mouse at all, and re-sweeping harder cannot fix it. Once
-                # per cast: if the window did not come back the first time,
-                # clicking at it again will not help either, and each attempt
-                # costs rope.
-                reactivated = True
-                focus = get_focus_state()
-                bot_logger.log_error(
-                    f"CAST_NO_HOVER_EVENTS: card {card_id} sweep {attempt} saw zero "
-                    f"hover events; MTGA is not reporting the mouse. "
-                    f"focus_state={focus}"
-                )
-                # Two different faults produce an identical blind sweep, and the
-                # focus state is what tells them apart. An inactive window cannot
-                # emit hover events at all; an ACTIVE one that still reports
-                # nothing is being covered by an overlay the hand sits behind.
-                # Treating the second as the first is what made the recovery a
-                # no-op for ten minutes on 2026-08-21: it kept "reactivating" a
-                # window that was never inactive.
-                recovered = False
-                if focus.get("mtga_is_foreground") is not False:
-                    recovered = self._dismiss_blocking_overlay(
-                        context=f"CAST_CARD id={card_id}"
-                    )
-                if not recovered:
-                    recovered = self._reactivate_arena_window(
-                        context=f"CAST_CARD id={card_id}"
-                    )
-                bot_logger.log_info(
-                    f"CAST_RECOVERY: card {card_id} recovered={recovered}; "
-                    "retrying the sweep."
-                )
             if attempt < len(self._CAST_SWEEP_PACING) - 1:
                 next_step, next_dwell = self._CAST_SWEEP_PACING[attempt + 1]
                 bot_logger.log_info(
@@ -6042,18 +5473,7 @@ class Controller(ControllerSecondary):
         # the bot just idles until the rope (observed: 36s frozen while holding
         # Valorous Stance at 3 life). Surface it and let the decision loop have
         # another go from the current state.
-        # Only hold it against the card if the hand actually talked back to us.
-        # A run of sweeps with zero hover events proves nothing about where the
-        # card is, and suppressing it for the whole TTL on that evidence means
-        # the following turns skip a card that was in hand all along.
-        if saw_hand:
-            self.__unreachable_cast_ids[card_id] = time.time()
-        else:
-            bot_logger.log_error(
-                f"CAST_NOT_SUPPRESSED: card {card_id} is not marked unreachable -- "
-                f"no sweep ever observed the hand (last evidence: "
-                f"{self._last_sweep_evidence}), so its contents were never seen."
-            )
+        self.__unreachable_cast_ids[card_id] = time.time()
         bot_logger.log_error(
             f"CAST_FAILED: card {card_id} could not be hovered after "
             f"{len(self._CAST_SWEEP_PACING)} attempts; re-driving the decision instead of idling."
@@ -6065,14 +5485,6 @@ class Controller(ControllerSecondary):
         step_px, dwell_sec = self._CAST_SWEEP_PACING[
             min(max(attempt, 0), len(self._CAST_SWEEP_PACING) - 1)
         ]
-        # "unknown" until the sweep actually crosses the hand row. Every early
-        # exit below (options overlay stuck, no arena region, another flow
-        # signalling us to abort) leaves it here on purpose: those tell us
-        # nothing about whether MTGA is answering, and treating them as "blind"
-        # would fire the reactivation click into the very prompts whose handlers
-        # asked the scan to stand down.
-        self._last_sweep_evidence = "unknown"
-        hover_scans_before = self._other_hover_scan_seq
         bot_logger.set_hover_logging(True)
         try:
             if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
@@ -6130,8 +5542,6 @@ class Controller(ControllerSecondary):
                     bot_logger.log_error(
                         f"SCAN_FAILED: Card {card_id} not found. Scanned from x={start_x} to x={end_x}, ended at x={current_x}"
                     )
-                    if self._last_sweep_evidence == "unknown" and current_x != start_x:
-                        self._last_sweep_evidence = "blind"
                     current_pos = self.input.position()
                     self._write_hand_select_debug_bundle(
                         reason="cast_scan_failed",
@@ -6172,10 +5582,6 @@ class Controller(ControllerSecondary):
                     if parsed is None:
                         continue
                     current_hovered_id = parsed
-                    # Any hover at all proves MTGA is processing our mouse, which
-                    # is what tells a "card is not in hand" failure apart from a
-                    # blind sweep over an inactive window.
-                    self._last_sweep_evidence = "hover"
                     # Seeing it proves it is in hand and reachable, so an earlier
                     # give-up on this id was wrong -- do not hold it against a
                     # card the mouse just passed over.
@@ -6189,9 +5595,6 @@ class Controller(ControllerSecondary):
                         f"start=({start_x},{start_y}), end=({end_x},{end_y}), "
                         f"attempt={attempt}, pacing={step_px}px/{dwell_sec}s)"
                     )
-                    # The sweep ran the full width and MTGA answered nothing.
-                    if self._last_sweep_evidence == "unknown":
-                        self._last_sweep_evidence = "blind"
                     current_pos = self.input.position()
                     self._write_hand_select_debug_bundle(
                         reason="cast_scan_stopped",
@@ -6206,14 +5609,7 @@ class Controller(ControllerSecondary):
             clicked = current_hovered_id == card_id
             if clicked:
                 click_pos = self.input.position()
-                # Log the arena region with it: without it clicks.jsonl only has
-                # absolute pixels, and working out whether a click landed on the
-                # hand row or on the graveyard pile next to it means reconstructing
-                # the window position from neighbouring entries.
-                bot_logger.log_click(
-                    click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})",
-                    arena=self._arena_region,
-                )
+                bot_logger.log_click(click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})")
                 time.sleep(0.5)
                 self.input.left_click(1)
                 time.sleep(0.1)
@@ -6227,29 +5623,6 @@ class Controller(ControllerSecondary):
             return clicked
         finally:
             bot_logger.set_hover_logging(False)
-            # The hover queue is shared, and the selection flows run their own
-            # hover scans from threading.Timer threads, outside the decision
-            # lock. Each of their scans clears that queue, so one overlapping
-            # our sweep can drain the very events we were waiting for and make a
-            # perfectly live window look blind. Downgrade the verdict rather
-            # than act on evidence another scan may have eaten.
-            if (
-                self._last_sweep_evidence == "blind"
-                and self._other_hover_scan_seq != hover_scans_before
-            ):
-                bot_logger.log_info(
-                    "CAST_SWEEP_INCONCLUSIVE: another hover scan ran during the "
-                    f"sweep for card {card_id}; not treating the empty result as "
-                    "proof that MTGA is unresponsive."
-                )
-                self._last_sweep_evidence = "unknown"
-
-    def _note_hover_scan(self, label: str) -> None:
-        """Bump the counter that tells a cast sweep another scan shared the
-        hover queue with it. Cheap on purpose: an int write is atomic under the
-        GIL, and a missed increment only costs us one wrong verdict, never a
-        crash."""
-        self._other_hover_scan_seq += 1
 
     def all_attack(self) -> bool:
         target, source = self._map_abs_point_to_arena(
@@ -6710,7 +6083,6 @@ class Controller(ControllerSecondary):
     
     def select_hand_card(self, card_id: int, clicks: int = 1) -> bool:
         """Select a card in hand by hovering until objectId matches, then click."""
-        self._note_hover_scan("HAND_SELECT")
         bot_logger.set_hover_logging(True)
         try:
             hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
@@ -6803,10 +6175,7 @@ class Controller(ControllerSecondary):
                     return False
 
             click_pos = self.input.position()
-            bot_logger.log_click(
-                click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})",
-                arena=self._arena_region,
-            )
+            bot_logger.log_click(click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})")
             for _ in range(max(1, int(clicks))):
                 self.input.left_click(1)
                 time.sleep(0.1)
@@ -6849,19 +6218,10 @@ class Controller(ControllerSecondary):
         """Select a stack/prompt item by scanning a grid for matching hover objectId."""
         bot_logger.set_hover_logging(True)
         try:
-            scan_p1, scan_p2 = self._get_stack_scan_points_mapped(
-                fallback=False, force_reacquire=True
-            )
-            if scan_p1 is None or scan_p2 is None:
-                bot_logger.log_error(
-                    f"STACK_ITEM aborted: arena_region unavailable, refusing to "
-                    f"scan the desktop for card {card_id}."
-                )
-                return False
             if self.__select_object_in_region(
                 card_id=card_id,
-                p1=scan_p1,
-                p2=scan_p2,
+                p1=self.stack_scan_p1,
+                p2=self.stack_scan_p2,
                 step=self.stack_scan_step,
                 clicks=clicks,
                 label="STACK_ITEM",
@@ -6869,13 +6229,10 @@ class Controller(ControllerSecondary):
             ):
                 return True
             bot_logger.log_info("Stack scan fallback to center region")
-            fb_p1, fb_p2 = self._get_stack_scan_points_mapped(fallback=True)
-            if fb_p1 is None or fb_p2 is None:
-                return False
             return self.__select_object_in_region(
                 card_id=card_id,
-                p1=fb_p1,
-                p2=fb_p2,
+                p1=self.stack_scan_fallback_p1,
+                p2=self.stack_scan_fallback_p2,
                 step=self.stack_scan_fallback_step,
                 clicks=clicks,
                 label="STACK_ITEM_FALLBACK",
@@ -6889,12 +6246,6 @@ class Controller(ControllerSecondary):
         bot_logger.set_hover_logging(True)
         scan_p1, scan_p2 = self._get_battlefield_scan_points_mapped(force_reacquire=True)
         try:
-            if scan_p1 is None or scan_p2 is None:
-                bot_logger.log_error(
-                    f"BATTLEFIELD_ITEM aborted: arena_region unavailable, refusing "
-                    f"to scan the desktop for card {card_id}."
-                )
-                return False
             if self.__select_object_in_region(
                 card_id=card_id,
                 p1=scan_p1,
@@ -6922,16 +6273,14 @@ class Controller(ControllerSecondary):
         self,
         *,
         force_reacquire: bool = False,
-    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
-        """(None, None) if the arena could not be located -- see
-        _get_hand_scan_points_mapped for why an unmapped scan is never run."""
-        p1, s1 = self._map_abs_point_to_arena(
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        p1, _s1 = self._map_abs_point_to_arena(
             self.opponent_battlefield_scan_p1,
             label="OPP_BATTLEFIELD_SCAN_P1",
             force_reacquire=force_reacquire,
             apply_correction=False,
         )
-        p2, s2 = self._map_abs_point_to_arena(
+        p2, _s2 = self._map_abs_point_to_arena(
             self.opponent_battlefield_scan_p2,
             label="OPP_BATTLEFIELD_SCAN_P2",
             force_reacquire=False,
@@ -6946,12 +6295,6 @@ class Controller(ControllerSecondary):
                 p2,
             )
         )
-        if "absolute_no_arena" in (s1, s2):
-            bot_logger.log_error(
-                "OPP_BATTLEFIELD_SCAN unavailable: arena_region could not be "
-                "resolved; refusing to scan the desktop."
-            )
-            return None, None
         return p1, p2
 
     def select_attacking_creature(self, card_id: int, clicks: int = 1) -> bool:
@@ -6975,12 +6318,6 @@ class Controller(ControllerSecondary):
         bot_logger.set_hover_logging(True)
         scan_p1, scan_p2 = self._get_opponent_battlefield_scan_points_mapped(force_reacquire=True)
         try:
-            if scan_p1 is None or scan_p2 is None:
-                bot_logger.log_error(
-                    f"OPP_BATTLEFIELD_ITEM aborted: arena_region unavailable, "
-                    f"refusing to scan the desktop for card {card_id}."
-                )
-                return False
             if self.__select_object_in_region(
                 card_id=card_id,
                 p1=scan_p1,
@@ -6990,11 +6327,6 @@ class Controller(ControllerSecondary):
                 label="OPP_BATTLEFIELD_ITEM",
                 max_scan_sec=4.0,
             ):
-                # The click landed on *something* -- but a target prompt that is
-                # still open after it means it was not the card. Check off-thread
-                # so the selection flow is not delayed, and only photograph the
-                # failure, not the many clicks that work.
-                self._schedule_target_click_check(card_id=card_id, label="OPP_BATTLEFIELD_ITEM")
                 return True
             bot_logger.log_error(
                 f"Opponent battlefield select failed for card_id={card_id} "
@@ -7150,55 +6482,22 @@ class Controller(ControllerSecondary):
         label: str,
         max_scan_sec: float | None = None,
     ) -> bool:
-        self._note_hover_scan(label)
         self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
         x1, y1 = p1
         x2, y2 = p2
         x_min, x_max = (x1, x2) if x1 <= x2 else (x2, x1)
         y_min, y_max = (y1, y2) if y1 <= y2 else (y2, y1)
-        # Every caller is expected to map its region through the arena origin
-        # first. Refuse the sweep outright if the rect lies outside the game
-        # window: unmapped points are raw desktop coordinates, and dragging the
-        # cursor across other windows hovers nothing and can pull focus away
-        # from MTGA -- which then blinds the hand scan too (see
-        # _get_stack_scan_points_mapped).
-        arena = self._arena_region
-        if arena is None:
-            # Without a region there is nothing to check the points against, and
-            # unmapped points are exactly what this guard exists to stop.
-            bot_logger.log_error(
-                f"{label}_ABORTED: arena_region unknown, refusing to sweep "
-                f"({x_min},{y_min})-({x_max},{y_max}) for card {card_id}."
-            )
-            return False
-        tol = 4
-        if (
-            x_min < int(arena[0]) - tol
-            or y_min < int(arena[1]) - tol
-            or x_max > int(arena[0] + arena[2]) + tol
-            or y_max > int(arena[1] + arena[3]) + tol
-        ):
-            bot_logger.log_error(
-                f"{label}_ABORTED: scan region ({x_min},{y_min})-({x_max},{y_max}) "
-                f"is outside arena_region={arena}; refusing to move the mouse "
-                f"out of the game window for card {card_id}."
-            )
-            return False
         step = max(10, int(step))
         start_ts = time.time()
 
         reset_x = x_min
-        # The pre-scan reset move must stay inside the window as well; with the
-        # arena at y=128 a plain "y_min - 80" can land above its top edge.
-        reset_y = max(int(arena[1]), y_min - 80)
+        reset_y = max(self.screen_bounds[0][1], y_min - 80)
         bot_logger.log_move(reset_x, reset_y, f"RESET_BEFORE_{label} (target card_id={card_id})")
         self.input.move_abs(reset_x, reset_y)
         time.sleep(0.1)
 
-        sample = 0
         for y in range(y_min, y_max + 1, step):
             for x in range(x_min, x_max + 1, step):
-                sample += 1
                 if self._stop_requested or self._suppress_selections:
                     bot_logger.log_info(f"{label}_ABORTED: stop/suppress requested")
                     return False
@@ -7220,35 +6519,7 @@ class Controller(ControllerSecondary):
                 bot_logger.log_hover(parsed)
                 if parsed != card_id:
                     continue
-                bot_logger.log_click(
-                    x, y, f"SELECT_{label} (id={card_id})", arena=self._arena_region
-                )
-                # Remember where we clicked. A selection click that is logged but
-                # has no effect is otherwise unmeasurable after the fact -- see
-                # _write_target_click_debug_bundle.
-                self._last_selection_click = {
-                    "point": (int(x), int(y)),
-                    "label": label,
-                    "card_id": int(card_id),
-                    "arena": self._arena_region,
-                    "ts": time.time(),
-                    # Which sample of the sweep produced the match. A hover is not
-                    # synchronous with the mouse (client -> server -> log round
-                    # trip), so an event emitted for an EARLIER cursor position
-                    # can arrive late, pass the has_new_line check and be credited
-                    # to wherever the cursor is now. The sample index is what
-                    # makes that visible: a match on sample 1-2 means the verdict
-                    # was reached before the sweep had covered any ground.
-                    "sample": sample,
-                    "elapsed_sec": round(time.time() - start_ts, 3),
-                }
-                if sample <= 2:
-                    bot_logger.log_error(
-                        f"SELECT_{label}_EARLY_MATCH: card {card_id} was reported on "
-                        f"sample {sample} at ({x},{y}), {time.time() - start_ts:.2f}s "
-                        "into the sweep -- too early for a hover this sweep caused, "
-                        "so this is probably a late event from an earlier position."
-                    )
+                bot_logger.log_click(x, y, f"SELECT_{label} (id={card_id})")
                 for _ in range(max(1, int(clicks))):
                     self.input.left_click(1)
                     time.sleep(0.1)
@@ -7707,8 +6978,8 @@ class Controller(ControllerSecondary):
             self.__emergency_concede_in_progress = True
             bot_logger.log_info("EMERGENCY_CONCEDE: starting ESC+concede sequence")
             runtime_status.set_mode("stuck_suspected", bot_state=str(self._get_state_from_log()))
-            focus_mtga_window()
-            time.sleep(0.3)
+            if focus_mtga_window():
+                time.sleep(0.3)
             self.input.tap_escape()
             time.sleep(0.8)
             concede_raw = self._loaded_click_targets.get("concede", {})
@@ -7737,8 +7008,8 @@ class Controller(ControllerSecondary):
         try:
             bot_logger.log_info("FORCE_CONCEDE: starting ESC+concede sequence (ActivePlayer timer expired)")
             runtime_status.set_mode("stuck_suspected", bot_state=str(self._get_state_from_log()))
-            focus_mtga_window()
-            time.sleep(0.3)
+            if focus_mtga_window():
+                time.sleep(0.3)
             self.input.tap_escape()
             time.sleep(0.8)
             concede_raw = self._loaded_click_targets.get("concede", {})
@@ -7801,7 +7072,7 @@ class Controller(ControllerSecondary):
             return
         if focus_mtga_window():
             bot_logger.log_info("Dismiss end screen: focused MTGA window before click.")
-        time.sleep(0.25)
+            time.sleep(0.25)
         runtime_status.set_mode("post_match", bot_state=str(self._get_state_from_log()))
         self._suppress_selections = False
         arena = self._get_ui_action_arena_region(force_reacquire=True, label="DISMISS_END_SCREEN")
@@ -8704,60 +7975,6 @@ class Controller(ControllerSecondary):
             self._queue_spam_thread = threading.Thread(target=self._queue_spam_loop, daemon=True)
             self._queue_spam_thread.start()
 
-    # How long the queue loop may tick without ever reaching a match before it
-    # suspects something is covering the screen. Matchmaking itself is fast; a
-    # minute and a half of clicking Play with nothing happening is not normal.
-    _QUEUE_STALL_REPORT_PROBE_SEC = 90.0
-
-    def _probe_report_dialog_if_queue_is_stuck(self) -> None:
-        """Close Arena's Report a Player dialog if it is what blocks the queue.
-
-        The dialog is not a game event -- nothing in Player.log announces it --
-        so while it is up the bot just fails every screen probe in silence. The
-        existing net for it hangs off _dismiss_blocking_overlay, which only runs
-        after a blind HAND SWEEP; between matches that path is never taken, and
-        the bot clicks Play into the dialog forever.
-
-        Live on 2026-08-22: it opened at ~13:51 on TEUBAT's match-end screen and
-        was still up 28 minutes later, the whole time logging STARTER_PLAY probes
-        that could not match. Both of the earlier occurrences had a click that
-        plausibly triggered it; this one had no logged click for six minutes
-        beforehand, which is why the answer is a net here rather than another
-        guard on a click path -- we cannot predict what opens it.
-
-        Deliberately probes ONLY the report dialog, not the Done-button templates
-        _dismiss_blocking_overlay also tries: this runs on Home, where a
-        false-positive Done match would click into the live UI. The report probe
-        confirms the dialog by its title template before touching anything, so
-        the worst case is a wasted screen search.
-        """
-        try:
-            if self._stop_queue_spam or self._stop_requested:
-                return
-            now = time.time()
-            # A match starting IS progress -- restart the clock and go quiet.
-            if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
-                self._queue_progress_ts = now
-                return
-            if not getattr(self, "_queue_progress_ts", 0.0):
-                self._queue_progress_ts = now
-                return
-            if now - self._queue_progress_ts < self._QUEUE_STALL_REPORT_PROBE_SEC:
-                return
-            # Re-arm before probing, so a probe that finds nothing costs one
-            # search per interval instead of one per tick.
-            self._queue_progress_ts = now
-            bot_logger.log_info(
-                "QUEUE_STALL_PROBE: {:.0f}s of queueing with no match; checking for "
-                "Arena's Report a Player dialog.".format(
-                    self._QUEUE_STALL_REPORT_PROBE_SEC
-                )
-            )
-            self._dismiss_report_player_dialog(context="QUEUE_STALL")
-        except Exception as exc:
-            # A recovery probe must never be the thing that kills the queue loop.
-            bot_logger.log_error(f"QUEUE_STALL_PROBE failed: {exc}")
-
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
             if self._account_switch_in_progress:
@@ -8799,7 +8016,6 @@ class Controller(ControllerSecondary):
                 bot_logger.log_info("Account switch due; performing switch now.")
                 threading.Thread(target=self._perform_account_switch, daemon=True).start()
                 return
-            self._probe_report_dialog_if_queue_is_stuck()
             self.start_game_from_home_screen()
             time.sleep(3.0)
 
@@ -9453,7 +8669,7 @@ class Controller(ControllerSecondary):
         # and the Options menu never opens -> logout fails on Home. Focus MTGA first.
         if focus_mtga_window():
             bot_logger.log_info("Account switch: focused MTGA window before logout ESC.")
-        time.sleep(0.3)
+            time.sleep(0.3)
         bot_logger.log_info("Account switch: pressing ESC to open options menu.")
         self.input.tap_escape()
         time.sleep(1.0)
@@ -11198,29 +10414,6 @@ class Controller(ControllerSecondary):
     # game moves on and never rain onto the battlefield behind the overlay.
     __CASTING_TIME_OPTION_MAX_RETRIES = 2
 
-    # Where the "choose an additional cost" dialog's buttons might be, tried in
-    # order, in the 1920x1080 arena frame.
-    #
-    # A list rather than one point because the single point this replaces was
-    # wrong and the retries could not tell: all three clicks went to the same
-    # spot. Live on 2026-08-21, Eaten Alive ("sacrifice a creature or pay
-    # {3}{B}") was clicked 3x at (1775, 978), the dialog stayed open through
-    # every one of them, the retries ran out and the spell was never cast --
-    # the AI had already picked its target and simply lost the card.
-    #
-    # The candidates: the original bottom-right button position first, since it
-    # is the only one ever observed working for some card; then the two
-    # mid-screen plate positions, because a ChooseOrCost is structurally the
-    # same "pick one of two" prompt as CastingTimeOptionType_Modal, which this
-    # same handler places at (750, 505) and (1185, 505). Cheapest-cost-first is
-    # not attempted: which plate is the sacrifice is unknown, and paying the
-    # mana still casts the spell, which beats losing it.
-    #
-    # Every click is gated on the dialog still being open (checked before the
-    # move and again after the settle sleep), so a candidate that misses costs
-    # a click into the overlay, and the sweep stops the moment one lands.
-    _CHOOSE_OR_COST_CANDIDATES = ((1775, 978), (750, 505), (1185, 505))
-
     def __handle_casting_time_options_req(self, line: str) -> None:
         # Kicker & friends: after clicking a card with optional casting-time
         # costs, MTGA blocks the cast behind a mid-screen "Choose One" dialog
@@ -11295,21 +10488,18 @@ class Controller(ControllerSecondary):
             # Kicker-style options render as mid-screen plates. Pick accordingly.
             if is_choose_or_cost:
                 label = "CASTING_TIME_OPTION_SACRIFICE"
-                base_point = self._CHOOSE_OR_COST_CANDIDATES[0]
-                candidates = list(self._CHOOSE_OR_COST_CANDIDATES)
-                choice_desc = "cheapest additional cost (candidate sweep)"
+                base_point = (1775, 978)  # bottom-right "Sacrifice a creature" button
+                choice_desc = "sacrifice-a-creature (bottom button)"
             elif prefer_second_modal:
                 # Two mode plates side by side (indestructible left, destroy right).
                 # Click the RIGHT plate (the "destroy" mode). Measured centre in the
                 # 1920x1080 arena frame; mirrors the left plate at (750, 505).
                 label = "CASTING_TIME_OPTION_MODAL_SECOND"
                 base_point = (1185, 505)
-                candidates = [base_point]
                 choice_desc = "second/right modal option (e.g. Valorous Stance destroy)"
             else:
                 label = "CASTING_TIME_OPTION_PLAIN"
                 base_point = (750, 505)   # leftmost (plain, non-kicked) plate
-                candidates = [base_point]
                 choice_desc = "plain (non-kicked) version"
             bot_logger.log_info(
                 "CASTING_TIME_OPTIONS detected: options=[{}] — choosing {}.".format(
@@ -11355,15 +10545,10 @@ class Controller(ControllerSecondary):
                             f"CASTING_TIME_OPTION: dialog resolved before retry {attempt}; stopping."
                         )
                         return
-                    # Walk the candidate list instead of re-clicking one point:
-                    # a repeat only helps a click that was swallowed, never a
-                    # point that is not on the button at all.
-                    point = candidates[min(attempt, len(candidates) - 1)]
-                    target, source = self._map_abs_point_to_arena(point, label=label)
+                    target, source = self._map_abs_point_to_arena(base_point, label=label)
                     bot_logger.log_info(
-                        f"CASTING_TIME_OPTION click (attempt {attempt}, "
-                        f"candidate {min(attempt, len(candidates) - 1) + 1}/{len(candidates)}): "
-                        f"base={point} target={target} source={source}"
+                        f"CASTING_TIME_OPTION click (attempt {attempt}): base={base_point} "
+                        f"target={target} source={source}"
                     )
                     bot_logger.log_click(target[0], target[1], label)
                     self.input.move_abs(target[0], target[1])
@@ -11390,13 +10575,7 @@ class Controller(ControllerSecondary):
                         # on (badly) rather than idling into the priority rope.
                         threading.Timer(
                             1.6,
-                            lambda: self.__give_up_on_casting_time_options(
-                                label=label,
-                                base_point=point,
-                                target_point=target,
-                                option_summaries=option_summaries,
-                                tried=list(candidates),
-                            ),
+                            lambda: self.__clear_casting_time_options_wait("retries exhausted"),
                         ).start()
                 except Exception as e:
                     # Never leave the pause armed on a crash -- it would block
@@ -11412,43 +10591,6 @@ class Controller(ControllerSecondary):
             threading.Timer(1.0, lambda: _click_option(0)).start()
         except Exception as e:
             bot_logger.log_error(f"Failed to handle CastingTimeOptionsReq: {e}")
-
-    def __give_up_on_casting_time_options(
-        self,
-        *,
-        label: str,
-        base_point: tuple[int, int],
-        target_point: tuple[int, int] | None,
-        option_summaries: list[str],
-        tried: list[tuple[int, int]] | None = None,
-    ) -> None:
-        """Release the decision pause, but photograph the dialog first.
-
-        Reaching here means every click missed: the dialog is still up, so the
-        spell was paid for and never cast, and the bot is about to play on as if
-        nothing happened. That is exactly the state worth a picture -- the
-        screenshot is what a corrected base_point can be measured from.
-        """
-        try:
-            if self.__casting_time_options_still_open():
-                bot_logger.log_error(
-                    f"CASTING_TIME_OPTION_UNANSWERED: {label} exhausted every candidate "
-                    f"({tried if tried else [base_point]}; last target={target_point}) and the "
-                    "dialog is still open -- none of these points is on the button. "
-                    f"options=[{'; '.join(option_summaries) or 'unparsed'}]"
-                )
-                self._write_casting_option_debug_bundle(
-                    reason="retries_exhausted_dialog_still_open",
-                    label=label,
-                    base_point=base_point,
-                    target_point=target_point,
-                    option_summaries=option_summaries,
-                    tried=list(tried) if tried else None,
-                )
-        except Exception as e:
-            bot_logger.log_error(f"CASTING_TIME_OPTION give-up capture failed: {e}")
-        finally:
-            self.__clear_casting_time_options_wait("retries exhausted")
 
     def __handle_select_targets_req(self, line: str) -> None:
         try:
@@ -12475,27 +11617,18 @@ class Controller(ControllerSecondary):
         self,
         *,
         force_reacquire: bool = False,
-    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
-        """(None, None) if the arena could not be located -- see
-        _get_hand_scan_points_mapped for why an unmapped scan is never run."""
-        p1, s1 = self._map_abs_point_to_arena(
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        p1, _s1 = self._map_abs_point_to_arena(
             self.chooser_scan_p1, label="CHOOSER_SCAN_P1",
             force_reacquire=force_reacquire, apply_correction=False,
         )
-        p2, s2 = self._map_abs_point_to_arena(
+        p2, _s2 = self._map_abs_point_to_arena(
             self.chooser_scan_p2, label="CHOOSER_SCAN_P2",
             force_reacquire=False, apply_correction=False,
         )
         bot_logger.log_info(
-            f"CHOOSER_SCAN mapped: arena={self._arena_region} p1={p1} p2={p2} "
-            f"src_p1={s1} src_p2={s2}"
+            f"CHOOSER_SCAN mapped: arena={self._arena_region} p1={p1} p2={p2}"
         )
-        if "absolute_no_arena" in (s1, s2):
-            bot_logger.log_error(
-                "CHOOSER_SCAN unavailable: arena_region could not be resolved; "
-                "refusing to scan the desktop."
-            )
-            return None, None
         return p1, p2
 
     def select_chooser_card(self, card_id: int, clicks: int = 1) -> bool:
@@ -12506,12 +11639,6 @@ class Controller(ControllerSecondary):
         bot_logger.set_hover_logging(True)
         scan_p1, scan_p2 = self._get_chooser_scan_points_mapped(force_reacquire=True)
         try:
-            if scan_p1 is None or scan_p2 is None:
-                bot_logger.log_error(
-                    f"CHOOSER_ITEM aborted: arena_region unavailable, refusing to "
-                    f"scan the desktop for card {card_id}."
-                )
-                return False
             return self.__select_object_in_region(
                 card_id=card_id, p1=scan_p1, p2=scan_p2,
                 step=self.battlefield_scan_step, clicks=clicks,
