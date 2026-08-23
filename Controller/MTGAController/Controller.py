@@ -425,6 +425,14 @@ class Controller(ControllerSecondary):
         self.__select_n_in_progress_since = 0.0
         self.__last_submit_selection_ts = 0.0
         self.__submit_selection_lock = threading.Lock()
+        # Only one combat declare/submit sequence at a time. A second, parallel
+        # all_attack() lands its press 0.46-0.48s after the first -- exactly
+        # inside MTGA's declaration animation, where clicks are swallowed. That
+        # spacing is what the 2026-08-22 post-mortem mistook for a designed
+        # retry; it was a concurrent invocation all along (measured again
+        # 2026-08-23: presses at 22.647 and 23.128 while the first sequence was
+        # still waiting).
+        self.__combat_submit_lock = threading.Lock()
         self.__select_n_token_counter = 0
         self.__select_n_stack_wait_timeout_sec = 8.0
         # Open modal card prompt (SearchReq / OrderReq), or None. Holds what MTGA
@@ -1587,6 +1595,12 @@ class Controller(ControllerSecondary):
                 # the hand row just as thoroughly (issue #41).
                 "casting_time_options_open": self.__casting_time_options_still_open(),
                 "turn_info": self.updated_game_state.get_turn_info() or {},
+                # What was clicked just before the hand went unreachable. On
+                # 2026-08-23 MTGA's library viewer covered the board and the
+                # click log showed *no* click in the 20s before it -- which is
+                # why this travels with the bundle now instead of being pieced
+                # together from a file the writer thread may not have flushed.
+                "recent_clicks": self.__recent_clicks_for_bundle(),
                 "log_path": self._log_path,
             }
             with open(debug_dir / "hand_select_state.json", "w", encoding="utf-8") as f:
@@ -6250,11 +6264,12 @@ class Controller(ControllerSecondary):
         if source == "absolute_no_arena":
             bot_logger.log_error("ATTACK_ALL aborted: arena_region unavailable, refusing absolute desktop click.")
             return False
-        bot_logger.log_click(target[0], target[1], "ATTACK_ALL")
-        self.input.move_abs(target[0], target[1])
-        self.input.left_click(1)
-        time.sleep(1)
-        self.input.left_click(1)
+        self.__press_combat_button_verified(
+            target,
+            "ATTACK_ALL",
+            declared_markers=["AttackState_Declared", '"canSubmitAttackers": true'],
+            submitted_markers=["SubmitAttackersReq", "AttackState_Attacking"],
+        )
         self.__last_attack_submit_ts = time.time()
         # Skip the nested target selection while the attack-target flow already
         # runs on another thread: the non-blocking lock would reject it anyway,
@@ -13568,6 +13583,141 @@ class Controller(ControllerSecondary):
             )
             self.__end_declare_blocks_pause()
 
+    # -- combat submit ---------------------------------------------------
+    # MTGA needs two presses of the same bottom-right button: the first
+    # declares, the second submits. In between it animates the creatures
+    # moving in, and a click that lands inside that animation is swallowed --
+    # indistinguishable from a click that was never sent. Measured 2026-08-23
+    # over one session: 26 logged DeclareBlockersReq against 2 SubmitBlockersReq,
+    # our blocker timer running to 0.0s in combat after combat, and matches lost
+    # while ahead on life. A fixed sleep cannot fix this (a re-click at +0.6s and
+    # +1.5s did nothing, one at +3.6s went through), so the declaration is
+    # confirmed from Player.log and the submit is then verified, not assumed.
+    __COMBAT_CONFIRM_SEC = 1.2
+    __COMBAT_ANIMATION_SEC = 0.9
+    __COMBAT_SUBMIT_ATTEMPTS = 2
+
+    @staticmethod
+    def __recent_clicks_for_bundle(limit: int = 12) -> list:
+        """Imported lazily: the recorder is optional (MTGA_DEBUG_CLICKS=0) and
+        must never break a debug bundle by being absent."""
+        try:
+            import click_recorder
+
+            return click_recorder.recent(limit)
+        except Exception:
+            return []
+
+    def __press_combat_button_verified(
+        self,
+        target: tuple[int, int],
+        label: str,
+        *,
+        declared_markers: list[str],
+        submitted_markers: list[str],
+    ) -> bool:
+        """Declare, wait for MTGA to confirm it, then submit once -- and check.
+
+        Returns True once a submit marker is seen in Player.log. When nothing is
+        confirmed at all the fallback is deliberately the old behaviour (press
+        again anyway): in this step never freezing is worth more than never
+        double-clicking, because an unanswered combat costs the rope and then the
+        match.
+        """
+        if not self.__combat_submit_lock.acquire(blocking=False):
+            # A sequence is already pressing this very button. Adding a press
+            # here is how the swallowed clicks happened in the first place.
+            bot_logger.log_info(
+                f"{label}: skipped, another combat submit sequence is in flight."
+            )
+            return False
+        try:
+            return self.__run_combat_submit_sequence(
+                target, label, declared_markers, submitted_markers
+            )
+        finally:
+            self.__combat_submit_lock.release()
+
+    def __run_combat_submit_sequence(
+        self,
+        target: tuple[int, int],
+        label: str,
+        declared_markers: list[str],
+        submitted_markers: list[str],
+    ) -> bool:
+        def press(kind: str = "") -> bool:
+            """One press, logged as it happens.
+
+            The caller used to log a single click *before* this sequence ran,
+            which made the click log lie twice over: it recorded a click for a
+            sequence the lock then skipped, and it hid the extra presses this
+            sequence makes. On 2026-08-23 that left a 20s window with an overlay
+            on screen and no click in the log to explain it. Every entry written
+            here is a press that really went out.
+            """
+            if self._suppress_selections or self._stop_requested:
+                return False
+            suffix = f"_{kind}" if kind else ""
+            bot_logger.log_click(target[0], target[1], f"{label}{suffix}")
+            self.input.move_abs(target[0], target[1])
+            self.input.left_click(1)
+            return True
+
+        offset = self._get_log_size(self._log_path)
+        if not press():
+            return False
+        # Submit first, declaration second -- and in that order deliberately.
+        # By the time we press, MTGA has usually *already* asked with
+        # canSubmitAttackers/canSubmitBlockers true (measured 2026-08-23: the
+        # request arrived 3.4s before our press), so waiting for a *new*
+        # declaration times out on the most common case of all. If this press
+        # was the submit, the acknowledgement is all we need.
+        if self._wait_for_playerlog_marker(
+            list(submitted_markers),
+            start_offset=offset,
+            timeout_sec=self.__COMBAT_CONFIRM_SEC,
+            label=f"{label}_SUBMITTED_ON_FIRST_PRESS",
+        ):
+            return True
+        # No submit: then this press was the declaration. Re-reading from the
+        # same offset matches instantly if it landed.
+        if not self._wait_for_playerlog_marker(
+            list(declared_markers),
+            start_offset=offset,
+            timeout_sec=0.3,
+            label=f"{label}_DECLARED",
+        ):
+            # Neither submitted nor declared: this press never reached the game.
+            # Press once more blind rather than leaving the step unanswered.
+            time.sleep(0.6)
+            press("BLIND")
+            bot_logger.log_error(
+                f"{label}: neither submit nor declaration confirmed; pressed "
+                "again blind."
+            )
+            return False
+
+        for attempt in range(1, self.__COMBAT_SUBMIT_ATTEMPTS + 1):
+            if self._suppress_selections or self._stop_requested:
+                return False
+            # Let the declaration animation finish before submitting.
+            time.sleep(self.__COMBAT_ANIMATION_SEC)
+            offset = self._get_log_size(self._log_path)
+            if not press(f"RETRY{attempt}"):
+                return False
+            if self._wait_for_playerlog_marker(
+                list(submitted_markers),
+                start_offset=offset,
+                timeout_sec=self.__COMBAT_CONFIRM_SEC,
+                label=f"{label}_SUBMITTED",
+            ):
+                return True
+            bot_logger.log_error(
+                f"COMBAT_SUBMIT_UNACKNOWLEDGED: {label} press "
+                f"{attempt}/{self.__COMBAT_SUBMIT_ATTEMPTS} was not acknowledged."
+            )
+        return False
+
     def __click_combat_submit_button(self, label: str) -> None:
         """Press the bottom-right combat button ("No Blocks" / "Submit Blocks")."""
         try:
@@ -13582,12 +13732,12 @@ class Controller(ControllerSecondary):
             if source == "absolute_no_arena":
                 bot_logger.log_error(f"{label} aborted: arena_region unavailable.")
                 return
-            bot_logger.log_click(target[0], target[1], label)
-            self.input.move_abs(target[0], target[1])
-            self.input.left_click(1)
-            time.sleep(0.6)
-            # Second click confirms through any first-strike/submit sub-step.
-            self.input.left_click(1)
+            self.__press_combat_button_verified(
+                target,
+                label,
+                declared_markers=["BlockState_Declared", "BlockState_Blocking"],
+                submitted_markers=["SubmitBlockersReq"],
+            )
         except Exception as e:
             bot_logger.log_error(f"{label} click failed: {e}")
 

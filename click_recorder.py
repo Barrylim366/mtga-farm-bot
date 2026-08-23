@@ -21,6 +21,7 @@ Env: ``MTGA_DEBUG_CLICKS=0`` disables it (default: on).
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import queue
@@ -56,6 +57,11 @@ class ClickRecorder:
         self._started = False
         self._path = None
         self._drop_warned = False
+        # The file is the record of truth, but a bundle written mid-incident
+        # cannot read its own tail reliably (the writer thread may not have
+        # flushed yet). Keep the last few in memory so a debug bundle can carry
+        # "what was clicked just before this" with it.
+        self._recent: "collections.deque" = collections.deque(maxlen=24)
 
     def start_session(self) -> None:
         if not _enabled():
@@ -92,6 +98,7 @@ class ClickRecorder:
                 "thread": threading.current_thread().name,
                 "decision_seq": decision_seq,
             }
+            self._recent.append(dict(record))
             self._queue.put_nowait(record)
         except queue.Full:
             if not self._drop_warned:
@@ -156,3 +163,11 @@ def start_session() -> None:
 
 def record(x, y, purpose, *, source=None, region_age=None, arena=None, risky=None) -> None:
     _recorder.record(x, y, purpose, source=source, region_age=region_age, arena=arena, risky=risky)
+
+
+def recent(limit: int = 12) -> list:
+    """The last few recorded clicks, newest last. Safe to call from anywhere."""
+    try:
+        return list(_recorder._recent)[-max(1, int(limit)):]
+    except Exception:
+        return []
