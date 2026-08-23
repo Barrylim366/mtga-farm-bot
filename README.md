@@ -95,7 +95,7 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.3.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.3.1`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
 
 ## Configuration
 
