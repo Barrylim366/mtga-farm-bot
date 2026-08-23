@@ -99,7 +99,30 @@ class SharedFrameTest(unittest.TestCase):
     def test_the_ttl_is_short_enough_for_a_live_board(self):
         """Long enough to collapse a burst, short enough that a click still
         lands on what was seen."""
-        self.assertLessEqual(vision_mod._FRAME_TTL_SEC, 0.25)
+        self.assertLessEqual(vision_mod._FRAME_TTL_SEC, 0.5)
+
+    def test_a_burst_shares_one_capture_even_when_the_backend_is_slow(self):
+        """The regression that made the bot feel sluggish.
+
+        A capture takes 610-730ms here. With a TTL below that, every queued
+        caller found the shared frame already expired and took its own, so N
+        callers cost N captures and the median gap between decisions doubled
+        (9.5s -> 18.6s). A frame taken while a caller waited must win outright,
+        regardless of the TTL.
+        """
+        self.engine._grab_full_frame_uncached = self._slow_backend(delay=0.7)
+        threads = [
+            threading.Thread(target=self.engine._grab_full_frame) for _ in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+        self.assertEqual(
+            len(self.captures),
+            1,
+            f"{len(self.captures)} captures for 5 callers -- they queued instead of sharing",
+        )
 
 
 class TimeoutReapingTest(unittest.TestCase):

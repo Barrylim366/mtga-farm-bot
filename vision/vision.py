@@ -42,7 +42,13 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 # for their own. The shared frame is read-only by convention -- every consumer
 # either template-matches it or slices a view out of it.
 _CAPTURE_LOCK = threading.Lock()
-_FRAME_TTL_SEC = 0.12
+# A capture costs 610-730ms on this backend (measured 2026-08-23), so a TTL
+# below that is worse than useless: by the time a queued caller gets the lock,
+# the frame it could have shared has already "expired" and it takes its own --
+# which turned sharing into plain queueing and roughly doubled the median gap
+# between decisions (9.5s -> 18.6s, measured over ~350 decisions). The TTL is
+# now the same order as the capture itself, and the rule below matters more.
+_FRAME_TTL_SEC = 0.35
 _last_frame: "np.ndarray | None" = None
 _last_frame_ts = 0.0
 
@@ -207,12 +213,17 @@ class VisionEngine:
     def _grab_full_frame(self) -> np.ndarray | None:
         """A frame, shared with whoever asked in the last _FRAME_TTL_SEC."""
         global _last_frame, _last_frame_ts
+        requested_at = time.time()
         fresh = _last_frame
-        if fresh is not None and time.time() - _last_frame_ts <= _FRAME_TTL_SEC:
+        if fresh is not None and requested_at - _last_frame_ts <= _FRAME_TTL_SEC:
             return fresh
         with _CAPTURE_LOCK:
-            # Another thread may have refreshed it while we waited for the lock;
-            # that is the whole point of holding one.
+            # A frame taken *after we started waiting* always wins: it is newer
+            # than anything this caller could still take for itself, so a burst
+            # of callers costs one capture instead of one each. This is the rule
+            # that makes serialising cheap rather than a queue.
+            if _last_frame is not None and _last_frame_ts >= requested_at:
+                return _last_frame
             if _last_frame is not None and time.time() - _last_frame_ts <= _FRAME_TTL_SEC:
                 return _last_frame
             frame = self._grab_full_frame_uncached()
