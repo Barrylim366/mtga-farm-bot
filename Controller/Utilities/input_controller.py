@@ -1,10 +1,43 @@
 import os
 import platform
+import select
 import shutil
 import subprocess
 import stat
+import sys
 import time
 from dataclasses import dataclass
+
+
+# Owns the X11 clipboard while the parent presses Ctrl+V, then wipes it. Run as
+# a separate interpreter on purpose: an X selection is served by a live process,
+# and Tk must own it from its own main loop -- a short-lived root that is merely
+# updated once hands out stale content (observed while debugging this).
+# The text arrives length-prefixed on stdin, never on the command line, so a
+# password never shows up in the process list.
+_LINUX_CLIPBOARD_HELPER = r"""
+import select
+import sys
+import time
+import tkinter
+
+size = int(sys.stdin.readline())
+data = sys.stdin.read(size)
+root = tkinter.Tk()
+root.withdraw()
+root.clipboard_clear()
+root.clipboard_append(data)
+root.update()
+sys.stdout.write("READY\n")
+sys.stdout.flush()
+deadline = time.monotonic() + 20.0
+while time.monotonic() < deadline:
+    root.update()
+    if select.select([sys.stdin], [], [], 0.05)[0]:
+        break
+root.clipboard_clear()
+root.update()
+"""
 
 
 class InputControllerError(RuntimeError):
@@ -289,10 +322,31 @@ class PyAutoGUIInputController(InputController):
     def tap_delete(self) -> None:
         self._pyautogui.press("delete")
 
+    # Linux input event codes. These are *physical* keys, so unlike a character
+    # they mean the same thing under every keyboard layout.
+    _EVDEV_CTRL = 29
+    _EVDEV_A = 30
+    _EVDEV_V = 47
+    _CLIPBOARD_READY_TIMEOUT_SEC = 5.0
+
     def type_text(self, text: str) -> None:
         text = text or ""
         if not text:
             return
+        if platform.system().lower() == "linux":
+            if self._type_text_via_clipboard(text):
+                return
+            # No fall-through to the keystroke path on purpose: here we *know*
+            # it mistypes, and a silently wrong password is exactly what cost a
+            # live run an hour on 2026-08-23 -- the login never went through and
+            # the bot then span in GO_HOME on a login screen it believed it had
+            # passed. A raised error is visible: _perform_account_switch logs it
+            # and aborts the switch instead of playing on as the wrong account.
+            raise InputControllerError(
+                "Linux: could not paste the text via the clipboard, and typing "
+                "it keystroke by keystroke mistypes characters that need AltGr "
+                "(e.g. '@'), so nothing was typed."
+            )
         if self._unicode_keyboard is None:
             # No pynput at all: layout-correct typing is impossible here, but
             # typing nothing is worse than typing something.
@@ -306,6 +360,85 @@ class PyAutoGUIInputController(InputController):
             # text into the field and retyping the whole string would duplicate
             # it. A visible error beats a silently half-typed password.
             raise InputControllerError(f"Failed to type text: {e}") from e
+
+    def _type_text_via_clipboard(self, text: str) -> bool:
+        """Paste the text instead of typing it. Linux only.
+
+        Ctrl+V carries no character, so nothing here depends on the active
+        keymap -- which is the entire point. On X11/XWayland pynput resolves a
+        character to its AltGr level (`@` sits on AltGr+Q on a German layout)
+        and then presses that key *without* AltGr: measured 2026-08-23, `a@b`
+        arrived as `aqb`, so every account e-mail was typed wrong and every
+        switch that had to type its credentials failed.
+
+        Windows and macOS keep the keystroke path untouched -- it works there,
+        and this one needs a clipboard, a helper process and Ctrl+V to work.
+        """
+        helper = None
+        try:
+            helper = subprocess.Popen(
+                [sys.executable, "-c", _LINUX_CLIPBOARD_HELPER],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            helper.stdin.write(f"{len(text)}\n{text}")
+            helper.stdin.flush()
+            if not select.select(
+                [helper.stdout], [], [], self._CLIPBOARD_READY_TIMEOUT_SEC
+            )[0]:
+                return False
+            if helper.stdout.readline().strip() != "READY":
+                return False
+            # Replace, do not append: the caller may be on a field MTGA
+            # pre-filled, and tap_delete() only deletes forward from the caret.
+            if not self._press_ctrl_combo(self._EVDEV_A, "a"):
+                return False
+            time.sleep(0.15)
+            if not self._press_ctrl_combo(self._EVDEV_V, "v"):
+                return False
+            time.sleep(0.35)
+            return True
+        except Exception:
+            return False
+        finally:
+            if helper is not None:
+                try:
+                    helper.stdin.close()  # tells the helper to wipe and exit
+                except Exception:
+                    pass
+                try:
+                    helper.wait(timeout=3)
+                except Exception:
+                    helper.kill()
+
+    def _press_ctrl_combo(self, evdev_code: int, pyautogui_key: str) -> bool:
+        """Ctrl+<key>, by physical key code where possible.
+
+        ydotool talks to uinput, which sidesteps both the layout and the X
+        server; pyautogui's X11 backend is the fallback because it has been seen
+        to raise out of Xlib on this session (BadRRMode during sync).
+        """
+        if shutil.which("ydotool"):
+            try:
+                subprocess.run(
+                    [
+                        "ydotool", "key",
+                        f"{self._EVDEV_CTRL}:1", f"{evdev_code}:1",
+                        f"{evdev_code}:0", f"{self._EVDEV_CTRL}:0",
+                    ],
+                    timeout=5,
+                    check=True,
+                    capture_output=True,
+                )
+                return True
+            except Exception:
+                pass
+        try:
+            self._pyautogui.hotkey("ctrl", pyautogui_key)
+            return True
+        except Exception:
+            return False
 
     def tap_escape(self) -> None:
         self._pyautogui.press("esc")
