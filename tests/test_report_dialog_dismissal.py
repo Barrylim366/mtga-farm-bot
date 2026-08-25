@@ -189,6 +189,39 @@ class StuckQueueProbeTest(unittest.TestCase):
         self.assertEqual(searched, ["report_player_title.png"])
         self.assertEqual(clicked, [], "clicked a template before the title matched")
 
+    def test_the_post_match_hold_is_not_mistaken_for_a_stall(self):
+        """Measured live on 2026-08-25: the probe fired 30.02s after MATCH_END,
+        twice, while the bot was doing exactly what it should.
+
+        The post-match flow owns _post_match_delay_sec after every match and the
+        queue loop does not tick through it, so the tick that resumes afterwards
+        used to find a _queue_progress_ts last set mid-match and call it a stall.
+        Finishing a match restarts the clock instead.
+        """
+        self.c._queue_progress_ts = time.time() - 500  # stale, as it was mid-match
+        self.c._note_match_finished()
+        self.c._probe_report_dialog_if_queue_is_stuck()
+        self.assertEqual(self.probes, [], "a finished match was read as a stall")
+
+    def test_the_match_end_path_actually_notes_the_finish(self):
+        """Pins the wiring: the helper existing while the dismissal path still
+        sets only _post_match_ready_ts would leave the bug exactly as it was."""
+        import inspect
+
+        src = inspect.getsource(Controller.dismiss_end_screen)
+        self.assertIn("_note_match_finished", src)
+
+    def test_the_post_match_hold_cannot_outlast_the_stall_threshold(self):
+        """The reset above only closes the gap while the hold is shorter than the
+        probe's own threshold. Raise one without the other and the false positive
+        comes straight back, so pin the relationship rather than the numbers."""
+        self.assertLess(
+            self.c._post_match_delay_sec,
+            self.c._QUEUE_STALL_REPORT_PROBE_SEC,
+            "the post-match hold now outlasts the stall threshold; the probe will "
+            "fire once per match again",
+        )
+
     def test_a_throwing_probe_cannot_kill_the_queue_loop(self):
         def boom(**kwargs):
             raise RuntimeError("screen search exploded")

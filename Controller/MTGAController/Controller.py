@@ -7146,7 +7146,7 @@ class Controller(ControllerSecondary):
         # lands in InventoryInfo on the next Home load; the current-minus-baseline
         # delta self-corrects once it does, and the Home reads also refresh it.
         self._update_gold_from_inventory()
-        self._post_match_ready_ts = time.time()
+        self._note_match_finished()
         threading.Timer(self._post_match_delay_sec, self._maybe_post_match_action).start()
         if self._queue_ready:
             self._maybe_post_match_action()
@@ -7158,6 +7158,27 @@ class Controller(ControllerSecondary):
             except TypeError:
                 # Backwards compatible: callback may not accept args
                 self.__match_end_callback()
+
+    def _note_match_finished(self) -> None:
+        """Arm the post-match hold, and count the finished match as progress.
+
+        Both clocks start together on purpose. `_post_match_ready_ts` holds the
+        queue loop for `_post_match_delay_sec`; `_queue_progress_ts` is what the
+        stuck-queue probe measures against. Restarting only the first one is what
+        made the probe fire exactly `_post_match_delay_sec` after every match --
+        measured live on 2026-08-25 at 10:41:30 and 10:55:11, both 30.02s after
+        MATCH_END, while the bot was doing precisely what it should. The queue
+        loop does not tick through the hold, so the tick that resumed afterwards
+        found a `_queue_progress_ts` last set mid-match and called it a stall.
+
+        It clicked nothing -- the title gate held, which is the property that
+        matters -- but each false alarm cost a ~2.5s screen search in the middle
+        of the reward claim, and a net that cries wolf once per match is a net
+        nobody reads.
+        """
+        now = time.time()
+        self._post_match_ready_ts = now
+        self._queue_progress_ts = now
 
     def _match_end_screen_cleared(self) -> bool:
         """True once we are back on a recognizable Arena screen after a match.
