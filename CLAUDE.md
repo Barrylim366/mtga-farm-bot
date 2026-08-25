@@ -108,13 +108,6 @@ debug toggles, and the open, measured blind-sweep gap all live in the
 `debug-artefacts` skill (`.claude/skills/debug-artefacts/SKILL.md`) — invoke
 it instead of re-deriving any of it.
 
-**The click path was rolled back to its 1.2.1 state on 2026-08-23.** The
-hand-sweep band, the blind-sweep rescue, the window-activation recovery, the
-Home-tab guard, the target-click diagnostic and the Report-a-Player detection
-had grown to ~1700 changed lines in `Controller.py` and play got worse with them
-in. Do **not** reintroduce them as a block: one fix per session, each with a
-watched run behind it. The bugs they described are open again — the skill has
-the measurements.
 
 **The declare-attack path is the most sensitive code in the bot**: an attack
 needs two clicks on the same button, and re-clicking into MTGA's animation gets
