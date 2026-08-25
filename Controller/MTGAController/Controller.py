@@ -22,7 +22,11 @@ from actions.actions import run_action
 from actions.navigation_flow import build_post_login_navigation_actions
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
 from vision.vision import VisionEngine
-from vision.window_locator import ArenaRegionProvider, focus_mtga_window
+from vision.window_locator import (
+    ArenaRegionProvider,
+    _describe_foreground_window,
+    focus_mtga_window,
+)
 import bot_logger
 import debug_recorder
 import runtime_status
@@ -1504,6 +1508,12 @@ class Controller(ControllerSecondary):
                 # Same question for the mid-screen "Choose One" overlay: it hides
                 # the hand row just as thoroughly (issue #41).
                 "casting_time_options_open": self.__casting_time_options_still_open(),
+                # Was MTGA actually the foreground window at the moment the sweep
+                # gave up? Unity emits no hover events without focus, so a blind
+                # sweep and a lost focus look identical from the log alone --
+                # focus_mtga_window() reports success unconditionally. Measured
+                # here so a bundle answers it without a live experiment.
+                "mtga_foreground": _describe_foreground_window(),
                 "turn_info": self.updated_game_state.get_turn_info() or {},
                 # What was clicked just before the hand went unreachable. On
                 # 2026-08-23 MTGA's library viewer covered the board and the

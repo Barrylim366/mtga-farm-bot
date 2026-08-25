@@ -366,5 +366,16 @@ For debugging the *visual* layer (bot clicked the wrong screen position, or the 
 
 The per-failure debug bundles under `runtime/debug/` (screenshots + state for mulligan/hand-select/navigation/etc.) are now capped automatically (oldest pruned, newest 60 kept) and their full-screen captures are saved as JPEG, so the debug folder no longer grows unbounded.
 
+### Window focus during a hand sweep
+
+To play a card the bot sweeps the mouse across the hand and waits for MTGA to log a hover; when that never arrives it gives up with `SCAN_STOPPED: No hover update before bounds` and the card is not played. Unity delivers no hover events to an *unfocused* window, so a lost foreground looks exactly like a hand that cannot be found.
+
+`focus_mtga_window()` calls `SetForegroundWindow`, but Windows silently refuses a foreground steal from a background process (it returns 0, no exception) — and the function reports success either way, so the bot cannot tell the two cases apart. That is measured, not fixed:
+
+- `bot.log` gets `FOCUS_MTGA_NOT_FOREGROUND: SetForegroundWindow returned …, foreground is hwnd=… title='…'` whenever the focus did not actually land on MTGA. Only the failure is logged (this runs on every cast attempt), so any occurrence is worth reading.
+- each `hand-select-*` debug bundle now carries `mtga_foreground` (`hwnd`, `title`, `is_mtga`) captured at the moment the sweep gave up.
+
+A `SCAN_STOPPED` together with `is_mtga: false` means the sweep never reached the game at all. Note that clicking into another window while the bot plays is enough to cause this.
+
 ## See also on
 [elitepvpers](https://www.elitepvpers.com/)

@@ -899,11 +899,69 @@ def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
         user32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
         user32.ShowWindow(wintypes.HWND(hwnd), SW_SHOW)
         user32.BringWindowToTop(wintypes.HWND(hwnd))
-        user32.SetForegroundWindow(wintypes.HWND(hwnd))
+        sfw_ret = int(user32.SetForegroundWindow(wintypes.HWND(hwnd)) or 0)
         user32.SetActiveWindow(wintypes.HWND(hwnd))
+        # Diagnostics only -- the return value stays True either way, so no caller
+        # changes behaviour because of this. Windows silently refuses a foreground
+        # steal from a background process (SetForegroundWindow returns 0), and
+        # without focus Unity never processes the hand-sweep's mouse moves, so the
+        # sweep runs blind and reports SCAN_STOPPED. Nothing measured that before.
+        # Only the failure is logged: this runs on every cast attempt.
+        try:
+            actual = int(user32.GetForegroundWindow() or 0)
+            if actual != hwnd:
+                bot_logger.log_error(
+                    f"FOCUS_MTGA_NOT_FOREGROUND: SetForegroundWindow returned {sfw_ret}; "
+                    f"wanted hwnd={hwnd}, foreground is hwnd={actual} "
+                    f"title={_get_window_title_windows(actual)!r}"
+                )
+        except Exception:
+            pass
         return True
     except Exception:
         return False
+
+
+def _describe_foreground_window() -> dict[str, Any]:
+    """Who owns the foreground right now, and is it MTGA? Diagnostics only.
+
+    Unity delivers no hover events to an unfocused window, so this is the one
+    fact that separates "the hand sweep found nothing" from "the sweep never
+    reached the game at all".
+    """
+    info: dict[str, Any] = {"hwnd": None, "title": "", "is_mtga": None}
+    if os.name != "nt":
+        return info
+    try:
+        hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        title = _get_window_title_windows(hwnd)
+        low = title.lower()
+        info["hwnd"] = hwnd
+        info["title"] = title
+        info["is_mtga"] = (
+            "mtga" in low
+            or "magic: the gathering arena" in low
+            or "magic the gathering arena" in low
+        )
+    except Exception:
+        pass
+    return info
+
+
+def _get_window_title_windows(hwnd: int) -> str:
+    """Best-effort window title, for diagnostics only."""
+    if os.name != "nt" or hwnd <= 0:
+        return ""
+    try:
+        user32 = ctypes.windll.user32
+        length = int(user32.GetWindowTextLengthW(wintypes.HWND(hwnd)) or 0)
+        if length <= 0:
+            return ""
+        buff = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(wintypes.HWND(hwnd), buff, length + 1)
+        return str(buff.value or "").strip()
+    except Exception:
+        return ""
 
 
 def run_arena_setup_check(
