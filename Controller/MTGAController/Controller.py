@@ -556,6 +556,9 @@ class Controller(ControllerSecondary):
         # boundary is precisely what let a previous session's block pass as this
         # account's. Read only by _quests_block_exists_past_boundary.
         self._quests_authoritative_floor = 0
+        # Last time the queue loop saw a match actually start. Drives the
+        # stuck-queue probe in _probe_report_dialog_if_queue_is_stuck.
+        self._queue_progress_ts = 0.0
         # Set in begin_session(): the gold read must ignore the previous session's
         # tail, which holds other accounts' balances. See _read_latest_inventory_gold.
         # None means "not armed yet" -- 0 is a legitimate floor (empty log).
@@ -7975,6 +7978,130 @@ class Controller(ControllerSecondary):
             self._queue_spam_thread = threading.Thread(target=self._queue_spam_loop, daemon=True)
             self._queue_spam_thread.start()
 
+    # Cancel's centre in the 1920x1080 game frame, measured from a live capture
+    # of the dialog (runtime screenshot, 2026-08-21 19:54). Submit Report sits
+    # ~325px to its right at (1122, 875) -- far enough that a template match on
+    # the left half cannot be confused for it.
+    _REPORT_PLAYER_CANCEL_POINT_1920 = (797, 875)
+
+    def _dismiss_report_player_dialog(self, *, context: str) -> bool:
+        """Close Arena's "Report a Player" dialog by pressing Cancel.
+
+        This dialog is not a game prompt and nothing in the game log announces
+        it, so the bot cannot see it: every screen probe simply fails while it is
+        up. It happened three times over 2026-08-21/22, twice inside a match and
+        once on a match-end screen, and each time the trigger was different or
+        not visible in the click log at all -- so this is a net that does not
+        depend on knowing how the dialog opened.
+
+        It is worth having even though the stall alone is survivable, because
+        this particular window has a Submit Report button on it, aimed at a real
+        person. Only Cancel is ever clicked; Submit is never a target, and the
+        search region for the button deliberately excludes it.
+
+        Called only from _probe_report_dialog_if_queue_is_stuck, i.e. after the
+        queue loop has ticked for 90s without a match, so a normal match never
+        pays for it.
+        """
+        title = self._app_path("assets", "assert", "report_player_title.png")
+        if not os.path.exists(title):
+            return False
+        if self._locate_image_center_in_scaled_arena_region(
+            title, f"REPORT_DIALOG_PROBE({context})",
+            rel_region=(600, 140, 720, 140),
+            confidence=0.80, timeout=1.0,
+        ) is None:
+            return False
+        bot_logger.log_error(
+            f"REPORT_DIALOG_DETECTED({context}): Arena's Report a Player dialog is "
+            "covering the board. Clicking Cancel -- never Submit."
+        )
+        cancel = self._app_path("assets", "assert", "report_player_cancel.png")
+        clicked = False
+        if os.path.exists(cancel):
+            # Left of centre only: Submit Report starts around x=988, and this
+            # template is 285px wide, so no match for it can fit in this band.
+            clicked = bool(self._click_image_in_scaled_arena_region(
+                cancel, f"REPORT_DIALOG_CANCEL({context})",
+                rel_region=(600, 820, 400, 110),
+                confidence=0.80, timeout=1.0,
+            ))
+        if not clicked:
+            # The title matched, so the dialog is up and Cancel is where it was
+            # measured. Fixed point rather than giving up: leaving this dialog
+            # open is what cost the match and left Submit one stray click away.
+            arena = self._ensure_arena_region()
+            if arena is None:
+                bot_logger.log_error(
+                    f"REPORT_DIALOG_CANCEL({context}): no arena region; refusing to "
+                    "click at an absolute desktop position."
+                )
+                return False
+            point = self._map_base_point_into_arena(
+                arena, self._REPORT_PLAYER_CANCEL_POINT_1920
+            )
+            bot_logger.log_info(
+                f"REPORT_DIALOG_CANCEL({context}): button template did not match; "
+                f"using the measured Cancel position {self._REPORT_PLAYER_CANCEL_POINT_1920}."
+            )
+            self._click_abs(int(point[0]), int(point[1]), f"REPORT_DIALOG_CANCEL({context})")
+            clicked = True
+        time.sleep(0.8)
+        bot_logger.log_info(
+            f"REPORT_DIALOG_DETECTED({context}): Cancel clicked; no report was submitted."
+        )
+        return clicked
+
+    # How long the queue loop may tick without ever reaching a match before it
+    # suspects something is covering the screen. Matchmaking itself is fast; a
+    # minute and a half of clicking Play with nothing happening is not normal.
+    _QUEUE_STALL_REPORT_PROBE_SEC = 90.0
+
+    def _probe_report_dialog_if_queue_is_stuck(self) -> None:
+        """Close Arena's Report a Player dialog if it is what blocks the queue.
+
+        The dialog is not a game event -- nothing in Player.log announces it --
+        so while it is up the bot just fails every screen probe in silence.
+
+        Live on 2026-08-22: it opened at ~13:51 on TEUBAT's match-end screen and
+        was still up 28 minutes later, the whole time logging STARTER_PLAY probes
+        that could not match, with a won match sitting unclaimed behind it. There
+        was no logged click for six minutes beforehand, which is why the answer
+        is a net here rather than a guard on a click path -- we cannot predict
+        what opens it.
+
+        Deliberately probes ONLY the report dialog, and only through its title
+        template: this runs on Home, where a false-positive match on some other
+        button template would click into the live UI. Worst case is a wasted
+        screen search.
+        """
+        try:
+            if self._stop_queue_spam or self._stop_requested:
+                return
+            now = time.time()
+            # A match starting IS progress -- restart the clock and go quiet.
+            if self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
+                self._queue_progress_ts = now
+                return
+            if not getattr(self, "_queue_progress_ts", 0.0):
+                self._queue_progress_ts = now
+                return
+            if now - self._queue_progress_ts < self._QUEUE_STALL_REPORT_PROBE_SEC:
+                return
+            # Re-arm before probing, so a probe that finds nothing costs one
+            # search per interval instead of one per tick.
+            self._queue_progress_ts = now
+            bot_logger.log_info(
+                "QUEUE_STALL_PROBE: {:.0f}s of queueing with no match; checking for "
+                "Arena's Report a Player dialog.".format(
+                    self._QUEUE_STALL_REPORT_PROBE_SEC
+                )
+            )
+            self._dismiss_report_player_dialog(context="QUEUE_STALL")
+        except Exception as exc:
+            # A recovery probe must never be the thing that kills the queue loop.
+            bot_logger.log_error(f"QUEUE_STALL_PROBE failed: {exc}")
+
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
             if self._account_switch_in_progress:
@@ -8016,6 +8143,7 @@ class Controller(ControllerSecondary):
                 bot_logger.log_info("Account switch due; performing switch now.")
                 threading.Thread(target=self._perform_account_switch, daemon=True).start()
                 return
+            self._probe_report_dialog_if_queue_is_stuck()
             self.start_game_from_home_screen()
             time.sleep(3.0)
 
