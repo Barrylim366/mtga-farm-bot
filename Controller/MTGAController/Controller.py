@@ -5478,6 +5478,22 @@ class Controller(ControllerSecondary):
                 # lock, against the rope, for nothing. It emits no log line of its own,
                 # so this visual probe is still the only way we can see it at all.
                 self._dismiss_are_you_sure_if_present(context=f"CAST_CARD id={card_id}")
+                if attempt == 0:
+                    # Two more things that cover the hand and are invisible to the
+                    # game log, both measured on 2026-08-25 over 31 failure bundles
+                    # (mean brightness of the hand zone separates them cleanly):
+                    #   5/31  Arena's "Report a Player" dialog, open mid-match
+                    #   5/31  a card-selection overlay (graveyard view) left open,
+                    #         with its Done button unanswered -- and this one logs
+                    #         no CASTING_TIME_OPTION_UNANSWERED at all (0 in the
+                    #         whole session) and reports casting_time_options_open
+                    #         False, so nothing else can see it.
+                    # Unlike the rescue that was reverted in 1.3.0, neither of these
+                    # acts on the sweep's verdict alone: each only fires when its own
+                    # template actually matches on screen. First failed attempt only,
+                    # to bound the added ~2s against the rope.
+                    self._dismiss_report_player_dialog(context=f"CAST_CARD id={card_id}")
+                    self._dismiss_stray_done_overlay(context=f"CAST_CARD id={card_id}")
                 time.sleep(0.8)
         if self._stop_requested or self._suppress_selections:
             return False
@@ -8014,6 +8030,39 @@ class Controller(ControllerSecondary):
     # ~325px to its right at (1122, 875) -- far enough that a template match on
     # the left half cannot be confused for it.
     _REPORT_PLAYER_CANCEL_POINT_1920 = (797, 875)
+
+    def _dismiss_stray_done_overlay(self, *, context: str) -> bool:
+        """Answer a card-selection overlay that was left open over the hand.
+
+        Measured on 2026-08-25: in 5 of 31 hand-sweep failures MTGA had a
+        selection view up (a graveyard browser opened by an additional cost --
+        "sacrifice a creature" -- with an orange Done button at arena
+        ~(960, 875), the same place scry and surveil put theirs). The hand sits
+        behind it, so every sweep runs over a dimmed, unresponsive row: mean
+        brightness of the hand zone was 16-31 against 68-104 for a clear board.
+
+        The controller is blind to this state -- `casting_time_options_open` was
+        False every time and the session logged zero
+        CASTING_TIME_OPTION_UNANSWERED -- so no existing net catches it.
+
+        This only clicks when the Done template really matches, so it cannot
+        fire on a clear board. That is the difference from the blind
+        sweep-verdict rescue reverted in 1.3.0.
+        """
+        done_tpl = os.path.join(self._buttons_dir(), "scry_done.png")
+        if not os.path.exists(done_tpl):
+            return False
+        if not self._click_image_in_scaled_arena_region(
+            done_tpl, f"STRAY_DONE({context})",
+            rel_region=(700, 820, 520, 240),
+            confidence=0.78, timeout=1.0,
+        ):
+            return False
+        bot_logger.log_error(
+            f"STRAY_DONE_DISMISSED({context}): a selection overlay was covering the "
+            "hand with its Done button unanswered; clicked it."
+        )
+        return True
 
     def _dismiss_report_player_dialog(self, *, context: str) -> bool:
         """Close Arena's "Report a Player" dialog by pressing Cancel.

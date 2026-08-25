@@ -377,5 +377,17 @@ To play a card the bot sweeps the mouse across the hand and waits for MTGA to lo
 
 A `SCAN_STOPPED` together with `is_mtga: false` means the sweep never reached the game at all. Note that clicking into another window while the bot plays is enough to cause this.
 
+Measured across 31 such failures: focus was **never** the cause (`is_mtga: true` in all 31). The mean brightness of the hand zone in each bundle's `arena_region.png` splits them into three groups instead, and two have a known cause that the bot now clears:
+
+| brightness | share | cause |
+|---|---|---|
+| 2.8–4.4 | 5/31 | Arena's "Report a Player" dialog, open mid-match |
+| 16–31 | 5/31 | a card-selection overlay (e.g. a graveyard browser opened by a "sacrifice a creature" cost) left open, Done unanswered |
+| 68–104 | 21/31 | board fully visible, cards on the scan line — still unexplained |
+
+After the *first* failed sweep of a cast, the bot probes for both and clears them: `REPORT_DIALOG_DETECTED` (Cancel is clicked, never Submit) and `STRAY_DONE_DISMISSED`. Both fire only when their own template matches on screen, so a clear board costs one scan and no click. The selection overlay is otherwise invisible — it reports `casting_time_options_open: False` and logs no `CASTING_TIME_OPTION_UNANSWERED`.
+
+A repeated `SCAN_STOPPED` does not resolve itself: after three attempts `CAST_FAILED` gives up and the turn moves on without the card, or the match dies to the 150s timer (`ResultReason_Timeout`).
+
 ## See also on
 [elitepvpers](https://www.elitepvpers.com/)
