@@ -5424,6 +5424,12 @@ class Controller(ControllerSecondary):
     # __decision_exec_lock, which DROPS rather than queues a decision that arrives
     # while it is held, so a longer sweep widens the window where an incoming
     # request is discarded and left to __maybe_wake_stalled_decision.
+    #
+    # The pacing is deliberately unchanged by the 2026-08-26 Unity 6 client
+    # update, which broke every hover scan: the cause was the cursor being
+    # *warped* rather than moved (see _Win32MouseMotion in input_controller.py),
+    # not the sweep being too fast. With real motion events, 10px/0.01s reports
+    # every card in the hand again -- measured through this exact code path.
     _CAST_SWEEP_PACING = ((10, 0.01), (8, 0.018), (7, 0.024))
     # Fixed per-attempt overhead outside the sweep itself, measured from the
     # sleeps and probes in _cast_once/cast. Only used to assert the budget.

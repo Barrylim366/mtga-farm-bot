@@ -158,6 +158,146 @@ class NullInputController(InputController):
         return self._position
 
 
+class _Win32MouseMotion:
+    """Moves the cursor with a real motion event instead of a warp.
+
+    pynput sets the cursor position on Windows with `SetCursorPos`, which
+    teleports the pointer without producing any device input. Unity reads the
+    mouse through Raw Input, and since Magic Arena moved to Unity 6 on
+    2026-08-26 a teleported cursor no longer counts as hovering anything:
+    measured across 12 stops on the hand row, warps produced 0 hover messages
+    at every dwell from 0.02s to 0.40s, while `SendInput` motion over the same
+    path and the same 0.40s dwell produced 8. Without this the bot can sweep its
+    hand all game and never identify a single card -- which is exactly what it
+    did until this was found.
+
+    A settle is still required on top of the motion (see
+    Controller.HOVER_SETTLE_SEC); the two conditions are independent, and
+    testing only one of them is what made the first fix look sufficient.
+
+    SendInput is given absolute coordinates over the virtual desktop, so the
+    pointer lands where it is told regardless of pointer speed or acceleration
+    (a relative move would be scaled by both). The normalisation is lossy at
+    1/65535 of the desktop, so the position is corrected with SetCursorPos
+    afterwards: the motion event has already been delivered by then, and that
+    keeps clicks landing on the exact pixel the caller asked for.
+    """
+
+    _SM_XVIRTUALSCREEN = 76
+    _SM_YVIRTUALSCREEN = 77
+    _SM_CXVIRTUALSCREEN = 78
+    _SM_CYVIRTUALSCREEN = 79
+    _MOUSEEVENTF_MOVE = 0x0001
+    _MOUSEEVENTF_VIRTUALDESK = 0x4000
+    _MOUSEEVENTF_ABSOLUTE = 0x8000
+    _INPUT_MOUSE = 0
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise InputControllerError("win32 mouse motion is Windows-only")
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+            ]
+
+        class _INPUTunion(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ("u",)
+            _fields_ = [("type", wintypes.DWORD), ("u", _INPUTunion)]
+
+        self._INPUT = INPUT
+        self._MOUSEINPUT = MOUSEINPUT
+        self._user32.SendInput.argtypes = (
+            wintypes.UINT,
+            ctypes.POINTER(INPUT),
+            ctypes.c_int,
+        )
+        self._user32.SendInput.restype = wintypes.UINT
+
+    def _virtual_desktop(self) -> tuple[int, int, int, int]:
+        metric = self._user32.GetSystemMetrics
+        return (
+            int(metric(self._SM_XVIRTUALSCREEN)),
+            int(metric(self._SM_YVIRTUALSCREEN)),
+            max(1, int(metric(self._SM_CXVIRTUALSCREEN))),
+            max(1, int(metric(self._SM_CYVIRTUALSCREEN))),
+        )
+
+    @staticmethod
+    def normalise(
+        x: int, y: int, desktop: tuple[int, int, int, int]
+    ) -> tuple[int, int]:
+        """Screen pixel -> the 0..65535 coordinates SendInput expects.
+
+        Kept separate from the send so the arithmetic can be tested without
+        moving the real cursor.
+        """
+        origin_x, origin_y, width, height = desktop
+        # 65535 spans the desktop inclusive of its last pixel, so the divisor is
+        # the span, not the pixel count -- off by one here puts every click a
+        # fraction of a pixel short of where it was aimed.
+        span_x = max(1, width - 1)
+        span_y = max(1, height - 1)
+        norm_x = int(round((int(x) - origin_x) * 65535.0 / span_x))
+        norm_y = int(round((int(y) - origin_y) * 65535.0 / span_y))
+        return (
+            min(65535, max(0, norm_x)),
+            min(65535, max(0, norm_y)),
+        )
+
+    def move_abs(self, x: int, y: int) -> bool:
+        """Return True if a motion event was delivered."""
+        x, y = int(x), int(y)
+        norm_x, norm_y = self.normalise(x, y, self._virtual_desktop())
+        event = self._INPUT(
+            type=self._INPUT_MOUSE,
+            mi=self._MOUSEINPUT(
+                dx=norm_x,
+                dy=norm_y,
+                mouseData=0,
+                dwFlags=(
+                    self._MOUSEEVENTF_MOVE
+                    | self._MOUSEEVENTF_ABSOLUTE
+                    | self._MOUSEEVENTF_VIRTUALDESK
+                ),
+                time=0,
+                dwExtraInfo=None,
+            ),
+        )
+        sent = self._user32.SendInput(
+            1, self._ctypes.byref(event), self._ctypes.sizeof(self._INPUT)
+        )
+        if sent != 1:
+            return False
+        # Land exactly on the requested pixel; the motion event is already out.
+        self._user32.SetCursorPos(x, y)
+        return True
+
+
+def _win32_mouse_motion_or_none() -> "_Win32MouseMotion | None":
+    if os.name != "nt":
+        return None
+    try:
+        return _Win32MouseMotion()
+    except Exception:
+        # A warp is worse than nothing on the Unity 6 client, but it is still
+        # what every previous version did -- degrade, do not refuse to start.
+        return None
+
+
 class PynputInputController(InputController):
     def __init__(self) -> None:
         try:
@@ -170,11 +310,24 @@ class PynputInputController(InputController):
         self._mouse = mouse.Controller()
         self._Key = keyboard.Key
         self._Button = Button
+        # Windows only, and only for movement: pynput's clicks and keystrokes go
+        # through SendInput already. See _Win32MouseMotion.
+        self._win32_motion = _win32_mouse_motion_or_none()
 
     def move_abs(self, x: int, y: int) -> None:
+        if self._win32_motion is not None and self._win32_motion.move_abs(x, y):
+            return
         self._mouse.position = (int(x), int(y))
 
     def move_rel(self, dx: int, dy: int) -> None:
+        if self._win32_motion is not None:
+            # Resolved against the current position and sent absolutely: a
+            # relative SendInput would be scaled by the pointer speed and
+            # acceleration curve, and a sweep that drifts cannot be mapped back
+            # to a card.
+            x, y = self._mouse.position
+            if self._win32_motion.move_abs(int(x) + int(dx), int(y) + int(dy)):
+                return
         self._mouse.move(int(dx), int(dy))
 
     def left_click(self, count: int = 1) -> None:
@@ -239,6 +392,7 @@ class PyAutoGUIInputController(InputController):
         except Exception:
             pass
         self._unicode_keyboard = self._make_unicode_keyboard()
+        self._win32_motion = _win32_mouse_motion_or_none()
         if platform.system().lower() == "darwin":
             self._verify_mouse_control()
 
@@ -296,9 +450,19 @@ class PyAutoGUIInputController(InputController):
             raise InputControllerError(f"Mouse control self-test failed: {e}") from e
 
     def move_abs(self, x: int, y: int) -> None:
+        # pyautogui also warps on Windows, and a warp hovers nothing on the
+        # Unity 6 client -- see _Win32MouseMotion. "auto" never picks this
+        # backend on Windows, but an explicit input_backend=pyautogui would
+        # otherwise be silently unable to play a card.
+        if self._win32_motion is not None and self._win32_motion.move_abs(x, y):
+            return
         self._pyautogui.moveTo(int(x), int(y), duration=0)
 
     def move_rel(self, dx: int, dy: int) -> None:
+        if self._win32_motion is not None:
+            x, y = self._pyautogui.position()
+            if self._win32_motion.move_abs(int(x) + int(dx), int(y) + int(dy)):
+                return
         self._pyautogui.moveRel(int(dx), int(dy), duration=0)
 
     def left_click(self, count: int = 1) -> None:
