@@ -33,6 +33,8 @@ Python dependencies are installed automatically by the launcher scripts:
 - `Options -> Video -> Resolution`: **any exact 16:9 windowed size**
 - OS display scaling: **any (the bot converts coordinates for scaled displays)**
 
+Keep the entire MTGA window visible while the bot is running. If the game is moved or resized to an unsupported/off-screen geometry mid-match, the bot now stops visual input instead of reusing obsolete coordinates and sweeping empty space for cards; restore a visible 16:9 window and let the next game-state update retry.
+
 ## Quick Start
 
 Each platform has its own launcher script — named after the platform — that creates a virtual environment, installs dependencies, and starts the UI:

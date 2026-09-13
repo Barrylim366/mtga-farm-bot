@@ -82,6 +82,15 @@ class ArenaRegionProvider:
         self._global_anchor_name = global_anchor_name
         self._global_anchor_offset = global_anchor_offset
         self._cached_region: tuple[int, int, int, int] | None = None
+        # Retain the outcome of the most recent probe.  Callers need to tell an
+        # ordinary in-game anchor miss (where a recent region is useful) from a
+        # live MTGA window that has changed size (where reusing that region would
+        # aim every click at the wrong place).
+        self._last_detection_result: ArenaDetectionResult | None = None
+
+    @property
+    def last_detection_result(self) -> ArenaDetectionResult | None:
+        return self._last_detection_result
 
     def acquire(self) -> tuple[int, int, int, int] | None:
         if self._cached_region is not None:
@@ -110,7 +119,7 @@ class ArenaRegionProvider:
 
         if write_debug_on_fail and not result.ok:
             debug_dir = self._write_detection_debug_bundle(result, debug_label=debug_label)
-            return ArenaDetectionResult(
+            result = ArenaDetectionResult(
                 ok=result.ok,
                 region=result.region,
                 code=result.code,
@@ -119,6 +128,7 @@ class ArenaRegionProvider:
                 diagnostics=result.diagnostics,
                 debug_dir=debug_dir,
             )
+        self._last_detection_result = result
         return result
 
     def _detect_windows(self) -> ArenaDetectionResult:

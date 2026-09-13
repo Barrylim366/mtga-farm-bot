@@ -1078,6 +1078,23 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return self._arena_region
 
         self._arena_region = None
+        # An in-game anchor can legitimately be unavailable, in which case the
+        # last verified rectangle is safer than abandoning an active prompt.  A
+        # *geometry* failure is different: MTGA is visible, but its current
+        # client rectangle no longer matches the cached one.  Reusing the old
+        # rectangle then scans empty board space (and burns ~28 seconds across
+        # the three cast retries) rather than the hand.  Do not issue blind
+        # input in that case; the next state update can retry after the user has
+        # restored a supported window size.
+        last_detection = getattr(self._arena_region_provider, "last_detection_result", None)
+        if last_detection is not None and getattr(last_detection, "code", None) in {
+            "window_wrong_size", "window_off_screen"
+        }:
+            bot_logger.log_error(
+                "Arena region re-acquire found incompatible live MTGA geometry "
+                f"(code={last_detection.code}); refusing stale cached coordinates."
+            )
+            return None
         if self._should_reuse_cached_arena_region():
             cached = self._get_reusable_cached_arena_region("reacquire" if force_reacquire else "acquire")
             if cached is not None:
@@ -1200,6 +1217,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         arena = self._ensure_arena_region(force_reacquire=force_reacquire)
         if arena is not None:
             return arena
+        last_detection = getattr(self._arena_region_provider, "last_detection_result", None)
+        if last_detection is not None and getattr(last_detection, "code", None) in {
+            "window_wrong_size", "window_off_screen"
+        }:
+            bot_logger.log_error(
+                f"{label}: live MTGA geometry is incompatible; refusing stale UI coordinates."
+            )
+            return None
         cached = self._last_good_arena_region
         if cached is None:
             bot_logger.log_error(f"{label}: no arena_region available for UI action.")
