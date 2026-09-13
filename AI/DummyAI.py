@@ -849,6 +849,7 @@ class DummyAI(AIKernel):
                         mana_cost_str = card_info.get('manaCost', '')
                         nominal_cmc = CardInfo.calculate_cmc(mana_cost_str)
                         paid_cost = self._mana_cost_total(action_mana_cost)
+                        planning_paid_cost = paid_cost
                         is_discounted = paid_cost < nominal_cmc
 
                         uses_convoke = CardInfo.card_has_convoke(grp_id) if grp_id else False
@@ -862,6 +863,24 @@ class DummyAI(AIKernel):
 
                         # Check if we can pay the mana cost (color + total)
                         if self._can_cast_with_mana_costs(action_mana_cost, eff_colors, eff_total_mana, eff_sources):
+                            alternate_total_mana = CardPolicy.sacrifice_or_alternate_total_mana(grp_id)
+                            if (
+                                alternate_total_mana is not None
+                                and not have_own_creature
+                                and total_mana < alternate_total_mana
+                            ):
+                                self._debug(
+                                    f"Additional cost {card_name}: no creature to sacrifice and "
+                                    f"{total_mana} mana is below the {alternate_total_mana}-mana alternative; "
+                                    "skipping cast."
+                                )
+                                continue
+                            if alternate_total_mana is not None and not have_own_creature:
+                                # Arena advertises only Eaten Alive's base {B}
+                                # in the action. When no creature can be fed to
+                                # it, account for the 3B path in removal priority,
+                                # ward budget and multi-spell mana planning.
+                                planning_paid_cost = alternate_total_mana
                             # Self-buff trick (e.g. Fake Your Own Death) with no
                             # creature of ours to buff: skip. Its only legal target
                             # would be an enemy, which we must never buff.
@@ -884,7 +903,7 @@ class DummyAI(AIKernel):
                                 # Convoke creatures can pay for this spell, but not
                                 # for the ward triggered after it resolves onto the
                                 # stack. Price ward only from real mana sources.
-                                _ward_budget = max(0, total_mana - paid_cost)
+                                _ward_budget = max(0, total_mana - planning_paid_cost)
                                 _rm_target = RemovalLogic.choose_removal_target(
                                     removal_profile,
                                     removal_game_objects,
@@ -951,7 +970,7 @@ class DummyAI(AIKernel):
                             lifegain_payoff = LifegainLogic.is_lifegain_payoff(grp_id)
                             cast_actions.append(
                                 (
-                                    paid_cost,
+                                    planning_paid_cost,
                                     instance_id,
                                     card_name,
                                     mana_cost_str,
@@ -965,7 +984,7 @@ class DummyAI(AIKernel):
                                 )
                             )
                             self._debug(
-                                f"Can cast: {card_name} (cost={mana_cost_str}, paid={paid_cost}, cmc={nominal_cmc}, discounted={is_discounted}, convoke={uses_convoke}, lifegain_payoff={lifegain_payoff})"
+                                f"Can cast: {card_name} (cost={mana_cost_str}, paid={planning_paid_cost}, cmc={nominal_cmc}, discounted={is_discounted}, convoke={uses_convoke}, lifegain_payoff={lifegain_payoff})"
                             )
                             if is_sorcery:
                                 sorcery_found += 1
