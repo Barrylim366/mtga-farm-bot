@@ -1983,6 +1983,25 @@ class ConfigManager:
                     or (other_alias and name_key == other_alias)
                 ):
                     raise ValueError("Account names and Arena screen names must be unique across accounts.")
+        base_groups: dict[str, list[str]] = {}
+        for item in accounts[:10]:
+            if not isinstance(item, dict):
+                continue
+            arena_name = str(item.get("screen_name") or item.get("name") or "").strip()
+            if not arena_name:
+                continue
+            base_groups.setdefault(
+                arena_name.split("#", 1)[0].strip().casefold(), []
+            ).append(arena_name)
+        for same_base_names in base_groups.values():
+            if len(same_base_names) > 1 and any(
+                re.fullmatch(r".+#[0-9]+", arena_name) is None
+                for arena_name in same_base_names
+            ):
+                raise ValueError(
+                    "Accounts sharing an Arena name must each include their full "
+                    "#digits discriminator."
+                )
         existing_accounts = self.get_managed_accounts()
         existing_by_name = {
             str(acc.get("name", "")).casefold(): str(acc.get("folder", "")).strip()
@@ -3973,53 +3992,72 @@ class MTGBotUI(tk.Tk):
 
     def _resolve_screenname_to_alias(self, screen: str) -> str:
         """Map an MTGA in-game screenName to the label the user configured for that
-        account, so the display is consistent with the switch config. Consults, in
-        order: the learned live map (status.json account_aliases), the persisted
-        learned map (account_aliases.json), then an exact match against a managed
-        account name; falls back to the raw screenName when nothing matches."""
+        account, so the display is consistent with the switch config. Complete
+        names are matched first. A pre-# fallback is used only when that visible
+        name belongs to exactly one configured account."""
         screen = str(screen or "").strip()
         if not screen:
             return ""
-        base = screen.split("#", 1)[0].casefold()
-        # 1) live learned map published by the controller.
+        screen_key = screen.casefold()
+        base_key = screen.split("#", 1)[0].strip().casefold()
+        accounts = []
         try:
-            live = runtime_status.read_status().get("account_aliases") or {}
-            for k, v in live.items():
-                if str(k).casefold() in (screen.casefold(), base) and str(v).strip():
-                    return str(v).strip()
+            accounts = list(self.config_manager.get_managed_accounts() or [])
+        except Exception:
+            accounts = []
+        base_accounts = []
+        for account in accounts:
+            configured = str(account.get("screen_name") or account.get("name") or "").strip()
+            if configured and configured.split("#", 1)[0].strip().casefold() == base_key:
+                base_accounts.append(account)
+        ambiguous = len(base_accounts) > 1
+
+        live = {}
+        persisted = {}
+        try:
+            value = runtime_status.read_status().get("account_aliases") or {}
+            if isinstance(value, dict):
+                live = value
         except Exception:
             pass
-        # 2) persisted learned map (screenName -> alias) from prior sessions.
         try:
             path = str(runtime_file("config", "account_aliases.json"))
             if os.path.isfile(path):
                 with open(path, "r", encoding="utf-8") as f:
-                    persisted = json.load(f)
-                if isinstance(persisted, dict):
-                    for k, v in persisted.items():
-                        if str(k).casefold() in (screen.casefold(), base) and str(v).strip():
-                            return str(v).strip()
+                    value = json.load(f)
+                if isinstance(value, dict):
+                    persisted = value
         except Exception:
             pass
-        # 3) the in-game alias the user configured for a managed account (the
-        #    global, deterministic link) -> that account's label.
-        try:
-            for a in (self.config_manager.get_managed_accounts() or []):
-                sn = str(a.get("screen_name", "")).strip()
-                nm = str(a.get("name", "")).strip()
-                if nm and sn and sn.casefold() in (screen.casefold(), base):
-                    return nm
-        except Exception:
-            pass
-        # 4) exact match against a configured account name (folder == screenName).
-        try:
-            for a in (self.config_manager.get_managed_accounts() or []):
-                nm = str(a.get("name", "")).strip()
-                if nm and nm.casefold() in (screen.casefold(), base):
-                    return nm
-        except Exception:
-            pass
-        # 5) nothing learned yet -> show the raw in-game name.
+
+        # Exact matches always precede legacy base-name matches. An ambiguous bare
+        # key is ignored even when an old persisted map contains it.
+        if "#" in screen or not ambiguous:
+            # The configured screen name is user-supplied fact and outranks maps
+            # learned by older switch runs.
+            for account in accounts:
+                configured = str(account.get("screen_name") or "").strip()
+                name = str(account.get("name") or "").strip()
+                if name and screen_key in (configured.casefold(), name.casefold()):
+                    return name
+            if "#" not in screen and len(base_accounts) == 1:
+                configured_name = str(base_accounts[0].get("name", "")).strip()
+                if configured_name:
+                    return configured_name
+            for mapping in (live, persisted):
+                for key, alias in mapping.items():
+                    if str(key).strip().casefold() == screen_key and str(alias).strip():
+                        return str(alias).strip()
+
+        # Only a genuinely hashtag-less value may use the legacy base-name
+        # fallback. A different full discriminator identifies a different account.
+        if "#" not in screen and len(base_accounts) == 1:
+            for mapping in (live, persisted):
+                for key, alias in mapping.items():
+                    if str(key).split("#", 1)[0].strip().casefold() == base_key and str(alias).strip():
+                        return str(alias).strip()
+
+        # Unknown or ambiguous -> display the log's value without guessing.
         return screen
 
     def _poll_quests_display(self) -> None:
@@ -6400,8 +6438,9 @@ class SwitchAccountWindow(tk.Toplevel):
                 "field, so what is shown may just be a label you chose:\n\n"
                 + "\n".join(f"  • {n}" for n in unverified)
                 + "\n\nThe Arena Name must be the account's in-game Magic Arena "
-                "name -- the one shown top-left in Arena (e.g. Name#12345; the "
-                "digits are optional). It is the only account identity the Arena "
+                "name -- the one shown top-left in Arena (e.g. Name#12345). The "
+                "#digits are optional only when no other configured account shares "
+                "that visible name. It is the only account identity the Arena "
                 "log exposes, so account rotation, farmed-gold tracking and the "
                 "Current/Next account display all key off it.\n\n"
                 "Correct it per row where needed and press Save Accounts.",
@@ -7175,6 +7214,21 @@ class SwitchAccountWindow(tk.Toplevel):
                     "folder": row.get("folder", ""),
                 }
             )
+        base_groups: dict[str, list[str]] = {}
+        for account in accounts:
+            arena_name = account["screen_name"]
+            base_groups.setdefault(
+                arena_name.split("#", 1)[0].strip().casefold(), []
+            ).append(arena_name)
+        for same_base_names in base_groups.values():
+            if len(same_base_names) > 1 and any(
+                re.fullmatch(r".+#[0-9]+", arena_name) is None
+                for arena_name in same_base_names
+            ):
+                raise ValueError(
+                    "Accounts sharing an Arena name must each use the full "
+                    "Name#digits shown in Arena."
+                )
         return accounts
 
     def _collect_pending_renames(self) -> dict[str, str]:

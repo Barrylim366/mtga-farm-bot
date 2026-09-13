@@ -2520,12 +2520,73 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     @staticmethod
     def _canonical_screen_name(screen: str | None) -> str:
-        """Strip the '#12345' discriminator MTGA appends to screenNames in some
-        events. Applied at every latch point so ONE canonical spelling reaches the
-        per-account keys (farmed gold, completed-round tracking, the alias map).
-        Without it the same account can be keyed twice ('venturaa' and
-        'venturaa#123'), splitting its gold row and breaking round completion."""
+        """Return Arena's complete account identity, including its discriminator.
+
+        The discriminator is not decoration: Arena permits two accounts such as
+        ``Player#11111`` and ``Player#22222``.  Removing it merges those accounts
+        in rotation, round-completion and gold-tracking state.  Case folding is
+        deliberately left to comparisons so the UI can retain Arena's spelling.
+        """
+        return str(screen or "").strip()
+
+    @staticmethod
+    def _screen_name_base(screen: str | None) -> str:
+        """Visible portion of an Arena name, used only for safe legacy fallback."""
         return str(screen or "").split("#", 1)[0].strip()
+
+    def _configured_accounts_with_base(self, screen: str | None) -> list[dict]:
+        """Configured rows sharing ``screen``'s visible, pre-# name."""
+        base_key = self._screen_name_base(screen).casefold()
+        if not base_key:
+            return []
+        matches = []
+        try:
+            for acc in (self._load_accounts_from_dirs() or []):
+                configured = self._canonical_screen_name(
+                    acc.get("screen_name") or acc.get("name")
+                )
+                if configured and self._screen_name_base(configured).casefold() == base_key:
+                    matches.append(acc)
+        except Exception:
+            return []
+        return matches
+
+    def _screen_name_base_is_ambiguous(self, screen: str | None) -> bool:
+        """Whether a hashtag-less spelling could identify multiple config rows."""
+        return len(self._configured_accounts_with_base(screen)) > 1
+
+    def _mapped_alias_for_screen(self, screen: str | None) -> str | None:
+        """Case-insensitive exact alias lookup, then an unambiguous base fallback."""
+        exact = self._canonical_screen_name(screen)
+        if not exact:
+            return None
+        exact_key = exact.casefold()
+        # A bare key from an old account_aliases.json is unsafe when two current
+        # rows share that base, even though it is technically an exact dict key.
+        ambiguous_bare = "#" not in exact and self._screen_name_base_is_ambiguous(exact)
+        if not ambiguous_bare:
+            for key, alias in self._screenname_to_alias.items():
+                if self._canonical_screen_name(key).casefold() == exact_key and alias:
+                    return str(alias)
+        # A supplied discriminator is authoritative. Falling back by visible name
+        # here would make an unknown ``Player#22222`` resolve as the configured
+        # ``Player#11111`` merely because it is the only Player row.
+        if "#" in exact:
+            return None
+        if ambiguous_bare:
+            return None
+        base_key = self._screen_name_base(exact).casefold()
+        for key, alias in self._screenname_to_alias.items():
+            if self._screen_name_base(key).casefold() == base_key and alias:
+                return str(alias)
+        return None
+
+    def _resolved_alias_for_screen(self, screen: str | None) -> str | None:
+        """Prefer configured identity facts over previously learned alias keys."""
+        exact = self._canonical_screen_name(screen)
+        if not exact:
+            return None
+        return self._match_configured_alias(exact) or self._mapped_alias_for_screen(exact)
 
     @staticmethod
     def _find_latest_login_screenname(text: str) -> str | None:
@@ -2566,14 +2627,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if str(acc.get("name", "")).strip().casefold() == label.casefold():
                 screen = str(acc.get("screen_name", "")).strip() or label
                 break
-        # Canonical (no '#discriminator') so a pinned account keys its gold/round
-        # tracking exactly like the same account latched from the log would.
+        # Keep the complete discriminator so same-base accounts remain distinct.
         screen = self._canonical_screen_name(screen or label) or label
         self._current_account_screen_name = screen
         self._current_account_pinned = True
         self._pin_log_offset = 0 if seeded else self._get_log_size(self._log_path)
         self._pin_reconcile_ts = 0.0
-        if screen not in self._screenname_to_alias:
+        if self._resolved_alias_for_screen(screen) is None:
             self._screenname_to_alias[screen] = label
         try:
             self._register_current_account_for_gold()
@@ -2608,6 +2668,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         self._read_log_tail(self._log_path, max_bytes=8_000_000)
                     )
             owner = self._canonical_screen_name(owner) or None
+            # A bare name cannot identify either member of a duplicate-base group.
+            # In particular, never let such an event overwrite the full identity
+            # taken from credentials during a switch.
+            if owner and "#" not in owner and self._screen_name_base_is_ambiguous(owner):
+                return
             if self._identity_from_config:
                 # We logged this account in ourselves, so only a handshake written
                 # AFTER the switch can outrank that -- anything older is by
@@ -2623,7 +2688,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 owner, is_post_switch = self._post_switch_login_owner()
                 if not is_post_switch:
                     return
-            if not owner or owner == self._current_account_screen_name:
+                if owner and "#" not in owner and self._screen_name_base_is_ambiguous(owner):
+                    return
+            if not owner or self._same_account(owner, self._current_account_screen_name):
                 return
             self._current_account_screen_name = owner
             # Whatever the log says now supersedes the credential-derived name
@@ -2684,20 +2751,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         return owner, abs_off
 
     def _account_identity_key(self, screen: str | None) -> str:
-        """Collapse an MTGA screenName to a stable per-account key, tolerating the
-        '#12345' discriminator MTGA appends in login events and resolving to the
-        configured label when known, so 'venturaa_a#123', 'venturaa_a' and the
-        alias 'bruno2' all compare equal."""
+        """Resolve an Arena identity to one stable configured-account key.
+
+        Full ``Name#digits`` values remain distinct. A pre-# spelling is accepted
+        only when exactly one configured account has that visible name.
+        """
         s = str(screen or "").strip()
         if not s:
             return ""
-        base = s.split("#", 1)[0].strip()
-        alias = (
-            self._screenname_to_alias.get(s)
-            or self._screenname_to_alias.get(base)
-            or self._match_configured_alias(base)
-        )
-        return (alias or base).casefold()
+        alias = self._resolved_alias_for_screen(s)
+        return (alias or s).casefold()
 
     def _same_account(self, screen_a: str | None, screen_b: str | None) -> bool:
         """Whether two screenNames refer to the same configured account."""
@@ -2835,11 +2898,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             owner = self._canonical_screen_name(self._find_latest_login_screenname(text))
             if not owner:
                 return False
+            if "#" not in owner and self._screen_name_base_is_ambiguous(owner):
+                return False
             self._current_account_screen_name = owner
             self._register_current_account_for_gold()
             bot_logger.log_info(
                 "Account identity latched from login: '{}' (alias '{}').".format(
-                    owner, self._screenname_to_alias.get(owner) or "?"
+                    owner, self._resolved_alias_for_screen(owner) or "?"
                 )
             )
             return True
@@ -2991,15 +3056,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         scr = screen if screen is not None else self._current_account_screen_name
         if not scr:
             return None
-        # Try the base (pre-'#') form too, mirroring _account_identity_key: the
-        # caller may pass a raw login screenName while the map is keyed canonically.
-        base = str(scr).split("#", 1)[0].strip()
-        return (
-            self._screenname_to_alias.get(scr)
-            or self._screenname_to_alias.get(base)
-            or self._match_configured_alias(base)
-            or None
-        )
+        return self._resolved_alias_for_screen(scr)
 
     def _select_next_switch_target(self, accounts: list[dict], current_name: str | None):
         """Pick the next account to switch INTO. "Next" is anchored to the CURRENT
@@ -3076,7 +3133,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             cur_screen = self._current_account_screen_name
             current = ""
             if cur_screen:
-                current = self._screenname_to_alias.get(cur_screen) or cur_screen
+                current = self._resolved_alias_for_screen(cur_screen) or cur_screen
             nxt = self._peek_next_account_name() if self._account_switch_enabled else None
             runtime_status.update_status(
                 current_account=current or "",
@@ -3099,13 +3156,25 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         already logged in at startup): match the screenName against a configured
         account name, case-insensitively. Returns None when there's no exact hit
         (we never guess)."""
-        try:
-            for acc in (self._load_accounts_from_dirs() or []):
-                name = str(acc.get("name") or "")
-                if name and name.casefold() == str(screen_name).casefold():
-                    return name
-        except Exception:
-            pass
+        query = self._canonical_screen_name(screen_name)
+        if not query:
+            return None
+        matches = self._configured_accounts_with_base(query)
+        # An unhashed event/config cannot distinguish same-base accounts. Refuse
+        # even an apparent exact match rather than silently choosing one row.
+        if "#" not in query and len(matches) > 1:
+            return None
+        query_key = query.casefold()
+        for acc in matches:
+            name = str(acc.get("name") or "").strip()
+            configured = self._canonical_screen_name(acc.get("screen_name") or name)
+            if configured.casefold() == query_key or name.casefold() == query_key:
+                return name or None
+        # Compatibility for old rows that omitted #digits, but only when the base
+        # identifies exactly one configured account. A different full discriminator
+        # is positive evidence that this is not the configured account.
+        if "#" not in query and len(matches) == 1:
+            return str(matches[0].get("name", "")).strip() or None
         return None
 
     def _account_aliases_path(self) -> str:
@@ -3122,13 +3191,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     data = json.load(f)
                 if isinstance(data, dict):
                     for k, v in data.items():
-                        # Canonicalise on the way in: a file written before the seed
-                        # was canonicalised can hold 'Name#12345' keys, which no
-                        # lookup produces (queries are canonical or base-stripped,
-                        # never the other way round). Normalising here migrates
-                        # those entries instead of leaving them permanently dead.
+                        # Preserve full discriminators. Ignore old base-only keys
+                        # when that base now belongs to multiple configured rows.
                         key = self._canonical_screen_name(k)
-                        if key and v and key not in self._screenname_to_alias:
+                        if (
+                            key and v
+                            and not ("#" not in key and self._screen_name_base_is_ambiguous(key))
+                            and self._mapped_alias_for_screen(key) is None
+                        ):
                             self._screenname_to_alias[key] = str(v)
         except Exception:
             pass
@@ -3144,7 +3214,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             known = {
                 k: v for k, v in self._screenname_to_alias.items()
-                if k not in self._guessed_aliases
+                if (
+                    k not in self._guessed_aliases
+                    and not (
+                        "#" not in str(k)
+                        and self._screen_name_base_is_ambiguous(k)
+                    )
+                )
             }
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(known, f, indent=2)
@@ -3159,17 +3235,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         already-learned mapping from the live log wins over the configured value."""
         try:
             for acc in (self._load_accounts_from_dirs() or []):
-                # Canonical key ('#12345' stripped): the Alias field is filled in by
-                # hand and the dialog explicitly says the digits are optional, so a
-                # user following it types 'Name#12345' -- while EVERY latch point
-                # stores the canonicalised name. Seeding the raw value would key this
-                # map in a namespace no lookup ever produces: the configured label
-                # would never resolve, and the same account would then be tracked
-                # under two identities (screenName here, alias after a switch-in),
-                # breaking skip-self, next-target anchoring and round completion.
+                # Full screenName keys keep same-base accounts distinct. A bare
+                # legacy key is useful only when no other configured row shares it.
                 screen = self._canonical_screen_name(acc.get("screen_name"))
                 label = str(acc.get("name", "")).strip()
-                if screen and label and screen not in self._screenname_to_alias:
+                if (
+                    screen and label
+                    and not ("#" not in screen and self._screen_name_base_is_ambiguous(screen))
+                    and self._mapped_alias_for_screen(screen) is None
+                ):
                     self._screenname_to_alias[screen] = label
         except Exception:
             pass
@@ -3179,7 +3253,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         is known, map it to its configured alias when we can, and fold in any gold
         credited before it was latched (a win that landed under the fallback key)."""
         key = self._current_account_key()
-        if key != "(current account)" and key not in self._screenname_to_alias:
+        if key != "(current account)" and self._mapped_alias_for_screen(key) is None:
             # Exact config match first: it is a fact. _pending_switch_alias is only
             # the row we AIMED at, which is the wrong answer whenever the screenName
             # we ended up latching is not that row's -- and persisting that guess is

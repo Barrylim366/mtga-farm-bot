@@ -468,15 +468,68 @@ class NextAccountDisplayTests(unittest.TestCase):
                         )
 
 
-class AliasNamespaceTests(unittest.TestCase):
-    """One account must collapse to ONE identity, whichever spelling it arrives in.
+class AccountDisplayIdentityTests(unittest.TestCase):
+    def _resolve(self, screen, accounts, live=None):
+        import ui
 
-    The Alias field is typed by hand and the dialog says the '#12345' digits are
-    optional, so the configured value and the latched screenName can differ by the
-    discriminator. Keyed in two namespaces, the same account is tracked twice:
-    skip-self and next-target anchoring stop working (no configured label resolves)
-    and round completion counts it under both keys.
-    """
+        class _Cfg:
+            def get_managed_accounts(self):
+                return list(accounts)
+
+        stub = types.SimpleNamespace(config_manager=_Cfg())
+        old_read = ui.runtime_status.read_status
+        old_runtime_file = ui.runtime_file
+        missing = os.path.join(tempfile.mkdtemp(), "missing_aliases.json")
+        ui.runtime_status.read_status = lambda: {"account_aliases": dict(live or {})}
+        ui.runtime_file = lambda *parts: missing
+        try:
+            return ui.MTGBotUI._resolve_screenname_to_alias(stub, screen)
+        finally:
+            ui.runtime_status.read_status = old_read
+            ui.runtime_file = old_runtime_file
+
+    def test_exact_full_name_beats_a_stale_base_alias(self):
+        configured = [
+            {"name": "First", "screen_name": "Player#11111"},
+            {"name": "Second", "screen_name": "Player#22222"},
+        ]
+        self.assertEqual(
+            self._resolve(
+                "player#22222",
+                configured,
+                {"Player": "First", "Player#22222": "Second"},
+            ),
+            "Second",
+        )
+
+    def test_ambiguous_base_alias_is_not_displayed_as_an_account(self):
+        configured = [
+            {"name": "First", "screen_name": "Player#11111"},
+            {"name": "Second", "screen_name": "Player#22222"},
+        ]
+        self.assertEqual(
+            self._resolve("Player", configured, {"Player": "First"}),
+            "Player",
+        )
+
+    def test_unique_base_name_still_resolves_for_legacy_logs(self):
+        configured = [{"name": "First", "screen_name": "Player#11111"}]
+        self.assertEqual(self._resolve("Player", configured), "First")
+
+    def test_unique_configured_account_beats_a_stale_bare_alias(self):
+        configured = [{"name": "First", "screen_name": "Player#11111"}]
+        self.assertEqual(
+            self._resolve("Player", configured, {"Player": "Stale"}),
+            "First",
+        )
+
+    def test_different_full_discriminator_does_not_use_unique_base_fallback(self):
+        configured = [{"name": "First", "screen_name": "Player#11111"}]
+        self.assertEqual(self._resolve("Player#22222", configured), "Player#22222")
+
+
+class AliasNamespaceTests(unittest.TestCase):
+    """Full identities stay distinct while safe legacy spellings still resolve."""
 
     def test_configured_alias_with_discriminator_still_resolves(self):
         c = make_controller()
@@ -507,7 +560,134 @@ class AliasNamespaceTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 f.write('{"venturaa#12345": "bruno1"}')
             c._load_persisted_aliases()
-            self.assertEqual(c._screenname_to_alias, {"venturaa": "bruno1"})
+            self.assertEqual(c._screenname_to_alias, {"venturaa#12345": "bruno1"})
+        finally:
+            if saved is None:
+                os.remove(path)
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(saved)
+
+    def test_same_base_accounts_keep_distinct_aliases_and_identity_keys(self):
+        c = make_controller()
+        configured = [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player#22222", "screen_name": "Player#22222"},
+        ]
+        c._load_accounts_from_dirs = lambda: list(configured)
+        c._screenname_to_alias = {}
+        c._seed_aliases_from_account_configs()
+
+        self.assertEqual(
+            c._screenname_to_alias,
+            {"Player#11111": "Player#11111", "Player#22222": "Player#22222"},
+        )
+        self.assertNotEqual(
+            c._account_identity_key("Player#11111"),
+            c._account_identity_key("Player#22222"),
+        )
+        self.assertFalse(c._same_account("Player#11111", "Player#22222"))
+
+    def test_duplicate_base_rotation_advances_from_the_actual_account(self):
+        c = make_controller()
+        configured = [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player#22222", "screen_name": "Player#22222"},
+        ]
+        c._load_accounts_from_dirs = lambda: list(configured)
+        c._screenname_to_alias = {}
+        c._seed_aliases_from_account_configs()
+
+        c._current_account_screen_name = "player#11111"
+        self.assertEqual(c._peek_next_account_name(), "Player#22222")
+        c._current_account_screen_name = "PLAYER#22222"
+        self.assertEqual(c._peek_next_account_name(), "Player#11111")
+
+    def test_duplicate_base_accounts_get_separate_gold_and_completion_keys(self):
+        c = make_controller()
+        configured = [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player#22222", "screen_name": "Player#22222"},
+        ]
+        c._load_accounts_from_dirs = lambda: list(configured)
+        c._screenname_to_alias = {}
+        c._seed_aliases_from_account_configs()
+        keys = {c._account_identity_key(a["screen_name"]) for a in configured}
+        c._completed_account_keys.update(keys)
+        for account in configured:
+            c._current_account_screen_name = account["screen_name"]
+            c._register_current_account_for_gold()
+
+        self.assertEqual(len(c._completed_account_keys), 2)
+        self.assertIn("Player#11111", c._gold_farmed_by_account)
+        self.assertIn("Player#22222", c._gold_farmed_by_account)
+
+    def test_unique_base_name_remains_a_legacy_fallback(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: [
+            {"name": "Player#11111", "screen_name": "Player#11111"}
+        ]
+        c._screenname_to_alias = {}
+        c._seed_aliases_from_account_configs()
+
+        self.assertEqual(c._current_account_config_name("Player"), "Player#11111")
+        self.assertTrue(c._same_account("Player", "Player#11111"))
+
+    def test_unique_configured_account_beats_stale_bare_controller_alias(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: [
+            {"name": "First", "screen_name": "Player#11111"}
+        ]
+        c._screenname_to_alias = {"Player": "Stale"}
+
+        self.assertEqual(c._current_account_config_name("Player"), "First")
+        self.assertEqual(c._account_identity_key("Player"), "first")
+        self.assertTrue(c._same_account("Player", "Player#11111"))
+
+    def test_different_full_discriminator_is_not_the_configured_account(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: [
+            {"name": "Player#11111", "screen_name": "Player#11111"}
+        ]
+        c._screenname_to_alias = {}
+        c._seed_aliases_from_account_configs()
+
+        self.assertIsNone(c._current_account_config_name("Player#22222"))
+        self.assertFalse(c._same_account("Player#11111", "Player#22222"))
+        self.assertNotEqual(
+            c._account_identity_key("Player#11111"),
+            c._account_identity_key("Player#22222"),
+        )
+
+    def test_ambiguous_base_name_is_never_guessed(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player#22222", "screen_name": "Player#22222"},
+        ]
+        c._screenname_to_alias = {"Player": "Player#11111"}
+
+        self.assertIsNone(c._current_account_config_name("Player"))
+        self.assertFalse(c._same_account("Player", "Player#11111"))
+
+    def test_ambiguous_legacy_persisted_alias_is_ignored(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player#22222", "screen_name": "Player#22222"},
+        ]
+        c._screenname_to_alias = {}
+        path = c._account_aliases_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        saved = None
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                saved = f.read()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"Player": "Player#11111"}')
+            c._load_persisted_aliases()
+            self.assertEqual(c._screenname_to_alias, {})
         finally:
             if saved is None:
                 os.remove(path)

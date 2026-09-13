@@ -221,6 +221,21 @@ class SaveAccountsKeepsOrderTest(_CMTest):
             ])
         self.assertEqual(os.listdir(self.dir), [])
 
+    def test_duplicate_visible_names_with_full_discriminators_are_saved(self):
+        saved = self.cm.save_managed_accounts([
+            {"name": "Player#11111", "screen_name": "Player#11111", "email": "a@x", "pw": "p"},
+            {"name": "Player#22222", "screen_name": "Player#22222", "email": "b@x", "pw": "p"},
+        ])
+        self.assertEqual([a["name"] for a in saved], ["Player#11111", "Player#22222"])
+
+    def test_ambiguous_hashtag_less_name_is_rejected_before_writing(self):
+        with self.assertRaisesRegex(ValueError, "full #digits discriminator"):
+            self.cm.save_managed_accounts([
+                {"name": "Player", "screen_name": "Player", "email": "a@x", "pw": "p"},
+                {"name": "Player#22222", "screen_name": "Player#22222", "email": "b@x", "pw": "p"},
+            ])
+        self.assertEqual(os.listdir(self.dir), [])
+
     def test_saving_accounts_does_not_drop_an_order_in_arena_spelling(self):
         """save_managed_accounts re-filters the order against what it just wrote.
         An entry already canonical stays; one in the other spelling is rewritten

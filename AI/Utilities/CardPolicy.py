@@ -31,6 +31,23 @@ STRATEGIC_SKIP_GRP_IDS: set[int] = {
     78934, 93677,
 }
 
+# Some spells advertise only their base mana cost in Arena's ActionType_Cast
+# payload, while the client then requires a sacrifice or a higher total mana
+# payment. The AI must reject these before clicking the card when neither route
+# is available; otherwise the unfinished cast blocks the turn behind its prompt.
+# Values are the total mana needed when declining the sacrifice option.
+SACRIFICE_OR_ALTERNATE_TOTAL_MANA: dict[int, int] = {
+    93885: 4,  # Eaten Alive: sacrifice a creature or pay the 3B alternative.
+}
+
+
+def sacrifice_or_alternate_total_mana(grp_id) -> int | None:
+    """Return the non-sacrifice total mana requirement for a known spell."""
+    try:
+        return SACRIFICE_OR_ALTERNATE_TOTAL_MANA.get(int(grp_id))
+    except (TypeError, ValueError):
+        return None
+
 # Oracle-text patterns for effects that pop an unclickable card chooser during
 # resolution. Kept conservative: a "choose one" (a/an/one/... but not "target")
 # from a hidden zone. Extend as we hit more.

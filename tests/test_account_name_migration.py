@@ -133,6 +133,23 @@ class PendingRenameTest(unittest.TestCase):
         self.assertEqual(self.rows(cleared)._collect_pending_renames(), {})
 
 
+class DuplicateBaseNameValidationTest(unittest.TestCase):
+    def test_full_discriminators_allow_duplicate_visible_names(self):
+        accounts = _Dialog([
+            row("Player#11111"),
+            row("Player#22222", email="b@x"),
+        ])._collect_accounts_for_save()
+        self.assertEqual([a["name"] for a in accounts], ["Player#11111", "Player#22222"])
+
+    def test_ambiguous_hashtag_less_name_is_rejected(self):
+        dialog = _Dialog([
+            row("Player"),
+            row("Player#22222", email="b@x"),
+        ])
+        with self.assertRaisesRegex(ValueError, "full Name#digits"):
+            dialog._collect_accounts_for_save()
+
+
 class ApplyRenameTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

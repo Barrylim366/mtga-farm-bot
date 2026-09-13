@@ -81,13 +81,12 @@ class AccountIdentityTest(unittest.TestCase):
         self.assertEqual(self.c._current_account_screen_name, ACCOUNT_B)
         self.assertTrue(self.c._identity_from_config)
 
-    def test_discriminator_is_stripped(self):
-        """Users type the name as Arena shows it, digits and all; every other latch
-        point stores the canonical form, and two spellings split the gold row."""
+    def test_discriminator_is_preserved(self):
+        """The discriminator distinguishes accounts with the same visible name."""
         self.c._latch_identity_from_switch_target(
             {"name": ACCOUNT_B, "screen_name": "TEUBAT#12345"}
         )
-        self.assertEqual(self.c._current_account_screen_name, ACCOUNT_B)
+        self.assertEqual(self.c._current_account_screen_name, "TEUBAT#12345")
 
     def test_a_row_without_an_arena_name_leaves_the_identity_unlatched(self):
         """Rows saved before the Arena name was a field. Claiming an identity we
@@ -144,6 +143,33 @@ class AccountIdentityTest(unittest.TestCase):
             self.c._identity_from_config,
             "the config-derived name was overruled, so it must stop being protected",
         )
+
+    def test_ambiguous_bare_handshake_cannot_overwrite_full_identity(self):
+        configured = [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player#22222", "screen_name": "Player#22222"},
+        ]
+        self.c._load_accounts_from_dirs = lambda: list(configured)
+        self.append(handshake_line("Player#11111"))
+        self.begin_switch()
+        self.c._latch_identity_from_switch_target(configured[1])
+        self.append(handshake_line("Player"))
+
+        self.c._latch_account_screen_name_from(handshake_line("Player"))
+
+        self.assertEqual(self.c._current_account_screen_name, "Player#22222")
+        self.assertTrue(self.c._identity_from_config)
+
+    def test_ambiguous_bare_startup_handshake_is_left_unidentified(self):
+        configured = [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player#22222", "screen_name": "Player#22222"},
+        ]
+        self.c._load_accounts_from_dirs = lambda: list(configured)
+        self.append(handshake_line("Player"))
+
+        self.assertFalse(self.c._refresh_identity_from_login(force=True))
+        self.assertIsNone(self.c._current_account_screen_name)
 
     def test_pinning_an_account_by_hand_drops_the_protection(self):
         """A pin replaces the identity with the user's answer, so it is no longer
@@ -291,6 +317,20 @@ class SwitchFlowIdentityTest(unittest.TestCase):
         self.c._perform_account_switch()
         self.assertIn("b@x", self.c.input.typed)
         self.assertEqual(self.c._current_account_screen_name, ACCOUNT_B)
+
+    def test_real_switch_flow_distinguishes_duplicate_visible_names(self):
+        self.c._current_account_screen_name = "Player#11111"
+        self.accounts = [
+            {"name": "Player#11111", "screen_name": "Player#11111", "email": "first@x", "pw": "p", "folder": "first"},
+            {"name": "Player#22222", "screen_name": "Player#22222", "email": "second@x", "pw": "p", "folder": "second"},
+        ]
+        self.c._screenname_to_alias = {}
+        self.c._seed_aliases_from_account_configs()
+
+        self.c._perform_account_switch()
+
+        self.assertIn("second@x", self.c.input.typed)
+        self.assertEqual(self.c._current_account_screen_name, "Player#22222")
 
 
 class _StubInput:
