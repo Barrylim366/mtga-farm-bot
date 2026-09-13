@@ -2573,13 +2573,20 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # ``Player#11111`` merely because it is the only Player row.
         if "#" in exact:
             return None
-        if self._screen_name_base_is_ambiguous(exact):
+        if ambiguous_bare:
             return None
         base_key = self._screen_name_base(exact).casefold()
         for key, alias in self._screenname_to_alias.items():
             if self._screen_name_base(key).casefold() == base_key and alias:
                 return str(alias)
         return None
+
+    def _resolved_alias_for_screen(self, screen: str | None) -> str | None:
+        """Prefer configured identity facts over previously learned alias keys."""
+        exact = self._canonical_screen_name(screen)
+        if not exact:
+            return None
+        return self._match_configured_alias(exact) or self._mapped_alias_for_screen(exact)
 
     @staticmethod
     def _find_latest_login_screenname(text: str) -> str | None:
@@ -2626,7 +2633,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self._current_account_pinned = True
         self._pin_log_offset = 0 if seeded else self._get_log_size(self._log_path)
         self._pin_reconcile_ts = 0.0
-        if self._mapped_alias_for_screen(screen) is None:
+        if self._resolved_alias_for_screen(screen) is None:
             self._screenname_to_alias[screen] = label
         try:
             self._register_current_account_for_gold()
@@ -2752,7 +2759,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         s = str(screen or "").strip()
         if not s:
             return ""
-        alias = self._mapped_alias_for_screen(s) or self._match_configured_alias(s)
+        alias = self._resolved_alias_for_screen(s)
         return (alias or s).casefold()
 
     def _same_account(self, screen_a: str | None, screen_b: str | None) -> bool:
@@ -2897,7 +2904,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self._register_current_account_for_gold()
             bot_logger.log_info(
                 "Account identity latched from login: '{}' (alias '{}').".format(
-                    owner, self._mapped_alias_for_screen(owner) or "?"
+                    owner, self._resolved_alias_for_screen(owner) or "?"
                 )
             )
             return True
@@ -3049,7 +3056,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         scr = screen if screen is not None else self._current_account_screen_name
         if not scr:
             return None
-        return self._mapped_alias_for_screen(scr) or self._match_configured_alias(scr)
+        return self._resolved_alias_for_screen(scr)
 
     def _select_next_switch_target(self, accounts: list[dict], current_name: str | None):
         """Pick the next account to switch INTO. "Next" is anchored to the CURRENT
@@ -3126,7 +3133,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             cur_screen = self._current_account_screen_name
             current = ""
             if cur_screen:
-                current = self._mapped_alias_for_screen(cur_screen) or cur_screen
+                current = self._resolved_alias_for_screen(cur_screen) or cur_screen
             nxt = self._peek_next_account_name() if self._account_switch_enabled else None
             runtime_status.update_status(
                 current_account=current or "",

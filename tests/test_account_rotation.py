@@ -516,6 +516,13 @@ class AccountDisplayIdentityTests(unittest.TestCase):
         configured = [{"name": "First", "screen_name": "Player#11111"}]
         self.assertEqual(self._resolve("Player", configured), "First")
 
+    def test_unique_configured_account_beats_a_stale_bare_alias(self):
+        configured = [{"name": "First", "screen_name": "Player#11111"}]
+        self.assertEqual(
+            self._resolve("Player", configured, {"Player": "Stale"}),
+            "First",
+        )
+
     def test_different_full_discriminator_does_not_use_unique_base_fallback(self):
         configured = [{"name": "First", "screen_name": "Player#11111"}]
         self.assertEqual(self._resolve("Player#22222", configured), "Player#22222")
@@ -624,6 +631,17 @@ class AliasNamespaceTests(unittest.TestCase):
         c._seed_aliases_from_account_configs()
 
         self.assertEqual(c._current_account_config_name("Player"), "Player#11111")
+        self.assertTrue(c._same_account("Player", "Player#11111"))
+
+    def test_unique_configured_account_beats_stale_bare_controller_alias(self):
+        c = make_controller()
+        c._load_accounts_from_dirs = lambda: [
+            {"name": "First", "screen_name": "Player#11111"}
+        ]
+        c._screenname_to_alias = {"Player": "Stale"}
+
+        self.assertEqual(c._current_account_config_name("Player"), "First")
+        self.assertEqual(c._account_identity_key("Player"), "first")
         self.assertTrue(c._same_account("Player", "Player#11111"))
 
     def test_different_full_discriminator_is_not_the_configured_account(self):

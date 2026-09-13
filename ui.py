@@ -4040,6 +4040,10 @@ class MTGBotUI(tk.Tk):
                 name = str(account.get("name") or "").strip()
                 if name and screen_key in (configured.casefold(), name.casefold()):
                     return name
+            if "#" not in screen and len(base_accounts) == 1:
+                configured_name = str(base_accounts[0].get("name", "")).strip()
+                if configured_name:
+                    return configured_name
             for mapping in (live, persisted):
                 for key, alias in mapping.items():
                     if str(key).strip().casefold() == screen_key and str(alias).strip():
@@ -4048,9 +4052,6 @@ class MTGBotUI(tk.Tk):
         # Only a genuinely hashtag-less value may use the legacy base-name
         # fallback. A different full discriminator identifies a different account.
         if "#" not in screen and len(base_accounts) == 1:
-            configured_name = str(base_accounts[0].get("name", "")).strip()
-            if configured_name:
-                return configured_name
             for mapping in (live, persisted):
                 for key, alias in mapping.items():
                     if str(key).split("#", 1)[0].strip().casefold() == base_key and str(alias).strip():
