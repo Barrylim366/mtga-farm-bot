@@ -6,6 +6,7 @@ import subprocess
 import stat
 import sys
 import time
+import threading
 from dataclasses import dataclass
 
 
@@ -95,6 +96,74 @@ class InputController:
 
     def configure_screen_bounds(self, screen_bounds: tuple[tuple[int, int], tuple[int, int]]) -> None:
         return
+
+
+class ExclusiveInputController(InputController):
+    """Delegate input while allowing a terminal action to take sole ownership.
+
+    Controller timers run concurrently. Cancelling a Timer does not stop a
+    callback which is already executing, so a stalled-match concede needs a
+    gate at the final input boundary as well as the higher-level cancellation
+    flags. Once claimed, calls from every thread except the claiming thread are
+    swallowed until the next-game reset releases the gate.
+    """
+
+    def __init__(self, delegate: InputController) -> None:
+        self._delegate = delegate
+        self._gate_lock = threading.Lock()
+        self._exclusive = False
+        self._owner_ident: int | None = None
+
+    def claim_exclusive_for_current_thread(self) -> None:
+        with self._gate_lock:
+            self._exclusive = True
+            self._owner_ident = threading.get_ident()
+        # A gameplay path may have pressed the mouse just before the claim.
+        # Releasing directly avoids leaving Arena in a drag state.
+        try:
+            self._delegate.left_up()
+        except Exception:
+            pass
+
+    def release_exclusive(self) -> None:
+        with self._gate_lock:
+            self._exclusive = False
+            self._owner_ident = None
+
+    def _allowed(self) -> bool:
+        with self._gate_lock:
+            return not self._exclusive or threading.get_ident() == self._owner_ident
+
+    def move_abs(self, x: int, y: int) -> None:
+        if self._allowed(): return self._delegate.move_abs(x, y)
+    def move_rel(self, dx: int, dy: int) -> None:
+        if self._allowed(): return self._delegate.move_rel(dx, dy)
+    def left_click(self, count: int = 1) -> None:
+        if self._allowed(): return self._delegate.left_click(count)
+    def left_down(self) -> None:
+        if self._allowed(): return self._delegate.left_down()
+    def left_up(self) -> None:
+        if self._allowed(): return self._delegate.left_up()
+    def tap_enter(self) -> None:
+        if self._allowed(): return self._delegate.tap_enter()
+    def tap_shift_enter(self) -> None:
+        if self._allowed(): return self._delegate.tap_shift_enter()
+    def tap_tab(self) -> None:
+        if self._allowed(): return self._delegate.tap_tab()
+    def tap_delete(self) -> None:
+        if self._allowed(): return self._delegate.tap_delete()
+    def type_text(self, text: str) -> None:
+        if self._allowed(): return self._delegate.type_text(text)
+    def tap_escape(self) -> None:
+        if self._allowed(): return self._delegate.tap_escape()
+    def tap_printscreen(self) -> None:
+        if self._allowed(): return self._delegate.tap_printscreen()
+    def tap_win_printscreen(self) -> None:
+        if self._allowed(): return self._delegate.tap_win_printscreen()
+    def position(self) -> Point:
+        return self._delegate.position()
+    def configure_screen_bounds(self, screen_bounds: tuple[tuple[int, int], tuple[int, int]]) -> None:
+        return self._delegate.configure_screen_bounds(screen_bounds)
 
 
 class NullInputController(InputController):

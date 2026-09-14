@@ -90,6 +90,7 @@ def main():
     # Fall back to 1920-relative defaults that match ui.ConfigManager._default_config()
     # so run_bot.py works out of the box on a fresh checkout.
     click_targets: dict = {}
+    auto_concede_stalled_matches = True
     try:
         from runtime_paths import runtime_file  # type: ignore
         cfg_path = runtime_file("config", "calibration_config.json")
@@ -99,6 +100,7 @@ def main():
             loaded_targets = cfg.get("click_targets")
             if isinstance(loaded_targets, dict):
                 click_targets = loaded_targets
+            auto_concede_stalled_matches = cfg.get("auto_concede_stalled_matches") is True
     except Exception:
         click_targets = {}
 
@@ -134,6 +136,7 @@ def main():
             screen_bounds=screen_bounds,
             click_targets=click_targets,
             input_backend=input_backend,
+            auto_concede_stalled_matches=auto_concede_stalled_matches,
         )
         
         print("Initializing AI...")

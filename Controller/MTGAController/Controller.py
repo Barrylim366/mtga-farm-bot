@@ -20,7 +20,12 @@ from Controller.MTGAController.quest_reroll import (
     QuestRerollMixin, replacement_verified, serialized_home_navigation,
 )
 from Controller.Utilities.GameState import GameState
-from Controller.Utilities.input_controller import InputControllerError, create_input_controller
+from Controller.Utilities.input_controller import (
+    ExclusiveInputController,
+    InputControllerError,
+    NullInputController,
+    create_input_controller,
+)
 from actions.actions import run_action
 from actions.navigation_flow import build_post_login_navigation_actions
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
@@ -89,6 +94,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         game_mode: str | None = None,
         gold_per_win: int | None = None,
         account_switch_enabled: bool = True,
+        auto_concede_stalled_matches: bool = False,
     ):
         self.__decision_callback = None
         # Serialises decision EXECUTION. A decision runs for seconds (hand scans
@@ -114,6 +120,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__mulligan_execution_thread = None
         self.__mulligan_decision_armed = False
         self.__inactivity_timer = None
+        # This is deliberately independent of Arena's rope bookkeeping.  It
+        # measures an unchanged Arena-observed local decision context, not mouse
+        # activity or TimerState messages (both of which can repeat forever).
+        self.__auto_concede_stalled_matches = bool(auto_concede_stalled_matches)
+        self.__stall_context_signature = None
+        self.__stall_context_started_at = None
+        self.__stall_watchdog_timer = None
+        self.__stall_concede_threshold_sec = 30.0
+        self.__concession_claimed = False
+        self.__concession_claim_reason = None
+        self.__concession_claim_lock = threading.Lock()
+        self.__concede_completed_event = threading.Event()
         self.__inactivity_timeout = 180  # 3 minutes in seconds
         self.__has_mulled_keep = False
         self.__intro_delay = 15
@@ -196,8 +214,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             #
             # MTGA_BOT_INPUT_BACKEND still overrides, so forcing a real backend
             # without touching the call site remains possible.
-            self.input = create_input_controller(
-                input_backend or os.environ.get("MTGA_BOT_INPUT_BACKEND") or "null"
+            selected_input_backend = input_backend or os.environ.get("MTGA_BOT_INPUT_BACKEND") or "null"
+            created_input = create_input_controller(selected_input_backend)
+            # Live backends are gated so a terminal recovery can atomically stop
+            # already-running retry threads at the final mouse/keyboard boundary.
+            # Keep NullInputController exposed directly for tests and scripts.
+            self.input = (
+                created_input
+                if isinstance(created_input, NullInputController)
+                else ExclusiveInputController(created_input)
             )
         except InputControllerError as e:
             raise RuntimeError(f"Failed to initialize input backend {input_backend!r}: {e}") from e
@@ -5448,6 +5473,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def end_game(self) -> None:
         self._stop_requested = True
+        self.__concede_completed_event.set()
+        self.__clear_stall_watchdog("bot stopped")
         runtime_status.set_mode("stopped", bot_state=str(self._get_state_from_log()))
         # Prevent any future decisions / restarts from firing after a UI stop.
         if self.__decision_execution_thread is not None:
@@ -7035,6 +7062,184 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__inactivity_timer.cancel()
             self.__inactivity_timer = None
 
+    def set_auto_concede_stalled_matches(self, enabled: bool) -> None:
+        """Live opt-in setting from the UI. Disabling is an immediate disarm."""
+        self.__auto_concede_stalled_matches = bool(enabled)
+        if not self.__auto_concede_stalled_matches:
+            self.__clear_stall_watchdog("setting disabled")
+        else:
+            self.__update_stall_watchdog()
+        bot_logger.log_info(
+            "Auto-concede stalled matches {}.".format(
+                "ENABLED" if self.__auto_concede_stalled_matches else "DISABLED"
+            )
+        )
+
+    def get_auto_concede_stalled_matches(self) -> bool:
+        return bool(self.__auto_concede_stalled_matches)
+
+    def __clear_stall_watchdog(self, reason: str) -> None:
+        if self.__stall_watchdog_timer is not None:
+            self.__stall_watchdog_timer.cancel()
+            self.__stall_watchdog_timer = None
+        if self.__stall_context_started_at is not None:
+            bot_logger.log_info(f"STALL_WATCHDOG_CLEARED: {reason}")
+        self.__stall_context_signature = None
+        self.__stall_context_started_at = None
+
+    def __local_stall_signature(self):
+        """A compact state signature.  Never include timer/message/click ids."""
+        if self._stop_requested or self._suppress_selections:
+            return None
+        turn = self.updated_game_state.get_turn_info() or {}
+        my_seat = self.__system_seat_id
+        local_priority = my_seat is not None and turn.get("decisionPlayer") == my_seat
+        prompt_kind = None
+        if self.__has_pending_mulligan_state():
+            prompt_kind = "mulligan"
+        elif self.__pending_card_prompt:
+            prompt_kind = str(self.__pending_card_prompt.get("kind") or "card")
+        elif self.__pending_target_select is not None:
+            prompt_kind = "target"
+        elif self.__pending_select_n is not None or self.__select_n_in_progress:
+            prompt_kind = "select_n"
+        elif self.__should_pause_for_pay_costs():
+            prompt_kind = "pay_costs"
+        elif self.__should_pause_for_assign_damage():
+            prompt_kind = "assign_damage"
+        elif self.__casting_time_options_until > time.time():
+            prompt_kind = "casting_options"
+        if not local_priority and prompt_kind is None:
+            return None
+        try:
+            actions = self.updated_game_state.get_actions() or []
+            action_keys = sorted(
+                str(a.get("actionType") or a.get("type") or a.get("abilityGrpId") or "?")
+                for a in actions if isinstance(a, dict)
+            )
+            zones = []
+            for zone_name in ("ZoneType_Hand", "ZoneType_Battlefield", "ZoneType_Stack", "ZoneType_Pending"):
+                zone = self.updated_game_state.get_zone(zone_name) or {}
+                zones.append((zone_name, tuple(sorted(zone.get("objectInstanceIds", []) or []))))
+            players = tuple(sorted(
+                (p.get("systemSeatNumber"), p.get("lifeTotal"), p.get("pendingMessageType"))
+                for p in (self.updated_game_state.get_players() or []) if isinstance(p, dict)
+            ))
+        except Exception:
+            action_keys, zones, players = [], [], []
+        prompt_identity = ()
+        if isinstance(self.__pending_card_prompt, dict):
+            prompt_identity = (
+                self.__pending_card_prompt.get("kind"),
+                self.__pending_card_prompt.get("source_id"),
+                tuple(sorted(self.__pending_card_prompt.get("ids", []) or [])),
+            )
+        elif isinstance(self.__pending_select_n, dict):
+            prompt_identity = (self.__pending_select_n.get("mode"), tuple(sorted(self.__pending_select_n.get("ids", []) or [])))
+        elif isinstance(self.__pending_target_select, dict):
+            prompt_identity = (self.__pending_target_select.get("source_id"), self.__pending_target_select.get("last_target"))
+        return (prompt_kind, prompt_identity, local_priority, turn.get("turnNumber"), turn.get("phase"), turn.get("step"),
+                tuple(action_keys), tuple(zones), players)
+
+    def __update_stall_watchdog(self) -> None:
+        if not self.__auto_concede_stalled_matches or self.__concession_claimed:
+            self.__clear_stall_watchdog("disabled or concession claimed")
+            return
+        signature = self.__local_stall_signature()
+        if signature is None:
+            self.__clear_stall_watchdog("local responsibility ended")
+            return
+        now = time.monotonic()
+        if signature != self.__stall_context_signature:
+            self.__clear_stall_watchdog("meaningful game progress")
+            self.__stall_context_signature = signature
+            self.__stall_context_started_at = now
+            self.__stall_watchdog_timer = threading.Timer(self.__stall_concede_threshold_sec, self.__attempt_stall_concede)
+            self.__stall_watchdog_timer.daemon = True
+            self.__stall_watchdog_timer.start()
+            bot_logger.log_info("STALL_WATCHDOG_ARMED: local responsibility; 30.0s window started")
+
+    def __claim_concession(self, reason: str) -> bool:
+        # The stall timer and the Arena inactivity timer run on separate
+        # threads, so claiming must be atomic rather than merely a boolean check.
+        with self.__concession_claim_lock:
+            if self._stop_requested or self.__concession_claimed:
+                bot_logger.log_info(f"CONCEDE_CLAIM_REJECTED: {reason}")
+                return False
+            self.__concession_claimed = True
+            self.__concession_claim_reason = reason
+            self.__concede_completed_event.clear()
+        claim_input = getattr(self.input, "claim_exclusive_for_current_thread", None)
+        if callable(claim_input):
+            claim_input()
+        self.__clear_stall_watchdog("concession claimed")
+        self.__cancel_emergency_concede_timer("concession claimed")
+        bot_logger.log_info(f"CONCEDE_CLAIMED: reason={reason}")
+        return True
+
+    def __attempt_stall_concede(self) -> None:
+        self.__stall_watchdog_timer = None
+        if not self.__auto_concede_stalled_matches or self.__stall_context_started_at is None:
+            return
+        age = time.monotonic() - self.__stall_context_started_at
+        if age < self.__stall_concede_threshold_sec - 0.1:
+            return
+        if not self.__claim_concession("stalled_local_context"):
+            return
+        bot_logger.log_info(f"STALL_WATCHDOG_TRIGGERED: age={age:.1f}s reason=stalled_local_context")
+        self.__cancel_pending_decisions_for_concede()
+        self.__run_claimed_concede_sequence("STALL_CONCEDE")
+
+    def __cancel_pending_decisions_for_concede(self) -> None:
+        self._suppress_selections = True
+        for attr in ("_Controller__decision_execution_thread", "_Controller__mulligan_execution_thread", "_Controller__group_resume_timer"):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try: timer.cancel()
+                except Exception: pass
+                setattr(self, attr, None)
+
+    def __perform_concede(self, label: str) -> None:
+        try:
+            runtime_status.set_mode("stuck_suspected", bot_state=str(self._get_state_from_log()))
+            if focus_mtga_window(): time.sleep(0.3)
+            self.input.tap_escape(); time.sleep(0.8)
+            raw = self._loaded_click_targets.get("concede", {})
+            xy = (int(raw.get("x", 962)), int(raw.get("y", 631)))
+            target, source = self._map_abs_point_to_arena(xy, label=f"{label}_BTN", force_reacquire=True, apply_correction=False)
+            if source == "absolute_no_arena":
+                bot_logger.log_error(f"{label}: arena_region unavailable, skipping click")
+                return
+            runtime_status.touch_input(label, target)
+            self.__click_concede_and_confirm(target, label=label)
+        except Exception as exc:
+            bot_logger.log_error(f"{label}: exception: {exc}")
+
+    def __run_claimed_concede_sequence(self, label: str) -> None:
+        """Retry the one claimed terminal action until match completion.
+
+        The one-per-match claim prevents competing recovery coordinators; it is
+        not a one-click limit. A missed menu/button/confirm click must remain in
+        terminal recovery rather than silently returning to normal play.
+        """
+        attempt = 0
+        try:
+            while not self._stop_requested and not self.__concede_completed_event.is_set():
+                attempt += 1
+                bot_logger.log_info(f"{label}: concede sequence attempt {attempt}")
+                self.__perform_concede(f"{label}_{attempt}")
+                if self.__concede_completed_event.wait(timeout=4.0):
+                    break
+                bot_logger.log_error(
+                    f"{label}: match completion not observed after attempt {attempt}; retrying"
+                )
+        finally:
+            # Keep exclusivity through the final confirm/result transition, then
+            # hand input back before the delayed post-match dismissal runs.
+            release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
+            if callable(release_input):
+                release_input()
+
     def __get_running_inactivity_timer_remaining(self) -> float | None:
         remaining_values: list[float] = []
         for timer_state in self.__my_timer_state.values():
@@ -7145,30 +7350,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return
         except Exception:
             pass
+        if not self.__claim_concession("arena_inactivity_emergency"):
+            return
+        self.__emergency_concede_in_progress = True
         try:
-            self.__emergency_concede_in_progress = True
-            bot_logger.log_info("EMERGENCY_CONCEDE: starting ESC+concede sequence")
-            runtime_status.set_mode("stuck_suspected", bot_state=str(self._get_state_from_log()))
-            if focus_mtga_window():
-                time.sleep(0.3)
-            self.input.tap_escape()
-            time.sleep(0.8)
-            concede_raw = self._loaded_click_targets.get("concede", {})
-            concede_xy = (int(concede_raw.get("x", 1714)), int(concede_raw.get("y", 814)))
-            target, source = self._map_abs_point_to_arena(
-                concede_xy,
-                label="EMERGENCY_CONCEDE_BTN",
-                force_reacquire=True,
-                apply_correction=False,
-            )
-            if source == "absolute_no_arena":
-                bot_logger.log_error("EMERGENCY_CONCEDE: arena_region unavailable, skipping click")
-                return
-            bot_logger.log_info(f"EMERGENCY_CONCEDE: clicking concede at {target} (source={source})")
-            runtime_status.touch_input("EMERGENCY_CONCEDE", target)
-            self.__click_concede_and_confirm(target, label="EMERGENCY_CONCEDE")
-        except Exception as exc:
-            bot_logger.log_error(f"EMERGENCY_CONCEDE: exception: {exc}")
+            bot_logger.log_info("EMERGENCY_CONCEDE: starting shared concede sequence")
+            self.__cancel_pending_decisions_for_concede()
+            self.__run_claimed_concede_sequence("EMERGENCY_CONCEDE")
         finally:
             self.__emergency_concede_in_progress = False
 
@@ -7377,6 +7565,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_match_won = None
         self._win_counted_this_match = False
         self.__last_seen_match_id = None
+        self.__concession_claimed = False
+        self.__concession_claim_reason = None
+        self.__concede_completed_event.clear()
+        release_input = getattr(self.input, "release_exclusive", None)
+        if callable(release_input):
+            release_input()
+        self.__clear_stall_watchdog("new game / reset")
         self.__attack_target_required = False
         self.__attack_target_attacker_ids = []
         self._suppress_selections = False
@@ -7417,6 +7612,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     def __reset_live_game_state(self, reason: str, *, preserve_system_seat_id: int | None = None) -> None:
         preserved_seat = preserve_system_seat_id if preserve_system_seat_id is not None else self.__system_seat_id
         self.__has_mulled_keep = False
+        self.__concession_claimed = False
+        self.__concession_claim_reason = None
+        self.__concede_completed_event.clear()
+        release_input = getattr(self.input, "release_exclusive", None)
+        if callable(release_input):
+            release_input()
+        self.__clear_stall_watchdog(f"state reset ({reason})")
         self.__last_match_won = None
         self.__attack_target_required = False
         self.__attack_target_attacker_ids = []
@@ -7596,6 +7798,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__update_game_state(json.loads(line_containing_pattern))
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
+            self.__concede_completed_event.set()
+            self.__clear_stall_watchdog("match completed")
+            self.__concession_claimed = False
+            self.__concession_claim_reason = None
             runtime_status.set_mode(
                 "post_match",
                 bot_state=str(current_state),
@@ -7691,6 +7897,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "CLIENT_EVENT: SetSettingsReq sent — if this follows one of our clicks, that click hit the "
                 "phase strip / stops UI instead of the intended target (misclick signal)."
             )
+
+        # Request handlers above establish prompt state before it becomes part of
+        # the signature. Repeated snapshots and retries leave that signature
+        # unchanged; Arena-observed progress resets its 30-second window.
+        self.__update_stall_watchdog()
 
     def _main_quests_completed_absolute(self) -> int | None:
         """Daily quests this account has completed RIGHT NOW (by bot or human),

@@ -1546,6 +1546,9 @@ class ConfigManager:
             # from the UI, so it only ever happens because they asked for it.
             # Quests mode only; time mode never completes a round.
             "shutdown_pc_when_round_complete": False,
+            # Recovery policy only. Off by default: it concedes only when Arena
+            # has left a locally-owned decision context unchanged for 30 seconds.
+            "auto_concede_stalled_matches": True,
             # Estimated gold credited per match won in the "Current Session"
             # per-account gold list (the real reward is not in the log). 0 = only
             # count completed-quest gold, no per-win estimate.
@@ -1785,6 +1788,13 @@ class ConfigManager:
 
     def set_shutdown_pc_when_round_complete(self, enabled: bool) -> None:
         self.config["shutdown_pc_when_round_complete"] = bool(enabled)
+        self._save_config()
+
+    def get_auto_concede_stalled_matches(self) -> bool:
+        return self.config.get("auto_concede_stalled_matches") is True
+
+    def set_auto_concede_stalled_matches(self, enabled: bool) -> None:
+        self.config["auto_concede_stalled_matches"] = bool(enabled)
         self._save_config()
 
     def get_gold_per_win(self) -> int:
@@ -4512,6 +4522,7 @@ class MTGBotUI(tk.Tk):
             game_mode = self.config_manager.get_game_mode()
             gold_per_win = self.config_manager.get_gold_per_win()
             account_switch_enabled = self.config_manager.get_account_switch_enabled()
+            auto_concede_stalled_matches = self.config_manager.get_auto_concede_stalled_matches()
             bot_logger.log_info(
                 "UI start: init controller log_path={} screen_bounds={} input_backend={} account_switch_minutes={} game_mode={}".format(
                     log_path,
@@ -4531,7 +4542,8 @@ class MTGBotUI(tk.Tk):
                                    account_play_order=account_play_order,
                                    game_mode=game_mode,
                                    gold_per_win=gold_per_win,
-                                   account_switch_enabled=account_switch_enabled)
+                                   account_switch_enabled=account_switch_enabled,
+                                   auto_concede_stalled_matches=auto_concede_stalled_matches)
             self._controller = controller
             # Seed the manually-pinned current account (if the user set one), so
             # rotation starts from the right place even when the log-based detect
@@ -6905,6 +6917,39 @@ class SwitchAccountWindow(tk.Toplevel):
         except Exception:
             pass
 
+    def _build_auto_concede_stall_toggle(self, y: int) -> None:
+        c = self._theme
+        cv = self._canvas
+        self.auto_concede_stall_var = tk.BooleanVar(
+            value=bool(self._config_manager.get_auto_concede_stalled_matches())
+        )
+        box = 14
+        self._stall_box_item = cv.create_rectangle(26, y, 26 + box, y + box, fill=c["entry_bg"], outline=c["widget_border"], width=1)
+        self._stall_tick_item = cv.create_text(26 + box // 2, y + box // 2 - 1, text="X", fill=c["text"], font=("Segoe UI", 10, "bold"), anchor="center")
+        self._stall_label_item = cv.create_text(50, y - 1, text="Auto-concede stalled matches", fill=c["text"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, y + 18, text="(after 30s waiting on local input; recovery only)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        for item in (self._stall_box_item, self._stall_tick_item, self._stall_label_item):
+            cv.tag_bind(item, "<Button-1>", self._toggle_auto_concede_stalled_matches)
+            cv.tag_bind(item, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
+            cv.tag_bind(item, "<Leave>", lambda _e: cv.configure(cursor=""))
+        self._refresh_auto_concede_stall_toggle_state()
+
+    def _toggle_auto_concede_stalled_matches(self, _event=None) -> None:
+        enabled = not bool(self.auto_concede_stall_var.get())
+        self._config_manager.set_auto_concede_stalled_matches(enabled)
+        self.auto_concede_stall_var.set(bool(self._config_manager.get_auto_concede_stalled_matches()))
+        parent_ui = getattr(self, "master", None)
+        controller = getattr(parent_ui, "_controller", None)
+        if controller is not None and hasattr(controller, "set_auto_concede_stalled_matches"):
+            controller.set_auto_concede_stalled_matches(self.auto_concede_stall_var.get())
+        self._refresh_auto_concede_stall_toggle_state()
+
+    def _refresh_auto_concede_stall_toggle_state(self) -> None:
+        try:
+            self._canvas.itemconfigure(self._stall_tick_item, state="normal" if self.auto_concede_stall_var.get() else "hidden")
+        except Exception:
+            pass
+
     def _build_ui(self):
         c = self._theme
         cv = self._canvas
@@ -6961,6 +7006,7 @@ class SwitchAccountWindow(tk.Toplevel):
         # rather than in the general settings because it only ever fires on the
         # end of an account rotation, which is configured in this very block.
         self._build_shutdown_toggle(y=106)
+        self._build_auto_concede_stall_toggle(y=138)
 
         cv.create_text(26, 178, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
         cv.create_text(26, 206, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
