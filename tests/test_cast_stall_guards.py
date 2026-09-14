@@ -22,6 +22,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -226,6 +227,41 @@ class HandScanRefusesDesktopTest(unittest.TestCase):
         p1, p2 = c._get_hand_scan_points_mapped()
         self.assertIsNotNone(p1)
         self.assertIsNotNone(p2)
+
+    def test_wrong_sized_live_window_never_reuses_stale_hand_coordinates(self):
+        """A moved/resized MTGA window must abort rather than sweep its old hand row."""
+        c = make_controller()
+        c._arena_region = None
+        c._last_good_arena_region = (429, 156, 1920, 1080)
+        c._last_good_arena_region_ts = 1.0
+        c._should_reuse_cached_arena_region = lambda: True
+        c._arena_region_provider = SimpleNamespace(
+            reacquire=lambda: None,
+            acquire=lambda: None,
+            last_detection_result=SimpleNamespace(code="window_wrong_size"),
+        )
+        # make_controller uses fixed points for ordinary sweep tests; exercise
+        # the real mapping path for this stale-geometry regression.
+        c._get_hand_scan_points_mapped = Controller._get_hand_scan_points_mapped.__get__(c, Controller)
+        self.assertIsNone(c._ensure_arena_region(force_reacquire=True))
+        with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False):
+            self.assertFalse(c._cast_once(999))
+        self.assertEqual(c.input.moves, [], "a geometry mismatch must not start a hand sweep")
+
+    def test_anchor_miss_can_still_reuse_recent_region_in_game(self):
+        """Only known geometry failures block the intentional in-game cache fallback."""
+        c = make_controller()
+        cached = (429, 156, 1920, 1080)
+        c._arena_region = None
+        c._last_good_arena_region = cached
+        c._last_good_arena_region_ts = 1.0
+        c._should_reuse_cached_arena_region = lambda: True
+        c._arena_region_provider = SimpleNamespace(
+            reacquire=lambda: None,
+            acquire=lambda: None,
+            last_detection_result=SimpleNamespace(code="anchor_not_found"),
+        )
+        self.assertEqual(c._ensure_arena_region(force_reacquire=True), cached)
 
 
 class _StubController:
