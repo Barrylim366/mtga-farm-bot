@@ -391,6 +391,10 @@ A `SCAN_STOPPED` together with `is_mtga: false` means the sweep never reached th
 
 Measured across 31 such failures: focus was **never** the cause (`is_mtga: true` in all 31). The mean brightness of the hand zone in each bundle's `arena_region.png` splits them into three groups instead, and two have a known cause that the bot now clears:
 
+The cast scanner also avoids reactivating MTGA when its verified `MTGA.exe` window is already in the foreground. Redundant Windows `ShowWindow`/`BringWindowToTop`/`SetActiveWindow` calls are the leading suspect in a captured long-session failure where cast sweeps received no events, but the select-N scanner reported every card seconds later across the same hand row. The bot still requests focus when another application owns the foreground or the foreground process cannot be verified.
+
+Starter-event navigation does not start while matchmaking or gameplay owns the screen. Its announcement-recovery path also rechecks after the slow image probe and immediately before ESC, covering a match transition during that probe or its focus-settle window. This prevents ESC from opening Options underneath the mulligan handler, where the fixed Keep Hand coordinate would otherwise click the `Report Player` link and strand the match behind that dialog.
+
 | brightness | share | cause |
 |---|---|---|
 | 2.8–4.4 | 5/31 | Arena's "Report a Player" dialog, open mid-match |

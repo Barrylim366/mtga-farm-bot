@@ -4340,13 +4340,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         Deck Duel banner on the left. Every click is done through
         _click_image_in_scaled_arena_region, so all ROIs are 1920x1080 arena
         references scaled to the real arena -> resolution independent. Template
-        matching also makes the flow self-limiting: if we are already in
-        matchmaking or in a game, the buttons are not on screen and each step
-        returns without disrupting anything.
+        The entry guard keeps an already active matchmaking/game screen out of
+        this flow; the announcement ESC fallback adds its own late checks because
+        its slow image probe can overlap the actual transition into mulligan.
         """
-        if self._stop_requested:
-            return False
-        if self._get_state_from_log() == BotState.IN_GAME:
+        if self._stop_requested or self._starter_navigation_must_yield_to_match():
             return False
 
         # A post-match reward popup covers the Play/Events controls; clear it
@@ -4873,6 +4871,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # window, so the apparent size goes as 1920/W.
     _ANNOUNCEMENT_SCALES = tuple(round(0.45 + 0.05 * i, 2) for i in range(32))
 
+    def _starter_navigation_must_yield_to_match(self) -> bool:
+        """True once matchmaking/gameplay owns the UI instead of navigation."""
+        if self.__mulligan_decision_armed:
+            return True
+        try:
+            return self._get_state_from_log() in (BotState.FIND_MATCH, BotState.IN_GAME)
+        except Exception:
+            return False
+
     def _dismiss_blocking_announcement(self, context: str) -> bool:
         """Clear a post-login announcement that covers the whole UI. True if we
         did something and the caller should re-read the screen.
@@ -4896,7 +4903,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         Options overlay. Callers must only use this once every navigation anchor
         has been ruled out.
         """
-        if self._stop_requested:
+        if self._stop_requested or self._starter_navigation_must_yield_to_match():
             return False
         okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
         if os.path.exists(okay_img):
@@ -4906,16 +4913,37 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 scales=list(self._ANNOUNCEMENT_SCALES),
             )
             if point is not None:
+                if self._starter_navigation_must_yield_to_match():
+                    bot_logger.log_info(
+                        f"{context}: match became active during announcement probe; yielding UI."
+                    )
+                    return False
                 bot_logger.log_info(
                     f"{context}: announcement popup detected; clicking Okay at {point}."
                 )
                 self._click_abs(point[0], point[1], f"{context}_ANNOUNCE_OKAY")
                 time.sleep(1.5)
                 return True
+        # Template probes can take several seconds. A match may join and arm its
+        # mulligan callback while they run; pressing ESC after that opens Options,
+        # and the fixed Keep Hand click lands on Options' Report Player link.
+        if self._starter_navigation_must_yield_to_match():
+            bot_logger.log_info(
+                f"{context}: match became active during announcement probe; not pressing ESC."
+            )
+            return False
         # No acknowledge button. ESC closes the promo overlays; do NOT click their
         # "Get Started!"-style button, which goes to the Store.
         if focus_mtga_window():
             time.sleep(0.2)
+        # The focus request/settle above is another scheduling window in which
+        # the log monitor can observe the joined match and arm mulligan. This is
+        # the final gate immediately before the destructive ESC action.
+        if self._starter_navigation_must_yield_to_match():
+            bot_logger.log_info(
+                f"{context}: match became active while focusing MTGA; not pressing ESC."
+            )
+            return False
         bot_logger.log_info(
             f"{context}: no anchor and no Okay button; pressing ESC to clear a possible overlay."
         )
@@ -5691,7 +5719,17 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # the whole hand, hovers NOTHING, and the cast fails -- the bot then
             # sat 36s burning the rope with Valorous Stance stuck in hand at 3
             # life. Focus MTGA first, exactly like the logout ESC path does.
-            focus_mtga_window()
+            # Do not reactivate an MTGA window that already owns the foreground.
+            # ShowWindow/BringWindowToTop/SetActiveWindow is not a harmless no-op
+            # for Unity: in a long live session we observed three cast sweeps get
+            # zero hover events with that sequence in the path, while the
+            # select-N hand sweep (which does not refocus) reported every card a
+            # few seconds later over the identical row. This makes redundant
+            # activation the strongest remaining suspect. Only ask Windows for
+            # a focus transition when another window actually owns it.
+            foreground = _describe_foreground_window()
+            if foreground.get("is_mtga") is not True:
+                focus_mtga_window()
             # NOTE: an "Are You Sure?" confirm dialog, if present, is probed for
             # reactively in cast() after a failed attempt -- not here. See the
             # comment in cast() for why running that scan up front on every

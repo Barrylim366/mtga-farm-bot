@@ -933,7 +933,7 @@ def focus_mtga_window(expected_size: tuple[int, int] = (1920, 1080)) -> bool:
 
 
 def _describe_foreground_window() -> dict[str, Any]:
-    """Who owns the foreground right now, and is it MTGA? Diagnostics only.
+    """Who owns the foreground right now, and is it the MTGA process?
 
     Unity delivers no hover events to an unfocused window, so this is the one
     fact that separates "the hand sweep found nothing" from "the sweep never
@@ -945,13 +945,15 @@ def _describe_foreground_window() -> dict[str, Any]:
     try:
         hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
         title = _get_window_title_windows(hwnd)
-        low = title.lower()
         info["hwnd"] = hwnd
         info["title"] = title
+        exe_name = _get_process_exe_name_windows(hwnd)
+        # A browser tab or chat window can contain "MTGA" in its title. This
+        # value now controls whether the cast path skips foreground recovery, so
+        # only the actual game executable may produce True. Unknown stays None
+        # and therefore takes the safe focus/recovery path.
         info["is_mtga"] = (
-            "mtga" in low
-            or "magic: the gathering arena" in low
-            or "magic the gathering arena" in low
+            exe_name.lower() == "mtga.exe" if exe_name is not None else None
         )
     except Exception:
         pass

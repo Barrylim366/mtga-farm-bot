@@ -263,6 +263,40 @@ class HandScanRefusesDesktopTest(unittest.TestCase):
         )
         self.assertEqual(c._ensure_arena_region(force_reacquire=True), cached)
 
+    def test_cast_does_not_reactivate_an_already_foreground_mtga_window(self):
+        """A redundant Win32 activation can make Unity drop injected hover events."""
+        self.c._get_hand_scan_points_mapped = lambda **k: (None, None)
+        with patch(
+            "Controller.MTGAController.Controller._describe_foreground_window",
+            return_value={"hwnd": 123, "title": "MTGA", "is_mtga": True},
+        ), patch(
+            "Controller.MTGAController.Controller.focus_mtga_window"
+        ) as focus:
+            self.assertFalse(self.c._cast_once(999))
+        focus.assert_not_called()
+
+    def test_title_only_mtga_window_still_triggers_verified_focus_recovery(self):
+        self.c._get_hand_scan_points_mapped = lambda **k: (None, None)
+        with patch(
+            "Controller.MTGAController.Controller._describe_foreground_window",
+            return_value={"hwnd": 456, "title": "MTGA issue - Browser", "is_mtga": False},
+        ), patch(
+            "Controller.MTGAController.Controller.focus_mtga_window"
+        ) as focus:
+            self.assertFalse(self.c._cast_once(999))
+        focus.assert_called_once_with()
+
+    def test_unknown_foreground_identity_still_triggers_focus_recovery(self):
+        self.c._get_hand_scan_points_mapped = lambda **k: (None, None)
+        with patch(
+            "Controller.MTGAController.Controller._describe_foreground_window",
+            return_value={"hwnd": 456, "title": "", "is_mtga": None},
+        ), patch(
+            "Controller.MTGAController.Controller.focus_mtga_window"
+        ) as focus:
+            self.assertFalse(self.c._cast_once(999))
+        focus.assert_called_once_with()
+
 
 class _StubController:
     """Only what Game.decision_method touches for a cast move."""
