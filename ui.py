@@ -1546,7 +1546,7 @@ class ConfigManager:
             # from the UI, so it only ever happens because they asked for it.
             # Quests mode only; time mode never completes a round.
             "shutdown_pc_when_round_complete": False,
-            # Recovery policy only. Off by default: it concedes only when Arena
+            # Recovery policy. Enabled by default: it concedes only when Arena
             # has left a locally-owned decision context unchanged for 30 seconds.
             "auto_concede_stalled_matches": True,
             # Estimated gold credited per match won in the "Current Session"
@@ -5447,6 +5447,12 @@ class SettingsWindow(tk.Toplevel):
             style_name="Secondary.TButton",
         )
         self._create_settings_canvas_button(
+            "behavior",
+            "Bot Behavior",
+            self._open_bot_behavior_window,
+            style_name="Secondary.TButton",
+        )
+        self._create_settings_canvas_button(
             "record",
             "Record Action",
             self._open_record_actions_window,
@@ -5663,6 +5669,16 @@ class SettingsWindow(tk.Toplevel):
             return
         self._open_replacement_subwindow(
             lambda xy: parent_ui._open_ui_settings(
+                spawn_xy=xy,
+                on_close=self._restore_after_subwindow_close,
+            )
+        )
+
+    def _open_bot_behavior_window(self):
+        self._open_replacement_subwindow(
+            lambda xy: BotBehaviorWindow(
+                self,
+                self._config_manager,
                 spawn_xy=xy,
                 on_close=self._restore_after_subwindow_close,
             )
@@ -6026,6 +6042,87 @@ class SettingsWindow(tk.Toplevel):
                 self._stop_recording()
         finally:
             super().destroy()
+
+
+class BotBehaviorWindow(tk.Toplevel):
+    """Small home for live gameplay/recovery policies.
+
+    This is deliberately separate from account rotation: the setting applies to
+    the current match, whether or not account switching is configured.
+    """
+
+    def __init__(self, parent: SettingsWindow, config_manager: ConfigManager,
+                 spawn_xy: tuple[int, int] | None = None, on_close=None):
+        super().__init__(parent)
+        self._parent = parent
+        self._config_manager = config_manager
+        self._on_close_callback = on_close
+        self._ui_scale = _get_ui_scale_from_widget(parent)
+        self.title("Bot Behavior")
+        width, height = self._s(460), self._s(280)
+        parent.update_idletasks()
+        if spawn_xy is not None:
+            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+        else:
+            x, y = parent.winfo_x(), parent.winfo_rooty() + parent.winfo_height()
+        x = min(max(0, x), max(0, self.winfo_screenwidth() - width))
+        y = min(max(0, y), max(0, self.winfo_screenheight() - height))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.resizable(False, False)
+        self.configure(bg="#0F1115")
+        _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
+
+        self._enabled = tk.BooleanVar(
+            value=bool(self._config_manager.get_auto_concede_stalled_matches())
+        )
+        panel = tk.Frame(self, bg="#121923", highlightbackground="#4B628A", highlightthickness=1)
+        panel.pack(fill=tk.BOTH, expand=True, padx=self._s(22), pady=self._s(22))
+        tk.Label(
+            panel, text="Match recovery", bg="#121923", fg="#E7EAF0",
+            font=("Segoe UI", max(11, self._s(13)), "bold"), anchor="w",
+        ).pack(fill=tk.X, padx=self._s(18), pady=(self._s(18), self._s(8)))
+        toggle = tk.Checkbutton(
+            panel, text="Auto-concede stalled matches", variable=self._enabled,
+            command=self._apply_auto_concede_setting, bg="#121923", fg="#E7EAF0",
+            activebackground="#121923", activeforeground="#E7EAF0",
+            selectcolor="#3D130E", font=("Segoe UI", max(9, self._s(10)), "bold"),
+            anchor="w", padx=0,
+        )
+        toggle.pack(fill=tk.X, padx=self._s(18), pady=(0, self._s(4)))
+        tk.Label(
+            panel,
+            text="Concede when Arena waits 30 seconds for bot input without game progress.\nChanges apply immediately.",
+            justify=tk.LEFT, bg="#121923", fg="#9AA3B2",
+            font=("Segoe UI", max(8, self._s(9))), anchor="w",
+        ).pack(fill=tk.X, padx=self._s(42), pady=(0, self._s(14)))
+        tk.Button(
+            panel, text="Back", command=self.destroy, bg="#1B2230", fg="#F2F6FF",
+            activebackground="#253041", activeforeground="#FFFFFF", relief=tk.FLAT,
+            font=("Segoe UI", max(9, self._s(10)), "bold"), cursor="hand2",
+        ).pack(anchor="e", padx=self._s(18), pady=(0, self._s(16)))
+
+    def _s(self, value: int | float) -> int:
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def _apply_auto_concede_setting(self) -> None:
+        enabled = bool(self._enabled.get())
+        self._config_manager.set_auto_concede_stalled_matches(enabled)
+        # Read back the persisted value in case saving failed before presenting
+        # the state as applied to the running bot.
+        enabled = bool(self._config_manager.get_auto_concede_stalled_matches())
+        self._enabled.set(enabled)
+        app = getattr(self._parent, "master", None)
+        controller = getattr(app, "_controller", None)
+        if controller is not None and hasattr(controller, "set_auto_concede_stalled_matches"):
+            controller.set_auto_concede_stalled_matches(enabled)
+
+    def destroy(self):
+        callback = self._on_close_callback
+        try:
+            super().destroy()
+        finally:
+            if callable(callback):
+                callback()
 
 
 class UISettingsWindow(tk.Toplevel):
@@ -6917,39 +7014,6 @@ class SwitchAccountWindow(tk.Toplevel):
         except Exception:
             pass
 
-    def _build_auto_concede_stall_toggle(self, y: int) -> None:
-        c = self._theme
-        cv = self._canvas
-        self.auto_concede_stall_var = tk.BooleanVar(
-            value=bool(self._config_manager.get_auto_concede_stalled_matches())
-        )
-        box = 14
-        self._stall_box_item = cv.create_rectangle(26, y, 26 + box, y + box, fill=c["entry_bg"], outline=c["widget_border"], width=1)
-        self._stall_tick_item = cv.create_text(26 + box // 2, y + box // 2 - 1, text="X", fill=c["text"], font=("Segoe UI", 10, "bold"), anchor="center")
-        self._stall_label_item = cv.create_text(50, y - 1, text="Auto-concede stalled matches", fill=c["text"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(26, y + 18, text="(after 30s waiting on local input; recovery only)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
-        for item in (self._stall_box_item, self._stall_tick_item, self._stall_label_item):
-            cv.tag_bind(item, "<Button-1>", self._toggle_auto_concede_stalled_matches)
-            cv.tag_bind(item, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
-            cv.tag_bind(item, "<Leave>", lambda _e: cv.configure(cursor=""))
-        self._refresh_auto_concede_stall_toggle_state()
-
-    def _toggle_auto_concede_stalled_matches(self, _event=None) -> None:
-        enabled = not bool(self.auto_concede_stall_var.get())
-        self._config_manager.set_auto_concede_stalled_matches(enabled)
-        self.auto_concede_stall_var.set(bool(self._config_manager.get_auto_concede_stalled_matches()))
-        parent_ui = getattr(self, "master", None)
-        controller = getattr(parent_ui, "_controller", None)
-        if controller is not None and hasattr(controller, "set_auto_concede_stalled_matches"):
-            controller.set_auto_concede_stalled_matches(self.auto_concede_stall_var.get())
-        self._refresh_auto_concede_stall_toggle_state()
-
-    def _refresh_auto_concede_stall_toggle_state(self) -> None:
-        try:
-            self._canvas.itemconfigure(self._stall_tick_item, state="normal" if self.auto_concede_stall_var.get() else "hidden")
-        except Exception:
-            pass
-
     def _build_ui(self):
         c = self._theme
         cv = self._canvas
@@ -7006,7 +7070,6 @@ class SwitchAccountWindow(tk.Toplevel):
         # rather than in the general settings because it only ever fires on the
         # end of an account rotation, which is configured in this very block.
         self._build_shutdown_toggle(y=106)
-        self._build_auto_concede_stall_toggle(y=138)
 
         cv.create_text(26, 178, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
         cv.create_text(26, 206, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
