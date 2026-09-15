@@ -3456,10 +3456,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # and quests exactly, no estimate).
         self._update_gold_from_inventory()
 
-        # Active quest = the one whose colors we play. Mirror _select_best_quest:
-        # the highest-gold guild (two-color) quest -- but skip quests already at
-        # their goal so the bot switches to an unfinished quest instead of grinding
-        # a completed one forever. Fall back to all guild quests if every one is done.
+        # Active quest = the highest-gold unfinished guild quest. Once all quests
+        # are complete, starter mode uses its dedicated WB farming fallback.
         active_id = ""
         active_colors = ""
         guild_entries = [v for v in view if v.get("colors")]
@@ -3467,9 +3465,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             v for v in guild_entries
             if not v.get("goal") or v.get("progress", 0) < v.get("goal", 0)
         ]
-        quest_pool = incomplete_guild or guild_entries
-        if quest_pool:
-            best = max(quest_pool, key=lambda v: v.get("gold", 0))
+        if incomplete_guild:
+            best = max(incomplete_guild, key=lambda v: v.get("gold", 0))
             active_id = best.get("id", "")
             active_colors = best.get("colors", "")
 
@@ -4530,9 +4527,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         Prefers the locally cached quests (parsed once at startup / between
         matches) so we don't re-parse the player.log on every queue cycle; falls
-        back to a live parse if the cache is empty. Returns an empty string when
-        there is no concrete two-color target (keep the current deck).
+        back to a live parse if the cache is empty. A valid completed quest list
+        selects WB; without a confirmed target, the current deck is kept.
         """
+        if (self._last_valid_quest_active_incomplete == 0
+                and self._quest_count_confirmed_fresh):
+            bot_logger.log_info("Starter: all daily quests complete; selecting WB fallback deck.")
+            return "WB"
         if self._cached_quests:
             if self._cached_active_colors:
                 bot_logger.log_info(

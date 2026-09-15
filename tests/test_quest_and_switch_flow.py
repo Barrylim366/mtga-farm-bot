@@ -165,6 +165,39 @@ class QuestReadGateTests(_QuestLogTestBase):
 class QuestTargetSelectionTests(_QuestLogTestBase):
     """The colors the starter-deck swap is driven with."""
 
+    def test_completed_quests_select_wb_fallback(self):
+        done = json.loads(quests_block(SIMIC).split(" ", 2)[2])["quests"][0]
+        done["endingProgress"] = 20
+        self.append("<== QuestGetQuests " + json.dumps({"quests": [done]}) + "\n")
+        self.controller.refresh_quests_cache()
+        self.assertEqual(self.controller._last_valid_quest_active_incomplete, 0)
+        self.controller._quest_count_confirmed_fresh = True
+        self.assertEqual(self.controller._resolve_starter_target_colors(), "WB")
+        self.assertEqual(
+            os.path.basename(self.controller._choose_starter_deck_template("WB")).upper(),
+            "WB.PNG",
+        )
+
+    def test_empty_quest_list_selects_wb_but_unreadable_list_does_not(self):
+        self.assertEqual(self.controller._resolve_starter_target_colors(), "")
+        self.append('<== QuestGetQuests {"quests": []}\n')
+        self.controller.refresh_quests_cache()
+        self.controller._quest_count_confirmed_fresh = True
+        self.assertEqual(self.controller._resolve_starter_target_colors(), "WB")
+
+    def test_stale_empty_quest_block_does_not_select_wb(self):
+        self.append('<== QuestGetQuests {"quests": []}\n')
+        self.controller._quests_authoritative_floor = os.path.getsize(self.log_path)
+        self.controller.refresh_quests_cache()
+        self.assertEqual(self.controller._last_valid_quest_active_incomplete, 0)
+        self.assertFalse(self.controller._quest_count_confirmed_fresh)
+        self.assertEqual(self.controller._resolve_starter_target_colors(), "")
+
+    def test_unfinished_quest_still_takes_priority(self):
+        self.append(quests_block(SIMIC))
+        self.controller.refresh_quests_cache()
+        self.assertEqual(self.controller._resolve_starter_target_colors(), "UG")
+
     def test_completed_guild_quest_is_not_selected_while_another_is_open(self):
         """The live parse (used whenever the cache is empty) must not keep
         farming a quest that is already at its goal."""
