@@ -1,4 +1,5 @@
 import copy
+import json
 import threading
 import unittest
 from unittest import mock
@@ -124,6 +125,71 @@ class StallTimerRaceTest(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
+
+
+class _FakeTimer:
+    def __init__(self, _delay, _callback):
+        self.daemon = False
+        self.cancelled = False
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class StallSoakTelemetryTest(StallSignatureTest):
+    def setUp(self):
+        super().setUp()
+        self.controller._Controller__auto_concede_stalled_matches = True
+        self.controller._Controller__concession_claimed = False
+        self.controller._Controller__stall_context_signature = None
+        self.controller._Controller__stall_context_started_at = None
+        self.controller._Controller__stall_watchdog_timer = None
+        self.controller._Controller__stall_concede_threshold_sec = 30.0
+        self.controller._Controller__soak_stall_arm_id = 0
+        self.controller._Controller__soak_stall_updates = 0
+        self.controller._Controller__soak_stall_heartbeat_bucket = 0
+        self.controller._Controller__soak_stall_reset_total = 0
+
+    @staticmethod
+    def _events(log_info):
+        prefix = "[SOAK_STALL_V1] "
+        return [
+            json.loads(call.args[0][len(prefix):])
+            for call in log_info.call_args_list
+            if call.args and call.args[0].startswith(prefix)
+        ]
+
+    def test_arm_heartbeat_and_progress_reset_are_machine_readable(self):
+        state = _state()
+        self.controller.updated_game_state = GameState(state)
+
+        with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer), \
+             mock.patch("Controller.MTGAController.Controller.bot_logger.log_info") as log_info, \
+             mock.patch("Controller.MTGAController.Controller.time.monotonic", side_effect=[100.0, 106.0, 107.0, 107.0]):
+            self.controller._Controller__update_stall_watchdog()
+            self.controller._Controller__update_stall_watchdog()
+            changed = copy.deepcopy(state)
+            changed["gameObjects"][2]["tapped"] = True
+            self.controller.updated_game_state = GameState(changed)
+            self.controller._Controller__update_stall_watchdog()
+
+        events = self._events(log_info)
+        self.assertEqual([event["event"] for event in events], ["armed", "unchanged", "cleared", "armed"])
+        self.assertEqual(events[1]["age_sec"], 6.0)
+        self.assertEqual(events[1]["signature"], events[0]["signature"])
+        self.assertIn("zone_objects", events[3]["changed"])
+        self.assertNotEqual(events[3]["signature"], events[0]["signature"])
+        self.assertEqual(events[2]["reason"], "meaningful game progress")
+
+    def test_signature_digest_is_stable_and_compact(self):
+        signature = self.signature(_state())
+        digest = self.controller._Controller__soak_stall_signature_digest(signature)
+
+        self.assertEqual(digest, self.controller._Controller__soak_stall_signature_digest(signature))
+        self.assertRegex(digest, r"^[0-9a-f]{16}$")
 
 
 if __name__ == "__main__":

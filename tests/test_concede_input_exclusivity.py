@@ -1,5 +1,6 @@
 import threading
 import unittest
+from unittest import mock
 
 from Controller.MTGAController.Controller import Controller
 from Controller.Utilities.input_controller import ExclusiveInputController, NullInputController
@@ -51,6 +52,39 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         controller._Controller__run_claimed_concede_sequence("STALL_CONCEDE")
 
         self.assertEqual(attempts, ["STALL_CONCEDE_1", "STALL_CONCEDE_2"])
+
+    def test_soak_log_distinguishes_timeout_from_successful_recovery(self):
+        class CompletesOnSecondWait:
+            def __init__(self):
+                self.completed = False
+                self.waits = 0
+
+            def is_set(self):
+                return self.completed
+
+            def wait(self, timeout):
+                self.waits += 1
+                self.completed = self.waits == 2
+                return self.completed
+
+        controller = Controller.__new__(Controller)
+        controller._stop_requested = False
+        controller._Controller__concede_completed_event = CompletesOnSecondWait()
+        controller._Controller__concession_claim_reason = "stalled_local_context"
+        controller._Controller__soak_concede_claimed_at = 10.0
+        controller._Controller__soak_concede_attempts = 0
+        controller._Controller__perform_concede = lambda _label: None
+        controller.input = NullInputController()
+
+        with mock.patch("Controller.MTGAController.Controller.time.monotonic", return_value=15.0), \
+             mock.patch("Controller.MTGAController.Controller.bot_logger.log_info") as log_info:
+            controller._Controller__run_claimed_concede_sequence("STALL_CONCEDE")
+
+        messages = [call.args[0] for call in log_info.call_args_list if call.args]
+        soak_messages = [message for message in messages if message.startswith("[SOAK_STALL_V1] ")]
+        self.assertTrue(any('"event":"concede_attempt_timeout"' in message for message in soak_messages))
+        self.assertTrue(any('"event":"recovery_observed"' in message for message in soak_messages))
+        self.assertTrue(any('"attempts":2' in message for message in soak_messages))
 
 
 if __name__ == "__main__":
