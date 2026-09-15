@@ -28,6 +28,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import runtime_status
+from actions import navigation_flow
 from Controller.MTGAController.Controller import Controller
 from state.state_machine import BotState
 
@@ -120,7 +121,7 @@ class _HistoricTestBase(unittest.TestCase):
         self.on_screen = {"RW.png", "BG.png", "B.png"}
         self.clicked_decks = []
 
-        def click_image(path, label):
+        def click_image(path, label, **kwargs):
             base = os.path.basename(path)
             if base in self.on_screen:
                 self.clicked_decks.append(base)
@@ -551,6 +552,193 @@ class HistoricQueueGateTests(_HistoricTestBase):
         self.controller.start_game_from_home_screen()
         self.assertEqual(calls, ["starter"])
         self.assertFalse(self.controller.input.clicked)
+
+
+class SelectedDeckVariantTests(_HistoricTestBase):
+    """A deck the bot already selected must be recognised, not re-clicked.
+
+    MTGA lifts and outlines the selected deck tile and replaces its art with a
+    fanned card spread, so a thumbnail captured from the normal grid scores ~0.44
+    against the very deck the bot itself just picked. Measured live 2026-09-15:
+    the bot selected R for its RW quest, then refused to queue because it could
+    not recognise its own selection. An optional "<name>.sel.png" is that
+    selected-state capture."""
+
+    def setUp(self):
+        super().setUp()
+        # Exactly one deck plus its selected-state capture, so the choice is
+        # unambiguous and the test is about recognition, not about scoring.
+        for name in os.listdir(self.account_dir):
+            os.unlink(os.path.join(self.account_dir, name))
+        for name in ("R.png", "R.sel.png"):
+            with open(os.path.join(self.account_dir, name), "wb") as fh:
+                fh.write(b"")
+        self.on_screen = {"R.png"}
+        self.append(quests_block("Quests/Quest_Rakdos_Headliner"))   # RB -> R.png
+        self.probes = []
+
+    def _arm_selected(self, found: bool):
+        def probe(path, label, **kw):
+            self.probes.append((os.path.basename(path), label))
+            return (100, 100) if found else None
+        self.controller._locate_image_center_in_scaled_arena_region = probe
+
+    def test_already_selected_deck_is_not_clicked_again(self):
+        self.arm_navigation()
+        self._arm_selected(True)
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(self.clicked_decks, [], "clicking again would deselect it")
+        self.assertIn(("R.sel.png", "HISTORIC_DECK_ALREADY_SELECTED"), self.probes)
+
+    def test_unselected_deck_is_still_clicked(self):
+        self.arm_navigation()
+        self._arm_selected(False)
+        # arm_navigation's probe stub is replaced above, so re-arm the final
+        # screen verification through the same probe (it returns None), which
+        # would fail the run -- keep the anchor check satisfied instead.
+        self.controller._historic_selection_screen_verified = lambda: True
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(self.clicked_decks, ["R.png"])
+
+    def test_selected_variant_is_never_offered_as_a_deck_choice(self):
+        """It carries the same colour letters as the real thumbnail."""
+        chosen = self.controller._choose_deck_image(self.account, "R", None)
+        self.assertEqual(os.path.basename(chosen), "R.png")
+        for name in os.listdir(self.account_dir):
+            if name == "R.sel.png":
+                self.assertTrue(self.controller._is_selected_deck_variant(name))
+            else:
+                self.assertFalse(self.controller._is_selected_deck_variant(name))
+
+    def test_variant_lookup_is_optional(self):
+        self.assertIsNone(
+            self.controller._selected_deck_variant(os.path.join(self.account_dir, "BG.png"))
+        )
+        self.assertTrue(
+            self.controller._selected_deck_variant(os.path.join(self.account_dir, "R.png"))
+        )
+
+
+class RememberedSelectionTests(_HistoricTestBase):
+    """Without a ".sel.png", the bot's own click is what identifies the selection.
+
+    Most installs will not have a selected-state capture, so the same
+    already-selected screen has to be survivable from memory: MTGA keeps the deck
+    selected between matches, so the tile this bot last clicked on this account
+    is still the selected one until something moves it."""
+
+    def setUp(self):
+        super().setUp()
+        for name in os.listdir(self.account_dir):
+            os.unlink(os.path.join(self.account_dir, name))
+        with open(os.path.join(self.account_dir, "R.png"), "wb") as fh:
+            fh.write(b"")
+        self.on_screen = {"R.png"}
+        self.append(quests_block("Quests/Quest_Rakdos_Headliner"))   # RB -> R.png
+
+    def test_a_confirmed_click_is_remembered_and_not_repeated(self):
+        self.arm_navigation()
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(self.clicked_decks, ["R.png"])
+        # Force a second selection pass for the same quest and account; the tile
+        # no longer looks like its thumbnail, so the click would fail.
+        self.controller._historic_selection_key = None
+        self.on_screen = set()
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(self.clicked_decks, ["R.png"], "the tile was already selected")
+
+    def test_nothing_is_assumed_before_the_bot_has_clicked(self):
+        self.arm_navigation()
+        self.on_screen = set()
+        self.assertFalse(self.controller._ensure_historic_selection())
+        self.assertEqual(self.clicked_decks, [])
+
+    def test_an_account_switch_forgets_the_selection(self):
+        self.arm_navigation()
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.controller._forget_selected_deck()
+        self.assertFalse(
+            self.controller._deck_is_known_selected(
+                "AccountA", os.path.join(self.account_dir, "R.png")
+            )
+        )
+
+    def test_the_record_is_per_account(self):
+        deck = os.path.join(self.account_dir, "R.png")
+        self.controller._remember_selected_deck("AccountA", deck)
+        self.assertTrue(self.controller._deck_is_known_selected("accounta", deck))
+        self.assertFalse(self.controller._deck_is_known_selected("AccountB", deck))
+
+    def test_a_stale_record_never_skips_a_click_that_would_have_worked(self):
+        """The memory is consulted only AFTER the thumbnail search misses.
+
+        Nothing tells the bot that a human reselected a deck in the client
+        mid-session, so the record can go stale. It is harmless in this order:
+        another deck being selected puts THIS one back in its normal unselected
+        form on the grid, where the click finds it. Checked before the click, the
+        same stale record would skip it and queue the quest on the deck the human
+        left selected."""
+        self.arm_navigation()
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(self.clicked_decks, ["R.png"])
+        # Someone reselects another deck in MTGA: R is a normal grid tile again.
+        self.controller._historic_selection_key = None
+        self.assertTrue(self.controller._ensure_historic_selection())
+        self.assertEqual(
+            self.clicked_decks, ["R.png", "R.png"],
+            "the thumbnail was on the grid, so it must be clicked, not assumed",
+        )
+
+    def test_the_grid_search_is_bounded(self):
+        """A miss is the normal case for the selected tile, and the queue loop
+        ticks every ~3s -- _click_image's 20s default would be spent on it."""
+        seen = []
+
+        def click_image(path, label, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return False
+
+        self.controller._click_image = click_image
+        self.arm_navigation()
+        self.assertFalse(self.controller._ensure_historic_selection())
+        self.assertTrue(seen)
+        for timeout in seen:
+            self.assertIsNotNone(timeout, "the 20s default must not be used here")
+            self.assertLessEqual(timeout, 6.0)
+
+
+class SelectionScreenAnchorRoiTests(_HistoricTestBase):
+    """Each anchor has to be searched where it actually is.
+
+    The gate carried its own top-left box for two anchors that live nowhere near
+    the top left (measured: "My Decks" at x=25..380 y=309..402, the selected
+    "Historic Play" row at x=1558..1769 y=554..618), so it refused to queue on
+    the screen the navigation had just verified."""
+
+    def test_each_anchor_is_searched_in_its_own_navigation_roi(self):
+        seen = {}
+
+        def probe(path, label, rel_region=None, **kw):
+            seen[os.path.basename(path)] = rel_region
+            return None
+
+        self.controller._locate_image_center_in_scaled_arena_region = probe
+        self.controller._get_state_from_log = lambda: BotState.MY_DECKS
+        self.assertFalse(self.controller._historic_selection_screen_verified())
+        self.assertEqual(seen.get("my_decks_anchor.png"), navigation_flow.DECKS_HEADER_ROI)
+        self.assertEqual(seen.get("historic_anchor.png"), navigation_flow.FORMAT_LIST_ROI)
+
+    def test_the_rois_contain_the_measured_anchor_rectangles(self):
+        for roi, rect in (
+            (navigation_flow.DECKS_HEADER_ROI, (25, 309, 380, 402)),
+            (navigation_flow.FORMAT_LIST_ROI, (1558, 554, 1769, 618)),
+        ):
+            x, y, w, h = roi
+            x1, y1, x2, y2 = rect
+            self.assertLessEqual(x, x1)
+            self.assertLessEqual(y, y1)
+            self.assertGreaterEqual(x + w, x2)
+            self.assertGreaterEqual(y + h, y2)
 
 
 if __name__ == "__main__":

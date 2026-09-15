@@ -22,6 +22,7 @@ from Controller.MTGAController.quest_reroll import (
 from Controller.Utilities.GameState import GameState
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
 from actions.actions import run_action
+from actions import navigation_flow as nav_rois
 from actions.navigation_flow import build_post_login_navigation_actions
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
 from vision.vision import VisionEngine
@@ -767,6 +768,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self._historic_selection_key: str | None = None
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
+        # account name -> the deck thumbnail this bot last clicked on that
+        # account's Historic grid. See _deck_is_known_selected.
+        self._historic_selected_deck: dict[str, str] = {}
         self._suppress_selections = False
         self._state_tracker = PlayerLogStateTracker(max_lines=500)
         self._vision = VisionEngine()
@@ -3805,8 +3809,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return None
         images = []
         for name in os.listdir(account_dir):
-            if name.lower().endswith((".png", ".jpg", ".jpeg")):
-                images.append(name)
+            if not name.lower().endswith((".png", ".jpg", ".jpeg")):
+                continue
+            # "<deck>.sel.png" is a selected-state capture of another thumbnail,
+            # not a deck the bot may choose -- it carries the same color letters
+            # and would otherwise compete with the real thumbnail.
+            if self._is_selected_deck_variant(name):
+                continue
+            images.append(name)
         if not images:
             bot_logger.log_info("Post-login: no deck images configured in account folder.")
             return None
@@ -3859,16 +3869,68 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         buttons_dir = self._buttons_dir()
         actions = build_post_login_navigation_actions(assets_dir=assets_dir, buttons_dir=buttons_dir)
 
-        def _recover(action_name: str, attempt: int) -> None:
-            bot_logger.log_info(
-                f"Post-login navigation recover: action={action_name} attempt={attempt} (ESC + reacquire)."
+        def _capture_step_failure(action_name: str, step: str, attempt: int) -> None:
+            """Screenshot the screen the step actually failed on.
+
+            The end-of-action bundle is written after the recovery has already
+            navigated away, so it shows Home no matter what went wrong. This one
+            fires first, while the offending screen is still up -- the difference
+            between "the Play blade opened and the anchor is stale" and "the click
+            did nothing", which are indistinguishable in the log.
+            """
+            bot_logger.log_error(
+                f"Post-login navigation: {action_name} failed at step={step} "
+                f"(attempt {attempt}); capturing the screen before recovery."
             )
+            self._write_nav_debug_bundle(f"step_failed:{action_name}:{step}")
+
+        def _recover(action_name: str, attempt: int) -> None:
+            """Recover between navigation attempts WITHOUT a blind ESC.
+
+            ESC is not a neutral "go back" in MTGA: on Home it opens the
+            exit/settings overlay, and the next attempt's ESC closes it again --
+            so a failing action flip-flopped an overlay over the very screen it
+            was trying to read, and any click that did land went to the overlay.
+            (Seen on 2026-09-15: POST_LOGIN_PLAY failed its pre-assert, and each
+            of the two attempts fired an ESC on a perfectly good Home screen.)
+
+            So ESC is sent only when the Options overlay is actually verified on
+            screen -- the one case where it is the correct key and there is
+            something to dismiss. Otherwise just re-acquire the client rectangle,
+            and if we are on Home, click the Home tab to settle the screen the
+            first action needs.
+            """
+            overlay = False
             try:
-                self.input.tap_escape()
+                overlay = self._options_overlay_visible()
             except Exception:
-                pass
-            time.sleep(0.5)
+                overlay = False
+            if overlay:
+                bot_logger.log_info(
+                    f"Post-login navigation recover: action={action_name} attempt={attempt} "
+                    "(Options overlay verified; ESC + reacquire)."
+                )
+                try:
+                    self.input.tap_escape()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                self._ensure_arena_region(force_reacquire=True)
+                return
+            bot_logger.log_info(
+                f"Post-login navigation recover: action={action_name} attempt={attempt} "
+                "(no overlay verified; reacquire only, no ESC)."
+            )
             self._ensure_arena_region(force_reacquire=True)
+            if action_name == "POST_LOGIN_PLAY":
+                # The first action starts from Home. Re-clicking the Home tab is
+                # idempotent there and is the one nudge that can actually help,
+                # unlike ESC which can only make Home worse.
+                try:
+                    self._navigate_to_home()
+                except Exception:
+                    pass
+            time.sleep(0.5)
 
         for spec in actions:
             result = run_action(
@@ -3878,6 +3940,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 arena_region_getter=lambda: self._ensure_arena_region(force_reacquire=False),
                 click_abs=self._click_abs,
                 recover_once=_recover,
+                on_diagnostic=bot_logger.log_error,
+                on_step_failed=_capture_step_failure,
             )
             if not result.ok:
                 self._navigation_verify_failures += 1
@@ -5189,6 +5253,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # first tile: a deck was selected, but nothing says which colors it is.
     _FIRST_DECK_SENTINEL = "<first deck in list>"
 
+    # How long to look for a deck thumbnail on the open My Decks grid. The grid
+    # is static once it is up, so a miss is a miss -- and a miss is the NORMAL
+    # case for the already-selected tile, which no longer looks like its own
+    # thumbnail. _click_image's 20s default would then be spent on every deck of
+    # every candidate account, on a queue-loop tick that runs every ~3s.
+    _DECK_TILE_SEARCH_SEC = 4.0
+
     def _select_historic_deck_for_quest(
         self,
         colors: str,
@@ -5237,19 +5308,61 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     )
                 )
                 continue
+            # A deck TILE looks different once it is the selected one: MTGA lifts
+            # it, outlines it and replaces the art with a fanned card spread, so a
+            # thumbnail captured from the normal grid drops to ~0.44 against the
+            # very deck the bot itself just picked. Measured live 2026-09-15: the
+            # bot selected R, then could not recognise its own selection and
+            # refused to queue. An optional "<name>.sel.png" next to the thumbnail
+            # is that selected-state capture; when it matches, the work is already
+            # done and clicking again would only deselect.
+            selected_variant = self._selected_deck_variant(deck_image)
+            if selected_variant and self._locate_image_center_in_scaled_arena_region(
+                selected_variant, f"{click_tag}_ALREADY_SELECTED",
+                rel_region=None, confidence=0.85, timeout=1.5,
+            ) is not None:
+                bot_logger.log_info(
+                    f"{label}: deck {os.path.basename(deck_image)} is already the "
+                    f"selected deck for account '{candidate_name}'; not clicking again."
+                )
+                return deck_image, candidate_name
             bot_logger.log_info(
                 f"{label}: trying deck image {os.path.basename(deck_image)} "
                 f"from account '{candidate_name}'."
             )
-            if self._click_image(deck_image, click_tag):
+            if self._click_image(deck_image, click_tag, timeout=self._DECK_TILE_SEARCH_SEC):
                 bot_logger.log_info(
                     f"{label}: deck selected ({os.path.basename(deck_image)}) "
                     f"for quest target colors={colors or '-'} forced={forced_filename or '-'}."
                 )
+                self._remember_selected_deck(candidate_name, deck_image)
                 return deck_image, candidate_name
             bot_logger.log_info(
                 f"{label}: deck image {os.path.basename(deck_image)} not found on screen."
             )
+            # The thumbnail is NOT on the grid. Without a ".sel.png" that is
+            # ambiguous between "it is the selected tile, which no longer looks
+            # like its thumbnail" and "wrong screen / wrong account". The bot's
+            # own last click on this account's grid resolves it: MTGA keeps the
+            # deck selected between matches, so the tile it clicked is still the
+            # selected one.
+            #
+            # This is deliberately AFTER the click attempt, never instead of it.
+            # Checked first, a memory that had gone stale -- a human reselecting a
+            # deck in the client mid-session is the realistic way that happens,
+            # and nothing tells the bot about it -- would skip a click that would
+            # have worked and queue the quest on someone else's deck. Reached
+            # only on a miss, a stale memory cannot cause that: if another deck is
+            # now selected, THIS thumbnail is back in its normal unselected form
+            # on the grid, the click above finds it, and the memory is never
+            # consulted.
+            if self._deck_is_known_selected(candidate_name, deck_image):
+                bot_logger.log_info(
+                    f"{label}: deck {os.path.basename(deck_image)} is not on the grid and "
+                    f"was the last tile this session selected for account "
+                    f"'{candidate_name}'; treating it as still selected."
+                )
+                return deck_image, candidate_name
         if has_target:
             bot_logger.log_error(
                 "{}: no deck thumbnail matched quest target colors={} forced={}; "
@@ -5270,6 +5383,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     str(fallback_account[0].get("name", "")).strip()
                     or str(fallback_account[0].get("folder", "")).strip()
                 )
+            # Whatever tile that was, it is not one the bot can name -- so the
+            # account's "I know what is selected" record is now wrong.
+            self._forget_selected_deck(name)
             return self._FIRST_DECK_SENTINEL, name
         bot_logger.log_error(f"{label}: could not select any deck on the My Decks grid.")
         return None
@@ -5303,6 +5419,69 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             )
         return all_accounts
 
+    # Marks a deck thumbnail captured in its SELECTED state: "R.png" -> "R.sel.png".
+    # Optional per deck; without one the bot simply clicks the tile as before.
+    _SELECTED_DECK_SUFFIX = ".sel"
+
+    @classmethod
+    def _is_selected_deck_variant(cls, filename: str) -> bool:
+        """Whether a file is a selected-state capture rather than a deck choice.
+
+        These must never be scored as deck candidates: the stem carries the same
+        color letters, so "R.sel.png" would compete with "R.png" for an R quest
+        and could be 'selected' as a deck in its own right."""
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        return stem.lower().endswith(cls._SELECTED_DECK_SUFFIX)
+
+    @classmethod
+    def _selected_deck_variant(cls, deck_image: str) -> str | None:
+        """Path of the selected-state capture for a thumbnail, if one exists."""
+        root, ext = os.path.splitext(deck_image)
+        candidate = f"{root}{cls._SELECTED_DECK_SUFFIX}{ext}"
+        return candidate if os.path.exists(candidate) else None
+
+    def _remember_selected_deck(self, account_name: str, deck_image: str) -> None:
+        """Record the tile this bot just clicked on an account's Historic grid."""
+        key = (account_name or "").strip().casefold()
+        if key:
+            self._historic_selected_deck[key] = deck_image
+
+    def _forget_selected_deck(self, account_name: str = "") -> None:
+        """Drop the record for one account, or for all of them when unnamed.
+
+        Anything that can move MTGA's selection without this bot clicking a
+        thumbnail has to clear it: a login or account switch (a different
+        account's client, and a different grid), a new session, and the
+        first-deck fallback, which deliberately selects a tile the bot cannot
+        name."""
+        key = (account_name or "").strip().casefold()
+        if key:
+            self._historic_selected_deck.pop(key, None)
+        else:
+            self._historic_selected_deck.clear()
+
+    def _deck_is_known_selected(self, account_name: str, deck_image: str) -> bool:
+        """Whether this bot already selected exactly this tile on this account.
+
+        The selected tile does not look like its own thumbnail -- MTGA lifts it,
+        outlines it and fans the cards over the art, which measured ~0.44 against
+        the grid capture -- so "the thumbnail is not on screen" is ambiguous
+        between "already selected" and "wrong screen". The bot's own click is the
+        evidence that resolves it: the record is only written after a confirmed
+        click on a thumbnail that matched the quest target, and is thrown away
+        whenever anything could have changed the selection behind the bot's back.
+
+        The caller must only consult this AFTER trying to click the thumbnail and
+        missing. Nothing tells the bot that a human reselected a deck in the
+        client mid-session, so this record can be stale -- but a stale one is
+        harmless in that order: if another deck is now selected, this deck is back
+        in its normal unselected form on the grid and the click finds it.
+        """
+        key = (account_name or "").strip().casefold()
+        if not key:
+            return False
+        return self._historic_selected_deck.get(key) == deck_image
+
     @staticmethod
     def _deck_image_matches_target(
         deck_image: str, colors: str, forced_filename: str | None
@@ -5333,12 +5512,25 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         long after the client moved on -- a stale read would wave through exactly
         the case this gate is for. The log state is only consulted when the anchor
         assets are missing from the install, where no better signal exists.
+
+        Each anchor is looked for where it actually lives, using the same boxes
+        the navigation actions use (`navigation_flow`). This gate used to search
+        one hand-written top-left box for both of them, and neither is top-left:
+        measured on the live client, "My Decks" sits at x=25..380, y=309..402 and
+        the selected "Historic Play" row at x=1558..1769, y=554..618, so the box
+        scored 0.30 and 0.46 against a 0.80 threshold. The gate therefore failed
+        on the very screen the navigation had just reached and verified, the
+        selection was never cached, and the queue loop re-navigated and refused
+        again every few seconds without ever playing a match.
         """
         anchors = [
-            self._app_path("assets", "assert", name)
-            for name in ("my_decks_anchor.png", "historic_anchor.png")
+            (self._app_path("assets", "assert", name), roi)
+            for name, roi in (
+                ("my_decks_anchor.png", nav_rois.DECKS_HEADER_ROI),
+                ("historic_anchor.png", nav_rois.FORMAT_LIST_ROI),
+            )
         ]
-        anchors = [p for p in anchors if os.path.exists(p)]
+        anchors = [(p, roi) for p, roi in anchors if os.path.exists(p)]
         state = self._get_state_from_log()
         if not anchors:
             if state in (BotState.MY_DECKS, BotState.HISTORIC):
@@ -5350,9 +5542,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 f"Historic: no anchor assets installed and log state={state}; refusing to queue."
             )
             return False
-        for path in anchors:
+        for path, roi in anchors:
             if self._locate_image_center_in_scaled_arena_region(
-                path, "HISTORIC_SELECTION_VERIFY", rel_region=(40, 20, 520, 210),
+                path, "HISTORIC_SELECTION_VERIFY", rel_region=roi,
                 confidence=0.80, timeout=1.5,
             ) is not None:
                 return True
@@ -5814,6 +6006,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self._historic_selection_key = None
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
+        self._forget_selected_deck()
         # A new session always starts at the beginning of the round: pass 1
         # (quests), nobody finished yet, no wins banked. Without this a Start
         # after a completed round would resume in the win pass and skip the
@@ -8857,6 +9050,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self._historic_selection_key = None
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
+        self._forget_selected_deck()
         # A switch really happened, so the logout works -> clear the failed-attempt
         # guard, and count this switch for the anti-storm guard (which asks "have we
         # cycled through every account without playing a single match?").
