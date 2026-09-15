@@ -2167,6 +2167,7 @@ class MTGBotUI(tk.Tk):
     def __init__(self):
         super().__init__()
 
+        self._controller_lock = threading.RLock()
         self.config_manager = ConfigManager()
         if not self._ensure_player_log_path_configured():
             self.after(0, self.destroy)
@@ -4544,7 +4545,7 @@ class MTGBotUI(tk.Tk):
                                    gold_per_win=gold_per_win,
                                    account_switch_enabled=account_switch_enabled,
                                    auto_concede_stalled_matches=auto_concede_stalled_matches)
-            self._controller = controller
+            self._publish_controller(controller)
             # Seed the manually-pinned current account (if the user set one), so
             # rotation starts from the right place even when the log-based detect
             # would get it wrong.
@@ -4769,7 +4770,25 @@ class MTGBotUI(tk.Tk):
         self._stop_session_watchdog()
         self._set_running_state(False)
         self._set_startup_loading(False)
-        self._controller = None
+        with self._controller_lock:
+            self._controller = None
+
+    def _publish_controller(self, controller) -> None:
+        """Publish a controller and reconcile settings atomically with toggles."""
+        with self._controller_lock:
+            self._controller = controller
+            enabled = self.config_manager.get_auto_concede_stalled_matches()
+            controller.set_auto_concede_stalled_matches(enabled)
+
+    def _set_auto_concede_stalled_matches(self, enabled: bool) -> bool:
+        """Persist and apply the live recovery setting as one operation."""
+        with self._controller_lock:
+            self.config_manager.set_auto_concede_stalled_matches(enabled)
+            persisted = bool(self.config_manager.get_auto_concede_stalled_matches())
+            controller = self._controller
+            if controller is not None and hasattr(controller, "set_auto_concede_stalled_matches"):
+                controller.set_auto_concede_stalled_matches(persisted)
+            return persisted
 
     def _open_calibration(self):
         CalibrationWindow(self, self.config_manager)
@@ -6106,15 +6125,15 @@ class BotBehaviorWindow(tk.Toplevel):
 
     def _apply_auto_concede_setting(self) -> None:
         enabled = bool(self._enabled.get())
-        self._config_manager.set_auto_concede_stalled_matches(enabled)
-        # Read back the persisted value in case saving failed before presenting
-        # the state as applied to the running bot.
-        enabled = bool(self._config_manager.get_auto_concede_stalled_matches())
-        self._enabled.set(enabled)
         app = getattr(self._parent, "master", None)
-        controller = getattr(app, "_controller", None)
-        if controller is not None and hasattr(controller, "set_auto_concede_stalled_matches"):
-            controller.set_auto_concede_stalled_matches(enabled)
+        setter = getattr(app, "_set_auto_concede_stalled_matches", None)
+        if callable(setter):
+            enabled = bool(setter(enabled))
+        else:
+            self._config_manager.set_auto_concede_stalled_matches(enabled)
+            enabled = bool(self._config_manager.get_auto_concede_stalled_matches())
+        # Read back before presenting the state as applied in case saving failed.
+        self._enabled.set(enabled)
 
     def destroy(self):
         callback = self._on_close_callback

@@ -7112,6 +7112,27 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__stall_context_signature = None
         self.__stall_context_started_at = None
 
+    @staticmethod
+    def __freeze_stall_value(value):
+        """Convert JSON-shaped Arena state into a stable, hashable value."""
+        if isinstance(value, dict):
+            return tuple(
+                (str(key), Controller.__freeze_stall_value(item))
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            )
+        if isinstance(value, (list, tuple)):
+            return tuple(Controller.__freeze_stall_value(item) for item in value)
+        if isinstance(value, set):
+            return tuple(sorted(
+                (Controller.__freeze_stall_value(item) for item in value),
+                key=repr,
+            ))
+        try:
+            hash(value)
+            return value
+        except TypeError:
+            return repr(value)
+
     def __local_stall_signature(self):
         """A compact state signature.  Never include timer/message/click ids."""
         if self._stop_requested or self._suppress_selections:
@@ -7138,20 +7159,46 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return None
         try:
             actions = self.updated_game_state.get_actions() or []
-            action_keys = sorted(
-                str(a.get("actionType") or a.get("type") or a.get("abilityGrpId") or "?")
-                for a in actions if isinstance(a, dict)
-            )
+            action_keys = tuple(sorted(
+                (self.__freeze_stall_value(action) for action in actions if isinstance(action, dict)),
+                key=repr,
+            ))
+            full_state = self.updated_game_state.get_full_state() or {}
+            relevant_zone_types = {
+                "ZoneType_Hand",
+                "ZoneType_Battlefield",
+                "ZoneType_Stack",
+                "ZoneType_Pending",
+            }
             zones = []
-            for zone_name in ("ZoneType_Hand", "ZoneType_Battlefield", "ZoneType_Stack", "ZoneType_Pending"):
-                zone = self.updated_game_state.get_zone(zone_name) or {}
-                zones.append((zone_name, tuple(sorted(zone.get("objectInstanceIds", []) or []))))
+            relevant_object_ids = set()
+            for zone in full_state.get("zones", []) or []:
+                if not isinstance(zone, dict) or zone.get("type") not in relevant_zone_types:
+                    continue
+                object_ids = tuple(sorted(zone.get("objectInstanceIds", []) or [], key=repr))
+                relevant_object_ids.update(object_ids)
+                zones.append((
+                    zone.get("type"),
+                    zone.get("ownerSeatId"),
+                    zone.get("zoneId"),
+                    object_ids,
+                ))
+            zones = tuple(sorted(zones, key=repr))
+            zone_objects = tuple(sorted(
+                (
+                    self.__freeze_stall_value(game_object)
+                    for game_object in (full_state.get("gameObjects", []) or [])
+                    if isinstance(game_object, dict)
+                    and game_object.get("instanceId") in relevant_object_ids
+                ),
+                key=repr,
+            ))
             players = tuple(sorted(
                 (p.get("systemSeatNumber"), p.get("lifeTotal"), p.get("pendingMessageType"))
                 for p in (self.updated_game_state.get_players() or []) if isinstance(p, dict)
             ))
         except Exception:
-            action_keys, zones, players = [], [], []
+            action_keys, zones, zone_objects, players = (), (), (), ()
         prompt_identity = ()
         if isinstance(self.__pending_card_prompt, dict):
             prompt_identity = (
@@ -7164,7 +7211,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         elif isinstance(self.__pending_target_select, dict):
             prompt_identity = (self.__pending_target_select.get("source_id"), self.__pending_target_select.get("last_target"))
         return (prompt_kind, prompt_identity, local_priority, turn.get("turnNumber"), turn.get("phase"), turn.get("step"),
-                tuple(action_keys), tuple(zones), players)
+                action_keys, zones, zone_objects, players)
 
     def __update_stall_watchdog(self) -> None:
         if not self.__auto_concede_stalled_matches or self.__concession_claimed:
@@ -7204,9 +7251,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def __attempt_stall_concede(self) -> None:
         self.__stall_watchdog_timer = None
-        if not self.__auto_concede_stalled_matches or self.__stall_context_started_at is None:
+        started_at = self.__stall_context_started_at
+        if not self.__auto_concede_stalled_matches or started_at is None:
             return
-        age = time.monotonic() - self.__stall_context_started_at
+        age = time.monotonic() - started_at
         if age < self.__stall_concede_threshold_sec - 0.1:
             return
         if not self.__claim_concession("stalled_local_context"):
