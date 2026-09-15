@@ -5117,6 +5117,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_info(
                 "Post-login: quest reroll did not run; continuing with deck selection."
             )
+        # In the wins pass, this account may already have banked its target wins
+        # during the quest pass. The queue loop will switch it next; selecting and
+        # pressing Play here would queue a match immediately before that switch.
+        if self._account_switch_due():
+            bot_logger.log_info("Post-login: account switch already due; skipping deck selection and queue.")
+            return True
         if self._game_mode == "starter":
             return self._run_starter_deck_routine()
         quest = self._select_best_quest()
