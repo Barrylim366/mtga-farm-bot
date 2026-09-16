@@ -6,6 +6,7 @@ from unittest import mock
 
 from Controller.MTGAController.Controller import Controller
 from Controller.Utilities.GameState import GameState
+from state.state_machine import BotState
 
 
 def _state():
@@ -55,6 +56,10 @@ class StallSignatureTest(unittest.TestCase):
         self.controller._Controller__assign_damage_in_progress = False
         self.controller._Controller__casting_time_options_until = 0.0
         self.controller._Controller__pending_mulligan = None
+        self.controller._Controller__live_match_id = "match-1"
+        self.controller._Controller__last_seen_match_id = "match-1"
+        self.controller._Controller__failed_stall_signature = None
+        self.controller._get_state_from_log = lambda: BotState.IN_GAME
 
     def signature(self, state):
         self.controller.updated_game_state = GameState(state)
@@ -99,7 +104,12 @@ class StallTimerRaceTest(unittest.TestCase):
         controller._Controller__stall_watchdog_timer = None
         controller._Controller__auto_concede_stalled_matches = True
         controller._Controller__stall_context_started_at = 10.0
+        controller._Controller__stall_context_signature = ("sig",)
         controller._Controller__stall_concede_threshold_sec = 30.0
+        controller._Controller__live_match_id = "match-1"
+        controller._Controller__last_seen_match_id = "match-1"
+        controller._get_state_from_log = lambda: BotState.IN_GAME
+        controller._Controller__local_stall_signature = lambda: ("sig",)
         entered_monotonic = threading.Event()
         continue_monotonic = threading.Event()
         errors = []
@@ -128,7 +138,7 @@ class StallTimerRaceTest(unittest.TestCase):
 
 
 class _FakeTimer:
-    def __init__(self, _delay, _callback):
+    def __init__(self, _delay, _callback, *args, **kwargs):
         self.daemon = False
         self.cancelled = False
 
@@ -152,6 +162,35 @@ class StallSoakTelemetryTest(StallSignatureTest):
         self.controller._Controller__soak_stall_updates = 0
         self.controller._Controller__soak_stall_heartbeat_bucket = 0
         self.controller._Controller__soak_stall_reset_total = 0
+
+    def test_stale_or_menu_state_cannot_arm_watchdog(self):
+        self.controller.updated_game_state = GameState(_state())
+        self.controller._Controller__live_match_id = None
+        self.controller._Controller__last_seen_match_id = None
+        with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer):
+            self.controller._Controller__update_stall_watchdog()
+        self.assertIsNone(self.controller._Controller__stall_watchdog_timer)
+
+        self.controller._Controller__live_match_id = "match-1"
+        self.controller._Controller__last_seen_match_id = "match-1"
+        self.controller._get_state_from_log = lambda: BotState.HOME
+        with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer):
+            self.controller._Controller__update_stall_watchdog()
+        self.assertIsNone(self.controller._Controller__stall_watchdog_timer)
+
+    def test_timer_rejects_mainnav_after_arm(self):
+        state = _state()
+        self.controller.updated_game_state = GameState(state)
+        signature = self.controller._Controller__local_stall_signature()
+        self.controller._Controller__stall_context_signature = signature
+        self.controller._Controller__stall_context_started_at = 10.0
+        self.controller._Controller__soak_stall_arm_id = 1
+        self.controller._get_state_from_log = lambda: BotState.HOME
+        self.controller._Controller__live_match_id = None
+        with mock.patch.object(self.controller, "_Controller__claim_concession") as claim, \
+             mock.patch("Controller.MTGAController.Controller.time.monotonic", return_value=41.0):
+            self.controller._Controller__attempt_stall_concede(1, signature, 10.0, "match-1")
+        claim.assert_not_called()
 
     @staticmethod
     def _events(log_info):

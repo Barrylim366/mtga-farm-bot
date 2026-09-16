@@ -129,6 +129,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__stall_context_started_at = None
         self.__stall_watchdog_timer = None
         self.__stall_concede_threshold_sec = 30.0
+        # A merged GameState can outlive the match which produced it.  This is
+        # deliberately separate from __last_seen_match_id: only a GameState
+        # observed while Player.log says IN_GAME makes a match live enough for
+        # unattended input.
+        self.__live_match_id: str | None = None
+        self.__retired_match_id: str | None = None
+        self.__failed_stall_signature = None
+        self.__concede_outcome: str | None = None
         # TEMPORARY soak-test telemetry for the local stall watchdog.  Remove
         # the [SOAK_STALL_V1] instrumentation after the overnight validation.
         self.__soak_stall_run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
@@ -5508,7 +5516,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def end_game(self) -> None:
         self._stop_requested = True
+        self.__concede_outcome = "stop_requested"
         self.__concede_completed_event.set()
+        self.__live_match_id = None
         self.__clear_stall_watchdog("bot stopped")
         runtime_status.set_mode("stopped", bot_state=str(self._get_state_from_log()))
         # Prevent any future decisions / restarts from firing after a UI stop.
@@ -7205,6 +7215,43 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__soak_stall_updates = 0
         self.__soak_stall_heartbeat_bucket = 0
 
+    def __is_live_match(self, expected_match_id: str | None = None) -> bool:
+        """Whether Arena is still in the exact match allowed to receive input."""
+        live_match_id = getattr(self, "_Controller__live_match_id", None)
+        if not live_match_id or (expected_match_id is not None and live_match_id != expected_match_id):
+            return False
+        if getattr(self, "_Controller__last_seen_match_id", None) != live_match_id:
+            return False
+        try:
+            return self._get_state_from_log() == BotState.IN_GAME
+        except Exception:
+            return False
+
+    def __leave_live_match(self, reason: str, outcome: str = "left_match") -> None:
+        """Retire all match-scoped state before menu navigation can use input."""
+        if getattr(self, "_Controller__concession_claimed", False):
+            self.__concede_outcome = outcome
+            self.__concede_completed_event.set()  # wake a retry; outcome says why.
+        self.__retired_match_id = self.__live_match_id or self.__last_seen_match_id
+        self.__live_match_id = None
+        self.__last_seen_match_id = None
+        self.__failed_stall_signature = None
+        self.__clear_stall_watchdog(f"left live match ({reason})")
+        self.__concession_claimed = False
+        self.__concession_claim_reason = None
+        self.__has_mulled_keep = False
+        self.__pending_mulligan = None
+        self.__pending_card_prompt = None
+        self.__pending_target_select = None
+        self.__pending_select_n = None
+        self.__select_n_in_progress = False
+        self._suppress_selections = False
+        self.updated_game_state = GameState()
+        release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
+        if callable(release_input):
+            release_input()
+        self.__soak_stall_event("left_match", reason=reason, outcome=outcome)
+
     @staticmethod
     def __freeze_stall_value(value):
         """Convert JSON-shaped Arena state into a stable, hashable value."""
@@ -7310,10 +7357,25 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if not self.__auto_concede_stalled_matches or self.__concession_claimed:
             self.__clear_stall_watchdog("disabled or concession claimed")
             return
+        if not self.__is_live_match():
+            self.__clear_stall_watchdog("not a verified live match")
+            self.__soak_stall_event("rejected", reason="not_live_match")
+            return
         signature = self.__local_stall_signature()
         if signature is None:
             self.__clear_stall_watchdog("local responsibility ended")
             return
+        failed_signature = getattr(self, "_Controller__failed_stall_signature", None)
+        if failed_signature == signature:
+            self.__clear_stall_watchdog("failed stall signature unchanged")
+            self.__soak_stall_event(
+                "rejected", reason="failed_signature_unchanged",
+                signature=self.__soak_stall_signature_digest(signature),
+            )
+            return
+        if failed_signature is not None:
+            self.__failed_stall_signature = None
+            self.__soak_stall_event("suppression_cleared", reason="meaningful_game_progress")
         now = time.monotonic()
         if signature != self.__stall_context_signature:
             previous = self.__stall_context_signature
@@ -7324,7 +7386,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__soak_stall_arm_id = getattr(self, "_Controller__soak_stall_arm_id", 0) + 1
             self.__soak_stall_updates = 1
             self.__soak_stall_heartbeat_bucket = 0
-            self.__stall_watchdog_timer = threading.Timer(self.__stall_concede_threshold_sec, self.__attempt_stall_concede)
+            match_id = self.__live_match_id
+            self.__stall_watchdog_timer = threading.Timer(
+                self.__stall_concede_threshold_sec,
+                self.__attempt_stall_concede,
+                args=(self.__soak_stall_arm_id, signature, now, match_id),
+            )
             self.__stall_watchdog_timer.daemon = True
             self.__stall_watchdog_timer.start()
             bot_logger.log_info("STALL_WATCHDOG_ARMED: local responsibility; 30.0s window started")
@@ -7385,10 +7452,22 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         )
         return True
 
-    def __attempt_stall_concede(self) -> None:
+    def __attempt_stall_concede(self, arm_id=None, expected_signature=None,
+                                expected_started_at=None, expected_match_id=None) -> None:
         self.__stall_watchdog_timer = None
         started_at = self.__stall_context_started_at
         if not self.__auto_concede_stalled_matches or started_at is None:
+            return
+        # A cancelled Timer may already be executing.  It must not act on a
+        # subsequent match, a newly armed context, or stale post-match state.
+        if (
+            not self.__is_live_match(expected_match_id)
+            or (arm_id is not None and arm_id != self.__soak_stall_arm_id)
+            or (expected_started_at is not None and expected_started_at != started_at)
+            or (expected_signature is not None and expected_signature != self.__stall_context_signature)
+            or self.__local_stall_signature() != self.__stall_context_signature
+        ):
+            self.__soak_stall_event("rejected", reason="stale_timer_callback", arm_id=arm_id)
             return
         age = time.monotonic() - started_at
         if age < self.__stall_concede_threshold_sec - 0.1:
@@ -7414,7 +7493,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             **self.__soak_stall_context(trigger_signature),
         )
         self.__cancel_pending_decisions_for_concede()
-        self.__run_claimed_concede_sequence("STALL_CONCEDE")
+        self.__run_claimed_concede_sequence("STALL_CONCEDE", trigger_signature, expected_match_id)
 
     def __cancel_pending_decisions_for_concede(self) -> None:
         self._suppress_selections = True
@@ -7429,7 +7508,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         try:
             runtime_status.set_mode("stuck_suspected", bot_state=str(self._get_state_from_log()))
             if focus_mtga_window(): time.sleep(0.3)
+            if not self.__is_live_match(getattr(self, "_Controller__live_match_id", None)):
+                self.__soak_stall_event("cancellation", reason="left_match_before_escape", label=label)
+                return
             self.input.tap_escape(); time.sleep(0.8)
+            if not self.__is_live_match(getattr(self, "_Controller__live_match_id", None)):
+                self.__soak_stall_event("cancellation", reason="left_match_after_escape", label=label)
+                return
             raw = self._loaded_click_targets.get("concede", {})
             xy = (int(raw.get("x", 962)), int(raw.get("y", 631)))
             target, source = self._map_abs_point_to_arena(xy, label=f"{label}_BTN", force_reacquire=True, apply_correction=False)
@@ -7437,21 +7522,26 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 bot_logger.log_error(f"{label}: arena_region unavailable, skipping click")
                 return
             runtime_status.touch_input(label, target)
-            self.__click_concede_and_confirm(target, label=label)
+            self.__click_concede_and_confirm(
+                target, label=label,
+                expected_match_id=getattr(self, "_Controller__live_match_id", None),
+            )
         except Exception as exc:
             bot_logger.log_error(f"{label}: exception: {exc}")
 
-    def __run_claimed_concede_sequence(self, label: str) -> None:
-        """Retry the one claimed terminal action until match completion.
-
-        The one-per-match claim prevents competing recovery coordinators; it is
-        not a one-click limit. A missed menu/button/confirm click must remain in
-        terminal recovery rather than silently returning to normal play.
-        """
+    def __run_claimed_concede_sequence(self, label: str, stalled_signature=None,
+                                       expected_match_id=None) -> None:
+        """Attempt a claimed recovery at most five times in its live match."""
         attempt = 0
         completed = False
+        cancelled = False
         try:
-            while not self._stop_requested and not self.__concede_completed_event.is_set():
+            while attempt < 5 and not self._stop_requested and not self.__concede_completed_event.is_set():
+                if not self.__is_live_match(expected_match_id):
+                    cancelled = True
+                    self.__concede_outcome = self.__concede_outcome or "left_match"
+                    self.__soak_stall_event("cancellation", reason=self.__concede_outcome, label=label)
+                    break
                 attempt += 1
                 self.__soak_concede_attempts = attempt
                 bot_logger.log_info(f"{label}: concede sequence attempt {attempt}")
@@ -7463,16 +7553,17 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 )
                 self.__perform_concede(f"{label}_{attempt}")
                 if self.__concede_completed_event.wait(timeout=4.0):
-                    completed = True
+                    completed = self.__concede_outcome == "match_completed"
+                    cancelled = not completed
                     claimed_at = getattr(self, "_Controller__soak_concede_claimed_at", None)
                     recovery_sec = (
                         max(0.0, time.monotonic() - claimed_at)
                         if claimed_at is not None else None
                     )
                     self.__soak_stall_event(
-                        "recovery_observed",
-                        attempts=attempt,
-                        label=label,
+                        "recovery_observed" if completed else "cancellation",
+                        attempts=attempt, label=label,
+                        reason=None if completed else (self.__concede_outcome or "wake_without_completion"),
                         recovery_sec=round(recovery_sec, 3) if recovery_sec is not None else None,
                     )
                     break
@@ -7485,6 +7576,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     label=label,
                     wait_sec=4.0,
                 )
+            if attempt >= 5 and not completed and not cancelled and self.__is_live_match(expected_match_id):
+                self.__failed_stall_signature = stalled_signature
+                self.__concession_claimed = False
+                self.__concession_claim_reason = None
+                self._suppress_selections = False
+                self.__concede_outcome = "attempt_limit"
+                self.__soak_stall_event(
+                    "attempt_limit", attempts=attempt, label=label,
+                    signature=self.__soak_stall_signature_digest(stalled_signature),
+                )
+                self.__soak_stall_event("resumed_play", reason="attempt_limit", label=label)
+                bot_logger.log_error(f"{label}: five attempts failed; resuming normal play until game progress.")
         finally:
             if not completed:
                 self.__soak_stall_event(
@@ -7492,6 +7595,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     attempts=attempt,
                     label=label,
                     stop_requested=bool(self._stop_requested),
+                    outcome=("stop_requested" if self._stop_requested else self.__concede_outcome),
                 )
             # Keep exclusivity through the final confirm/result transition, then
             # hand input back before the delayed post-match dismissal runs.
@@ -7647,8 +7751,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception as exc:
             bot_logger.log_error(f"FORCE_CONCEDE: exception: {exc}")
 
-    def __click_concede_and_confirm(self, concede_target: tuple, label: str) -> None:
+    def __click_concede_and_confirm(self, concede_target: tuple, label: str,
+                                    expected_match_id: str | None = None) -> None:
         """Click the Concede button then click the OK confirmation dialog."""
+        if expected_match_id is not None and not self.__is_live_match(expected_match_id):
+            self.__soak_stall_event("cancellation", reason="left_match_before_concede_click", label=label)
+            return
         concede_img = os.path.join(self._buttons_dir(), "concede.png")
         clicked_concede = False
         if os.path.exists(concede_img):
@@ -7660,10 +7768,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 timeout=1.5,
             )
         if not clicked_concede:
-            self.input.move_abs(concede_target[0], concede_target[1])
-            time.sleep(0.1)
-            self.input.left_click(1)
+            self._click_abs(concede_target[0], concede_target[1], f"{label}_CONCEDE_FALLBACK")
         time.sleep(1.5)
+        if expected_match_id is not None and not self.__is_live_match(expected_match_id):
+            self.__soak_stall_event("cancellation", reason="left_match_before_confirm", label=label)
+            return
         okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
         if os.path.exists(okay_img):
             if self._click_image_in_scaled_arena_region(
@@ -7679,9 +7788,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if arena is not None:
             ok_x, ok_y = self._map_base_point_into_arena(arena, (960, 540))
             bot_logger.log_info(f"{label}: clicking confirm OK at ({ok_x}, {ok_y})")
-            self.input.move_abs(ok_x, ok_y)
-            time.sleep(0.1)
-            self.input.left_click(1)
+            self._click_abs(ok_x, ok_y, f"{label}_OKAY_FALLBACK")
 
     def dismiss_end_screen(self):
         """Click to dismiss match end screen and return to main menu"""
@@ -7824,6 +7931,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_match_won = None
         self._win_counted_this_match = False
         self.__last_seen_match_id = None
+        self.__live_match_id = None
+        self.__retired_match_id = None
+        self.__failed_stall_signature = None
+        self.__concede_outcome = None
         self.__concession_claimed = False
         self.__concession_claim_reason = None
         self.__concede_completed_event.clear()
@@ -7873,6 +7984,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__has_mulled_keep = False
         self.__concession_claimed = False
         self.__concession_claim_reason = None
+        self.__live_match_id = None
+        self.__retired_match_id = None
+        self.__failed_stall_signature = None
+        self.__concede_outcome = None
         self.__concede_completed_event.clear()
         release_input = getattr(self.input, "release_exclusive", None)
         if callable(release_input):
@@ -8057,6 +8172,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__update_game_state(json.loads(line_containing_pattern))
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
+            self.__concede_outcome = "match_completed"
             soak_claim_reason = self.__concession_claim_reason
             soak_claimed_at = self.__soak_concede_claimed_at
             soak_completion_age = (
@@ -8107,6 +8223,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if outcome is not None:
                 self.__last_match_won = outcome
             self.__log_match_summary(line_containing_pattern)
+            self.__leave_live_match("match completed", outcome="match_completed")
             # A match was played -> reset the anti-storm switch guard.
             self._switches_without_match = 0
             self._match_end_dismissed = False
@@ -8119,6 +8236,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self._set_runtime_home_mode("queue_ready")
             self._handle_queue_ready()
         elif pattern == self.patterns["main_nav_loaded"]:
+            self.__leave_live_match("MainNav", outcome="left_match")
             if self._account_switch_in_progress:
                 self._set_runtime_home_mode("account_switch")
             else:
@@ -14215,7 +14333,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "Fresh game baseline detected from early gameState/mulligan signals. Resetting stale local game state.",
                 preserve_system_seat_id=self.__system_seat_id,
             )
-        if incoming_match_id:
+        if incoming_match_id and incoming_match_id != self.__retired_match_id:
             self.__last_seen_match_id = incoming_match_id
 
         outcome = self.__infer_match_won_from_raw_dict(raw_dict)
@@ -14234,6 +14352,17 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict, fallback_seat_id=self.__system_seat_id or 1)
         self.updated_game_state.update(game_state)
+        # This assignment intentionally follows the merge: a match id in an old
+        # timer fragment alone is not permission to interact with Arena.
+        if incoming_match_id and incoming_match_id == self.__retired_match_id:
+            self.__soak_stall_event("rejected", reason="retired_match_state", match_id=incoming_match_id)
+        elif incoming_match_id and self._get_state_from_log() == BotState.IN_GAME:
+            if self.__live_match_id != incoming_match_id:
+                self.__retired_match_id = None
+                self.__failed_stall_signature = None
+                self.__concede_outcome = None
+                self.__soak_stall_event("live_match_started", match_id=incoming_match_id)
+            self.__live_match_id = incoming_match_id
         keep_observed = self.__infer_keep_from_raw_dict(raw_dict)
         if self.__has_local_mulligan_request(raw_dict) and not keep_observed:
             self.__clear_premature_mulligan_keep("Local MulliganReq observed: clearing premature keep state.")
