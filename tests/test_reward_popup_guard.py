@@ -17,13 +17,14 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 
 
 CLAIM_POINT = (3163, 1201)  # where the false positive actually landed, in Play
@@ -228,6 +229,82 @@ class RewardRoiOverlapTests(unittest.TestCase):
         # so the template gate alone can never discriminate the two screens.
         covered = (overlap_w * overlap_h) / float(ew * eh)
         self.assertGreater(covered, 0.75, f"only {covered:.0%} of Play ROI covered")
+
+
+class StarterAnnouncementMatchRaceTests(unittest.TestCase):
+    """Queue navigation must stop touching the UI as soon as mulligan takes over."""
+
+    def setUp(self):
+        log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
+        log.close()
+        self.c = Controller(log.name)
+        self.buttons = tempfile.mkdtemp()
+        with open(os.path.join(self.buttons, "okay_btn.png"), "wb") as f:
+            f.write(b"not-a-real-png")
+        self.c._buttons_dir = lambda: self.buttons
+        self.escapes = []
+        self.c.input.tap_escape = lambda: self.escapes.append(True)
+
+    def test_mulligan_already_armed_prevents_announcement_navigation(self):
+        self.c._Controller__mulligan_decision_armed = True
+        self.c._locate_image_center_in_scaled_arena_region = Mock()
+
+        self.assertFalse(self.c._dismiss_blocking_announcement("STARTER_NAV"))
+        self.c._locate_image_center_in_scaled_arena_region.assert_not_called()
+        self.assertEqual(self.escapes, [])
+
+    def test_match_joining_during_slow_probe_prevents_escape(self):
+        def probe(*_args, **_kwargs):
+            self.c._Controller__mulligan_decision_armed = True
+            return None
+
+        self.c._locate_image_center_in_scaled_arena_region = probe
+        with patch("Controller.MTGAController.Controller.focus_mtga_window") as focus:
+            self.assertFalse(self.c._dismiss_blocking_announcement("STARTER_NAV"))
+
+        focus.assert_not_called()
+        self.assertEqual(self.escapes, [])
+
+    def test_live_game_state_prevents_announcement_navigation(self):
+        self.c._get_state_from_log = lambda: BotState.IN_GAME
+        self.c._locate_image_center_in_scaled_arena_region = Mock()
+
+        self.assertFalse(self.c._dismiss_blocking_announcement("STARTER_NAV"))
+        self.c._locate_image_center_in_scaled_arena_region.assert_not_called()
+        self.assertEqual(self.escapes, [])
+
+    def test_matchmaking_state_prevents_announcement_navigation(self):
+        self.c._get_state_from_log = lambda: BotState.FIND_MATCH
+        self.c._locate_image_center_in_scaled_arena_region = Mock()
+
+        self.assertFalse(self.c._dismiss_blocking_announcement("STARTER_NAV"))
+        self.c._locate_image_center_in_scaled_arena_region.assert_not_called()
+        self.assertEqual(self.escapes, [])
+
+    def test_match_arming_during_focus_settle_prevents_escape(self):
+        self.c._locate_image_center_in_scaled_arena_region = lambda *_a, **_k: None
+
+        def focus_and_join():
+            self.c._Controller__mulligan_decision_armed = True
+            return True
+
+        with patch(
+            "Controller.MTGAController.Controller.focus_mtga_window",
+            side_effect=focus_and_join,
+        ):
+            self.assertFalse(self.c._dismiss_blocking_announcement("STARTER_NAV"))
+
+        self.assertEqual(self.escapes, [])
+
+    def test_starter_navigation_entry_does_nothing_during_matchmaking(self):
+        self.c._get_state_from_log = lambda: BotState.FIND_MATCH
+        self.c._dismiss_reward_popup = Mock()
+        self.c._dismiss_match_end_screen = Mock()
+
+        self.assertFalse(self.c._navigate_starter_deck())
+        self.c._dismiss_reward_popup.assert_not_called()
+        self.c._dismiss_match_end_screen.assert_not_called()
+        self.assertEqual(self.escapes, [])
 
 
 class StarterDeckNavigationFilterFallbackTests(unittest.TestCase):

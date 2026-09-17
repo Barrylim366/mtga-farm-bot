@@ -21,6 +21,18 @@ class ActionSpec:
     post_expected_state: BotState | None = None
     post_assert_template: str | None = None
     post_assert_roi_rel: tuple[int, int, int, int] | None = None
+    # When this template is already on screen the action is considered done and
+    # is skipped without clicking. Two reasons, both live-measured on 2026-09-15:
+    # a step may already be satisfied (the account left the Play blade open, or
+    # Historic Play already selected), and several of these widgets are TOGGLES --
+    # clicking "My Decks" when the grid is already expanded COLLAPSES it. It also
+    # makes the flow resumable from wherever MTGA happens to be.
+    skip_if_template: str | None = None
+    skip_if_roi_rel: tuple[int, int, int, int] | None = None
+    # A step that only sometimes needs doing (e.g. selecting a sub-tab that the
+    # account already had selected). Not finding its click target is then the
+    # normal case, not a failure.
+    optional: bool = False
     threshold: float = 0.88
     pre_timeout_sec: float = 1.2
     post_timeout_sec: float = 6.0
@@ -41,7 +53,28 @@ def run_action(
     arena_region_getter: Callable[[], tuple[int, int, int, int] | None],
     click_abs: Callable[[int, int, str], None],
     recover_once: Callable[[str, int], None] | None = None,
+    on_diagnostic: Callable[[str], None] | None = None,
+    on_step_failed: Callable[[str, str, int], None] | None = None,
 ) -> ActionResult:
+    # Capture the screen at the MOMENT a step fails, before the recovery runs.
+    # Without this the only screenshot is the one written after the action gave
+    # up -- by which time the recovery has already navigated back to Home, so the
+    # bundle shows a healthy Home screen and says nothing about the screen the
+    # assert actually failed on. That cost a whole debugging round on 2026-09-15:
+    # POST_LOGIN_PLAY clicked Play correctly and then failed its post-assert, and
+    # every saved bundle showed Home. Once per step per action, so a failing loop
+    # cannot fill the disk.
+    captured: set[str] = set()
+
+    def _step_failed(step: str, attempt: int) -> None:
+        if on_step_failed is None or step in captured:
+            return
+        captured.add(step)
+        try:
+            on_step_failed(spec.name, step, attempt)
+        except Exception:
+            pass
+
     for attempt in range(1, max(1, spec.max_retries) + 1):
         arena_region = arena_region_getter()
         if arena_region is None:
@@ -55,37 +88,136 @@ def run_action(
                     recover_once(spec.name, attempt)
                 continue
 
-        if not _run_pre_assert(spec, vision, arena_region):
+        # After the state gate, not before it: skipping is still a claim about
+        # what is on screen, and it must not be reachable on a screen the action
+        # was not allowed to run on in the first place.
+        if _already_satisfied(spec, vision, arena_region):
+            if on_diagnostic is not None:
+                on_diagnostic(
+                    f"ACTION_ALREADY_SATISFIED: {spec.name} skipped; "
+                    f"{os.path.basename(spec.skip_if_template or '')} is already on screen."
+                )
+            return ActionResult(ok=True, reason="already_satisfied")
+
+        if not _run_pre_assert(spec, vision, arena_region, on_diagnostic):
+            _step_failed("pre_assert", attempt)
             if recover_once is not None:
                 recover_once(spec.name, attempt)
             continue
 
         click_done = _click_step(spec, vision, arena_region, click_abs)
+        if not click_done and spec.optional:
+            if on_diagnostic is not None:
+                on_diagnostic(
+                    f"ACTION_OPTIONAL_SKIPPED: {spec.name} click target not found; "
+                    "treating as already done."
+                )
+            return ActionResult(ok=True, reason="optional_skipped")
         if not click_done:
+            _step_failed("click", attempt)
             if recover_once is not None:
                 recover_once(spec.name, attempt)
             continue
 
-        if _run_post_assert(spec, vision, arena_region, state_getter):
+        if _run_post_assert(spec, vision, arena_region, state_getter, on_diagnostic):
             return ActionResult(ok=True, reason="ok")
 
+        _step_failed("post_assert", attempt)
         if recover_once is not None:
             recover_once(spec.name, attempt)
 
     return ActionResult(ok=False, reason=f"action_failed:{spec.name}")
 
 
-def _run_pre_assert(spec: ActionSpec, vision: VisionEngine, arena: tuple[int, int, int, int]) -> bool:
+def _already_satisfied(
+    spec: ActionSpec,
+    vision: VisionEngine,
+    arena: tuple[int, int, int, int],
+) -> bool:
+    """Whether this action's end state is already on screen (see skip_if_template)."""
+    if not spec.skip_if_template or not spec.skip_if_roi_rel:
+        return False
+    if not os.path.exists(spec.skip_if_template):
+        return False
+    vision.begin_tick()
+    return vision.assert_template(
+        _abs_region(arena, spec.skip_if_roi_rel),
+        spec.skip_if_template,
+        threshold=spec.threshold,
+    )
+
+
+def _assert_anchor(
+    spec: ActionSpec,
+    vision: VisionEngine,
+    arena: tuple[int, int, int, int],
+    template: str,
+    roi_rel: tuple[int, int, int, int],
+    kind: str,
+    on_diagnostic: Callable[[str], None] | None,
+) -> bool:
+    """Look for a screen-identity anchor in its ROI, then in the whole client area.
+
+    A too-tight anchor ROI is the worst kind of bug here, because it is invisible:
+    the action reports "the screen is not what I expected" and the recovery starts
+    clicking, while the anchor is plainly on screen a few pixels outside the box.
+    That is exactly what happened to POST_LOGIN_PLAY, whose ROI started 20 rows
+    below the top edge and so sliced the top off an anchor that sits flush against
+    it (0.22 in the ROI, 0.998 over the full area). So: if the ROI misses, look
+    once more across the whole arena, and when THAT hits, say so loudly and carry
+    on -- a misconfigured box must cost a log line, not the navigation.
+
+    The widening is only ever applied to anchors ("am I on the right screen?"),
+    never to a click template, where searching outside the intended box could put
+    a real click on the wrong widget.
+    """
+    if vision.assert_template(
+        _abs_region(arena, roi_rel), template, threshold=spec.threshold
+    ):
+        return True
+    full_rel = (0, 0, int(arena[2]), int(arena[3]))
+    if tuple(roi_rel) == full_rel:
+        return False
+    vision.begin_tick()
+    match = None
+    image = vision.capture(_abs_region(arena, full_rel))
+    if image is not None:
+        match = vision.find_template(image, template, threshold=spec.threshold)
+    if match is None:
+        return False
+    if on_diagnostic is not None:
+        on_diagnostic(
+            "ACTION_ROI_TOO_TIGHT: {} {}-assert template {} was not in roi_rel={} but "
+            "matched the full client area at ({}, {}) score={:.3f}. The ROI is "
+            "misconfigured; continuing on the wider match.".format(
+                spec.name, kind, os.path.basename(template), tuple(roi_rel),
+                match.x, match.y, match.score,
+            )
+        )
+    return True
+
+
+def _run_pre_assert(
+    spec: ActionSpec,
+    vision: VisionEngine,
+    arena: tuple[int, int, int, int],
+    on_diagnostic: Callable[[str], None] | None = None,
+) -> bool:
     if not spec.pre_assert_template or not spec.pre_assert_roi_rel:
         return True
     if not os.path.exists(spec.pre_assert_template):
         return True
-    return vision.wait_for_template(
-        _abs_region(arena, spec.pre_assert_roi_rel),
-        spec.pre_assert_template,
-        threshold=spec.threshold,
-        timeout_sec=spec.pre_timeout_sec,
-    )
+    deadline = time.time() + max(0.0, spec.pre_timeout_sec)
+    while True:
+        vision.begin_tick()
+        if _assert_anchor(
+            spec, vision, arena, spec.pre_assert_template, spec.pre_assert_roi_rel,
+            "pre", on_diagnostic,
+        ):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
 
 
 def _run_post_assert(
@@ -93,21 +225,40 @@ def _run_post_assert(
     vision: VisionEngine,
     arena: tuple[int, int, int, int],
     state_getter: Callable[[], BotState],
+    on_diagnostic: Callable[[str], None] | None = None,
 ) -> bool:
+    # A step that declares no post-condition at all has nothing to wait for, and
+    # a confirmed click is all the success it can report. Without this the loop
+    # below simply runs out its deadline and returns False, so such a step FAILS
+    # however well it went -- measured live 2026-09-15: POST_LOGIN_PLAY_SUBTAB
+    # clicked the Play sub-tab correctly and then reported
+    # `action_failed:POST_LOGIN_PLAY_SUBTAB` every single time, which failed the
+    # whole navigation and left Historic unable to queue. It used to carry a
+    # `post_expected_state` that made it pass; dropping that (the Play blade is
+    # not a scene, so the state was never really evidence) exposed the hole.
+    has_template = bool(
+        spec.post_assert_template
+        and spec.post_assert_roi_rel
+        and os.path.exists(spec.post_assert_template)
+    )
+    if spec.post_expected_state is None and not has_template:
+        return True
     deadline = time.time() + max(0.0, spec.post_timeout_sec)
     while time.time() < deadline:
         if spec.post_expected_state is not None:
             cur_state = state_getter()
             if cur_state in (spec.post_expected_state, BotState.UNKNOWN):
-                if not spec.post_assert_template or not spec.post_assert_roi_rel:
+                # `has_template`, not just "a path is configured": a path naming
+                # an asset that is not installed is no evidence, and treating it
+                # as one to be waited for would fail the step forever.
+                if not has_template:
                     return True
 
-        if spec.post_assert_template and spec.post_assert_roi_rel and os.path.exists(spec.post_assert_template):
+        if has_template:
             vision.begin_tick()
-            if vision.assert_template(
-                _abs_region(arena, spec.post_assert_roi_rel),
-                spec.post_assert_template,
-                threshold=spec.threshold,
+            if _assert_anchor(
+                spec, vision, arena, spec.post_assert_template, spec.post_assert_roi_rel,
+                "post", on_diagnostic,
             ):
                 return True
 

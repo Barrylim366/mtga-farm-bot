@@ -374,6 +374,15 @@ class LandingTests(RerollCase):
         self.assertTrue(c._run_post_login_routine({}, []))
         c._run_starter_deck_routine.assert_called_once()
 
+    def test_post_login_skips_deck_and_queue_when_switch_is_due(self):
+        c = self.c
+        c._game_mode = "starter"
+        c.reroll_quest_on_landing = Mock(return_value=True)
+        c._account_switch_due = Mock(return_value=True)
+        c._run_starter_deck_routine = Mock(return_value=True)
+        self.assertTrue(c._run_post_login_routine({}, []))
+        c._run_starter_deck_routine.assert_not_called()
+
     def test_match_or_stop_still_skips_deck_selection(self):
         c = self.c
         c._game_mode = "starter"
