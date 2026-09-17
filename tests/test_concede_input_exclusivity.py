@@ -54,7 +54,7 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
                 controller._Controller__concede_outcome = "match_completed"
                 controller._Controller__concede_completed_event.set()
 
-        controller._Controller__perform_concede = perform
+        controller._Controller__perform_concede = lambda label, *_args: perform(label)
         controller._Controller__run_claimed_concede_sequence("STALL_CONCEDE")
 
         self.assertEqual(attempts, ["STALL_CONCEDE_1", "STALL_CONCEDE_2"])
@@ -73,6 +73,10 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
                 self.completed = self.waits == 2
                 if self.completed:
                     controller._Controller__concede_outcome = "match_completed"
+                    controller._Controller__concede_terminal_results = {
+                        "match-1": {"outcome": "match_completed", "recovery_sec": 4.25}
+                    }
+                    controller._Controller__soak_concede_claimed_at = None
                 return self.completed
 
         controller = Controller.__new__(Controller)
@@ -80,12 +84,13 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         controller._Controller__concede_completed_event = CompletesOnSecondWait()
         controller._Controller__concession_claim_reason = "stalled_local_context"
         controller._Controller__concede_outcome = None
+        controller._Controller__concede_terminal_results = {}
         controller._Controller__soak_concede_claimed_at = 10.0
         controller._Controller__soak_concede_attempts = 0
         controller._Controller__live_match_id = "match-1"
         controller._Controller__last_seen_match_id = "match-1"
         controller._get_state_from_log = lambda: BotState.IN_GAME
-        controller._Controller__perform_concede = lambda _label: None
+        controller._Controller__perform_concede = lambda _label, *_args: None
         controller.input = NullInputController()
 
         with mock.patch("Controller.MTGAController.Controller.time.monotonic", return_value=15.0), \
@@ -97,6 +102,8 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         self.assertTrue(any('"event":"concede_attempt_timeout"' in message for message in soak_messages))
         self.assertTrue(any('"event":"recovery_observed"' in message for message in soak_messages))
         self.assertTrue(any('"attempts":2' in message for message in soak_messages))
+        self.assertTrue(any('"reason":"match_completed"' in message for message in soak_messages))
+        self.assertTrue(any('"recovery_sec":4.25' in message for message in soak_messages))
 
     def test_attempt_limit_releases_input_and_suppresses_same_signature(self):
         class NeverCompletes:
@@ -119,14 +126,14 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         controller._get_state_from_log = lambda: BotState.IN_GAME
         controller.input = NullInputController()
         attempts = []
-        controller._Controller__perform_concede = lambda label: attempts.append(label)
+        controller._Controller__perform_concede = lambda label, *_args: attempts.append(label)
         signature = ("prompt", (), True, 1, "main", "step", (), (), (), ())
 
         controller._Controller__run_claimed_concede_sequence(
             "STALL_CONCEDE", signature, "match-1"
         )
 
-        self.assertEqual(len(attempts), 5)
+        self.assertEqual(len(attempts), 2)
         self.assertFalse(controller._Controller__concession_claimed)
         self.assertFalse(controller._suppress_selections)
         self.assertEqual(controller._Controller__failed_stall_signature, signature)
@@ -147,6 +154,27 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         messages = [call.args[0] for call in log_info.call_args_list if call.args]
         self.assertTrue(any('"event":"concede_sequence_ended_without_completion"' in msg for msg in messages))
         self.assertFalse(any('"event":"recovery_observed"' in msg for msg in messages))
+
+    def test_completed_match_skips_confirmation_without_cancellation(self):
+        controller = Controller.__new__(Controller)
+        controller._Controller__concede_outcome = "match_completed"
+        controller._Controller__soak_stall_run_id = "test"
+        controller._Controller__last_seen_match_id = None
+        controller._Controller__live_match_id = None
+        controller._click_abs = lambda *_args, **_kwargs: None
+
+        with mock.patch.object(controller, "_Controller__is_live_match", side_effect=[True, False]), \
+             mock.patch("Controller.MTGAController.Controller.os.path.exists", return_value=False), \
+             mock.patch("Controller.MTGAController.Controller.time.sleep"), \
+             mock.patch("Controller.MTGAController.Controller.bot_logger.log_info") as log_info:
+            controller._Controller__click_concede_and_confirm(
+                (10, 20), label="STALL_CONCEDE_1", expected_match_id="match-1"
+            )
+
+        messages = [call.args[0] for call in log_info.call_args_list if call.args]
+        self.assertTrue(any('"event":"confirmation_skipped_match_completed"' in msg for msg in messages))
+        self.assertTrue(any('"match_id":"match-1"' in msg for msg in messages))
+        self.assertFalse(any('"event":"cancellation"' in msg for msg in messages))
 
 
 if __name__ == "__main__":

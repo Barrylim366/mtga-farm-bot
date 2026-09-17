@@ -3,8 +3,11 @@ from Controller.Utilities.GameStateInterface import GameStateSecondary
 
 
 class GameState(GameStateSecondary):
-    def __init__(self, game_dict: [str, str or int] = {}):
-        self.game_dict = game_dict
+    def __init__(self, game_dict: [str, str or int] | None = None):
+        # Never share an empty mutable state between Controller instances or
+        # successive match resets. A diff merged into one such state would
+        # otherwise become the baseline of the next GameState().
+        self.game_dict = {} if game_dict is None else game_dict
         self.game_dict_expected_keys = ["turnInfo", "timers", "gameObjects", "players", "annotations", "actions",
                                         "zones"]
         self.ti_dict_expected_keys = ["phase", "phase", "turnNumber", "activePlayer", "priorityPlayer",

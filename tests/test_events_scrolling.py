@@ -145,9 +145,13 @@ class _Stub(Controller):
         return _V()
 
     def _click_image_in_scaled_arena_region(self, image_path, label, *, rel_region=None,
-                                            confidence=0.82, timeout=1.5):
+                                            confidence=0.82, timeout=1.5,
+                                            action_guard=None):
         self.probes.append(label)
         return self.probe_results.pop(0) if self.probe_results else False
+
+    def _starter_navigation_may_act(self):
+        return not self._stop_requested
 
 
 class _ScriptedDrag(_Stub):

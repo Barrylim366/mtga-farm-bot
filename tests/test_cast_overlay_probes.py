@@ -29,6 +29,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 
 
 class _Pos:
@@ -73,6 +74,9 @@ def make_controller() -> Controller:
     f = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
     f.close()
     c = Controller(f.name)
+    c._Controller__live_match_id = "test-match"
+    c._Controller__last_seen_match_id = "test-match"
+    c._get_state_from_log = lambda: BotState.IN_GAME
     c.input = _FakeInput()
     c._get_hand_scan_points_mapped = lambda **k: ((0, 0), (0, 0))
     c._ensure_options_overlay_closed = lambda **k: True
@@ -157,7 +161,7 @@ class CastProbeBudgetTest(unittest.TestCase):
 
     def test_a_cast_that_hovers_the_card_probes_nothing(self):
         """No failure, no evidence, no probe -- and no cost."""
-        self.c._cast_once = lambda card_id, attempt=0: True
+        self.c._cast_once = lambda card_id, attempt=0, **_kwargs: True
         self.assertTrue(self.c.cast(999))
         self.assertEqual(self.report, [])
         self.assertEqual(self.done, [])

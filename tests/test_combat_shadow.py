@@ -27,6 +27,7 @@ if ROOT not in sys.path:
 
 from Controller.MTGAController.Controller import Controller
 from Controller.Utilities.GameState import GameState
+from state.state_machine import BotState
 
 MY_SEAT = 1
 OPP_SEAT = 2
@@ -39,6 +40,9 @@ def make_controller() -> Controller:
     controller = Controller(handle.name)
     controller._test_log_path = handle.name
     controller._Controller__system_seat_id = MY_SEAT
+    controller._Controller__live_match_id = "test-match"
+    controller._Controller__last_seen_match_id = "test-match"
+    controller._get_state_from_log = lambda: BotState.IN_GAME
     return controller
 
 

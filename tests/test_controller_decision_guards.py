@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -23,6 +24,7 @@ if ROOT not in sys.path:
 
 from Controller.MTGAController.Controller import Controller
 from Controller.Utilities.GameState import GameState
+from state.state_machine import BotState
 
 
 def _cleanup_controller(c: Controller) -> None:
@@ -47,6 +49,9 @@ def make_controller() -> Controller:
     f = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
     f.close()
     c = Controller(f.name)
+    c._Controller__live_match_id = "test-match-1"
+    c._Controller__last_seen_match_id = "test-match-1"
+    c._get_state_from_log = lambda: BotState.IN_GAME
     return c
 
 
@@ -202,6 +207,69 @@ class StackDeferTimeoutProceedsTest(unittest.TestCase):
         self.assertEqual(c._Controller__stack_defer_since, 0.0)
 
 
+class FreshMatchStateIsolationTest(unittest.TestCase):
+    def test_first_diff_resets_old_match_before_merge_and_starts_once(self):
+        c = make_controller()
+        self.addCleanup(_cleanup_controller, c)
+        c._Controller__live_match_id = "old-match"
+        c._Controller__last_seen_match_id = "old-match"
+        c._Controller__pending_card_prompt = {"kind": "old"}
+        c._Controller__pending_target_select = {"source_id": 99}
+        c._Controller__pending_select_n = {"ids": [99]}
+        c._Controller__inst_id_grp_id_dict = {99: 999}
+        seed_state(c, decision_player=1, active_player=1, game_state_id=500)
+        c.updated_game_state.game_dict["actions"] = [{"actionType": "ActionType_Cast"}]
+        c.updated_game_state.game_dict["timers"] = [{"timerId": 99, "durationSec": 2}]
+
+        first_diff = make_raw_dict(
+            match_id="new-match", game_state_id=1, prev_game_state_id=0
+        )
+        message = first_diff["greToClientEvent"]["greToClientMessages"][0]["gameStateMessage"]
+        message["type"] = "GameStateType_Diff"
+        message.pop("turnInfo")
+        message.pop("actions")
+        message.pop("timers")
+
+        with mock.patch("Controller.MTGAController.Controller.bot_logger.log_info") as log_info:
+            c._Controller__update_game_state(first_diff)
+            c._Controller__update_game_state(first_diff)
+
+        state = c.updated_game_state.get_full_state()
+        self.assertFalse(state.get("turnInfo"))
+        self.assertFalse(state.get("actions"))
+        self.assertFalse(state.get("timers"))
+        self.assertIsNone(c._Controller__pending_card_prompt)
+        self.assertIsNone(c._Controller__pending_target_select)
+        self.assertIsNone(c._Controller__pending_select_n)
+        self.assertEqual(c.get_inst_id_grp_id_dict(), {})
+        self.assertEqual(c.get_current_match_id(), "new-match")
+        self.assertEqual(c._Controller__retired_match_id, "old-match")
+
+        starts = [
+            call.args[0] for call in log_info.call_args_list
+            if call.args and '"event":"live_match_started"' in call.args[0]
+        ]
+        self.assertEqual(len(starts), 1)
+
+    def test_late_retired_match_diff_is_rejected_before_merge(self):
+        c = make_controller()
+        self.addCleanup(_cleanup_controller, c)
+        c._Controller__live_match_id = "new-match"
+        c._Controller__last_seen_match_id = "new-match"
+        c._Controller__retired_match_id = "old-match"
+        seed_state(c, decision_player=1, active_player=1, game_state_id=10)
+        before = c.updated_game_state.get_full_state().copy()
+
+        late = make_raw_dict(
+            match_id="old-match", game_state_id=999, prev_game_state_id=998,
+            decision_player=2, active_player=2,
+        )
+        c._Controller__update_game_state(late)
+
+        self.assertEqual(c.updated_game_state.get_full_state(), before)
+        self.assertEqual(c.get_current_match_id(), "new-match")
+
+
 class SafeToRedriveDecisionTest(unittest.TestCase):
     """Findings 3 + 6: the guard used by both the group/scry resume timer and
     the idle-decision heartbeat must refuse to fire while a pay-costs prompt
@@ -329,6 +397,57 @@ class DecisionTimestampStampedOnFreshPriorityTest(unittest.TestCase):
                 c._Controller__decision_execution_thread.cancel()
 
         self.assertGreaterEqual(c._Controller__last_decision_ts, before)
+
+
+class SubmitSelectionCancellationTest(unittest.TestCase):
+    def test_match_completion_during_probe_stops_fallbacks_and_clicks(self):
+        c = make_controller()
+        self.addCleanup(_cleanup_controller, c)
+        c._Controller__pending_target_select = {
+            "source_id": 10,
+            "selected": 1,
+            "min": 1,
+        }
+        probes = []
+        clicks = []
+
+        def complete_match_during_first_probe(*_args, **_kwargs):
+            probes.append("scaled")
+            c._Controller__live_match_id = None
+            c._Controller__last_seen_match_id = None
+            return None
+
+        c._locate_image_center_in_scaled_arena_region = complete_match_during_first_probe
+        c._locate_image_center = lambda *_args, **_kwargs: probes.append("full")
+        c._click_abs = lambda *_args, **_kwargs: clicks.append((_args, _kwargs))
+
+        with mock.patch("Controller.MTGAController.Controller.os.path.exists", return_value=True):
+            submitted = c.submit_selection(
+                reason="test_completion_during_probe",
+                expected_match_id="test-match-1",
+            )
+
+        self.assertFalse(submitted)
+        self.assertEqual(probes, ["scaled"])
+        self.assertEqual(clicks, [])
+
+    def test_are_you_sure_probe_refuses_retired_match(self):
+        c = make_controller()
+        self.addCleanup(_cleanup_controller, c)
+        probes = []
+        c._Controller__live_match_id = None
+        c._Controller__last_seen_match_id = None
+        c._locate_image_center_in_scaled_arena_region = (
+            lambda *_args, **_kwargs: probes.append("probe")
+        )
+
+        dismissed = c._dismiss_are_you_sure_if_present(
+            context="TARGET_SUBMIT id=395",
+            expected_match_id="test-match-1",
+        )
+
+        self.assertFalse(dismissed)
+        self.assertEqual(probes, [])
 
 
 if __name__ == "__main__":

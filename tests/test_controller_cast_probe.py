@@ -18,6 +18,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 
 
 class _Pos:
@@ -51,7 +52,11 @@ class _FakeInput:
 def make_controller() -> Controller:
     f = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
     f.close()
-    return Controller(f.name)
+    controller = Controller(f.name)
+    controller._Controller__live_match_id = "test-match"
+    controller._Controller__last_seen_match_id = "test-match"
+    controller._get_state_from_log = lambda: BotState.IN_GAME
+    return controller
 
 
 class CastProbeIsReactiveTest(unittest.TestCase):

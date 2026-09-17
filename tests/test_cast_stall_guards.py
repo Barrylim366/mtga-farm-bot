@@ -31,6 +31,7 @@ if ROOT not in sys.path:
 
 import Game as GameModule
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 
 
 class _Pos:
@@ -80,6 +81,9 @@ def make_controller() -> Controller:
     f = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
     f.close()
     c = Controller(f.name)
+    c._Controller__live_match_id = "test-match"
+    c._Controller__last_seen_match_id = "test-match"
+    c._get_state_from_log = lambda: BotState.IN_GAME
     c.input = _FakeInput()
     c._get_hand_scan_points_mapped = lambda **k: ((0, 0), (0, 0))
     c._ensure_options_overlay_closed = lambda **k: True
@@ -198,6 +202,46 @@ class CastSuppressionTest(unittest.TestCase):
              patch("time.sleep", return_value=None):
             self.assertIs(self.c.cast(999), True)
 
+    def test_suppression_during_scan_stops_before_recovery_probes(self):
+        probes = []
+
+        def cancelled_scan(_card_id, **_kwargs):
+            self.c._suppress_selections = True
+            return False
+
+        self.c._cast_once = cancelled_scan
+        self.c._dismiss_are_you_sure_if_present = lambda **_kwargs: probes.append("confirm")
+        self.c._dismiss_report_player_dialog = lambda **_kwargs: probes.append("report")
+        self.c._dismiss_stray_done_overlay = lambda **_kwargs: probes.append("done")
+
+        self.assertFalse(self.c.cast(999))
+        self.assertEqual(probes, [])
+
+
+class GameActionCancellationTest(unittest.TestCase):
+    def setUp(self):
+        self.c = make_controller()
+
+    def test_resolve_refuses_input_after_concession_claim(self):
+        self.c._Controller__concession_claimed = True
+        with patch.object(self.c, "_map_abs_point_to_arena") as mapper:
+            self.c.resolve()
+        mapper.assert_not_called()
+
+    def test_resolve_refuses_input_after_match_retirement(self):
+        self.c._Controller__live_match_id = None
+        self.c._Controller__last_seen_match_id = None
+        self.c._Controller__retired_match_id = "test-match"
+        with patch.object(self.c, "_map_abs_point_to_arena") as mapper:
+            self.c.resolve()
+        mapper.assert_not_called()
+
+    def test_resolve_refuses_input_after_stop(self):
+        self.c._stop_requested = True
+        with patch.object(self.c, "_map_abs_point_to_arena") as mapper:
+            self.c.resolve()
+        mapper.assert_not_called()
+
 
 class HandScanRefusesDesktopTest(unittest.TestCase):
     """Unmapped scan points are raw desktop coordinates, so the sweep runs
@@ -270,6 +314,10 @@ class _StubController:
     def __init__(self, cast_result):
         self._cast_result = cast_result
         self.calls = []
+        self.can_execute = True
+
+    def can_execute_game_action(self, expected_match_id=None):
+        return self.can_execute
 
     def cast(self, inst_id):
         self.calls.append(("cast", inst_id))
@@ -325,6 +373,12 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
         """`is False` and not falsiness: an older controller reporting nothing
         must not be read as a failure and made to pass priority."""
         g = self.game(None)
+        self.execute_cast(g)
+        self.assertEqual(g.controller.calls, [("cast", 477)])
+
+    def test_a_cancelled_cast_does_not_pass_priority(self):
+        g = self.game(False)
+        g.controller.can_execute = False
         self.execute_cast(g)
         self.assertEqual(g.controller.calls, [("cast", 477)])
 

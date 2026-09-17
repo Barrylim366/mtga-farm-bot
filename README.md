@@ -110,7 +110,7 @@ The app's current version (`1.5.1`, sourced from `version.py`) is shown in **Set
 When enabled in Settings, the bot can concede only after Arena has confirmed a
 live match and the same local decision state has remained unchanged for 30
 seconds. It never acts from stale post-match data or while Arena is in a menu.
-If the Concede dialog cannot be completed after five attempts, normal play is
+If the Concede dialog cannot be completed after two attempts, normal play is
 resumed and that unchanged state is not retried until Arena reports real game
 progress.
 

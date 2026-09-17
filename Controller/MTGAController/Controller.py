@@ -79,6 +79,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # start_game_from_home_screen). After this many failed attempts the bot gives
     # up reading and just plays, rather than dipping to Home forever.
     _HOME_QUEST_CHECK_MAX_ATTEMPTS = 3
+    _STALL_CONCEDE_MAX_ATTEMPTS = 2
 
     def __init__(
         self,
@@ -146,6 +147,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__soak_stall_reset_total = 0
         self.__soak_concede_attempts = 0
         self.__soak_concede_claimed_at = None
+        self.__concede_terminal_results = {}
         self.__concession_claimed = False
         self.__concession_claim_reason = None
         self.__concession_claim_lock = threading.Lock()
@@ -1684,7 +1686,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # A ward acknowledgement older than this belongs to an earlier prompt.
     _WARD_ACK_MAX_AGE_SEC = 25.0
 
-    def _dismiss_are_you_sure_if_present(self, *, context: str) -> bool:
+    def _dismiss_are_you_sure_if_present(
+        self, *, context: str, expected_match_id: str | None = None
+    ) -> bool:
         """Answer MTGA's client-side "Are You Sure?" confirm, returning True if one
         was dismissed.
 
@@ -1705,6 +1709,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         stale one, still means No. Paying is then MTGA's problem: it raises a
         PayCostsReq, which __handle_pay_costs_req already auto-pays.
         """
+        if (
+            expected_match_id is not None
+            and not self.can_execute_game_action(expected_match_id)
+        ):
+            return False
         tpl = os.path.join(self._buttons_dir(), "are_you_sure.png")
         if not os.path.exists(tpl):
             return False
@@ -1715,6 +1724,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         ) is None:
             return False
 
+        if (
+            expected_match_id is not None
+            and not self.can_execute_game_action(expected_match_id)
+        ):
+            return False
         ack = self.__consume_ward_payment_ack()
         if ack is not None:
             target, src = self._map_abs_point_to_arena(
@@ -1724,6 +1738,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 f"{context}: 'Are You Sure?' dialog detected; paying ward {{{ack['mana']}}} "
                 f"on target {ack['target']} -- answering Yes at {target} ({src})."
             )
+            if (
+                expected_match_id is not None
+                and not self.can_execute_game_action(expected_match_id)
+            ):
+                return False
             self._click_abs(int(target[0]), int(target[1]), "ARE_YOU_SURE_YES")
             time.sleep(0.6)
             return True
@@ -1734,6 +1753,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         bot_logger.log_info(
             f"{context}: 'Are You Sure?' dialog detected; answering No at {target} ({src})."
         )
+        if (
+            expected_match_id is not None
+            and not self.can_execute_game_action(expected_match_id)
+        ):
+            return False
         self._click_abs(int(target[0]), int(target[1]), "ARE_YOU_SURE_NO")
         # Whatever we just backed out of must not be re-picked identically, or the
         # decision loop re-derives it from the unchanged board and we are back in
@@ -2235,7 +2259,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         rel_region: tuple[int, int, int, int] | None = None,
         confidence: float = 0.82,
         timeout: float = 1.5,
+        action_guard=None,
     ) -> bool:
+        if action_guard is not None and not action_guard():
+            return False
         point = self._locate_image_center_in_scaled_arena_region(
             image_path,
             label,
@@ -2243,7 +2270,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             confidence=confidence,
             timeout=timeout,
         )
-        if point is None:
+        if point is None or (action_guard is not None and not action_guard()):
             return False
         self._click_abs(point[0], point[1], label)
         return True
@@ -3962,7 +3989,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         Worst case is one wasted navigation cycle, and _swap_starter_deck_for_quest
         in between verifies the deck chooser really opened before touching the grid.
         """
-        if self._stop_requested:
+        if not self._starter_navigation_may_act():
             return False
         claim_btn = os.path.join(self._buttons_dir(), "claim.png")
         if not os.path.exists(claim_btn):
@@ -3972,7 +3999,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             claim_btn, "REWARD_CLAIM", rel_region=self._REWARD_CLAIM_ROI,
             confidence=0.80, timeout=1.5,
         )
-        if point is None:
+        if point is None or not self._starter_navigation_may_act():
             return False
         # Candidate match -- verify before clicking. Done only now, so the extra
         # probe costs nothing on the common path where no claim-like button is up.
@@ -3982,6 +4009,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "is the event landing page and not a reward popup (clicking would start a "
                 "match with the wrong deck)."
             )
+            return False
+        if not self._starter_navigation_may_act():
             return False
         self._click_abs(point[0], point[1], "REWARD_CLAIM")
         bot_logger.log_info("Reward screen detected: clicked Claim to continue.")
@@ -3998,10 +4027,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         consecutive navigation attempts, then click the continue prompt + center
         (language-independent, no result-text template needed). Returns True if it
         clicked, so the caller restarts navigation on the next loop."""
-        if self._stop_requested:
-            return False
-        # In a game the anchors are legitimately different; never click there.
-        if self._get_state_from_log() == BotState.IN_GAME:
+        if not self._starter_navigation_may_act():
             self._unknown_screen_strikes = 0
             return False
         try:
@@ -4031,10 +4057,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if focus_mtga_window():
             time.sleep(0.2)
         for ty in (continue_y, center_y):
-            if self._stop_requested:
+            if not self._starter_navigation_may_act():
                 break
             self.input.move_abs(cx, ty)
             time.sleep(0.25)
+            if not self._starter_navigation_may_act():
+                break
             self.input.left_click(1)
             time.sleep(0.5)
         self._unknown_screen_strikes = 0
@@ -4050,11 +4078,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         Buttons/event_play.png, so it is a no-op on any other screen and the
         caller can fall back to full navigation.
         """
+        if not self._starter_navigation_may_act():
+            return False
         event_play = os.path.join(self._buttons_dir(), "event_play.png")
         if not os.path.exists(event_play):
             return False
         # Confirm we are actually on the event page before touching the deck box.
         if not self._on_starter_event_landing_page("STARTER_EVENT_PLAY_PROBE"):
+            return False
+        if not self._starter_navigation_may_act():
             return False
         # Between matches: refresh quest progress best-effort (keeps the cache and
         # the UI display current when Home has logged a fresh quests block).
@@ -4072,10 +4104,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             target_colors = refreshed_colors
         # Swap to the deck that best advances the top quest, then queue.
         self._swap_starter_deck_for_quest(target_colors)
+        if not self._starter_navigation_may_act():
+            return False
         runtime_status.set_startup_phase("Pressing Play")
         if self._click_image_in_scaled_arena_region(
             event_play, "STARTER_EVENT_PLAY", rel_region=self._EVENT_PLAY_ROI,
             confidence=0.80, timeout=2.0,
+            action_guard=self._starter_navigation_may_act,
         ):
             bot_logger.log_info("Starter: re-queued from event landing page via Play button.")
             time.sleep(1.0)
@@ -4329,7 +4364,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         scroll position is left alone.
         """
         if self._click_image_in_scaled_arena_region(
-            template, label, rel_region=roi, confidence=confidence, timeout=3.0
+            template, label, rel_region=roi, confidence=confidence, timeout=3.0,
+            action_guard=self._starter_navigation_may_act,
         ):
             return True
         thumb = self._locate_events_scrollbar_thumb()
@@ -4348,7 +4384,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # sweep can never recover. From the top, the sweep covers the whole list.
         self._scroll_events_to_top()
         if self._click_image_in_scaled_arena_region(
-            template, label, rel_region=roi, confidence=confidence, timeout=1.5
+            template, label, rel_region=roi, confidence=confidence, timeout=1.5,
+            action_guard=self._starter_navigation_may_act,
         ):
             bot_logger.log_info(f"{label}: found after scrolling back to the top.")
             return True
@@ -4368,12 +4405,29 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 )
                 break
             if self._click_image_in_scaled_arena_region(
-                template, label, rel_region=roi, confidence=confidence, timeout=1.5
+                template, label, rel_region=roi, confidence=confidence, timeout=1.5,
+                action_guard=self._starter_navigation_may_act,
             ):
                 bot_logger.log_info(f"{label}: found after {step} scroll step(s).")
                 return True
         self._scroll_events_to_top()
         return False
+
+    def _starter_navigation_may_act(self) -> bool:
+        """Whether a menu-navigation worker may still send UI input.
+
+        Queue navigation can spend seconds inside template searches. A match may
+        become live during that search, so checking only when the routine starts
+        lets the stale worker press Escape or click over the mulligan screen.
+        Callers check this again after every blocking probe and immediately before
+        input.
+        """
+        if self._stop_requested:
+            return False
+        try:
+            return self._get_state_from_log() != BotState.IN_GAME
+        except Exception:
+            return False
 
     def _navigate_starter_deck(self) -> bool:
         """Navigate Home -> Play -> Events -> In Progress -> Starter Deck Duel.
@@ -4387,20 +4441,22 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         matchmaking or in a game, the buttons are not on screen and each step
         returns without disrupting anything.
         """
-        if self._stop_requested:
-            return False
-        if self._get_state_from_log() == BotState.IN_GAME:
+        if not self._starter_navigation_may_act():
             return False
 
         # A post-match reward popup covers the Play/Events controls; clear it
         # first so navigation is not stuck retrying against a blocked screen.
         if self._dismiss_reward_popup():
             return False
+        if not self._starter_navigation_may_act():
+            return False
 
         # Safety net: a DEFEAT/VICTORY result screen the post-match timer failed
         # to dismiss also covers the Play/Events controls. Clear it so the queue
         # loop never spins forever on a screen that still shows the result.
         if self._dismiss_match_end_screen():
+            return False
+        if not self._starter_navigation_may_act():
             return False
 
         # Populate the quest cache the first time we reach navigation (in case the
@@ -4443,15 +4499,21 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         #    blade the home Play button is not found and we just continue.
         runtime_status.set_startup_phase("Opening the Play menu")
         if self._click_image_in_scaled_arena_region(
-            play_btn, "STARTER_PLAY", rel_region=home_play_roi, confidence=0.80, timeout=1.5
+            play_btn, "STARTER_PLAY", rel_region=home_play_roi, confidence=0.80,
+            timeout=1.5, action_guard=self._starter_navigation_may_act,
         ):
             time.sleep(1.0)
+        if not self._starter_navigation_may_act():
+            return False
 
         # 2) Events tab (top-right of the Play blade).
         runtime_status.set_startup_phase("Opening the Events tab")
         if not self._click_image_in_scaled_arena_region(
-            events_tpl, "STARTER_EVENTS", rel_region=events_tab_roi, confidence=0.74, timeout=2.0
+            events_tpl, "STARTER_EVENTS", rel_region=events_tab_roi, confidence=0.74,
+            timeout=2.0, action_guard=self._starter_navigation_may_act,
         ):
+            if not self._starter_navigation_may_act():
+                return False
             # Not in the Play blade. We may already be on the event landing page
             # (MTGA returns here after each match) -- re-queue from its Play
             # button instead of stalling.
@@ -4467,6 +4529,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # so unlike the old submit_deck.PNG probe this cannot fire on an
             # unrelated event's deckbuilder -- hence no once-per-account gate.
             screen = self._detect_starter_screen("STARTER_ENTRY_SCREEN")
+            if not self._starter_navigation_may_act():
+                return False
             if screen != self._STARTER_SCREEN_UNKNOWN:
                 bot_logger.log_info(
                     f"Starter: no Play/Events chrome, but we are on the event's "
@@ -4496,6 +4560,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         in_progress_point = self._locate_image_center_in_scaled_arena_region(
             in_progress_tpl, "STARTER_IN_PROGRESS_LOCATE", rel_region=in_progress_roi, confidence=0.80, timeout=1.5
         )
+        if not self._starter_navigation_may_act():
+            return False
         if in_progress_point is not None:
             self._click_abs(in_progress_point[0], in_progress_point[1], "STARTER_IN_PROGRESS")
             bot_logger.log_info("Starter: In Progress filter selected.")
@@ -4526,8 +4592,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             all_clicked = False
             if os.path.exists(all_tpl):
                 all_clicked = self._click_image_in_scaled_arena_region(
-                    all_tpl, "STARTER_ALL_FILTER", rel_region=in_progress_roi, confidence=0.75, timeout=1.5
+                    all_tpl, "STARTER_ALL_FILTER", rel_region=in_progress_roi, confidence=0.75,
+                    timeout=1.5, action_guard=self._starter_navigation_may_act,
                 )
+            if not self._starter_navigation_may_act():
+                return False
             if not all_clicked:
                 # If template for 'All' is not present or matching fails, click the 'All' filter row.
                 # In MTGA's Events sidebar, 'All' is the top filter row, directly above 'In Progress'.
@@ -4557,13 +4626,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         # 4.5) Swap to the quest-matched starter deck before pressing Play.
         self._swap_starter_deck_for_quest(target_colors)
+        if not self._starter_navigation_may_act():
+            return False
 
         # 5) Press the event page's Play button. Prefer event_play.png -- that IS
         #    the button on this page; play_btn.png is the Home blade's Play and only
         #    ever matched here by luck. Still best-effort: clicking the "Resume"
         #    banner can launch the match outright, so a miss is not a failure.
         if not self._press_starter_event_play() and not self._click_image_in_scaled_arena_region(
-            play_btn, "STARTER_PLAY_CONFIRM", rel_region=play_confirm_roi, confidence=0.80, timeout=1.5
+            play_btn, "STARTER_PLAY_CONFIRM", rel_region=play_confirm_roi, confidence=0.80,
+            timeout=1.5, action_guard=self._starter_navigation_may_act,
         ):
             bot_logger.log_info("Starter: no separate Play button (likely launched from Resume).")
 
@@ -4731,13 +4803,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self, name: str, label: str, roi: tuple[int, int, int, int]
     ) -> bool:
         """True if button template `name` is on screen inside `roi`."""
+        if not self._starter_navigation_may_act():
+            return False
         path = os.path.join(self._buttons_dir(), name)
         if not os.path.exists(path):
             return False
-        return self._locate_image_center_in_scaled_arena_region(
+        point = self._locate_image_center_in_scaled_arena_region(
             path, label, rel_region=roi,
             confidence=self._STARTER_SCREEN_CONFIDENCE, timeout=1.0,
-        ) is not None
+        )
+        return point is not None and self._starter_navigation_may_act()
 
     def _detect_starter_screen(self, label: str) -> str:
         """Which Starter Deck Duel screen is on screen, as a _STARTER_SCREEN_* value.
@@ -4824,9 +4899,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """
         backouts = 0
         for step in range(self._STARTER_CHOOSER_MAX_STEPS):
-            if self._stop_requested:
+            if not self._starter_navigation_may_act():
                 return False
             screen = self._detect_starter_screen(f"STARTER_SCREEN_{step}")
+            if not self._starter_navigation_may_act():
+                return False
             if screen == self._STARTER_SCREEN_CHOOSER:
                 if step:
                     bot_logger.log_info(f"Starter: deck chooser reached after {step} step(s).")
@@ -4893,6 +4970,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def _click_starter_button(self, template: str, label: str) -> bool:
         """Click one of the event's bottom-right pill buttons by template."""
+        if not self._starter_navigation_may_act():
+            return False
         path = os.path.join(self._buttons_dir(), template)
         if not os.path.exists(path):
             bot_logger.log_error(f"Starter: button template {template} is missing; cannot continue.")
@@ -4900,6 +4979,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if self._click_image_in_scaled_arena_region(
             path, label, rel_region=self._EVENT_PLAY_ROI,
             confidence=self._STARTER_SCREEN_CONFIDENCE, timeout=1.5,
+            action_guard=self._starter_navigation_may_act,
         ):
             return True
         bot_logger.log_error(f"Starter: {template} was detected but no longer clickable.")
@@ -4939,7 +5019,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         Options overlay. Callers must only use this once every navigation anchor
         has been ruled out.
         """
-        if self._stop_requested:
+        if not self._starter_navigation_may_act():
             return False
         okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
         if os.path.exists(okay_img):
@@ -4948,6 +5028,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 confidence=self._ANNOUNCEMENT_OKAY_CONFIDENCE, timeout=1.5,
                 scales=list(self._ANNOUNCEMENT_SCALES),
             )
+            if not self._starter_navigation_may_act():
+                return False
             if point is not None:
                 bot_logger.log_info(
                     f"{context}: announcement popup detected; clicking Okay at {point}."
@@ -4957,13 +5039,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return True
         # No acknowledge button. ESC closes the promo overlays; do NOT click their
         # "Get Started!"-style button, which goes to the Store.
+        if not self._starter_navigation_may_act():
+            return False
         if focus_mtga_window():
             time.sleep(0.2)
+        if not self._starter_navigation_may_act():
+            return False
         bot_logger.log_info(
             f"{context}: no anchor and no Okay button; pressing ESC to clear a possible overlay."
         )
         self.input.tap_escape()
         time.sleep(1.2)
+        if not self._starter_navigation_may_act():
+            return False
         # ESC on an unobstructed screen OPENS the Options overlay instead of
         # closing anything, and leaving it open would hide Home from the next
         # navigation pass -- the dead-end would then repeat forever, toggling
@@ -4973,6 +5061,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 f"{context}: ESC opened the Options overlay, so nothing was covering the "
                 "screen; closing it again."
             )
+            if not self._starter_navigation_may_act():
+                return False
             self.input.tap_escape()
             time.sleep(0.9)
             return False
@@ -5002,6 +5092,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def _click_starter_back_arrow(self) -> None:
         """Click the '< Starter Deck Duel' back arrow in the top-left corner."""
+        if not self._starter_navigation_may_act():
+            return
         back_target, back_src = self._map_abs_point_to_arena(
             (95, 90), label="STARTER_CHOOSER_BACK_ARROW"
         )
@@ -5016,6 +5108,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         screens we are on (_open_starter_deck_chooser), click the quest deck, then
         Submit Deck.
         """
+        if not self._starter_navigation_may_act():
+            return
         desired_tpl = self._choose_starter_deck_template(target_colors)
         if not desired_tpl:
             return
@@ -5077,9 +5171,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if os.path.exists(submit_btn) and self._click_image_in_scaled_arena_region(
             submit_btn, "STARTER_SUBMIT_DECK", rel_region=self._EVENT_PLAY_ROI,
             confidence=self._STARTER_SCREEN_CONFIDENCE, timeout=1.5,
+            action_guard=self._starter_navigation_may_act,
         ):
             bot_logger.log_info("Starter: submitted deck (template).")
         else:
+            if not self._starter_navigation_may_act():
+                return
             sub_target, sub_src = self._map_abs_point_to_arena(
                 self._STARTER_SUBMIT_DECK_BASE, label="STARTER_SUBMIT_DECK"
             )
@@ -5095,6 +5192,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         #    the corner; anything else means the submit did not take, so back out
         #    rather than leaving the bot parked on an unrecognized screen.
         screen = self._detect_starter_screen("STARTER_SWAP_VERIFY")
+        if not self._starter_navigation_may_act():
+            return
         if screen == self._STARTER_SCREEN_PLAY:
             bot_logger.log_info(f"Starter: deck {desired_name} submitted; event page ready to queue.")
         elif screen == self._STARTER_SCREEN_CHOOSER:
@@ -5659,6 +5758,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     def cast(self, card_id: int) -> bool:
         """True if the card was actually clicked. False means the click never
         happened, and the caller must not leave the bot idling on it."""
+        expected_match_id = self.__live_match_id
+        if not self.can_execute_game_action(expected_match_id):
+            return False
         if self._is_cast_suppressed(card_id):
             # Re-sweeping costs ~6.6s per attempt against the rope for a card the
             # hand demonstrably does not hold. Report the failure straight away so
@@ -5672,11 +5774,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # passes it ("No hover update before bounds"), so a single pass can miss
         # a card that is really in hand. Retry a couple of times after a pause.
         for attempt in range(len(self._CAST_SWEEP_PACING)):
-            if self._stop_requested or self._suppress_selections:
+            if not self.can_execute_game_action(expected_match_id):
                 return False
-            if self._cast_once(card_id, attempt=attempt):
+            if self._cast_once(card_id, attempt=attempt, expected_match_id=expected_match_id):
                 self.clear_cast_suppression(card_id)
                 return True
+            if not self.can_execute_game_action(expected_match_id):
+                return False
             if attempt < len(self._CAST_SWEEP_PACING) - 1:
                 next_step, next_dwell = self._CAST_SWEEP_PACING[attempt + 1]
                 bot_logger.log_info(
@@ -5691,6 +5795,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 # every one of up to 3 attempts burned up to ~5s under the decision-exec
                 # lock, against the rope, for nothing. It emits no log line of its own,
                 # so this visual probe is still the only way we can see it at all.
+                if not self.can_execute_game_action(expected_match_id):
+                    return False
                 self._dismiss_are_you_sure_if_present(context=f"CAST_CARD id={card_id}")
                 if attempt == 0:
                     # Two more things that cover the hand and are invisible to the
@@ -5706,10 +5812,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     # acts on the sweep's verdict alone: each only fires when its own
                     # template actually matches on screen. First failed attempt only,
                     # to bound the added ~2s against the rope.
+                    if not self.can_execute_game_action(expected_match_id):
+                        return False
                     self._dismiss_report_player_dialog(context=f"CAST_CARD id={card_id}")
+                    if not self.can_execute_game_action(expected_match_id):
+                        return False
                     self._dismiss_stray_done_overlay(context=f"CAST_CARD id={card_id}")
                 time.sleep(0.8)
-        if self._stop_requested or self._suppress_selections:
+        if not self.can_execute_game_action(expected_match_id):
             return False
         # All retries failed. Do NOT return silently: nothing we did changed the
         # game, so no fresh GameStateMessage arrives to re-trigger a decision and
@@ -5724,12 +5834,17 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__schedule_group_resume(1.0)
         return False
 
-    def _cast_once(self, card_id: int, *, attempt: int = 0) -> bool:
+    def _cast_once(
+        self, card_id: int, *, attempt: int = 0, expected_match_id: str | None = None
+    ) -> bool:
+        expected_match_id = expected_match_id or self.__live_match_id
         step_px, dwell_sec = self._CAST_SWEEP_PACING[
             min(max(attempt, 0), len(self._CAST_SWEEP_PACING) - 1)
         ]
         bot_logger.set_hover_logging(True)
         try:
+            if not self.can_execute_game_action(expected_match_id):
+                return False
             if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
                 return False
             # The hand scan identifies cards purely from MTGA's hover events, and
@@ -5739,6 +5854,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # sat 36s burning the rope with Valorous Stance stuck in hand at 3
             # life. Focus MTGA first, exactly like the logout ESC path does.
             focus_mtga_window()
+            if not self.can_execute_game_action(expected_match_id):
+                return False
             # NOTE: an "Are You Sure?" confirm dialog, if present, is probed for
             # reactively in cast() after a failed attempt -- not here. See the
             # comment in cast() for why running that scan up front on every
@@ -5777,7 +5894,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             end_y = hand_p2[1]
 
             while current_hovered_id != card_id:
-                if self._stop_requested or self._suppress_selections or time.time() < self.__group_req_active_until:
+                if (
+                    not self.can_execute_game_action(expected_match_id)
+                    or time.time() < self.__group_req_active_until
+                ):
                     break
                 # Check if we have exceeded the scan area
                 current_x = self.input.position().x
@@ -5799,6 +5919,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
                 # Inner loop: move until log updates or bounds hit
                 while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                    if not self.can_execute_game_action(expected_match_id):
+                        return False
                     step_dx = step_px * direction
                     pos = self.input.position()
                     next_x = pos.x + step_dx
@@ -5851,18 +5973,25 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
             clicked = current_hovered_id == card_id
             if clicked:
+                if not self.can_execute_game_action(expected_match_id):
+                    return False
                 click_pos = self.input.position()
                 bot_logger.log_click(click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})")
                 time.sleep(0.5)
+                if not self.can_execute_game_action(expected_match_id):
+                    return False
                 self.input.left_click(1)
                 time.sleep(0.1)
+                if not self.can_execute_game_action(expected_match_id):
+                    return False
                 self.input.left_click(1)
                 time.sleep(0.7)
 
             # Final reset position
-            reset_pos = (hand_p1[0], hand_p1[1] - 100)
-            bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
-            self.input.move_abs(reset_pos[0], reset_pos[1])
+            if self.can_execute_game_action(expected_match_id):
+                reset_pos = (hand_p1[0], hand_p1[1] - 100)
+                bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
+                self.input.move_abs(reset_pos[0], reset_pos[1])
             return clicked
         finally:
             bot_logger.set_hover_logging(False)
@@ -6326,8 +6455,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     
     def select_hand_card(self, card_id: int, clicks: int = 1) -> bool:
         """Select a card in hand by hovering until objectId matches, then click."""
+        expected_match_id = self.__live_match_id
         bot_logger.set_hover_logging(True)
         try:
+            if not self.can_execute_game_action(expected_match_id):
+                return False
             hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
             if hand_p1 is None or hand_p2 is None:
                 bot_logger.log_error(
@@ -6358,7 +6490,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             end_y = hand_p2[1]
 
             while current_hovered_id != card_id:
-                if self._stop_requested or self._suppress_selections or time.time() < self.__group_req_active_until:
+                if (
+                    not self.can_execute_game_action(expected_match_id)
+                    or time.time() < self.__group_req_active_until
+                ):
                     return False
                 current_x = self.input.position().x
                 if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
@@ -6377,6 +6512,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     return False
 
                 while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                    if not self.can_execute_game_action(expected_match_id):
+                        return False
                     step_dx = self.cast_card_dist * direction
                     pos = self.input.position()
                     next_x = pos.x + step_dx
@@ -6418,8 +6555,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     return False
 
             click_pos = self.input.position()
+            if not self.can_execute_game_action(expected_match_id):
+                return False
             bot_logger.log_click(click_pos.x, click_pos.y, f"SELECT_HAND_CARD (id={card_id})")
             for _ in range(max(1, int(clicks))):
+                if not self.can_execute_game_action(expected_match_id):
+                    return False
                 self.input.left_click(1)
                 time.sleep(0.1)
             return True
@@ -6596,38 +6737,92 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return True
         return False
 
-    def submit_selection(self, *, reason: str = "unknown", force: bool = False) -> bool:
+    def submit_selection(
+        self,
+        *,
+        reason: str = "unknown",
+        force: bool = False,
+        expected_match_id: str | None = None,
+    ) -> bool:
+        expected_match_id = expected_match_id or self.__live_match_id
+        if not self.can_execute_game_action(expected_match_id):
+            bot_logger.log_info(
+                f"SubmitSelection cancelled: live match ended or input was suppressed. reason={reason}"
+            )
+            return False
         if not self.__submit_selection_lock.acquire(blocking=False):
             bot_logger.log_info(f"SubmitSelection skipped (already running). reason={reason}")
             return False
         try:
+            def _still_active() -> bool:
+                return self.can_execute_game_action(expected_match_id)
+
+            def _locate_and_click(
+                image_path: str,
+                label: str,
+                *,
+                rel_region: tuple[int, int, int, int] | None = None,
+                scaled: bool = False,
+            ) -> bool:
+                if not _still_active():
+                    return False
+                if scaled:
+                    point = self._locate_image_center_in_scaled_arena_region(
+                        image_path,
+                        label,
+                        rel_region=rel_region,
+                        confidence=0.82,
+                        timeout=1.5,
+                    )
+                else:
+                    point = self._locate_image_center(
+                        image_path, label, confidence=0.82, timeout=1.5
+                    )
+                    if point is None:
+                        bot_logger.log_error(f"{label}: image not found within 1.5s")
+                if point is None or not _still_active():
+                    return False
+                self._click_abs(point[0], point[1], label)
+                return True
+
             if not force and not self.__selection_submit_allowed():
                 bot_logger.log_info(f"SubmitSelection skipped (not active). reason={reason}")
                 return False
             submit_img = os.path.join(self._buttons_dir(), "submit_btn.png")
             okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
             if os.path.exists(submit_img):
-                if self._click_image_in_scaled_arena_region(
+                if _locate_and_click(
                     submit_img,
                     "SUBMIT_SELECTION_IMG",
                     rel_region=(1320, 720, 600, 320),
-                    confidence=0.82,
-                    timeout=1.5,
-                ) or self._click_image(submit_img, "SUBMIT_SELECTION_IMG", confidence=0.82, timeout=1.5):
+                    scaled=True,
+                ):
+                    self.__last_submit_selection_ts = time.time()
+                    return True
+                if not _still_active():
+                    return False
+                if _locate_and_click(submit_img, "SUBMIT_SELECTION_IMG"):
                     self.__last_submit_selection_ts = time.time()
                     return True
                 # submit_btn not on screen — try okay_btn as fallback (e.g. combat confirm)
                 if os.path.exists(okay_img):
-                    if self._click_image_in_scaled_arena_region(
+                    if _locate_and_click(
                         okay_img,
                         "SUBMIT_OKAY_FALLBACK_IMG",
                         rel_region=(1320, 720, 600, 320),
-                        confidence=0.82,
-                        timeout=1.5,
-                    ) or self._click_image(okay_img, "SUBMIT_OKAY_FALLBACK_IMG", confidence=0.82, timeout=1.5):
+                        scaled=True,
+                    ):
                         bot_logger.log_info("SUBMIT_SELECTION: submit_btn not found, clicked okay_btn as fallback")
                         self.__last_submit_selection_ts = time.time()
                         return True
+                    if not _still_active():
+                        return False
+                    if _locate_and_click(okay_img, "SUBMIT_OKAY_FALLBACK_IMG"):
+                        bot_logger.log_info("SUBMIT_SELECTION: submit_btn not found, clicked okay_btn as fallback")
+                        self.__last_submit_selection_ts = time.time()
+                        return True
+                return False
+            if not _still_active():
                 return False
             target, source = self._map_abs_point_to_arena(
                 self.main_br_button_coordinates,
@@ -6643,12 +6838,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     f"SUBMIT_SELECTION aborted: arena_region unavailable, refusing absolute desktop click. reason={reason}"
                 )
                 return False
+            self.input.move_abs(target[0], target[1])
+            time.sleep(0.1)
+            if not _still_active():
+                return False
             bot_logger.log_click(
                 target[0], target[1], "SUBMIT_SELECTION",
                 source=source, region_age=self._region_age(), arena=self._arena_region,
             )
-            self.input.move_abs(target[0], target[1])
-            time.sleep(0.1)
             self.input.left_click(1)
             self.__last_submit_selection_ts = time.time()
             return True
@@ -6656,6 +6853,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__submit_selection_lock.release()
 
     def resolve(self) -> None:
+        expected_match_id = self.__live_match_id
+        if not self.can_execute_game_action(expected_match_id):
+            bot_logger.log_info("RESOLVE skipped: no matching live game may receive input.")
+            return
         if self.__should_pause_for_assign_damage():
             bot_logger.log_info("RESOLVE skipped: assign damage handler is active.")
             return
@@ -6702,6 +6903,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         region_age = self._region_age()
         for pos in positions:
+            if not self.can_execute_game_action(expected_match_id):
+                bot_logger.log_info("RESOLVE cancelled before click: live match ended or input was suppressed.")
+                return
             bot_logger.log_click(
                 pos[0], pos[1], "RESOLVE",
                 source=source, region_age=region_age, arena=self._arena_region,
@@ -6725,6 +6929,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         label: str,
         max_scan_sec: float | None = None,
     ) -> bool:
+        expected_match_id = self.__live_match_id
+        if not self.can_execute_game_action(expected_match_id):
+            return False
         self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
         x1, y1 = p1
         x2, y2 = p2
@@ -6741,8 +6948,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         for y in range(y_min, y_max + 1, step):
             for x in range(x_min, x_max + 1, step):
-                if self._stop_requested or self._suppress_selections:
-                    bot_logger.log_info(f"{label}_ABORTED: stop/suppress requested")
+                if not self.can_execute_game_action(expected_match_id):
+                    bot_logger.log_info(f"{label}_ABORTED: live match ended or input was suppressed")
                     return False
                 if max_scan_sec is not None and (time.time() - start_ts) > max_scan_sec:
                     bot_logger.log_error(
@@ -6762,8 +6969,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 bot_logger.log_hover(parsed)
                 if parsed != card_id:
                     continue
+                if not self.can_execute_game_action(expected_match_id):
+                    return False
                 bot_logger.log_click(x, y, f"SELECT_{label} (id={card_id})")
                 for _ in range(max(1, int(clicks))):
+                    if not self.can_execute_game_action(expected_match_id):
+                        return False
                     self.input.left_click(1)
                     time.sleep(0.1)
                 return True
@@ -6786,6 +6997,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """Last seen matchId (None until a match is joined). Used by the debug
         snapshot recorder to rotate per-match output directories."""
         return self.__last_seen_match_id
+
+    def can_execute_game_action(self, expected_match_id=None) -> bool:
+        """Return False as soon as a worker no longer owns a live match.
+
+        Timers cannot forcibly stop a Python callback that is already running,
+        so long scans and AI decisions use this predicate as cooperative
+        cancellation immediately before probes and input.
+        """
+        if self._stop_requested or self._suppress_selections:
+            return False
+        if getattr(self, "_Controller__concession_claimed", False):
+            return False
+        return self.__is_live_match(expected_match_id)
 
     def __record_decision(self, decision_kind, move_name, move_data, extra=None) -> None:
         """Record a debug snapshot of the live game state for a prompt-handler
@@ -7119,6 +7343,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "ENABLED" if self.__auto_concede_stalled_matches else "DISABLED"
             )
         )
+        if not self._starter_navigation_may_act():
+            return
         self.__soak_stall_event(
             "setting_changed",
             enabled=self.__auto_concede_stalled_matches,
@@ -7232,7 +7458,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if getattr(self, "_Controller__concession_claimed", False):
             self.__concede_outcome = outcome
             self.__concede_completed_event.set()  # wake a retry; outcome says why.
-        self.__retired_match_id = self.__live_match_id or self.__last_seen_match_id
+        leaving_match_id = self.__live_match_id or self.__last_seen_match_id
+        self.__retired_match_id = leaving_match_id
         self.__live_match_id = None
         self.__last_seen_match_id = None
         self.__failed_stall_signature = None
@@ -7245,12 +7472,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__pending_target_select = None
         self.__pending_select_n = None
         self.__select_n_in_progress = False
-        self._suppress_selections = False
+        # Keep already-running prompt and decision workers cancelled through the
+        # post-match/menu transition. A fresh match reset re-enables them.
+        self._suppress_selections = True
         self.updated_game_state = GameState()
         release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
         if callable(release_input):
             release_input()
-        self.__soak_stall_event("left_match", reason=reason, outcome=outcome)
+        self.__soak_stall_event(
+            "left_match", reason=reason, outcome=outcome, match_id=leaving_match_id or "unknown"
+        )
 
     @staticmethod
     def __freeze_stall_value(value):
@@ -7504,16 +7735,23 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 except Exception: pass
                 setattr(self, attr, None)
 
-    def __perform_concede(self, label: str) -> None:
+    def __perform_concede(self, label: str, expected_match_id: str | None = None) -> None:
         try:
             runtime_status.set_mode("stuck_suspected", bot_state=str(self._get_state_from_log()))
             if focus_mtga_window(): time.sleep(0.3)
-            if not self.__is_live_match(getattr(self, "_Controller__live_match_id", None)):
-                self.__soak_stall_event("cancellation", reason="left_match_before_escape", label=label)
+            expected_match_id = expected_match_id or getattr(self, "_Controller__live_match_id", None)
+            if not self.__is_live_match(expected_match_id):
+                self.__soak_stall_event(
+                    "cancellation", reason="left_match_before_escape", label=label,
+                    match_id=expected_match_id or "unknown",
+                )
                 return
             self.input.tap_escape(); time.sleep(0.8)
-            if not self.__is_live_match(getattr(self, "_Controller__live_match_id", None)):
-                self.__soak_stall_event("cancellation", reason="left_match_after_escape", label=label)
+            if not self.__is_live_match(expected_match_id):
+                self.__soak_stall_event(
+                    "cancellation", reason="left_match_after_escape", label=label,
+                    match_id=expected_match_id or "unknown",
+                )
                 return
             raw = self._loaded_click_targets.get("concede", {})
             xy = (int(raw.get("x", 962)), int(raw.get("y", 631)))
@@ -7523,20 +7761,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return
             runtime_status.touch_input(label, target)
             self.__click_concede_and_confirm(
-                target, label=label,
-                expected_match_id=getattr(self, "_Controller__live_match_id", None),
+                target, label=label, expected_match_id=expected_match_id,
             )
         except Exception as exc:
             bot_logger.log_error(f"{label}: exception: {exc}")
 
     def __run_claimed_concede_sequence(self, label: str, stalled_signature=None,
                                        expected_match_id=None) -> None:
-        """Attempt a claimed recovery at most five times in its live match."""
+        """Attempt a claimed recovery a bounded number of times in its live match."""
+        expected_match_id = expected_match_id or getattr(self, "_Controller__live_match_id", None)
         attempt = 0
         completed = False
         cancelled = False
         try:
-            while attempt < 5 and not self._stop_requested and not self.__concede_completed_event.is_set():
+            while (
+                attempt < self._STALL_CONCEDE_MAX_ATTEMPTS
+                and not self._stop_requested
+                and not self.__concede_completed_event.is_set()
+            ):
                 if not self.__is_live_match(expected_match_id):
                     cancelled = True
                     self.__concede_outcome = self.__concede_outcome or "left_match"
@@ -7551,20 +7793,28 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     claim_reason=getattr(self, "_Controller__concession_claim_reason", None),
                     label=label,
                 )
-                self.__perform_concede(f"{label}_{attempt}")
+                self.__perform_concede(f"{label}_{attempt}", expected_match_id)
                 if self.__concede_completed_event.wait(timeout=4.0):
-                    completed = self.__concede_outcome == "match_completed"
-                    cancelled = not completed
-                    claimed_at = getattr(self, "_Controller__soak_concede_claimed_at", None)
-                    recovery_sec = (
-                        max(0.0, time.monotonic() - claimed_at)
-                        if claimed_at is not None else None
+                    terminal_results = getattr(
+                        self, "_Controller__concede_terminal_results", {}
                     )
+                    terminal_result = terminal_results.pop(expected_match_id, {})
+                    terminal_outcome = terminal_result.get("outcome") or self.__concede_outcome
+                    completed = terminal_outcome == "match_completed"
+                    cancelled = not completed
+                    recovery_sec = terminal_result.get("recovery_sec")
+                    if completed and recovery_sec is None:
+                        claimed_at = getattr(self, "_Controller__soak_concede_claimed_at", None)
+                        recovery_sec = (
+                            max(0.0, time.monotonic() - claimed_at)
+                            if claimed_at is not None else None
+                        )
                     self.__soak_stall_event(
                         "recovery_observed" if completed else "cancellation",
                         attempts=attempt, label=label,
-                        reason=None if completed else (self.__concede_outcome or "wake_without_completion"),
+                        reason=("match_completed" if completed else (terminal_outcome or "wake_without_completion")),
                         recovery_sec=round(recovery_sec, 3) if recovery_sec is not None else None,
+                        match_id=expected_match_id or "unknown",
                     )
                     break
                 bot_logger.log_error(
@@ -7576,7 +7826,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     label=label,
                     wait_sec=4.0,
                 )
-            if attempt >= 5 and not completed and not cancelled and self.__is_live_match(expected_match_id):
+            if (
+                attempt >= self._STALL_CONCEDE_MAX_ATTEMPTS
+                and not completed
+                and not cancelled
+                and self.__is_live_match(expected_match_id)
+            ):
                 self.__failed_stall_signature = stalled_signature
                 self.__concession_claimed = False
                 self.__concession_claim_reason = None
@@ -7587,7 +7842,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     signature=self.__soak_stall_signature_digest(stalled_signature),
                 )
                 self.__soak_stall_event("resumed_play", reason="attempt_limit", label=label)
-                bot_logger.log_error(f"{label}: five attempts failed; resuming normal play until game progress.")
+                bot_logger.log_error(
+                    f"{label}: {self._STALL_CONCEDE_MAX_ATTEMPTS} attempts failed; "
+                    "resuming normal play until game progress."
+                )
         finally:
             if not completed:
                 self.__soak_stall_event(
@@ -7755,7 +8013,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                                     expected_match_id: str | None = None) -> None:
         """Click the Concede button then click the OK confirmation dialog."""
         if expected_match_id is not None and not self.__is_live_match(expected_match_id):
-            self.__soak_stall_event("cancellation", reason="left_match_before_concede_click", label=label)
+            event = (
+                "confirmation_skipped_match_completed"
+                if self.__concede_outcome == "match_completed"
+                else "cancellation"
+            )
+            reason = "match_already_completed" if event != "cancellation" else "left_match_before_concede_click"
+            self.__soak_stall_event(event, reason=reason, label=label, match_id=expected_match_id)
             return
         concede_img = os.path.join(self._buttons_dir(), "concede.png")
         clicked_concede = False
@@ -7771,7 +8035,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self._click_abs(concede_target[0], concede_target[1], f"{label}_CONCEDE_FALLBACK")
         time.sleep(1.5)
         if expected_match_id is not None and not self.__is_live_match(expected_match_id):
-            self.__soak_stall_event("cancellation", reason="left_match_before_confirm", label=label)
+            event = (
+                "confirmation_skipped_match_completed"
+                if self.__concede_outcome == "match_completed"
+                else "cancellation"
+            )
+            reason = "match_already_completed" if event != "cancellation" else "left_match_before_confirm"
+            self.__soak_stall_event(event, reason=reason, label=label, match_id=expected_match_id)
             return
         okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
         if os.path.exists(okay_img):
@@ -7979,13 +8249,21 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.log_reader.reset_all_patterns()
         bot_logger.log_info("Controller state reset complete")
 
-    def __reset_live_game_state(self, reason: str, *, preserve_system_seat_id: int | None = None) -> None:
+    def __reset_live_game_state(
+        self,
+        reason: str,
+        *,
+        preserve_system_seat_id: int | None = None,
+        preserve_match_id: str | None = None,
+        preserve_retired_match_id: str | None = None,
+    ) -> None:
         preserved_seat = preserve_system_seat_id if preserve_system_seat_id is not None else self.__system_seat_id
         self.__has_mulled_keep = False
         self.__concession_claimed = False
         self.__concession_claim_reason = None
-        self.__live_match_id = None
-        self.__retired_match_id = None
+        self.__live_match_id = preserve_match_id
+        self.__last_seen_match_id = preserve_match_id
+        self.__retired_match_id = preserve_retired_match_id
         self.__failed_stall_signature = None
         self.__concede_outcome = None
         self.__concede_completed_event.clear()
@@ -8179,6 +8457,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 max(0.0, time.monotonic() - soak_claimed_at)
                 if soak_claimed_at is not None else None
             )
+            completed_match_id = self.__live_match_id or self.__last_seen_match_id
+            if soak_claim_reason and completed_match_id:
+                self.__concede_terminal_results[completed_match_id] = {
+                    "outcome": "match_completed",
+                    "recovery_sec": soak_completion_age,
+                }
             self.__soak_stall_event(
                 "match_completed",
                 concede_attempts=self.__soak_concede_attempts,
@@ -8193,6 +8477,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__clear_stall_watchdog("match completed")
             self.__concession_claimed = False
             self.__concession_claim_reason = None
+            # The worker owns these values until it records recovery_observed.
             self.__soak_concede_claimed_at = None
             self.__soak_concede_attempts = 0
             runtime_status.set_mode(
@@ -12410,6 +12695,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         now = time.time()
         if self._suppress_selections or self._stop_requested:
             return
+        expected_match_id = self.__live_match_id
+        if not self.can_execute_game_action(expected_match_id):
+            return
         self.__last_target_select_source_id = source_id if source_id is not None else -1
         self.__last_target_select_ts = now
         self.__update_pending_target_select(source_id)
@@ -12430,7 +12718,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         )
 
         def _valid() -> bool:
-            if self._suppress_selections or self._stop_requested:
+            if not self.can_execute_game_action(expected_match_id):
                 return False
             pending = self.__pending_target_select or {}
             return pending.get("source_id") == source_id and pending.get("token") == selection_token
@@ -12440,17 +12728,25 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return
             if self.__pending_target_ready_to_submit():
                 self.__last_submit_targets_ts = time.time()
-                self.submit_selection(reason="creature_target_submit")
+                submitted = self.submit_selection(
+                    reason="creature_target_submit",
+                    expected_match_id=expected_match_id,
+                )
+                if not submitted or not _valid():
+                    return
                 # Ward and other client-side confirms are raised by the submit and
                 # emit nothing, so nothing else will ever tell us they are there.
                 # Until this hook existed the dialog just sat on screen until some
                 # later cast attempt tripped over it ~10s down the rope.
-                threading.Timer(
-                    0.7,
-                    lambda: self._dismiss_are_you_sure_if_present(
-                        context=f"TARGET_SUBMIT id={creature_id}"
-                    ),
-                ).start()
+                def _confirm_if_still_valid() -> None:
+                    if not _valid():
+                        return
+                    self._dismiss_are_you_sure_if_present(
+                        context=f"TARGET_SUBMIT id={creature_id}",
+                        expected_match_id=expected_match_id,
+                    )
+
+                threading.Timer(0.7, _confirm_if_still_valid).start()
 
         def _do_click(attempt: int = 0) -> None:
             if not _valid():
@@ -14309,6 +14605,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__inst_id_grp_id_dict[instance_id] = grp_id
 
     def __update_game_state(self, raw_dict: [str, str or int]):
+        incoming_match_id = self.__extract_match_id_from_raw_dict(raw_dict)
+        if (
+            incoming_match_id
+            and incoming_match_id == self.__retired_match_id
+            and incoming_match_id != self.__live_match_id
+        ):
+            # Reject before touching any merged state. A late diff from the
+            # completed match must not contaminate the next match's baseline.
+            self.__soak_stall_event(
+                "rejected", reason="retired_match_state", match_id=incoming_match_id
+            )
+            return
+
         # Derive the local player's systemSeatId from incoming messages (if present)
         system_seat_id = Controller.__get_system_seat_id_from_raw_dict(raw_dict)
         if system_seat_id is not None and system_seat_id != self.__system_seat_id:
@@ -14318,20 +14627,20 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if self.__system_seat_id is not None:
             runtime_status.update_status(local_system_seat_id=self.__system_seat_id)
 
-        incoming_match_id = self.__extract_match_id_from_raw_dict(raw_dict)
-        if (
-            incoming_match_id
-            and self.__last_seen_match_id
-            and incoming_match_id != self.__last_seen_match_id
-        ):
+        current_match_id = self.__live_match_id or self.__last_seen_match_id
+        if incoming_match_id and incoming_match_id != current_match_id:
+            retired_match_id = current_match_id or self.__retired_match_id
             self.__reset_live_game_state(
-                f"Fresh match detected: {self.__last_seen_match_id} -> {incoming_match_id}. Resetting stale local game state.",
+                f"Fresh match detected: {current_match_id or 'none'} -> {incoming_match_id}. Resetting stale local game state.",
                 preserve_system_seat_id=self.__system_seat_id,
+                preserve_retired_match_id=retired_match_id,
             )
         elif self.__should_reset_for_fresh_game_baseline(raw_dict):
             self.__reset_live_game_state(
                 "Fresh game baseline detected from early gameState/mulligan signals. Resetting stale local game state.",
                 preserve_system_seat_id=self.__system_seat_id,
+                preserve_match_id=current_match_id,
+                preserve_retired_match_id=self.__retired_match_id,
             )
         if incoming_match_id and incoming_match_id != self.__retired_match_id:
             self.__last_seen_match_id = incoming_match_id
@@ -14352,13 +14661,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict, fallback_seat_id=self.__system_seat_id or 1)
         self.updated_game_state.update(game_state)
-        # This assignment intentionally follows the merge: a match id in an old
-        # timer fragment alone is not permission to interact with Arena.
-        if incoming_match_id and incoming_match_id == self.__retired_match_id:
-            self.__soak_stall_event("rejected", reason="retired_match_state", match_id=incoming_match_id)
-        elif incoming_match_id and self._get_state_from_log() == BotState.IN_GAME:
+        # This assignment intentionally follows the merge: a match id alone is
+        # not permission to interact with Arena.
+        if incoming_match_id and self._get_state_from_log() == BotState.IN_GAME:
             if self.__live_match_id != incoming_match_id:
-                self.__retired_match_id = None
                 self.__failed_stall_signature = None
                 self.__concede_outcome = None
                 self.__soak_stall_event("live_match_started", match_id=incoming_match_id)

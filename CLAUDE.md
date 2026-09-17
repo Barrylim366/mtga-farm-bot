@@ -5,6 +5,7 @@
 AI agents must **not open, read, or analyze** the following files:
 
 - credentials.txt
+- credentials.json
 
 This file contains sensitive information and is explicitly excluded from access.
 
