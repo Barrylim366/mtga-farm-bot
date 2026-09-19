@@ -6078,7 +6078,7 @@ class BotBehaviorWindow(tk.Toplevel):
         self._on_close_callback = on_close
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self.title("Bot Behavior")
-        width, height = self._s(460), self._s(280)
+        width, height = self._s(520), self._s(400)
         parent.update_idletasks()
         if spawn_xy is not None:
             x, y = int(spawn_xy[0]), int(spawn_xy[1])
@@ -6105,13 +6105,13 @@ class BotBehaviorWindow(tk.Toplevel):
             command=self._apply_auto_concede_setting, bg="#121923", fg="#E7EAF0",
             activebackground="#121923", activeforeground="#E7EAF0",
             selectcolor="#3D130E", font=("Segoe UI", max(9, self._s(10)), "bold"),
-            anchor="w", padx=0,
+            anchor="w", padx=0, justify=tk.LEFT, wraplength=self._s(400),
         )
         toggle.pack(fill=tk.X, padx=self._s(18), pady=(0, self._s(4)))
         tk.Label(
             panel,
-            text="Concede when Arena waits 30 seconds for bot input without game progress.\nChanges apply immediately.",
-            justify=tk.LEFT, bg="#121923", fg="#9AA3B2",
+            text="Concede when Arena waits 30 seconds for bot input without game progress. Changes apply immediately.",
+            justify=tk.LEFT, wraplength=self._s(390), bg="#121923", fg="#9AA3B2",
             font=("Segoe UI", max(8, self._s(9))), anchor="w",
         ).pack(fill=tk.X, padx=self._s(42), pady=(0, self._s(14)))
         tk.Button(

@@ -42,9 +42,8 @@ try:
 except Exception:  # pragma: no cover - CardInfo should always import
     CardInfo = None
 
-# TEMPORARY soak-test retention: keep the full overnight watchdog run available
-# for false-trigger review. Restore to 30 with the [SOAK_STALL_V1] removal.
-_MAX_MATCH_DIRS = 200
+# Keep at most this many match directories around (oldest pruned first).
+_MAX_MATCH_DIRS = 30
 # Drop records rather than block the decision thread if the writer falls behind.
 _QUEUE_MAXSIZE = 500
 

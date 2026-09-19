@@ -1,4 +1,3 @@
-import hashlib
 import json
 import random
 import re
@@ -139,15 +138,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__retired_match_id: str | None = None
         self.__failed_stall_signature = None
         self.__concede_outcome: str | None = None
-        # TEMPORARY soak-test telemetry for the local stall watchdog.  Remove
-        # the [SOAK_STALL_V1] instrumentation after the overnight validation.
-        self.__soak_stall_run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
-        self.__soak_stall_arm_id = 0
-        self.__soak_stall_updates = 0
-        self.__soak_stall_heartbeat_bucket = 0
-        self.__soak_stall_reset_total = 0
-        self.__soak_concede_attempts = 0
-        self.__soak_concede_claimed_at = None
+        # Generation ownership prevents a cancelled, already-running timer
+        # callback from acting on or clearing a newer watchdog arm.
+        self.__stall_watchdog_generation = 0
         self.__concede_terminal_results = {}
         self.__concession_claimed = False
         self.__concession_claim_reason = None
@@ -7948,103 +7941,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "ENABLED" if self.__auto_concede_stalled_matches else "DISABLED"
             )
         )
-        if not self._starter_navigation_may_act():
-            return
-        self.__soak_stall_event(
-            "setting_changed",
-            enabled=self.__auto_concede_stalled_matches,
-            threshold_sec=self.__stall_concede_threshold_sec,
-        )
 
     def get_auto_concede_stalled_matches(self) -> bool:
         return bool(self.__auto_concede_stalled_matches)
 
-    # TEMPORARY: structured soak-test telemetry.  The payload deliberately
-    # contains only compact context and stable hashes, never the full Arena
-    # state, so an overnight run remains small and machine-readable.
-    def __soak_stall_event(self, event: str, **details) -> None:
-        try:
-            turn = self.updated_game_state.get_turn_info() or {}
-        except Exception:
-            turn = {}
-        payload = {
-            "event": str(event),
-            "run_id": str(getattr(self, "_Controller__soak_stall_run_id", "unknown")),
-            "match_id": str(getattr(self, "_Controller__last_seen_match_id", None) or "unknown"),
-            "turn": turn.get("turnNumber"),
-            "phase": turn.get("phase"),
-            "step": turn.get("step"),
-        }
-        payload.update(details)
-        try:
-            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-        except Exception as exc:
-            encoded = json.dumps({"event": str(event), "encoding_error": type(exc).__name__})
-        bot_logger.log_info(f"[SOAK_STALL_V1] {encoded}")
-
-    @staticmethod
-    def __soak_stall_signature_digest(signature) -> str:
-        if signature is None:
-            return "none"
-        return hashlib.sha256(repr(signature).encode("utf-8", errors="replace")).hexdigest()[:16]
-
-    @staticmethod
-    def __soak_stall_changed_components(previous, current) -> list[str]:
-        names = (
-            "prompt_kind", "prompt_identity", "local_priority", "turn", "phase",
-            "step", "actions", "zones", "zone_objects", "players",
-        )
-        if previous is None:
-            return ["initial"]
-        return [
-            name for index, name in enumerate(names)
-            if index >= len(previous) or index >= len(current) or previous[index] != current[index]
-        ]
-
-    @staticmethod
-    def __soak_stall_context(signature) -> dict:
-        if not isinstance(signature, tuple) or len(signature) < 10:
-            return {}
-        zones = signature[7] if isinstance(signature[7], tuple) else ()
-        zone_object_count = 0
-        for zone in zones:
-            if isinstance(zone, tuple) and len(zone) >= 4 and isinstance(zone[3], tuple):
-                zone_object_count += len(zone[3])
-        return {
-            "prompt_kind": signature[0],
-            "local_priority": bool(signature[2]),
-            "signature_turn": signature[3],
-            "signature_phase": signature[4],
-            "signature_step": signature[5],
-            "action_count": len(signature[6]) if isinstance(signature[6], tuple) else 0,
-            "zone_count": len(zones),
-            "zone_object_count": zone_object_count,
-        }
-
     def __clear_stall_watchdog(self, reason: str) -> None:
-        started_at = self.__stall_context_started_at
-        signature = self.__stall_context_signature
-        age = max(0.0, time.monotonic() - started_at) if started_at is not None else None
         if self.__stall_watchdog_timer is not None:
             self.__stall_watchdog_timer.cancel()
             self.__stall_watchdog_timer = None
-        if started_at is not None:
+        if self.__stall_context_started_at is not None:
             bot_logger.log_info(f"STALL_WATCHDOG_CLEARED: {reason}")
-            self.__soak_stall_reset_total = getattr(self, "_Controller__soak_stall_reset_total", 0) + 1
-            self.__soak_stall_event(
-                "cleared",
-                arm_id=getattr(self, "_Controller__soak_stall_arm_id", 0),
-                age_sec=round(age, 3),
-                reason=reason,
-                reset_total=self.__soak_stall_reset_total,
-                signature=self.__soak_stall_signature_digest(signature),
-                updates=getattr(self, "_Controller__soak_stall_updates", 0),
-                **self.__soak_stall_context(signature),
-            )
         self.__stall_context_signature = None
         self.__stall_context_started_at = None
-        self.__soak_stall_updates = 0
-        self.__soak_stall_heartbeat_bucket = 0
 
     def __is_live_match(self, expected_match_id: str | None = None) -> bool:
         """Whether Arena is still in the exact match allowed to receive input."""
@@ -8063,8 +7971,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if getattr(self, "_Controller__concession_claimed", False):
             self.__concede_outcome = outcome
             self.__concede_completed_event.set()  # wake a retry; outcome says why.
-        leaving_match_id = self.__live_match_id or self.__last_seen_match_id
-        self.__retired_match_id = leaving_match_id
+        self.__retired_match_id = self.__live_match_id or self.__last_seen_match_id
         self.__live_match_id = None
         self.__last_seen_match_id = None
         self.__failed_stall_signature = None
@@ -8084,9 +7991,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
         if callable(release_input):
             release_input()
-        self.__soak_stall_event(
-            "left_match", reason=reason, outcome=outcome, match_id=leaving_match_id or "unknown"
-        )
 
     @staticmethod
     def __freeze_stall_value(value):
@@ -8189,13 +8093,25 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         return (prompt_kind, prompt_identity, local_priority, turn.get("turnNumber"), turn.get("phase"), turn.get("step"),
                 action_keys, zones, zone_objects, players)
 
+    def __arm_stall_watchdog_timer(
+        self, arm_id, signature, started_at, match_id, delay: float
+    ) -> None:
+        """Schedule the deadline for the currently owned stall context."""
+        timer = threading.Timer(
+            max(0.1, delay),
+            self.__attempt_stall_concede,
+            args=(arm_id, signature, started_at, match_id),
+        )
+        timer.daemon = True
+        self.__stall_watchdog_timer = timer
+        timer.start()
+
     def __update_stall_watchdog(self) -> None:
         if not self.__auto_concede_stalled_matches or self.__concession_claimed:
             self.__clear_stall_watchdog("disabled or concession claimed")
             return
         if not self.__is_live_match():
             self.__clear_stall_watchdog("not a verified live match")
-            self.__soak_stall_event("rejected", reason="not_live_match")
             return
         signature = self.__local_stall_signature()
         if signature is None:
@@ -8204,55 +8120,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         failed_signature = getattr(self, "_Controller__failed_stall_signature", None)
         if failed_signature == signature:
             self.__clear_stall_watchdog("failed stall signature unchanged")
-            self.__soak_stall_event(
-                "rejected", reason="failed_signature_unchanged",
-                signature=self.__soak_stall_signature_digest(signature),
-            )
             return
         if failed_signature is not None:
             self.__failed_stall_signature = None
-            self.__soak_stall_event("suppression_cleared", reason="meaningful_game_progress")
         now = time.monotonic()
         if signature != self.__stall_context_signature:
-            previous = self.__stall_context_signature
-            changed = self.__soak_stall_changed_components(previous, signature)
             self.__clear_stall_watchdog("meaningful game progress")
             self.__stall_context_signature = signature
             self.__stall_context_started_at = now
-            self.__soak_stall_arm_id = getattr(self, "_Controller__soak_stall_arm_id", 0) + 1
-            self.__soak_stall_updates = 1
-            self.__soak_stall_heartbeat_bucket = 0
+            self.__stall_watchdog_generation += 1
             match_id = self.__live_match_id
-            self.__stall_watchdog_timer = threading.Timer(
+            self.__arm_stall_watchdog_timer(
+                self.__stall_watchdog_generation,
+                signature,
+                now,
+                match_id,
                 self.__stall_concede_threshold_sec,
-                self.__attempt_stall_concede,
-                args=(self.__soak_stall_arm_id, signature, now, match_id),
             )
-            self.__stall_watchdog_timer.daemon = True
-            self.__stall_watchdog_timer.start()
             bot_logger.log_info("STALL_WATCHDOG_ARMED: local responsibility; 30.0s window started")
-            self.__soak_stall_event(
-                "armed",
-                arm_id=self.__soak_stall_arm_id,
-                changed=changed,
-                signature=self.__soak_stall_signature_digest(signature),
-                threshold_sec=self.__stall_concede_threshold_sec,
-                **self.__soak_stall_context(signature),
-            )
-        else:
-            self.__soak_stall_updates = getattr(self, "_Controller__soak_stall_updates", 0) + 1
-            age = max(0.0, now - self.__stall_context_started_at)
-            bucket = int(age // 5.0)
-            if bucket > getattr(self, "_Controller__soak_stall_heartbeat_bucket", 0):
-                self.__soak_stall_heartbeat_bucket = bucket
-                self.__soak_stall_event(
-                    "unchanged",
-                    arm_id=getattr(self, "_Controller__soak_stall_arm_id", 0),
-                    age_sec=round(age, 3),
-                    signature=self.__soak_stall_signature_digest(signature),
-                    updates=self.__soak_stall_updates,
-                    **self.__soak_stall_context(signature),
-                )
 
     def __claim_concession(self, reason: str) -> bool:
         # The stall timer and the Arena inactivity timer run on separate
@@ -8264,70 +8149,52 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__concession_claimed = True
             self.__concession_claim_reason = reason
             self.__concede_completed_event.clear()
-            self.__soak_concede_attempts = 0
-            self.__soak_concede_claimed_at = time.monotonic()
-        local_started_at = self.__stall_context_started_at
-        local_signature = self.__stall_context_signature
-        local_age = (
-            max(0.0, time.monotonic() - local_started_at)
-            if local_started_at is not None else None
-        )
         claim_input = getattr(self.input, "claim_exclusive_for_current_thread", None)
         if callable(claim_input):
             claim_input()
         self.__clear_stall_watchdog("concession claimed")
         self.__cancel_emergency_concede_timer("concession claimed")
         bot_logger.log_info(f"CONCEDE_CLAIMED: reason={reason}")
-        self.__soak_stall_event(
-            "concede_claimed",
-            arm_id=getattr(self, "_Controller__soak_stall_arm_id", 0),
-            local_arm_age_sec=round(local_age, 3) if local_age is not None else None,
-            local_signature=self.__soak_stall_signature_digest(local_signature),
-            reason=reason,
-            **self.__soak_stall_context(local_signature),
-        )
         return True
 
     def __attempt_stall_concede(self, arm_id=None, expected_signature=None,
                                 expected_started_at=None, expected_match_id=None) -> None:
-        self.__stall_watchdog_timer = None
         started_at = self.__stall_context_started_at
         if not self.__auto_concede_stalled_matches or started_at is None:
             return
-        # A cancelled Timer may already be executing.  It must not act on a
-        # subsequent match, a newly armed context, or stale post-match state.
+        # A cancelled Timer may already be executing.  Do not clear the timer
+        # reference until this callback has proved it owns the current arm: an
+        # old callback otherwise drops the newer arm's deadline on the floor.
+        if arm_id is not None and arm_id != self.__stall_watchdog_generation:
+            return
         if (
             not self.__is_live_match(expected_match_id)
-            or (arm_id is not None and arm_id != self.__soak_stall_arm_id)
             or (expected_started_at is not None and expected_started_at != started_at)
             or (expected_signature is not None and expected_signature != self.__stall_context_signature)
-            or self.__local_stall_signature() != self.__stall_context_signature
         ):
-            self.__soak_stall_event("rejected", reason="stale_timer_callback", arm_id=arm_id)
             return
+        if self.__local_stall_signature() != self.__stall_context_signature:
+            # The callback caught a new local context before its normal
+            # GameState-driven update. Re-evaluate and give that new context a
+            # deadline instead of leaving the old arm timerless.
+            self.__clear_stall_watchdog("timer callback observed local context change")
+            self.__update_stall_watchdog()
+            return
+        self.__stall_watchdog_timer = None
         age = time.monotonic() - started_at
         if age < self.__stall_concede_threshold_sec - 0.1:
-            self.__soak_stall_event(
-                "early_timer_callback",
-                age_sec=round(age, 3),
-                arm_id=getattr(self, "_Controller__soak_stall_arm_id", 0),
-                signature=self.__soak_stall_signature_digest(
-                    getattr(self, "_Controller__stall_context_signature", None)
-                ),
+            self.__arm_stall_watchdog_timer(
+                arm_id,
+                self.__stall_context_signature,
+                started_at,
+                expected_match_id,
+                self.__stall_concede_threshold_sec - age,
             )
             return
         trigger_signature = getattr(self, "_Controller__stall_context_signature", None)
-        trigger_arm_id = getattr(self, "_Controller__soak_stall_arm_id", 0)
         if not self.__claim_concession("stalled_local_context"):
             return
         bot_logger.log_info(f"STALL_WATCHDOG_TRIGGERED: age={age:.1f}s reason=stalled_local_context")
-        self.__soak_stall_event(
-            "triggered",
-            age_sec=round(age, 3),
-            arm_id=trigger_arm_id,
-            signature=self.__soak_stall_signature_digest(trigger_signature),
-            **self.__soak_stall_context(trigger_signature),
-        )
         self.__cancel_pending_decisions_for_concede()
         self.__run_claimed_concede_sequence("STALL_CONCEDE", trigger_signature, expected_match_id)
 
@@ -8346,17 +8213,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if focus_mtga_window(): time.sleep(0.3)
             expected_match_id = expected_match_id or getattr(self, "_Controller__live_match_id", None)
             if not self.__is_live_match(expected_match_id):
-                self.__soak_stall_event(
-                    "cancellation", reason="left_match_before_escape", label=label,
-                    match_id=expected_match_id or "unknown",
-                )
                 return
             self.input.tap_escape(); time.sleep(0.8)
             if not self.__is_live_match(expected_match_id):
-                self.__soak_stall_event(
-                    "cancellation", reason="left_match_after_escape", label=label,
-                    match_id=expected_match_id or "unknown",
-                )
                 return
             raw = self._loaded_click_targets.get("concede", {})
             xy = (int(raw.get("x", 962)), int(raw.get("y", 631)))
@@ -8387,17 +8246,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if not self.__is_live_match(expected_match_id):
                     cancelled = True
                     self.__concede_outcome = self.__concede_outcome or "left_match"
-                    self.__soak_stall_event("cancellation", reason=self.__concede_outcome, label=label)
                     break
                 attempt += 1
-                self.__soak_concede_attempts = attempt
                 bot_logger.log_info(f"{label}: concede sequence attempt {attempt}")
-                self.__soak_stall_event(
-                    "concede_attempt",
-                    attempt=attempt,
-                    claim_reason=getattr(self, "_Controller__concession_claim_reason", None),
-                    label=label,
-                )
                 self.__perform_concede(f"{label}_{attempt}", expected_match_id)
                 if self.__concede_completed_event.wait(timeout=4.0):
                     terminal_results = getattr(
@@ -8407,29 +8258,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     terminal_outcome = terminal_result.get("outcome") or self.__concede_outcome
                     completed = terminal_outcome == "match_completed"
                     cancelled = not completed
-                    recovery_sec = terminal_result.get("recovery_sec")
-                    if completed and recovery_sec is None:
-                        claimed_at = getattr(self, "_Controller__soak_concede_claimed_at", None)
-                        recovery_sec = (
-                            max(0.0, time.monotonic() - claimed_at)
-                            if claimed_at is not None else None
-                        )
-                    self.__soak_stall_event(
-                        "recovery_observed" if completed else "cancellation",
-                        attempts=attempt, label=label,
-                        reason=("match_completed" if completed else (terminal_outcome or "wake_without_completion")),
-                        recovery_sec=round(recovery_sec, 3) if recovery_sec is not None else None,
-                        match_id=expected_match_id or "unknown",
-                    )
                     break
                 bot_logger.log_error(
                     f"{label}: match completion not observed after attempt {attempt}; retrying"
-                )
-                self.__soak_stall_event(
-                    "concede_attempt_timeout",
-                    attempt=attempt,
-                    label=label,
-                    wait_sec=4.0,
                 )
             if (
                 attempt >= self._STALL_CONCEDE_MAX_ATTEMPTS
@@ -8442,24 +8273,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 self.__concession_claim_reason = None
                 self._suppress_selections = False
                 self.__concede_outcome = "attempt_limit"
-                self.__soak_stall_event(
-                    "attempt_limit", attempts=attempt, label=label,
-                    signature=self.__soak_stall_signature_digest(stalled_signature),
-                )
-                self.__soak_stall_event("resumed_play", reason="attempt_limit", label=label)
                 bot_logger.log_error(
                     f"{label}: {self._STALL_CONCEDE_MAX_ATTEMPTS} attempts failed; "
                     "resuming normal play until game progress."
                 )
         finally:
-            if not completed:
-                self.__soak_stall_event(
-                    "concede_sequence_ended_without_completion",
-                    attempts=attempt,
-                    label=label,
-                    stop_requested=bool(self._stop_requested),
-                    outcome=("stop_requested" if self._stop_requested else self.__concede_outcome),
-                )
             # Keep exclusivity through the final confirm/result transition, then
             # hand input back before the delayed post-match dismissal runs.
             release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
@@ -8618,13 +8436,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                                     expected_match_id: str | None = None) -> None:
         """Click the Concede button then click the OK confirmation dialog."""
         if expected_match_id is not None and not self.__is_live_match(expected_match_id):
-            event = (
-                "confirmation_skipped_match_completed"
-                if self.__concede_outcome == "match_completed"
-                else "cancellation"
-            )
-            reason = "match_already_completed" if event != "cancellation" else "left_match_before_concede_click"
-            self.__soak_stall_event(event, reason=reason, label=label, match_id=expected_match_id)
             return
         concede_img = os.path.join(self._buttons_dir(), "concede.png")
         clicked_concede = False
@@ -8640,13 +8451,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self._click_abs(concede_target[0], concede_target[1], f"{label}_CONCEDE_FALLBACK")
         time.sleep(1.5)
         if expected_match_id is not None and not self.__is_live_match(expected_match_id):
-            event = (
-                "confirmation_skipped_match_completed"
-                if self.__concede_outcome == "match_completed"
-                else "cancellation"
-            )
-            reason = "match_already_completed" if event != "cancellation" else "left_match_before_confirm"
-            self.__soak_stall_event(event, reason=reason, label=label, match_id=expected_match_id)
             return
         okay_img = os.path.join(self._buttons_dir(), "okay_btn.png")
         if os.path.exists(okay_img):
@@ -9056,35 +8860,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         elif pattern == self.patterns["match_completed"]:
             bot_logger.log_info("Detected match completed event")
             self.__concede_outcome = "match_completed"
-            soak_claim_reason = self.__concession_claim_reason
-            soak_claimed_at = self.__soak_concede_claimed_at
-            soak_completion_age = (
-                max(0.0, time.monotonic() - soak_claimed_at)
-                if soak_claimed_at is not None else None
-            )
             completed_match_id = self.__live_match_id or self.__last_seen_match_id
-            if soak_claim_reason and completed_match_id:
+            if self.__concession_claim_reason and completed_match_id:
                 self.__concede_terminal_results[completed_match_id] = {
                     "outcome": "match_completed",
-                    "recovery_sec": soak_completion_age,
                 }
-            self.__soak_stall_event(
-                "match_completed",
-                concede_attempts=self.__soak_concede_attempts,
-                concede_claim_reason=soak_claim_reason,
-                recovery_sec=(
-                    round(soak_completion_age, 3)
-                    if soak_completion_age is not None else None
-                ),
-                recovery=bool(soak_claim_reason),
-            )
             self.__concede_completed_event.set()
             self.__clear_stall_watchdog("match completed")
             self.__concession_claimed = False
             self.__concession_claim_reason = None
-            # The worker owns these values until it records recovery_observed.
-            self.__soak_concede_claimed_at = None
-            self.__soak_concede_attempts = 0
             runtime_status.set_mode(
                 "post_match",
                 bot_state=str(current_state),
@@ -15226,9 +15010,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         ):
             # Reject before touching any merged state. A late diff from the
             # completed match must not contaminate the next match's baseline.
-            self.__soak_stall_event(
-                "rejected", reason="retired_match_state", match_id=incoming_match_id
-            )
             return
 
         # Derive the local player's systemSeatId from incoming messages (if present)
@@ -15280,7 +15061,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if self.__live_match_id != incoming_match_id:
                 self.__failed_stall_signature = None
                 self.__concede_outcome = None
-                self.__soak_stall_event("live_match_started", match_id=incoming_match_id)
             self.__live_match_id = incoming_match_id
         keep_observed = self.__infer_keep_from_raw_dict(raw_dict)
         if self.__has_local_mulligan_request(raw_dict) and not keep_observed:
