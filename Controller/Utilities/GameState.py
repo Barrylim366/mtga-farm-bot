@@ -1,9 +1,13 @@
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from Controller.Utilities.GameStateInterface import GameStateSecondary
 
 
 class GameState(GameStateSecondary):
-    def __init__(self, game_dict: [str, str or int] | None = None):
+    # `Dict[...]`, not a list display: annotations are evaluated at class
+    # definition time, and `[str, str or int] | None` builds a real list and
+    # asks for `list | None`, which raises TypeError before the module can be
+    # imported at all.
+    def __init__(self, game_dict: Optional[Dict[str, Any]] = None):
         # Never share an empty mutable state between Controller instances or
         # successive match resets. A diff merged into one such state would
         # otherwise become the baseline of the next GameState().
@@ -108,7 +112,7 @@ class GameState(GameStateSecondary):
                 return is_complete
         return is_complete
 
-    def __update_dict(self, dict_to_update: [str, str or int], dict_with_update: [str, str or int]):
+    def __update_dict(self, dict_to_update: Dict[str, Any], dict_with_update: Dict[str, Any]):
         for key in dict_with_update:
             if key in dict_to_update.keys():
                 item_to_update = dict_to_update[key]
