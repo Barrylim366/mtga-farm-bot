@@ -397,7 +397,22 @@ Controller   DummyAI        ← AI decides what to play (generate_move / generat
 
 **Card data** (`AI/Utilities/CardInfo.py`) is loaded from a local export of MTGA's own card database and delta-synced with the Scryfall API for missing entries. Cards Scryfall does not have at all — Arena-only tokens, Alchemy rebalances — are remembered as such and not requested again for 30 days, and the whole startup sync is capped at 10 seconds, so an unreachable Scryfall cannot stall the start. A card that a later Arena update ships locally is dropped from the retry list without a request.
 
-Both `Controller` and `AI` follow an interface pattern (`ControllerInterface.py` / `AIInterface.py`) that decouples `Game.py` from the concrete implementations — making it straightforward to swap in a different AI or add a non-MTGA controller.
+`Controller` and `AI` each carry an informal interface file (`ControllerInterface.py` / `AIInterface.py`) documenting the methods `Game.py` relies on. Only one Controller (`Controller/MTGAController/Controller.py`, the real MTGA controller) and one AI (`AI/DummyAI.py`) are actually wired up today, and `Game.py` is typed directly against those two concrete classes — the interface files are documentation of the expected contract, not a runtime abstraction that makes swapping either one a drop-in change.
+
+### Static type checking
+
+A [Pyright](https://microsoft.github.io/pyright/) pass (developer-only, not run by the bot or its launchers) covers the AI decision layer -- `AI/`, `Game.py` and `Controller/Utilities/GameState.py` -- in `basic` (non-strict) mode, scoped via `pyrightconfig.json`. Run it from an activated project `.venv`:
+
+```
+python -m pip install -r requirements-dev.txt   # once, installs pyright
+python -m pyright                               # uses pyrightconfig.json
+```
+
+(Activate first: `source .venv/bin/activate` on Linux/macOS, `.venv\Scripts\activate` on Windows.)
+
+The rest of the codebase (`Controller/MTGAController/Controller.py`, `ui.py`, …) is out of scope for now.
+
+GitHub Actions runs the same Pyright check automatically for every push and pull request (`.github/workflows/pyright.yml`).
 
 ## Logs & Troubleshooting
 

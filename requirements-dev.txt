@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Static type checking (developer-only, see README.md#static-type-checking).
+pyright==1.1.414

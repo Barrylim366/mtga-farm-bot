@@ -1,5 +1,7 @@
-from Controller.ControllerInterface import ControllerSecondary
-from AI.AIInterface import AIKernel
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from Controller.Utilities.GameState import GameState
 import AI.Utilities.CardInfo as CardInfo
 import time
@@ -10,6 +12,16 @@ import bot_logger
 import debug_recorder
 import click_recorder
 import runtime_status
+
+if TYPE_CHECKING:
+    # Only the one real MTGA Controller and DummyAI are ever wired up (see
+    # ui.py / run_bot.py); typing against them directly -- instead of the
+    # informal ControllerSecondary/AIKernel interfaces -- lets Pyright catch
+    # real mistakes here. Guarded by TYPE_CHECKING + postponed evaluation
+    # (see the __future__ import above) so this never actually imports
+    # Controller.py's runtime dependencies (pyautogui, cv2, ...) at import time.
+    from Controller.MTGAController.Controller import Controller
+    from AI.DummyAI import DummyAI
 
 
 class Game:
@@ -51,7 +63,7 @@ class Game:
             return
         self.controller.resolve()
 
-    def __init__(self, controller: ControllerSecondary, ai: AIKernel, data_dir_prompt=None):
+    def __init__(self, controller: "Controller", ai: "DummyAI", data_dir_prompt=None):
         self.ai = ai
         self.controller = controller
         self.last_logged_turn = -1
@@ -711,18 +723,9 @@ class Game:
                     self._pass_priority_on_uncastable(
                         inst_id, turn_num, phase, step, decision_player, expected_match_id
                     )
-            elif move_name == 'attack':
-                self._debug(f"Attacking with {move[move_name][0]}")
-                self.controller.attack(move[move_name][0])
             elif move_name == 'all_attack':
                 self._debug("Executing all_attack")
                 self.controller.all_attack()
-            elif move_name == 'block':
-                self._debug(f"Blocking: {move[move_name]}")
-                self.controller.block(move[move_name][0], move[move_name][1])
-            elif move_name == 'all_block':
-                self._debug("Executing all_block")
-                self.controller.all_block()
             elif move_name == 'select_target':
                 self._debug(f"Selecting target: {move[move_name][0]}")
                 self.controller.select_target(move[move_name][0])

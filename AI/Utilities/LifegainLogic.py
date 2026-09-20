@@ -158,7 +158,7 @@ def creature_score(obj: dict) -> tuple:
     grp_id = (obj or {}).get("grpId")
     tier = creature_tier(grp_id)
     try:
-        cmc = CardInfo.calculate_cmc(str(_card(int(grp_id)).get("manaCost") or ""))
+        cmc = CardInfo.calculate_cmc(str(_card(int(grp_id)).get("manaCost") or "")) if grp_id is not None else 0
     except Exception:
         cmc = 0
     body = _stat((obj or {}).get("power")) + _stat((obj or {}).get("toughness"))

@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 from runtime_paths import ensure_runtime_subdir
 
@@ -687,7 +688,7 @@ def get_card_info(mtga_id: int):
     return None # Return None if card not found
 
 
-def get_card_info_local(mtga_id: int):
+def get_card_info_local(mtga_id: Optional[int]):
     """Offline-only variant of get_card_info.
 
     Looks the card up in the two local layers (curated starter DB, then the
