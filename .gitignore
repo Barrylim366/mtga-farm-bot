@@ -1,8 +1,6 @@
 # Ignore generated card data
 cards.json
 cards_metadata.json
-#ignore credentials
-credentials.txt
 nul
 NUL
 # Build artifacts
