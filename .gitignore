@@ -35,6 +35,7 @@ Accounts/*
 
 # Internal AI/session files
 learning.md
-AGENTS.md
+# AGENTS.md is deliberately NOT ignored: like .claude/skills/ it is project
+# documentation describing how to work on this bot, and it is tracked.
 
 
