@@ -23,6 +23,16 @@ if ROOT not in sys.path:
 import AI.Utilities.RemovalLogic as RemovalLogic
 from Controller.Utilities.GameState import GameState
 
+
+class EmptyStateIsolationTest(unittest.TestCase):
+    def test_default_states_do_not_share_their_merge_baseline(self):
+        first = GameState()
+        second = GameState()
+
+        first.update(GameState({"gameStateId": 7, "actions": [{"id": 1}]}))
+
+        self.assertEqual(second.get_full_state(), {})
+
 BATTLEFIELD = 28
 
 

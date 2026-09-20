@@ -22,7 +22,7 @@ class Game:
     _STUCK_MOVE_RETRY_LIMIT = 3
 
     def _pass_priority_on_uncastable(
-        self, inst_id, turn_num, phase, step, decision_player
+        self, inst_id, turn_num, phase, step, decision_player, expected_match_id=None
     ) -> None:
         """The cast's click never reached the game, so nothing about the state
         will change and the AI will pick this same card again on the next tick.
@@ -45,6 +45,10 @@ class Game:
             turn_num, phase, step, decision_player, 'resolve', (),
         )
         self._last_move_repeat_count = 1
+        can_execute = getattr(self.controller, "can_execute_game_action", None)
+        if callable(can_execute) and not can_execute(expected_match_id):
+            self._debug("CAST_UNAVAILABLE fallback cancelled because the decision's match ended.")
+            return
         self.controller.resolve()
 
     def __init__(self, controller: ControllerSecondary, ai: AIKernel, data_dir_prompt=None):
@@ -501,6 +505,12 @@ class Game:
     def decision_method(self, current_game_state: GameState):
         if self._stop_requested:
             return
+        expected_match_id = None
+        try:
+            if hasattr(self.controller, "get_current_match_id"):
+                expected_match_id = self.controller.get_current_match_id()
+        except Exception:
+            pass
         runtime_status.clear_intentional_wait()
         # Don't do anything before game has started
         if not self.game_started:
@@ -673,6 +683,13 @@ class Game:
                 pass
             self._debug(f"Executing move: {move_name}")
 
+            can_execute = getattr(self.controller, "can_execute_game_action", None)
+            if callable(can_execute) and not can_execute(expected_match_id):
+                self._debug(
+                    "Decision cancelled before dispatch: the live match changed, ended, or input was suppressed."
+                )
+                return
+
             # Execute move
             if move_name == 'cast':
                 inst_id = int(move[move_name][0])
@@ -692,7 +709,7 @@ class Game:
                     self._debug(f"Cast {card_id_str}")
                 if self.controller.cast(inst_id) is False:
                     self._pass_priority_on_uncastable(
-                        inst_id, turn_num, phase, step, decision_player
+                        inst_id, turn_num, phase, step, decision_player, expected_match_id
                     )
             elif move_name == 'attack':
                 self._debug(f"Attacking with {move[move_name][0]}")

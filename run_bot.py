@@ -71,6 +71,25 @@ def _detect_player_log_path() -> str:
     return _default_player_log_path()
 
 
+def _load_runtime_bot_config(cfg_path: pathlib.Path) -> tuple[dict, bool]:
+    """Load CLI settings while preserving defaults missing from older files."""
+    click_targets: dict = {}
+    auto_concede_stalled_matches = True
+    try:
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            loaded_targets = cfg.get("click_targets")
+            if isinstance(loaded_targets, dict):
+                click_targets = loaded_targets
+            configured_auto_concede = cfg.get("auto_concede_stalled_matches")
+            if isinstance(configured_auto_concede, bool):
+                auto_concede_stalled_matches = configured_auto_concede
+    except Exception:
+        click_targets = {}
+    return click_targets, auto_concede_stalled_matches
+
+
 def main():
     print("Starting MTG AI Bot...")
 
@@ -90,15 +109,11 @@ def main():
     # Fall back to 1920-relative defaults that match ui.ConfigManager._default_config()
     # so run_bot.py works out of the box on a fresh checkout.
     click_targets: dict = {}
+    auto_concede_stalled_matches = True
     try:
         from runtime_paths import runtime_file  # type: ignore
         cfg_path = runtime_file("config", "calibration_config.json")
-        if cfg_path.is_file():
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            loaded_targets = cfg.get("click_targets")
-            if isinstance(loaded_targets, dict):
-                click_targets = loaded_targets
+        click_targets, auto_concede_stalled_matches = _load_runtime_bot_config(cfg_path)
     except Exception:
         click_targets = {}
 
@@ -134,6 +149,7 @@ def main():
             screen_bounds=screen_bounds,
             click_targets=click_targets,
             input_backend=input_backend,
+            auto_concede_stalled_matches=auto_concede_stalled_matches,
         )
         
         print("Initializing AI...")

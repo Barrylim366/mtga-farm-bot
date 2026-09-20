@@ -105,6 +105,39 @@ The app's current version (`1.5.1`, sourced from `version.py`) is shown in **Set
 
 ## Configuration
 
+### Auto-concede stalled matches
+
+When enabled in Settings, the bot can concede only after Arena has confirmed a
+live match and the same local decision state has remained unchanged for 30
+seconds. It never acts from stale post-match data or while Arena is in a menu.
+If Arena changes the local prompt while that 30-second deadline is firing, the
+bot starts a fresh deadline for the new prompt instead of silently losing the
+watchdog timer.
+If the Concede dialog cannot be completed after two attempts, normal play is
+resumed and that unchanged state is not retried until Arena reports real game
+progress.
+
+The 30-second deadline is checked and the concession is claimed as one
+indivisible step, so a prompt that changes (or the setting being switched off)
+while that check runs cancels the concede instead of being overtaken by it.
+The concede itself then runs outside that lock — it clicks and waits for
+Arena, which must never block the log thread.
+
+Every click of the concede sequence is authorised at the moment it happens,
+not when the sequence started. Searching the screen for the Concede and OK
+buttons takes up to 1.5 seconds each, and focusing the window, the Escape
+settle and re-acquiring the game area add more; the match can end or be
+replaced by the next one in that time. If it does, the remaining clicks are
+dropped rather than landing on whatever Arena is showing by then. The
+unconditional concede that follows an expired Arena turn timer is unaffected —
+it deliberately does not depend on a known match id.
+
+While a concede is running it holds sole ownership of mouse and keyboard, and
+a gameplay action that was authorised a moment earlier can no longer slip
+through: the permission check and the input itself are now a single step, so a
+claim waits for any action still in flight and the mouse is released only once
+that action has finished.
+
 ### Input backend
 
 The bot auto-selects the best available input backend per platform:

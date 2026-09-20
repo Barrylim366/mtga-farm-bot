@@ -23,6 +23,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 
 
 def _controller():
@@ -115,6 +116,22 @@ class AnnouncementDismissTests(unittest.TestCase):
         self.c._stop_requested = True
 
         self.assertFalse(self.c._dismiss_blocking_announcement("T"))
+        self.assertEqual(self.clicks, [])
+        self.assertEqual(self.escapes, [])
+
+    def test_match_start_during_probe_cancels_before_escape(self):
+        """A queue worker that was already searching when a match starts must
+        not press ESC over the mulligan screen."""
+        state = {"value": BotState.HOME}
+        self.c._get_state_from_log = lambda: state["value"]
+
+        def locate(*_args, **_kwargs):
+            state["value"] = BotState.IN_GAME
+            return None
+
+        self.c._locate_image_center_in_scaled_arena_region = locate
+
+        self.assertFalse(self.c._dismiss_blocking_announcement("STARTER_NAV"))
         self.assertEqual(self.clicks, [])
         self.assertEqual(self.escapes, [])
 

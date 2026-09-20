@@ -40,6 +40,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
 
 # Verbatim from the session: a compact incoming GRE hover.
 GRE_HOVER = (
@@ -65,7 +66,11 @@ GAMESTATE_LINE = (
 def _controller():
     log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
     log.close()
-    return Controller(log.name)
+    controller = Controller(log.name)
+    controller._Controller__live_match_id = "test-match"
+    controller._Controller__last_seen_match_id = "test-match"
+    controller._get_state_from_log = lambda: BotState.IN_GAME
+    return controller
 
 
 def _parse(controller, line):
@@ -202,7 +207,7 @@ class CastSweepBackoffTests(unittest.TestCase):
         c._buttons_dir = lambda: tempfile.mkdtemp()
         attempts: list[int] = []
 
-        def cast_once(card_id, *, attempt=0):
+        def cast_once(card_id, *, attempt=0, **_kwargs):
             attempts.append(attempt)
             return False
 
@@ -230,7 +235,7 @@ class CastSweepBackoffTests(unittest.TestCase):
         c = _controller()
         attempts: list[int] = []
 
-        def cast_once(card_id, *, attempt=0):
+        def cast_once(card_id, *, attempt=0, **_kwargs):
             attempts.append(attempt)
             return attempt == 1
 

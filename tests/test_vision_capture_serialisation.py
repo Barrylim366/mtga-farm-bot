@@ -138,6 +138,7 @@ class TimeoutReapingTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    @unittest.skipIf(os.name == "nt", "POSIX process groups are unavailable on Windows")
     def test_an_overrunning_tool_is_killed_by_process_group(self):
         engine = bare_engine()
         engine._linux_tool_cmd = ["spectacle", "-b", "-n", "-f", "-o", "__OUT__"]

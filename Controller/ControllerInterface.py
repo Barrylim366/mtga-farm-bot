@@ -146,5 +146,9 @@ class ControllerSecondary(ControllerKernel):
     Informal Interface
     Defines secondary methods for the Controller type.
     """
+    def can_execute_game_action(self, expected_match_id=None) -> bool:
+        """Whether input may still be sent to the expected live match."""
+        return True
+
     def start_game(self) -> None:
         """ Starts log monitor and starts the game """
