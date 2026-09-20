@@ -40,6 +40,15 @@ def handshake_line(screen_name: str) -> str:
     )
 
 
+def login_line(display_name: str) -> str:
+    """MTGA's OTHER record of who just logged in, written with no
+    authenticateResponse anywhere near it. Copied from a live Player.log
+    (2026-09-20, offset 45,546,374)."""
+    return (
+        "[Accounts - Login] Logged in successfully. Display Name: %s\n" % display_name
+    )
+
+
 def inventory_line(gold: int) -> str:
     """A balance, exactly as MTGA writes it: with no account name anywhere in it."""
     return (
@@ -111,6 +120,100 @@ class AccountIdentityTest(unittest.TestCase):
             {"name": ACCOUNT_B, "screen_name": ACCOUNT_B}
         )
         self.assertIn(ACCOUNT_B, self.c._gold_farmed_by_account)
+
+    # --- both logged forms of a login count -------------------------------
+
+    def test_the_display_name_login_line_identifies_the_account(self):
+        """Live 2026-09-20: a re-login (after two `401 | INVALID ACCOUNT
+        CREDENTIALS`) was recorded ONLY as `Logged in successfully. Display Name:
+        Barrylim#08112`, 1.88 MB after the last authenticateResponse -- which
+        named the previous account. Reading just the handshake left the bot calling
+        itself by the old name, so the Historic deck pick read the wrong account's
+        thumbnail folder and it refused to queue on every tick."""
+        self.assertEqual(
+            self.c._find_latest_login_screenname(login_line("Barrylim#08112")),
+            "Barrylim#08112",
+        )
+
+    def test_the_later_of_the_two_forms_wins(self):
+        """Neither form outranks the other; recency decides."""
+        self.assertEqual(
+            self.c._find_latest_login_screenname(
+                handshake_line(ACCOUNT_A) + login_line(ACCOUNT_B)
+            ),
+            ACCOUNT_B,
+        )
+        self.assertEqual(
+            self.c._find_latest_login_screenname(
+                login_line(ACCOUNT_B) + handshake_line(ACCOUNT_A)
+            ),
+            ACCOUNT_A,
+        )
+
+    def test_the_display_name_is_one_token_not_the_rest_of_the_line(self):
+        """`[^\\r\\n]+` would fold anything the client appends after the name into
+        the identity -- which is then the key for gold attribution, round tracking
+        and the deck folder lookup."""
+        self.assertEqual(
+            self.c._find_latest_login_screenname(
+                "[Accounts - Login] Logged in successfully. Display Name: Foo#111 (cached)\n"
+            ),
+            "Foo#111",
+        )
+
+    def test_the_display_name_form_does_not_span_lines(self):
+        """With `\\s*` between its parts the pattern bridges newlines, so two
+        unrelated fragments splice into a login that was never logged."""
+        self.assertIsNone(
+            self.c._find_latest_login_screenname(
+                "Logged in successfully.\n\nDisplay Name: Sneaky#1234\n"
+            )
+        )
+
+    def test_the_display_name_login_carries_its_offset(self):
+        """The offset gate (pre/post switch) has to work for this form too, or a
+        login it cannot place is treated as if it never happened."""
+        self.append(handshake_line(ACCOUNT_A))
+        boundary = self.log_size()
+        self.append(login_line(ACCOUNT_B))
+        owner, offset = self.c._find_latest_login_with_offset(8_000_000)
+        self.assertEqual(owner, ACCOUNT_B)
+        self.assertGreaterEqual(offset, boundary)
+
+    def test_a_display_name_login_reclaims_the_identity_after_a_switch(self):
+        """End to end over the latch: the hand-made login must win."""
+        self.append(handshake_line(ACCOUNT_B))
+        self.begin_switch()
+        self.c._latch_identity_from_switch_target(
+            {"name": ACCOUNT_B, "screen_name": ACCOUNT_B}
+        )
+        self.append(login_line(ACCOUNT_A))
+        self.c._latch_account_screen_name_from(login_line(ACCOUNT_A))
+        self.assertEqual(self.c._current_account_screen_name, ACCOUNT_A)
+
+    def test_a_discriminated_login_maps_to_a_config_row_without_one(self):
+        """`Barrylim#08112` against the configured row `Barrylim`. The config
+        never recorded discriminators, so the base is all it knows and the single
+        match is the only reading available -- refusing is a dead end, not
+        caution."""
+        configured = [{"name": "Barrylim", "screen_name": "Barrylim"}]
+        self.c._load_accounts_from_dirs = lambda: configured
+        self.assertEqual(self.c._current_account_config_name("Barrylim#08112"), "Barrylim")
+
+    def test_a_discriminated_login_still_never_crosses_two_discriminators(self):
+        """The case the strictness exists for stays strict: a configured row that
+        SPECIFIES a discriminator is positive evidence about which account it is."""
+        configured = [{"name": "Player#11111", "screen_name": "Player#11111"}]
+        self.c._load_accounts_from_dirs = lambda: configured
+        self.assertIsNone(self.c._current_account_config_name("Player#22222"))
+
+    def test_a_discriminated_login_is_refused_when_the_base_is_ambiguous(self):
+        configured = [
+            {"name": "Player#11111", "screen_name": "Player#11111"},
+            {"name": "Player", "screen_name": "Player"},
+        ]
+        self.c._load_accounts_from_dirs = lambda: configured
+        self.assertIsNone(self.c._current_account_config_name("Player#33333"))
 
     # --- the log must not take it back ------------------------------------
 

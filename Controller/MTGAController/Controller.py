@@ -814,6 +814,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # whatever was last played by hand (a Starter Duel event and its deck),
         # so the next queue must navigate and select explicitly instead of
         # re-clicking Play on a stale selection. See _ensure_historic_selection.
+        # Which query the "matched by visible name only" warning has been said for.
+        # _match_configured_alias runs on queue-loop ticks, so without this the
+        # advice would repeat every few seconds.
+        self._loose_base_match_logged_for: str = ""
         self._historic_selection_key: str | None = None
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
@@ -2699,15 +2703,63 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return None
         return self._match_configured_alias(exact) or self._mapped_alias_for_screen(exact)
 
+    # The two ways MTGA records WHO just logged in. Both are the client's own
+    # statement about its own session, so either is authoritative; the LAST one in
+    # the log wins, whichever form it takes.
+    #
+    # 1. `{"authenticateResponse":{...,"screenName":"X"}}` -- the form this code
+    #    was built on, and the only one it used to read.
+    # 2. `[Accounts - Login] Logged in successfully. Display Name: X#12345`
+    #
+    # Reading only (1) is a live-measured bug. On 2026-09-20 the client logged a
+    # login for `Barrylim#08112` in form (2) ONLY, at byte offset 45,546,374 --
+    # 1.88 MB after the last authenticateResponse, which named the PREVIOUS
+    # account `Barrylita`. Observed right before it: two
+    # `401 | INVALID ACCOUNT CREDENTIALS` and `Account error: Invalid email
+    # address or password`, then a successful retry -- so the re-login path is one
+    # way to get form (2) with no form (1) at all.
+    #
+    # The consequence is not cosmetic. The identity decides WHICH account folder
+    # the Historic deck thumbnails are read from (_historic_deck_candidate_accounts
+    # uses only the logged-in account's own folder), so the bot kept looking in
+    # `Accounts/Barrylita/`, found nothing that matched the quest, and logged
+    # "no deck thumbnail matched quest target colors=UB" on every queue tick,
+    # forever, while the decks sat in `Accounts/Barrylim/`.
+    # Form (2) is matched tightly on purpose, because it is the one form we have
+    # seen exactly one live example of:
+    #
+    # - Horizontal space only (`[ \t]*`) between its parts. With `\s*` the pattern
+    #   spans newlines, so two unrelated fragments that happen to end and begin
+    #   with those words would splice into a login event that was never logged.
+    # - The name is one whitespace-free token, not "the rest of the line". Arena
+    #   names have no spaces (`Name#12345`), and `[^\r\n]+` would swallow anything
+    #   the client appends after the name into the identity string -- which is then
+    #   the key for gold attribution, round tracking and the deck folder lookup.
+    _LOGIN_IDENTITY_RE = re.compile(
+        r'"authenticateResponse"\s*:\s*\{[^}]*?"screenName"\s*:\s*"([^"]+)"'
+        r'|Logged in successfully\.[ \t]*Display Name:[ \t]*([^\s]+)'
+    )
+
+    @classmethod
+    def _find_latest_login_match(cls, text: str) -> "re.Match[str] | None":
+        """The LAST login record in `text`, in either logged form."""
+        last = None
+        for m in cls._LOGIN_IDENTITY_RE.finditer(text or ""):
+            last = m
+        return last
+
     @staticmethod
-    def _find_latest_login_screenname(text: str) -> str | None:
-        owner = None
-        for m in re.finditer(
-            r'"authenticateResponse"\s*:\s*\{[^}]*?"screenName"\s*:\s*"([^"]+)"',
-            text or "",
-        ):
-            owner = m.group(1)
-        return owner
+    def _login_match_screenname(match: "re.Match[str] | None") -> str | None:
+        """The name out of whichever alternative of _LOGIN_IDENTITY_RE matched."""
+        if match is None:
+            return None
+        owner = match.group(1) or match.group(2)
+        owner = str(owner or "").strip()
+        return owner or None
+
+    @classmethod
+    def _find_latest_login_screenname(cls, text: str) -> str | None:
+        return cls._login_match_screenname(cls._find_latest_login_match(text))
 
     def set_current_account_manual(self, label: str | None, *, seeded: bool = False) -> None:
         """Manually declare which account is logged in RIGHT NOW (by config label),
@@ -2831,9 +2883,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         return self._canonical_screen_name(owner) or None, True
 
     def _find_latest_login_with_offset(self, max_bytes: int) -> tuple[str | None, int]:
-        """(screenName, absolute byte offset) of the LAST login (authenticateResponse)
-        in the log tail, or (None, 0). The offset lets a caller tell a login apart
-        from one that predates a reference point (e.g. a manual pin)."""
+        """(screenName, absolute byte offset) of the LAST login in the log tail,
+        or (None, 0). Either logged form counts -- see _LOGIN_IDENTITY_RE. The
+        offset lets a caller tell a login apart from one that predates a reference
+        point (e.g. a manual pin)."""
         path = self._log_path
         if not path:
             return None, 0
@@ -2847,16 +2900,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception:
             return None, 0
         text = raw.decode("utf-8", errors="ignore")
-        owner = None
-        last_start = 0
-        for m in re.finditer(
-            r'"authenticateResponse"\s*:\s*\{[^}]*?"screenName"\s*:\s*"([^"]+)"',
-            text,
-        ):
-            owner = m.group(1)
-            last_start = m.start()
-        if owner is None:
+        match = self._find_latest_login_match(text)
+        owner = self._login_match_screenname(match)
+        if owner is None or match is None:
             return None, 0
+        last_start = match.start()
         # Approximate the match's absolute byte offset (log is effectively ASCII).
         abs_off = base + len(text[:last_start].encode("utf-8", errors="ignore"))
         return owner, abs_off
@@ -3286,6 +3334,49 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # is positive evidence that this is not the configured account.
         if "#" not in query and len(matches) == 1:
             return str(matches[0].get("name", "")).strip() or None
+        # The mirror case: the QUERY carries a discriminator and the single
+        # configured row for that base carries none. Then the config never recorded
+        # discriminators at all, so the base is the whole of what it knows and an
+        # unambiguous base match is the best evidence available. Refusing here is
+        # not caution, it is a dead end -- there is no spelling of that row the
+        # query could ever match.
+        #
+        # This is NOT the `Player#11111` vs `Player#22222` case the block above
+        # guards: that needs a configured discriminator to disagree with, and the
+        # condition below excludes every row that has one. Live 2026-09-20:
+        # `Logged in successfully. Display Name: Barrylim#08112` against the
+        # configured row `Barrylim` (screen_name `Barrylim`) resolved to None, so
+        # the logged-in account stayed unidentified and the Historic deck pick read
+        # the wrong account's folder.
+        #
+        # The residual risk, and why it is logged rather than refused: "exactly one
+        # CONFIGURED row has this base" is not "exactly one ARENA account has this
+        # base". A second, unconfigured `Player#22222` signed in by hand would
+        # resolve to the bare `Player` row too, and its gold and round completion
+        # would be booked against the configured account -- the very merge the
+        # discriminator exists to prevent. Refusing instead does not avoid that
+        # trade, it just fails both accounts: the INTENDED `Player#11111` cannot
+        # match a bare row either, which is the bug being fixed. So the match is
+        # made, and named in the log with the one instruction that removes the
+        # ambiguity for good. The bot never logs itself into an unconfigured
+        # account, so reaching this at all takes a manual login.
+        if "#" in query and len(matches) == 1:
+            only = matches[0]
+            name = str(only.get("name") or "").strip()
+            configured = self._canonical_screen_name(only.get("screen_name") or name)
+            if "#" not in configured and "#" not in name:
+                if query_key != self._loose_base_match_logged_for:
+                    self._loose_base_match_logged_for = query_key
+                    bot_logger.log_info(
+                        "Login '{}' matched the configured account '{}' by visible name "
+                        "only -- that row has no #discriminator. If more than one Arena "
+                        "account shares the name '{}', give this row its full Arena Name "
+                        "in Manage Accounts, or their gold and round tracking will be "
+                        "booked against the same account.".format(
+                            query, name, self._screen_name_base(query)
+                        )
+                    )
+                return name or None
         return None
 
     def _account_aliases_path(self) -> str:
@@ -3941,7 +4032,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         assets_dir = self._app_path("assets", "assert")
         buttons_dir = self._buttons_dir()
-        actions = build_post_login_navigation_actions(assets_dir=assets_dir, buttons_dir=buttons_dir)
+        actions = build_post_login_navigation_actions(
+            assets_dir=assets_dir,
+            buttons_dir=buttons_dir,
+            # The same Home Play button the queue click falls back to, so a
+            # recalibrated install moves both together.
+            home_play_rel=self._queue_button_rel,
+        )
 
         def _capture_step_failure(action_name: str, step: str, attempt: int) -> None:
             """Screenshot the screen the step actually failed on.
@@ -5440,6 +5537,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             )
             deck_image = self._choose_deck_image(candidate, colors, forced_filename)
             if not deck_image:
+                # An account folder with no thumbnails at all used to be skipped in
+                # complete silence, and the only thing logged was the summary below
+                # -- "no deck thumbnail matched quest target colors=UB" -- which
+                # blames the quest for what is really an empty folder. Live
+                # 2026-09-20 that sent a debugging session after the colour
+                # matching while `Accounts/Barrylita/` simply held no images.
+                bot_logger.log_error(
+                    "{}: account '{}' (folder '{}') has no deck thumbnails at all; "
+                    "put the deck images in that folder -- it is named after the "
+                    "account's Arena screen name.".format(
+                        label, candidate_name, str(candidate.get("folder", "")).strip() or "?"
+                    )
+                )
                 continue
             # _choose_deck_image never returns empty-handed: with no usable match
             # it falls back to the first (or a random) image in the folder, which
