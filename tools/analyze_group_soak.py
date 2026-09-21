@@ -69,10 +69,24 @@ def summarize(events: list[dict], parse_errors: list[dict] | None = None) -> dic
     prompts: dict[tuple, dict] = {}
     event_counts = Counter()
     anomaly_counts = Counter()
+    decision_origin_counts = Counter()
+    shadow_recommendation_counts = Counter()
+    unattributed_event_counts = Counter()
     for event in events:
         event_name = str(event.get("event") or "unknown")
         event_counts[event_name] += 1
+        decision_origin = event.get("decision_origin")
+        if decision_origin:
+            decision_origin_counts[str(decision_origin)] += 1
+        if event_name == "resume_shadow_guard":
+            shadow_recommendation_counts[str(event.get("recommendation") or "unknown")] += 1
         key = (event.get("run_id"), event.get("prompt_seq"))
+        # A recovery event without a prompt is intentionally outside this report.
+        # Keeping it out prevents old/generic recovery telemetry from becoming a
+        # fictional prompt row and inflating the scry anomaly count.
+        if key[1] is None:
+            unattributed_event_counts[event_name] += 1
+            continue
         prompt = prompts.setdefault(key, {
             "run_id": key[0], "prompt_seq": key[1], "context": event.get("context"),
             "match_id": event.get("match_id"), "first_timestamp": event.get("log_timestamp"),
@@ -108,6 +122,9 @@ def summarize(events: list[dict], parse_errors: list[dict] | None = None) -> dic
         "incomplete_prompt_count": sum(bool(row["incomplete"]) for row in prompt_rows),
         "event_counts": dict(sorted(event_counts.items())),
         "anomaly_counts": dict(sorted(anomaly_counts.items())),
+        "decision_origin_counts": dict(sorted(decision_origin_counts.items())),
+        "shadow_recommendation_counts": dict(sorted(shadow_recommendation_counts.items())),
+        "unattributed_event_counts": dict(sorted(unattributed_event_counts.items())),
         "parse_errors": parse_errors or [],
         "prompts": prompt_rows,
     }

@@ -215,6 +215,66 @@ class GroupSoakLifecycleTest(unittest.TestCase):
         self.assertEqual(self.controller.updated_game_state.get_full_state()["gameStateId"], 50)
         self.assertEqual(self.events[-1][0], "state_progress")
 
+    def test_group_resume_records_shadow_gate_but_does_not_block(self):
+        seed_state(self.controller, local_sources=3)
+        self.controller._Controller__has_mulled_keep = True
+        self.controller._Controller__soak_group_raw_pending_count = 1
+        self.controller._Controller__soak_group_raw_pending_state_id = 50
+        self.controller._Controller__soak_group_anomaly = lambda *a, **k: None
+        self.controller._Controller__decision_callback = (
+            lambda state: self.controller.record_group_soak_decision("cast", [10])
+        )
+
+        self.controller._Controller__resume_decision_after_group_req(
+            prompt_seq=1, match_id="match-1"
+        )
+
+        shadow = next(details for event, details in self.events if event == "resume_shadow_guard")
+        self.assertEqual(shadow["mode"], "observe_only")
+        self.assertEqual(shadow["recommendation"], "wait_for_current_raw_pending")
+        cast = next(details for event, details in self.events if event == "post_group_cast_selected")
+        self.assertEqual(cast["decision_origin"], "group_resume")
+
+    def test_stale_group_resume_is_ignored(self):
+        seed_state(self.controller, local_sources=3)
+        calls = []
+        self.controller._Controller__decision_callback = lambda state: calls.append(state)
+
+        self.controller._Controller__resume_decision_after_group_req(
+            prompt_seq=99, match_id="old-match"
+        )
+
+        self.assertEqual(calls, [])
+        event, details = self.events[-1]
+        self.assertEqual(event, "resume_rejected")
+        self.assertEqual(details["reason"], "stale_prompt_or_match")
+
+    def test_non_group_recovery_keeps_its_own_origin(self):
+        seed_state(self.controller, local_sources=3)
+        self.controller._Controller__has_mulled_keep = True
+        self.controller._Controller__decision_callback = (
+            lambda state: self.controller.record_group_soak_decision("cast", [10])
+        )
+
+        self.controller._Controller__resume_decision_after_recovery("cast_failure_recovery")
+
+        self.assertNotIn("resume_timer_fired", [event for event, _ in self.events])
+        cast = next(details for event, details in self.events if event == "post_group_cast_selected")
+        self.assertEqual(cast["decision_origin"], "cast_failure_recovery")
+
+    def test_non_group_recovery_does_not_cancel_group_resume_timer(self):
+        seed_state(self.controller, local_sources=3)
+        with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer):
+            self.controller._Controller__schedule_group_resume(1.0)
+            group_timer = self.controller._Controller__group_resume_timer
+            self.controller._Controller__schedule_decision_recovery(1.0, "modal_recovery")
+            recovery_timer = self.controller._Controller__decision_recovery_timer
+
+        self.assertIsNot(group_timer, recovery_timer)
+        self.assertFalse(group_timer.cancelled)
+        self.assertEqual(group_timer.kwargs["prompt_seq"], 1)
+        self.assertEqual(recovery_timer.kwargs["origin"], "modal_recovery")
+
 
 class GroupSoakAnalyzerTest(unittest.TestCase):
     def test_deduplicates_history_copy_and_summarizes_anomaly(self):
@@ -243,6 +303,30 @@ class GroupSoakAnalyzerTest(unittest.TestCase):
         self.assertEqual(report["prompt_count"], 1)
         self.assertEqual(report["anomaly_counts"], {"cast_not_in_hand": 1})
         self.assertTrue(report["prompts"][0]["incomplete"])
+
+    def test_keeps_unattributed_recovery_out_of_prompt_totals(self):
+        events = [
+            {"event": "resume_timer_fired", "run_id": "run", "prompt_seq": None},
+            {
+                "event": "post_group_cast_selected", "run_id": "run", "prompt_seq": 1,
+                "context": "GroupingContext_Scry", "match_id": "match",
+                "decision_origin": "cast_failure_recovery",
+            },
+            {
+                "event": "resume_shadow_guard", "run_id": "run", "prompt_seq": 1,
+                "context": "GroupingContext_Scry", "match_id": "match",
+                "recommendation": "wait_for_current_raw_pending",
+            },
+        ]
+
+        report = summarize(events)
+
+        self.assertEqual(report["prompt_count"], 0)
+        self.assertEqual(report["unattributed_event_counts"], {"resume_timer_fired": 1})
+        self.assertEqual(report["decision_origin_counts"], {"cast_failure_recovery": 1})
+        self.assertEqual(
+            report["shadow_recommendation_counts"], {"wait_for_current_raw_pending": 1}
+        )
 
 
 if __name__ == "__main__":
