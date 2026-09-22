@@ -53,7 +53,7 @@ class ControllerKernel:
         """
         pass
 
-    def cast(self, card_id: int) -> bool:
+    def cast(self, card_id: int, decision_context: dict | None = None) -> bool:
         """
         Casts the card with the given id from the player's hand.
 
@@ -67,6 +67,10 @@ class ControllerKernel:
             wait for a game-state change that will never come.
         """
         return False
+
+    def get_last_cast_abort_reason(self) -> str | None:
+        """Why the most recent cast stopped before clicking, if known."""
+        return None
 
     def should_defer_cast_for_target_selection(self, expected_match_id=None) -> bool:
         """Whether a target-selection transaction currently owns the UI.

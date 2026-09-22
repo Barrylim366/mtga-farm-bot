@@ -21,6 +21,51 @@ class Game:
     # STUCK_ACTION_RETRY_LIMIT below.
     _STUCK_MOVE_RETRY_LIMIT = 3
 
+    @staticmethod
+    def _capture_cast_decision_base(current_game_state, expected_match_id):
+        """Freeze the state used by the AI before log updates can replace it."""
+        try:
+            state = current_game_state.get_full_state() or {}
+            turn = state.get("turnInfo", {}) or {}
+            actions = []
+            for wrapper in state.get("actions", []) or []:
+                action = (wrapper or {}).get("action", {}) or {}
+                if action.get("actionType") not in {"ActionType_Cast", "ActionType_Play"}:
+                    continue
+                actions.append({
+                    "card_id": action.get("instanceId"),
+                    "seat_id": wrapper.get("seatId"),
+                    "type": action.get("actionType"),
+                    "mana_cost": list(action.get("manaCost", []) or []),
+                    "ability_grp_id": action.get("abilityGrpId"),
+                })
+            return {
+                "match_id": expected_match_id,
+                "game_state_id": state.get("gameStateId"),
+                "turn": {key: turn.get(key) for key in (
+                    "turnNumber", "phase", "step", "activePlayer",
+                    "priorityPlayer", "decisionPlayer",
+                )},
+                "cast_actions": actions,
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cast_decision_context(base, card_id):
+        if not isinstance(base, dict):
+            return None
+        selected = [
+            dict(action) for action in base.get("cast_actions", [])
+            if action.get("card_id") == card_id
+        ]
+        context = dict(base)
+        context["card_id"] = card_id
+        context["selected_actions"] = selected
+        context["selected_action_observed"] = bool(selected)
+        context.pop("cast_actions", None)
+        return context
+
     def _pass_priority_on_uncastable(
         self, inst_id, turn_num, phase, step, decision_player, expected_match_id=None
     ) -> None:
@@ -614,7 +659,11 @@ class Game:
             except Exception as e:
                 self._debug(f"Decision recorder capture failed: {e}")
 
-            # Generate move
+            # Generate move. Freeze cast context first: updated_game_state is
+            # shared with the log-reader thread and may advance during a scan.
+            cast_decision_base = self._capture_cast_decision_base(
+                current_game_state, expected_match_id
+            )
             self._debug("Calling AI.generate_move()")
             move = self.ai.generate_move(current_game_state, self.controller.get_inst_id_grp_id_dict())
             self._debug(f"AI returned move: {move}")
@@ -729,7 +778,8 @@ class Game:
                         "leaving priority fallback untouched."
                     )
                     return
-                cast_result = self.controller.cast(inst_id)
+                cast_context = self._cast_decision_context(cast_decision_base, inst_id)
+                cast_result = self.controller.cast(inst_id, decision_context=cast_context)
                 record_cast_result = getattr(
                     self.controller, "record_group_soak_cast_result", None
                 )
@@ -749,6 +799,13 @@ class Game:
                         bot_logger.log_info(
                             f"CAST_DEFERRED: target selection opened while casting card {inst_id}; "
                             "suppressing priority fallback."
+                        )
+                    elif getattr(self.controller, "get_last_cast_abort_reason", lambda: None)() == "stale_decision_context":
+                        self._debug(
+                            f"CAST_STALE_CONTEXT: card {inst_id} was not clicked because the decision window changed."
+                        )
+                        bot_logger.log_info(
+                            f"CAST_STALE_CONTEXT: card {inst_id} cancelled; waiting for the recovery decision."
                         )
                     else:
                         self._pass_priority_on_uncastable(

@@ -75,11 +75,13 @@ def summarize(events: list[dict], parse_errors: list[dict] | None = None) -> dic
             row["signals"] = event.get("signals", []) or []
             for signal in row["signals"]:
                 signal_counts[str(signal)] += 1
-        elif event_name in {"click_ineffective", "state_changed_elsewhere", "ambiguous"}:
+        elif event_name in {"click_ineffective", "state_changed_elsewhere", "ambiguous", "stale_decision_context"}:
             row["outcome"] = event_name
-            row["reason"] = event.get("reason")
+            row["reason"] = event.get("reason") or ",".join(
+                str(item) for item in (event.get("mismatch_reasons") or [])
+            )
             row["signals"] = event.get("signals", []) or []
-            outcome_reasons[str(event.get("reason") or "unknown")] += 1
+            outcome_reasons[str(row["reason"] or "unknown")] += 1
         elif event_name == "cast_not_clicked":
             row["outcome"] = "not_clicked"
             row["reason"] = event.get("reason")
@@ -99,6 +101,10 @@ def summarize(events: list[dict], parse_errors: list[dict] | None = None) -> dic
         "investigation_cases": [
             row for row in rows
             if row.get("outcome") in {"click_ineffective", "ambiguous"}
+        ],
+        "stale_decision_cases": [
+            row for row in rows
+            if row.get("outcome") == "stale_decision_context"
         ],
         "attempts": rows,
     }

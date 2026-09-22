@@ -528,6 +528,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__cast_ack_seq = 0
         self.__cast_ack_attempts = {}
         self.__cast_ack_lock = threading.RLock()
+        # cast() keeps its Boolean API. This distinguishes a stale decision
+        # from a genuinely unreachable hand card for Game's fallback policy.
+        self.__last_cast_abort_reason = None
         self.__last_declare_blockers_ts = 0.0
         # Calibration captures are bounded: one per block prompt would be ~30
         # screenshots a session, and a handful is enough to measure the band.
@@ -6391,6 +6394,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     "seat_id": wrapper.get("seatId"),
                     "type": action.get("actionType"),
                     "mana_cost": action.get("manaCost", []) or [],
+                    "ability_grp_id": action.get("abilityGrpId"),
                 })
         obj = next(
             (
@@ -6492,6 +6496,91 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 elapsed_sec=round(time.monotonic() - attempt["started_monotonic"], 3),
                 scan_attempts=attempt.get("scan_attempts", []),
             )
+
+    @staticmethod
+    def __same_cast_action(expected: dict, current: dict) -> bool:
+        """Compare a selected legal action without relying on GRE list order."""
+        if expected.get("seat_id") != current.get("seat_id"):
+            return False
+        if expected.get("type") != current.get("type"):
+            return False
+        if expected.get("ability_grp_id") != current.get("ability_grp_id"):
+            return False
+        try:
+            return json.dumps(expected.get("mana_cost", []), sort_keys=True) == json.dumps(
+                current.get("mana_cost", []), sort_keys=True
+            )
+        except Exception:
+            return expected.get("mana_cost", []) == current.get("mana_cost", [])
+
+    def __cast_context_mismatches(self, card_id: int, context: dict | None) -> tuple[list[str], dict]:
+        """Return evidence that an AI-selected cast is no longer safe to click."""
+        current = self.__cast_ack_snapshot(card_id)
+        if not isinstance(context, dict):
+            return [], current
+        mismatches = []
+        expected_match = context.get("match_id")
+        if expected_match and current.get("match_id") != expected_match:
+            mismatches.append("match_changed")
+        expected_state_id = context.get("game_state_id")
+        if expected_state_id is not None and current.get("game_state_id") != expected_state_id:
+            mismatches.append("game_state_changed")
+        expected_turn = context.get("turn", {}) or {}
+        current_turn = current.get("turn", {}) or {}
+        for key in ("turnNumber", "phase", "step", "activePlayer", "priorityPlayer", "decisionPlayer"):
+            if expected_turn.get(key) is not None and current_turn.get(key) != expected_turn.get(key):
+                mismatches.append(f"turn_{key}_changed")
+        if not current.get("card_in_hand"):
+            mismatches.append("card_left_hand")
+        expected_actions = context.get("selected_actions", []) or []
+        selected_action_observed = context.get("selected_action_observed")
+        if selected_action_observed is False or (
+            expected_actions and not any(
+                self.__same_cast_action(expected, live)
+                for expected in expected_actions
+                for live in (current.get("cast_actions", []) or [])
+            )
+        ):
+            mismatches.append("selected_action_missing")
+        prompt_flags = current.get("prompt_flags", {}) or {}
+        if any(active for name, active in prompt_flags.items() if name != "target_select"):
+            mismatches.append("non_target_prompt_active")
+        return mismatches, current
+
+    def __abort_stale_cast_context(
+        self, cast_ack_id: str | None, card_id: int, context: dict | None,
+        checkpoint: str, scan_attempt: int | None = None,
+    ) -> bool:
+        mismatches, current = self.__cast_context_mismatches(card_id, context)
+        if not mismatches:
+            return False
+        self.__last_cast_abort_reason = "stale_decision_context"
+        if cast_ack_id is not None:
+            with self.__cast_ack_lock:
+                attempt = self.__cast_ack_attempts.pop(cast_ack_id, None)
+            if attempt is not None:
+                self.__cast_ack_event(
+                    "stale_decision_context", attempt_id=cast_ack_id, card_id=card_id,
+                    checkpoint=checkpoint, scan_attempt=scan_attempt,
+                    mismatch_reasons=mismatches, expected_context=context,
+                    current_snapshot=current,
+                    elapsed_sec=round(time.monotonic() - attempt["started_monotonic"], 3),
+                )
+        else:
+            self.__cast_ack_event(
+                "stale_decision_context", card_id=card_id, checkpoint=checkpoint,
+                scan_attempt=scan_attempt, mismatch_reasons=mismatches,
+                expected_context=context, current_snapshot=current,
+            )
+        bot_logger.log_info(
+            f"CAST_STALE_CONTEXT: card {card_id} at {checkpoint}; "
+            f"reasons={','.join(mismatches)}."
+        )
+        self.__schedule_decision_recovery(0.2, "stale_cast_decision")
+        return True
+
+    def get_last_cast_abort_reason(self) -> str | None:
+        return self.__last_cast_abort_reason
 
     def __cast_ack_signals(self, baseline: dict, current: dict) -> list[str]:
         """Return only evidence that the chosen card's cast actually progressed."""
@@ -6679,9 +6768,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if attempts:
             self.__cast_ack_event("ack_cancelled", reason=reason, count=len(attempts))
 
-    def cast(self, card_id: int) -> bool:
+    def cast(self, card_id: int, decision_context: dict | None = None) -> bool:
         """True if the card was actually clicked. False means the click never
         happened, and the caller must not leave the bot idling on it."""
+        self.__last_cast_abort_reason = None
         expected_match_id = self.__live_match_id
         if not self.can_execute_game_action(expected_match_id):
             return False
@@ -6704,17 +6794,23 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # passes it ("No hover update before bounds"), so a single pass can miss
         # a card that is really in hand. Retry a couple of times after a pause.
         for attempt in range(len(self._CAST_SWEEP_PACING)):
+            if self.__abort_stale_cast_context(
+                cast_ack_id, card_id, decision_context, "before_scan", attempt
+            ):
+                return False
             if not self.can_execute_game_action(expected_match_id):
                 self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_scan")
                 return False
             if self._cast_once(
                 card_id, attempt=attempt, expected_match_id=expected_match_id,
-                cast_ack_id=cast_ack_id,
+                cast_ack_id=cast_ack_id, decision_context=decision_context,
             ):
                 self.clear_cast_suppression(card_id)
                 return True
             if not self.can_execute_game_action(expected_match_id):
                 self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_after_scan")
+                return False
+            if self.__last_cast_abort_reason == "stale_decision_context":
                 return False
             if attempt < len(self._CAST_SWEEP_PACING) - 1:
                 next_step, next_dwell = self._CAST_SWEEP_PACING[attempt + 1]
@@ -6733,6 +6829,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if not self.can_execute_game_action(expected_match_id):
                     self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_probe")
                     return False
+                if self.__abort_stale_cast_context(
+                    cast_ack_id, card_id, decision_context, "before_recovery_probe", attempt
+                ):
+                    return False
                 self._dismiss_are_you_sure_if_present(context=f"CAST_CARD id={card_id}")
                 if attempt == 0:
                     # Two more things that cover the hand and are invisible to the
@@ -6750,6 +6850,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     # to bound the added ~2s against the rope.
                     if not self.can_execute_game_action(expected_match_id):
                         self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_rescue")
+                        return False
+                    if self.__abort_stale_cast_context(
+                        cast_ack_id, card_id, decision_context, "before_overlay_rescue", attempt
+                    ):
                         return False
                     self._dismiss_report_player_dialog(context=f"CAST_CARD id={card_id}")
                     if not self.can_execute_game_action(expected_match_id):
@@ -6776,7 +6880,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def _cast_once(
         self, card_id: int, *, attempt: int = 0, expected_match_id: str | None = None,
-        cast_ack_id: str | None = None,
+        cast_ack_id: str | None = None, decision_context: dict | None = None,
     ) -> bool:
         expected_match_id = expected_match_id or self.__live_match_id
         step_px, dwell_sec = self._CAST_SWEEP_PACING[
@@ -6785,6 +6889,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         bot_logger.set_hover_logging(True)
         try:
             if not self.can_execute_game_action(expected_match_id):
+                return False
+            if self.__abort_stale_cast_context(
+                cast_ack_id, card_id, decision_context, "scan_start", attempt
+            ):
                 return False
             if self.should_defer_cast_for_target_selection(expected_match_id):
                 self.__target_soak_event(
@@ -6857,6 +6965,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     or self.should_defer_cast_for_target_selection(expected_match_id)
                 ):
                     break
+                if self.__abort_stale_cast_context(
+                    cast_ack_id, card_id, decision_context, "scan_loop", attempt
+                ):
+                    return False
                 # Check if we have exceeded the scan area
                 current_x = self.input.position().x
                 if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
@@ -6878,6 +6990,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 # Inner loop: move until log updates or bounds hit
                 while not self.log_reader.has_new_line(self.patterns['hover_id']):
                     if not self.can_execute_game_action(expected_match_id):
+                        return False
+                    if self.__abort_stale_cast_context(
+                        cast_ack_id, card_id, decision_context, "scan_motion", attempt
+                    ):
                         return False
                     step_dx = step_px * direction
                     pos = self.input.position()
@@ -6934,6 +7050,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if clicked:
                 if not self.can_execute_game_action(expected_match_id):
                     self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_probe")
+                    return False
+                if self.__abort_stale_cast_context(
+                    cast_ack_id, card_id, decision_context, "before_click", attempt
+                ):
                     return False
                 click_pos = self.input.position()
                 click_position = (click_pos.x, click_pos.y)
