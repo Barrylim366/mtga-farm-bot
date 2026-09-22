@@ -68,6 +68,16 @@ class ControllerKernel:
         """
         return False
 
+    def should_defer_cast_for_target_selection(self, expected_match_id=None) -> bool:
+        """Whether a target-selection transaction currently owns the UI.
+
+        A deferred cast must not be converted into a priority pass: the target
+        handler is still responsible for finishing the modal interaction.
+        Alternate controllers do not have this state machine, so their safe
+        default is to allow normal casting.
+        """
+        return False
+
     def select_target(self, target_id: int) -> None:
         """
         Selects a target for spell or ability specified by target id.

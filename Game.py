@@ -717,6 +717,18 @@ class Game:
                         self._debug(f"Cast {card_id_str}")
                 else:
                     self._debug(f"Cast {card_id_str}")
+                defer_cast = getattr(
+                    self.controller, "should_defer_cast_for_target_selection", None
+                )
+                if callable(defer_cast) and defer_cast(expected_match_id):
+                    self._debug(
+                        f"CAST_DEFERRED: target selection is still blocking card {inst_id}."
+                    )
+                    bot_logger.log_info(
+                        f"CAST_DEFERRED: target selection is still blocking card {inst_id}; "
+                        "leaving priority fallback untouched."
+                    )
+                    return
                 cast_result = self.controller.cast(inst_id)
                 record_cast_result = getattr(
                     self.controller, "record_group_soak_cast_result", None
@@ -727,9 +739,21 @@ class Game:
                     except Exception as e:
                         self._debug(f"Group soak cast-result observation failed: {e}")
                 if cast_result is False:
-                    self._pass_priority_on_uncastable(
-                        inst_id, turn_num, phase, step, decision_player, expected_match_id
-                    )
+                    # A target prompt can arrive during the hand scan. Recheck
+                    # before treating the failed click as an uncastable card.
+                    blocked_now = callable(defer_cast) and defer_cast(expected_match_id)
+                    if blocked_now:
+                        self._debug(
+                            f"CAST_DEFERRED: target selection opened while casting card {inst_id}."
+                        )
+                        bot_logger.log_info(
+                            f"CAST_DEFERRED: target selection opened while casting card {inst_id}; "
+                            "suppressing priority fallback."
+                        )
+                    else:
+                        self._pass_priority_on_uncastable(
+                            inst_id, turn_num, phase, step, decision_player, expected_match_id
+                        )
             elif move_name == 'attack':
                 self._debug(f"Attacking with {move[move_name][0]}")
                 self.controller.attack(move[move_name][0])

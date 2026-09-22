@@ -1,7 +1,7 @@
-"""Summarize temporary [SOAK_CAST_ACK_V1] cast acknowledgement telemetry.
+"""Summarize temporary [SOAK_CAST_ACK_V2] cast acknowledgement telemetry.
 
 Read-only. It groups each attempted hand-card cast by its attempt id, reports
-which acknowledgement signal arrived, and lists timeouts for bundle review.
+which acknowledgement signal arrived, and lists genuine/ambiguous failures.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 from runtime_paths import runtime_file
 
 
-MARKER = "[SOAK_CAST_ACK_V1] "
+MARKER = "[SOAK_CAST_ACK_V2] "
 TIMESTAMP_RE = re.compile(r"^\[(?P<timestamp>[^]]+)]")
 
 
@@ -53,7 +53,7 @@ def parse_events(paths: list[Path]) -> tuple[list[dict], list[dict]]:
 
 def summarize(events: list[dict], parse_errors: list[dict] | None = None) -> dict:
     attempts: dict[str, dict] = {}
-    event_counts, signal_counts, timeout_reasons = Counter(), Counter(), Counter()
+    event_counts, signal_counts, outcome_reasons = Counter(), Counter(), Counter()
     for event in events:
         event_name = str(event.get("event") or "unknown")
         event_counts[event_name] += 1
@@ -75,9 +75,11 @@ def summarize(events: list[dict], parse_errors: list[dict] | None = None) -> dic
             row["signals"] = event.get("signals", []) or []
             for signal in row["signals"]:
                 signal_counts[str(signal)] += 1
-        elif event_name == "ack_timeout":
-            row["outcome"] = "timeout"
-            timeout_reasons[str(event.get("reason") or "unknown")] += 1
+        elif event_name in {"click_ineffective", "state_changed_elsewhere", "ambiguous"}:
+            row["outcome"] = event_name
+            row["reason"] = event.get("reason")
+            row["signals"] = event.get("signals", []) or []
+            outcome_reasons[str(event.get("reason") or "unknown")] += 1
         elif event_name == "cast_not_clicked":
             row["outcome"] = "not_clicked"
             row["reason"] = event.get("reason")
@@ -91,10 +93,13 @@ def summarize(events: list[dict], parse_errors: list[dict] | None = None) -> dic
         "attempt_count": len(rows),
         "outcome_counts": dict(sorted(outcome_counts.items())),
         "ack_signal_counts": dict(sorted(signal_counts.items())),
-        "timeout_reasons": dict(sorted(timeout_reasons.items())),
+        "outcome_reasons": dict(sorted(outcome_reasons.items())),
         "event_counts": dict(sorted(event_counts.items())),
         "parse_errors": parse_errors or [],
-        "timeouts": [row for row in rows if row.get("outcome") == "timeout"],
+        "investigation_cases": [
+            row for row in rows
+            if row.get("outcome") in {"click_ineffective", "ambiguous"}
+        ],
         "attempts": rows,
     }
 

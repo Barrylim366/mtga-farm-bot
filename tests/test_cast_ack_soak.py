@@ -54,8 +54,8 @@ def make_controller() -> Controller:
     return controller
 
 
-def seed_state(controller: Controller, *, card_in_hand=True, state_id=50):
-    zone = "ZoneType_Hand" if card_in_hand else "ZoneType_Battlefield"
+def seed_state(controller: Controller, *, card_in_hand=True, state_id=50, zone=None):
+    zone = zone or ("ZoneType_Hand" if card_in_hand else "ZoneType_Battlefield")
     controller.updated_game_state = GameState({
         "gameStateId": state_id,
         "turnInfo": {
@@ -86,6 +86,7 @@ class CastAcknowledgementSoakTest(unittest.TestCase):
     def _begin_and_click(self):
         attempt_id = self.controller._Controller__begin_cast_ack(10, "match-1")
         with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer):
+            self.controller._Controller__note_cast_ack_pre_click(attempt_id, (100, 900))
             self.controller._Controller__note_cast_ack_click(attempt_id, (100, 900))
         return attempt_id
 
@@ -100,7 +101,7 @@ class CastAcknowledgementSoakTest(unittest.TestCase):
         self.assertIn("card_left_hand", details["signals"])
         self.assertNotIn(attempt_id, self.controller._Controller__cast_ack_attempts)
 
-    def test_no_acknowledgement_writes_timeout_bundle(self):
+    def test_unchanged_card_and_state_is_click_ineffective_and_writes_bundle(self):
         attempt_id = self._begin_and_click()
         bundles = []
         self.controller._Controller__write_cast_ack_bundle = lambda payload: bundles.append(payload)
@@ -109,10 +110,54 @@ class CastAcknowledgementSoakTest(unittest.TestCase):
             self.controller._Controller__probe_cast_ack(attempt_id, final_probe=True)
 
         event, details = self.events[-1]
-        self.assertEqual(event, "ack_timeout")
+        self.assertEqual(event, "click_ineffective")
         self.assertEqual(details["card_id"], 10)
         self.assertEqual(len(bundles), 1)
-        self.assertEqual(bundles[0]["reason"], "no_cast_acknowledgement")
+        self.assertEqual(bundles[0]["reason"], "card_and_game_state_unchanged")
+
+    def test_state_advancing_while_card_stays_in_hand_is_not_bundled(self):
+        attempt_id = self._begin_and_click()
+        seed_state(self.controller, card_in_hand=True, state_id=51)
+        bundles = []
+        self.controller._Controller__write_cast_ack_bundle = lambda payload: bundles.append(payload)
+
+        with mock.patch("Controller.MTGAController.Controller.threading.Thread", _ImmediateThread):
+            self.controller._Controller__probe_cast_ack(attempt_id, final_probe=True)
+
+        event, details = self.events[-1]
+        self.assertEqual(event, "state_changed_elsewhere")
+        self.assertEqual(details["reason"], "card_stayed_in_hand_while_state_changed")
+        self.assertEqual(bundles, [])
+
+    def test_no_progress_from_a_non_hand_zone_is_ambiguous_and_writes_bundle(self):
+        seed_state(
+            self.controller, card_in_hand=False, state_id=50,
+            zone="ZoneType_Graveyard",
+        )
+        attempt_id = self._begin_and_click()
+        bundles = []
+        self.controller._Controller__write_cast_ack_bundle = lambda payload: bundles.append(payload)
+
+        with mock.patch("Controller.MTGAController.Controller.threading.Thread", _ImmediateThread):
+            self.controller._Controller__probe_cast_ack(attempt_id, final_probe=True)
+
+        event, details = self.events[-1]
+        self.assertEqual(event, "ambiguous")
+        self.assertEqual(details["reason"], "no_strong_cast_progress_signal")
+        self.assertEqual(len(bundles), 1)
+
+    def test_pre_click_snapshot_is_the_acknowledgement_baseline(self):
+        attempt_id = self.controller._Controller__begin_cast_ack(10, "match-1")
+        self.controller._Controller__note_cast_ack_pre_click(attempt_id, (100, 900))
+        seed_state(self.controller, card_in_hand=False, state_id=51)
+        with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer):
+            self.controller._Controller__note_cast_ack_click(attempt_id, (100, 900))
+
+        self.controller._Controller__probe_cast_ack(attempt_id, final_probe=True)
+
+        event, details = self.events[-1]
+        self.assertEqual(event, "acknowledged")
+        self.assertIn("card_left_hand", details["signals"])
 
     def test_no_click_is_recorded_without_a_timeout(self):
         attempt_id = self.controller._Controller__begin_cast_ack(10, "match-1")
@@ -126,22 +171,39 @@ class CastAcknowledgementSoakTest(unittest.TestCase):
 
 
 class CastAcknowledgementAnalyzerTest(unittest.TestCase):
-    def test_summarizes_ack_and_timeout(self):
+    def test_summarizes_all_classified_outcomes(self):
         events = [
             {"event": "cast_selected", "attempt_id": "a", "card_id": 10, "match_id": "m"},
             {"event": "acknowledged", "attempt_id": "a", "card_id": 10,
              "signals": ["card_left_hand"]},
             {"event": "cast_selected", "attempt_id": "b", "card_id": 11, "match_id": "m"},
-            {"event": "ack_timeout", "attempt_id": "b", "card_id": 11,
-             "reason": "no_cast_acknowledgement"},
+            {"event": "click_ineffective", "attempt_id": "b", "card_id": 11,
+             "reason": "card_and_game_state_unchanged"},
+            {"event": "cast_selected", "attempt_id": "c", "card_id": 12, "match_id": "m"},
+            {"event": "state_changed_elsewhere", "attempt_id": "c", "card_id": 12,
+             "reason": "card_stayed_in_hand_while_state_changed"},
+            {"event": "cast_selected", "attempt_id": "d", "card_id": 13, "match_id": "m"},
+            {"event": "ambiguous", "attempt_id": "d", "card_id": 13,
+             "reason": "no_strong_cast_progress_signal"},
         ]
 
         report = summarize(events)
 
-        self.assertEqual(report["attempt_count"], 2)
-        self.assertEqual(report["outcome_counts"], {"acknowledged": 1, "timeout": 1})
+        self.assertEqual(report["attempt_count"], 4)
+        self.assertEqual(report["outcome_counts"], {
+            "acknowledged": 1, "ambiguous": 1, "click_ineffective": 1,
+            "state_changed_elsewhere": 1,
+        })
         self.assertEqual(report["ack_signal_counts"], {"card_left_hand": 1})
-        self.assertEqual(report["timeout_reasons"], {"no_cast_acknowledgement": 1})
+        self.assertEqual(report["outcome_reasons"], {
+            "card_and_game_state_unchanged": 1,
+            "card_stayed_in_hand_while_state_changed": 1,
+            "no_strong_cast_progress_signal": 1,
+        })
+        self.assertEqual(
+            [row["outcome"] for row in report["investigation_cases"]],
+            ["click_ineffective", "ambiguous"],
+        )
 
 
 if __name__ == "__main__":

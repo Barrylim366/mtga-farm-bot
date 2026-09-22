@@ -441,6 +441,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__pending_target_select = None
         self.__target_select_token_counter = 0
         self.__last_submit_targets_ts = 0.0
+        # Target prompts are modal transactions.  Keep the transaction alive
+        # until MTGA positively acknowledges it; an old annotation by itself
+        # is not proof that the overlay disappeared.
+        self.__target_soak_last_event = None
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
@@ -6441,7 +6445,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         except Exception as exc:
             encoded = json.dumps({"event": str(event), "encoding_error": type(exc).__name__})
-        bot_logger.log_info(f"[SOAK_CAST_ACK_V1] {encoded}")
+        bot_logger.log_info(f"[SOAK_CAST_ACK_V2] {encoded}")
 
     def __begin_cast_ack(self, card_id: int, expected_match_id: str | None) -> str:
         with self.__cast_ack_lock:
@@ -6489,24 +6493,56 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 scan_attempts=attempt.get("scan_attempts", []),
             )
 
-    def __cast_ack_signals(self, start: dict, current: dict) -> list[str]:
+    def __cast_ack_signals(self, baseline: dict, current: dict) -> list[str]:
         """Return only evidence that the chosen card's cast actually progressed."""
         signals = []
-        if start.get("card_in_hand") and not current.get("card_in_hand"):
+        if baseline.get("card_in_hand") and not current.get("card_in_hand"):
             signals.append("card_left_hand")
         if current.get("card_on_stack"):
             signals.append("card_on_stack")
         if current.get("card_on_battlefield"):
             signals.append("card_on_battlefield")
-        if start.get("cast_actions") and not current.get("cast_actions"):
+        baseline_zones = set(baseline.get("zones") or [])
+        current_zones = set(current.get("zones") or [])
+        if baseline_zones and current_zones and baseline_zones != current_zones:
+            signals.append("card_zone_changed")
+        if baseline.get("cast_actions") and not current.get("cast_actions"):
             signals.append("cast_action_removed")
         state_advanced = (
             current.get("game_state_id") is not None
-            and current.get("game_state_id") != start.get("game_state_id")
+            and current.get("game_state_id") != baseline.get("game_state_id")
         )
         if state_advanced and any((current.get("prompt_flags") or {}).values()):
             signals.append("state_advanced_to_prompt")
+        baseline_prompts = baseline.get("prompt_flags") or {}
+        current_prompts = current.get("prompt_flags") or {}
+        if any(
+            active and not baseline_prompts.get(name)
+            for name, active in current_prompts.items()
+        ):
+            signals.append("prompt_opened")
         return signals
+
+    def __classify_cast_ack(self, baseline: dict, current: dict) -> tuple[str, list[str], str]:
+        """Classify a post-click observation without changing gameplay behavior."""
+        signals = self.__cast_ack_signals(baseline, current)
+        strong_signals = {
+            "card_left_hand", "card_on_stack", "card_on_battlefield",
+            "card_zone_changed", "state_advanced_to_prompt", "prompt_opened",
+        }
+        if strong_signals.intersection(signals):
+            return "acknowledged", signals, "cast_progress_observed"
+
+        same_state = current.get("game_state_id") == baseline.get("game_state_id")
+        same_turn = current.get("turn") == baseline.get("turn")
+        no_prompt = not any((current.get("prompt_flags") or {}).values())
+        card_still_in_hand = baseline.get("card_in_hand") and current.get("card_in_hand")
+        same_actions = current.get("cast_actions") == baseline.get("cast_actions")
+        if card_still_in_hand and same_state and same_turn and same_actions and no_prompt:
+            return "click_ineffective", signals, "card_and_game_state_unchanged"
+        if card_still_in_hand and (not same_state or not same_turn):
+            return "state_changed_elsewhere", signals, "card_stayed_in_hand_while_state_changed"
+        return "ambiguous", signals, "no_strong_cast_progress_signal"
 
     def __write_cast_ack_bundle(self, payload: dict) -> None:
         try:
@@ -6544,8 +6580,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__cast_ack_event("ack_cancelled", attempt_id=attempt_id, reason="match_changed")
             return
         current = self.__cast_ack_snapshot(attempt["card_id"])
-        signals = self.__cast_ack_signals(attempt["click_snapshot"], current)
-        if signals:
+        baseline = attempt.get("pre_click_snapshot") or attempt["start_snapshot"]
+        outcome, signals, reason = self.__classify_cast_ack(baseline, current)
+        if outcome == "acknowledged":
             with self.__cast_ack_lock:
                 active = self.__cast_ack_attempts.pop(attempt_id, None)
                 if active:
@@ -6559,7 +6596,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 signals=signals,
                 elapsed_sec=round(time.monotonic() - attempt["clicked_monotonic"], 3),
                 start_snapshot=attempt["start_snapshot"],
-                click_snapshot=attempt["click_snapshot"], current_snapshot=current,
+                pre_click_snapshot=baseline,
+                post_click_snapshot=attempt["post_click_snapshot"], current_snapshot=current,
             )
             return
         if not final_probe:
@@ -6573,18 +6611,35 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             "current_snapshot": current,
             "recent_clicks": self.__recent_clicks_for_bundle(24),
             "elapsed_sec": round(time.monotonic() - active["clicked_monotonic"], 3),
-            "reason": "no_cast_acknowledgement",
+            "outcome": outcome,
+            "reason": reason,
+            "signals": signals,
         }
         self.__cast_ack_event(
-            "ack_timeout", attempt_id=attempt_id, card_id=active["card_id"],
-            elapsed_sec=payload["elapsed_sec"], start_snapshot=active["start_snapshot"],
-            click_snapshot=active.get("click_snapshot"), current_snapshot=current,
+            outcome, attempt_id=attempt_id, card_id=active["card_id"],
+            reason=reason, signals=signals, elapsed_sec=payload["elapsed_sec"],
+            start_snapshot=active["start_snapshot"], pre_click_snapshot=baseline,
+            post_click_snapshot=active.get("post_click_snapshot"), current_snapshot=current,
         )
-        worker = threading.Thread(
-            target=self.__write_cast_ack_bundle, args=(payload,),
-            name="CastAckBundle", daemon=True,
+        if outcome in {"click_ineffective", "ambiguous"}:
+            worker = threading.Thread(
+                target=self.__write_cast_ack_bundle, args=(payload,),
+                name="CastAckBundle", daemon=True,
+            )
+            worker.start()
+
+    def __note_cast_ack_pre_click(self, attempt_id: str, click_position) -> None:
+        with self.__cast_ack_lock:
+            attempt = self.__cast_ack_attempts.get(attempt_id)
+            if attempt is None:
+                return
+            snapshot = self.__cast_ack_snapshot(attempt["card_id"])
+            attempt["pre_click_snapshot"] = snapshot
+            attempt["click_position"] = click_position
+        self.__cast_ack_event(
+            "cast_click_ready", attempt_id=attempt_id, card_id=attempt["card_id"],
+            click_position=click_position, pre_click_snapshot=snapshot,
         )
-        worker.start()
 
     def __note_cast_ack_click(self, attempt_id: str, click_position) -> None:
         with self.__cast_ack_lock:
@@ -6594,17 +6649,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             attempt["clicked"] = True
             attempt["clicked_monotonic"] = time.monotonic()
             attempt["click_position"] = click_position
-            attempt["click_snapshot"] = self.__cast_ack_snapshot(attempt["card_id"])
+            attempt["post_click_snapshot"] = self.__cast_ack_snapshot(attempt["card_id"])
             timers = []
             for delay, final_probe in ((0.35, False), (1.1, False), (2.2, True)):
                 timer = threading.Timer(delay, self.__probe_cast_ack, args=(attempt_id, final_probe))
                 timer.daemon = True
                 timers.append(timer)
             attempt["timers"] = timers
-            snapshot = attempt["click_snapshot"]
+            snapshot = attempt["post_click_snapshot"]
         self.__cast_ack_event(
             "cast_clicked", attempt_id=attempt_id, card_id=attempt["card_id"],
-            click_position=click_position, click_snapshot=snapshot,
+            click_position=click_position,
+            pre_click_snapshot=attempt.get("pre_click_snapshot"),
+            post_click_snapshot=snapshot,
         )
         for timer in timers:
             timer.start()
@@ -6627,6 +6684,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         happened, and the caller must not leave the bot idling on it."""
         expected_match_id = self.__live_match_id
         if not self.can_execute_game_action(expected_match_id):
+            return False
+        if self.should_defer_cast_for_target_selection(expected_match_id):
+            self.__target_soak_event(
+                "cast_deferred", card_id=card_id, reason="target_transaction_active"
+            )
             return False
         if self._is_cast_suppressed(card_id):
             # Re-sweeping costs ~6.6s per attempt against the rope for a card the
@@ -6724,6 +6786,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         try:
             if not self.can_execute_game_action(expected_match_id):
                 return False
+            if self.should_defer_cast_for_target_selection(expected_match_id):
+                self.__target_soak_event(
+                    "cast_deferred", card_id=card_id, reason="target_transaction_active"
+                )
+                return False
             if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
                 return False
             # The hand scan identifies cards purely from MTGA's hover events, and
@@ -6787,6 +6854,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if (
                     not self.can_execute_game_action(expected_match_id)
                     or time.time() < self.__group_req_active_until
+                    or self.should_defer_cast_for_target_selection(expected_match_id)
                 ):
                     break
                 # Check if we have exceeded the scan area
@@ -6873,6 +6941,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 time.sleep(0.5)
                 if not self.can_execute_game_action(expected_match_id):
                     return False
+                if cast_ack_id is not None:
+                    self.__note_cast_ack_pre_click(cast_ack_id, click_position)
                 self.input.left_click(1)
                 time.sleep(0.1)
                 if not self.can_execute_game_action(expected_match_id):
@@ -7135,6 +7205,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_error(f"Failed to purge PlayerSelectingTargets annotations: {e}")
 
     def __clear_pending_target_select_state(self, reason: str) -> bool:
+        self.__target_soak_event("resolved", reason=reason)
         self.__purge_selecting_targets_annotations()
         had_target_select = self.__pending_target_select is not None
         if not had_target_select:
@@ -8464,6 +8535,47 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         bot_logger.log_info(f"CONCEDE_CLAIMED: reason={reason}")
         return True
 
+    def __target_soak_event(self, event: str, **details) -> None:
+        """Temporary target-modal telemetry for the next overnight soak run."""
+        try:
+            pending = self.__pending_target_select or {}
+            payload = {
+                "event": event,
+                "match_id": self.__live_match_id or self.__last_seen_match_id,
+                "source_id": pending.get("source_id"),
+                "target_id": pending.get("last_target"),
+                "token": pending.get("token"),
+                "attempt": pending.get("attempts", 0),
+                "game_state_id": self.__read_game_state_id(),
+                "selected": pending.get("selected"),
+                "min": pending.get("min"),
+                "max": pending.get("max"),
+                **details,
+            }
+            # Avoid duplicate heartbeat noise while retaining every meaningful
+            # lifecycle transition and retry.
+            signature = (event, payload.get("token"), payload.get("attempt"), details.get("reason"))
+            if event == "pause" and signature == self.__target_soak_last_event:
+                return
+            self.__target_soak_last_event = signature
+            bot_logger.log_info(
+                "[SOAK_TARGET_RECOVERY_V1] " + json.dumps(payload, default=str, sort_keys=True)
+            )
+        except Exception as exc:
+            bot_logger.log_error(f"Target soak telemetry failed: {exc}")
+
+    def should_defer_cast_for_target_selection(self, expected_match_id=None) -> bool:
+        """Return true while a local target prompt still owns the UI."""
+        if expected_match_id is not None and not self.__is_live_match(expected_match_id):
+            return False
+        try:
+            blocked = self.__pending_target_select is not None or self.__is_selecting_targets()
+        except Exception:
+            blocked = self.__pending_target_select is not None
+        if blocked:
+            self.__target_soak_event("pause", reason="cast_guard")
+        return blocked
+
     def __attempt_stall_concede(self, arm_id=None, expected_signature=None,
                                 expected_started_at=None, expected_match_id=None) -> None:
         started_at = self.__stall_context_started_at
@@ -9014,6 +9126,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_target_select_source_id = None
         self.__last_target_select_ts = 0.0
         self.__last_submit_targets_ts = 0.0
+        self.__target_soak_last_event = None
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
@@ -9293,6 +9406,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__handle_casting_time_options_req(line_containing_pattern)
         elif pattern == self.patterns["client_select_targets_resp"]:
             bot_logger.log_info("CLIENT_EVENT: SelectTargetsResp sent — a target click registered in the MTGA client.")
+            self.__last_submit_targets_ts = time.time()
+            self.__target_soak_event("click_acknowledged", reason="client_select_targets_resp")
+            self.__clear_pending_target_select_state(
+                "Target selection cleared: client SelectTargetsResp acknowledgement received."
+            )
         elif pattern == self.patterns["client_submit_attackers"]:
             bot_logger.log_info("CLIENT_EVENT: SubmitAttackersReq sent — attack declaration submitted by the client.")
         elif pattern == self.patterns["client_set_settings"]:
@@ -13483,11 +13601,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         min_t=_TARGET_FIELD_UNSET,
         max_t=_TARGET_FIELD_UNSET,
         selected=_TARGET_FIELD_UNSET,
+        allow_cancel=_TARGET_FIELD_UNSET,
     ) -> None:
         if source_id is None:
             source_id = -1
         pending = self.__pending_target_select or {}
-        if pending.get("source_id") != source_id:
+        is_new = pending.get("source_id") != source_id
+        if is_new:
             self.__target_select_token_counter += 1
             pending = {
                 "source_id": source_id,
@@ -13503,7 +13623,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             pending["max"] = max_t
         if selected is not _TARGET_FIELD_UNSET:
             pending["selected"] = selected
+        if allow_cancel is not _TARGET_FIELD_UNSET:
+            pending["allow_cancel"] = allow_cancel
         self.__pending_target_select = pending
+        if is_new:
+            self.__target_soak_event("opened", source_id=source_id)
 
     def __get_effective_decision_delay(self) -> float:
         delay = max(0.0, float(self.__decision_delay or 0.0))
@@ -14029,16 +14153,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             "select_target", "target_creature",
             {"target": creature_id, "side": side, "source": source_id, "reason": reason},
         )
+        self.__target_soak_event("target_chosen", target_id=creature_id, side=side)
 
         def _valid() -> bool:
             pending = self.__pending_target_select or {}
             return pending.get("source_id") == source_id and pending.get("token") == selection_token
 
-        def _attempt_submit() -> None:
+        def _attempt_submit(attempt: int = 0) -> None:
             if not _valid():
                 return
             if self.__pending_target_ready_to_submit():
                 self.__last_submit_targets_ts = time.time()
+                self.__target_soak_event("submit_attempt", attempt=attempt)
                 submitted = self.submit_selection(
                     reason="creature_target_submit",
                     expected_match_id=expected_match_id,
@@ -14058,6 +14184,20 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     )
 
                 threading.Timer(0.7, _confirm_if_still_valid).start()
+                return
+            if attempt < 2:
+                self.__target_soak_event("retry_scheduled", attempt=attempt + 1)
+                threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
+            else:
+                self.__target_soak_event("retry_exhausted", reason="target_not_acknowledged")
+                self.__write_target_debug_bundle("target_click_ack_timeout")
+                if (self.__pending_target_select or {}).get("allow_cancel") == "AllowCancel_Abort":
+                    if _valid() and self.can_execute_game_action(expected_match_id):
+                        try:
+                            self.__target_soak_event("cancel_attempt", reason="retry_exhausted")
+                            self.input.tap_escape()
+                        except Exception as exc:
+                            bot_logger.log_error(f"Target cancellation failed: {exc}")
 
         def _do_click(attempt: int = 0) -> None:
             if not _valid():
@@ -14073,9 +14213,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_info(
                 f"CREATURE_TARGET click: id={creature_id} side={side} found={clicked} attempt={attempt}"
             )
-            threading.Timer(0.5, _attempt_submit).start()
-            if not clicked and attempt < 2 and _valid():
-                threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
+            self.__target_soak_event("target_click", target_id=creature_id, clicked=clicked, attempt=attempt)
+            threading.Timer(0.5, lambda: _attempt_submit(attempt)).start()
 
         delay_remaining = self.__get_delay_timer_remaining()
         start_delay = 0.8
@@ -14594,21 +14733,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     break
             if not has_local_target_annotation:
                 return False
-            pending_message_count = self.updated_game_state.get_pending_message_count()
             last_signal_ts = max(
                 float(self.__last_target_select_ts or 0.0),
                 float((self.__pending_target_select or {}).get("ts", 0.0) or 0.0),
             )
-            # Without an active SelectTargetsReq context the annotation cannot
-            # be answered by waiting, so clear it even while another prompt
-            # (e.g. DeclareBlockers) keeps pendingMessageCount above zero.
-            no_select_context = self.__pending_target_select is None
-            if (pending_message_count <= 0 or no_select_context) and last_signal_ts > 0.0:
-                signal_age = time.time() - last_signal_ts
-                if signal_age > 8.0:
-                    self.__clear_pending_target_select_state(
-                        "Target selection auto-clear: stale PlayerSelectingTargets annotation."
-                    )
+            # A stale annotation without a live request can still be removed;
+            # never remove the pending transaction itself on age alone.
+            if self.__pending_target_select is None and last_signal_ts > 0.0:
+                if time.time() - last_signal_ts > 8.0:
+                    self.__purge_selecting_targets_annotations()
                     return False
             return True
         except Exception:
@@ -14779,8 +14912,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if self.__is_selecting_targets():
                 bot_logger.log_info("Target pause reason: pending target select + selecting annotation.")
                 return True
-            self.__clear_pending_target_select_state("Target selection auto-clear: prompt no longer active.")
-            return False
+            # A missing annotation is not resolution.  The GRE can omit the
+            # annotation while the target overlay is still visible; only the
+            # explicit response/state handlers may clear this transaction.
+            bot_logger.log_info("Target pause reason: pending target transaction awaiting acknowledgement.")
+            return True
         selecting = self.__is_selecting_targets()
         if selecting:
             bot_logger.log_info("Target pause reason: PlayerSelectingTargets annotation without pending select.")
@@ -14951,6 +15087,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         min_t=min_t,
                         max_t=max_t,
                         selected=selected,
+                        allow_cancel=message.get("allowCancel"),
                     )
                     pending_token = (self.__pending_target_select or {}).get("token")
                     if self.__pending_target_ready_to_submit():
