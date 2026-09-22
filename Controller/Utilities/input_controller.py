@@ -106,11 +106,21 @@ class ExclusiveInputController(InputController):
     gate at the final input boundary as well as the higher-level cancellation
     flags. Once claimed, calls from every thread except the claiming thread are
     swallowed until the next-game reset releases the gate.
+
+    The permission check and the delegated call are serialised against ownership
+    changes under one lock. Checking permission, releasing the lock and *then*
+    delegating leaves a window in which a gameplay thread that was authorised a
+    moment ago still reaches the real mouse after the concede has claimed it --
+    the click then lands on whatever Arena is showing by that point. Holding the
+    gate across the delegate call means a claim waits for the in-flight action
+    to finish, so the drag-releasing left_up() cannot be overtaken either.
     """
 
     def __init__(self, delegate: InputController) -> None:
         self._delegate = delegate
-        self._gate_lock = threading.Lock()
+        # Reentrant: claim_exclusive_for_current_thread() delegates input of its
+        # own while holding the gate.
+        self._gate_lock = threading.RLock()
         self._exclusive = False
         self._owner_ident: int | None = None
 
@@ -118,12 +128,14 @@ class ExclusiveInputController(InputController):
         with self._gate_lock:
             self._exclusive = True
             self._owner_ident = threading.get_ident()
-        # A gameplay path may have pressed the mouse just before the claim.
-        # Releasing directly avoids leaving Arena in a drag state.
-        try:
-            self._delegate.left_up()
-        except Exception:
-            pass
+            # A gameplay path may have pressed the mouse just before the claim.
+            # Releasing directly avoids leaving Arena in a drag state. Inside
+            # the gate on purpose: any call that was already delegating has
+            # finished by now, and none that is refused can follow this up.
+            try:
+                self._delegate.left_up()
+            except Exception:
+                pass
 
     def release_exclusive(self) -> None:
         with self._gate_lock:
@@ -134,32 +146,39 @@ class ExclusiveInputController(InputController):
         with self._gate_lock:
             return not self._exclusive or threading.get_ident() == self._owner_ident
 
+    def _gated(self, method_name: str, *args):
+        """Run a delegate method only while the caller still holds permission."""
+        with self._gate_lock:
+            if self._exclusive and threading.get_ident() != self._owner_ident:
+                return None
+            return getattr(self._delegate, method_name)(*args)
+
     def move_abs(self, x: int, y: int) -> None:
-        if self._allowed(): return self._delegate.move_abs(x, y)
+        return self._gated("move_abs", x, y)
     def move_rel(self, dx: int, dy: int) -> None:
-        if self._allowed(): return self._delegate.move_rel(dx, dy)
+        return self._gated("move_rel", dx, dy)
     def left_click(self, count: int = 1) -> None:
-        if self._allowed(): return self._delegate.left_click(count)
+        return self._gated("left_click", count)
     def left_down(self) -> None:
-        if self._allowed(): return self._delegate.left_down()
+        return self._gated("left_down")
     def left_up(self) -> None:
-        if self._allowed(): return self._delegate.left_up()
+        return self._gated("left_up")
     def tap_enter(self) -> None:
-        if self._allowed(): return self._delegate.tap_enter()
+        return self._gated("tap_enter")
     def tap_shift_enter(self) -> None:
-        if self._allowed(): return self._delegate.tap_shift_enter()
+        return self._gated("tap_shift_enter")
     def tap_tab(self) -> None:
-        if self._allowed(): return self._delegate.tap_tab()
+        return self._gated("tap_tab")
     def tap_delete(self) -> None:
-        if self._allowed(): return self._delegate.tap_delete()
+        return self._gated("tap_delete")
     def type_text(self, text: str) -> None:
-        if self._allowed(): return self._delegate.type_text(text)
+        return self._gated("type_text", text)
     def tap_escape(self) -> None:
-        if self._allowed(): return self._delegate.tap_escape()
+        return self._gated("tap_escape")
     def tap_printscreen(self) -> None:
-        if self._allowed(): return self._delegate.tap_printscreen()
+        return self._gated("tap_printscreen")
     def tap_win_printscreen(self) -> None:
-        if self._allowed(): return self._delegate.tap_win_printscreen()
+        return self._gated("tap_win_printscreen")
     def position(self) -> Point:
         return self._delegate.position()
     def configure_screen_bounds(self, screen_bounds: tuple[tuple[int, int], tuple[int, int]]) -> None:

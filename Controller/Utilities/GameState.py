@@ -1,9 +1,13 @@
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from Controller.Utilities.GameStateInterface import GameStateSecondary
 
 
 class GameState(GameStateSecondary):
-    def __init__(self, game_dict: [str, str or int] | None = None):
+    # `Dict[...]`, not a list display: annotations are evaluated at class
+    # definition time, and `[str, str or int] | None` builds a real list and
+    # asks for `list | None`, which raises TypeError before the module can be
+    # imported at all.
+    def __init__(self, game_dict: Optional[Dict[str, Any]] = None):
         # Never share an empty mutable state between Controller instances or
         # successive match resets. A diff merged into one such state would
         # otherwise become the baseline of the next GameState().
@@ -16,17 +20,17 @@ class GameState(GameStateSecondary):
     def __str__(self):
         return str(self.game_dict)
 
-    def get_full_state(self) -> Dict[str, str or int]:
+    def get_full_state(self) -> Dict[str, Any]:
         return dict(self.game_dict)
 
-    def get_turn_info(self) -> Dict[str, str or int]:
+    def get_turn_info(self) -> Optional[Dict[str, Any]]:
         turn_info_dict = None
         full_state_dict = self.get_full_state()
         if 'turnInfo' in full_state_dict.keys():
             turn_info_dict = full_state_dict['turnInfo']
         return turn_info_dict
 
-    def get_game_info(self) -> Dict[str, str or int]:
+    def get_game_info(self) -> Dict[str, Any]:
         return self.get_full_state()['gameInfo']
 
     def get_pending_message_count(self) -> int:
@@ -35,7 +39,7 @@ class GameState(GameStateSecondary):
         except Exception:
             return 0
 
-    def get_zone(self, zone_type: str, owner_seat_id: int = None) -> Dict[str, str or int]:
+    def get_zone(self, zone_type: str, owner_seat_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         zones = self.get_full_state()['zones']
         matching_zones = []
         zone_to_return = None
@@ -50,7 +54,7 @@ class GameState(GameStateSecondary):
             zone_to_return = matching_zones[0]
         return zone_to_return
 
-    def get_zone_object_count(self, zone_type: str, owner_seat_id: int = None) -> int:
+    def get_zone_object_count(self, zone_type: str, owner_seat_id: Optional[int] = None) -> int:
         try:
             zone = self.get_zone(zone_type, owner_seat_id)
             if not zone:
@@ -63,7 +67,7 @@ class GameState(GameStateSecondary):
     def get_annotations(self) -> List[Dict]:
         return self.get_full_state()['annotations']
 
-    def remove_annotations_by_type(self, annotation_type: str, affector_id: int = None) -> int:
+    def remove_annotations_by_type(self, annotation_type: str, affector_id: Optional[int] = None) -> int:
         """Remove merged annotations of the given type (optionally limited to an
         affector seat or annotations without affector). GRE never sends deletes
         for transient annotations like PlayerSelectingTargets, so callers must
@@ -91,7 +95,7 @@ class GameState(GameStateSecondary):
     def get_players(self) -> List[Dict]:
         return self.get_full_state()['players']
 
-    def get_game_objects(self) -> List[Dict[str, str or int]]:
+    def get_game_objects(self) -> List[Dict[str, Any]]:
         return self.get_full_state()['gameObjects']
 
     def is_complete(self):
@@ -108,7 +112,7 @@ class GameState(GameStateSecondary):
                 return is_complete
         return is_complete
 
-    def __update_dict(self, dict_to_update: [str, str or int], dict_with_update: [str, str or int]):
+    def __update_dict(self, dict_to_update: Dict[str, Any], dict_with_update: Dict[str, Any]):
         for key in dict_with_update:
             if key in dict_to_update.keys():
                 item_to_update = dict_to_update[key]

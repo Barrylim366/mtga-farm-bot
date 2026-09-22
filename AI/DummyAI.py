@@ -1,5 +1,4 @@
 from AI.AIInterface import AIKernel
-from Controller.Utilities.GameState import GameState
 from Controller.Utilities.GameStateInterface import GameStateSecondary
 import AI.Utilities.CardInfo as CardInfo
 import AI.Utilities.RemovalLogic as RemovalLogic
@@ -10,6 +9,7 @@ import AI.Utilities.LifegainLogic as LifegainLogic
 import AI.Utilities.LegendRule as LegendRule
 import traceback
 from datetime import datetime
+from typing import Optional, Tuple
 
 
 class DummyAI(AIKernel):
@@ -394,7 +394,7 @@ class DummyAI(AIKernel):
             fallback_cost_fail_msg=fallback_cost_fail_msg,
         )
 
-    def _get_convoke_sources(self, game_state: GameState, my_seat: int):
+    def _get_convoke_sources(self, game_state: GameStateSecondary, my_seat: int):
         """Return convoke sources from untapped creatures we control."""
         color_map = {
             'W': 'white',
@@ -444,7 +444,7 @@ class DummyAI(AIKernel):
         for i in range(len(actions) - 1, -1, -1):
             cmc_suffix[i] = cmc_suffix[i + 1] + actions[i][0]
 
-        best = None  # (spent, count, max_cmc, payoffs, indices)
+        best: Optional[Tuple[int, int, int, int, list[int]]] = None  # (spent, count, max_cmc, payoffs, indices)
 
         def _better(a, b):
             if b is None:
@@ -522,7 +522,7 @@ class DummyAI(AIKernel):
         self._debug("generate_keep called - keeping hand")
         return True
 
-    def __new_turn_check(self, current_game_state: 'GameState'):
+    def __new_turn_check(self, current_game_state: 'GameStateSecondary'):
         """Check if it's a new turn and reset land played flag"""
         try:
             turn_info = current_game_state.get_turn_info()

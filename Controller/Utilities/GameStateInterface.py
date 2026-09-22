@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 
 class GameStateKernel:
@@ -9,7 +9,7 @@ class GameStateKernel:
 
     GAME_STATE_KEYS = ['turnInfo', 'timers', 'gameObjects', 'players', 'annotations', 'actions', 'zones']
 
-    def get_full_state(self) -> Dict[str, str or int]:
+    def get_full_state(self) -> Dict[str, Any]:
         """
         Returns:
              a dictionary object with the game state fully constructed like a JSON object
@@ -125,7 +125,7 @@ class GameStateSecondary(GameStateKernel):
     Defines secondary methods for the GameState type
     """
 
-    def get_zone(self, zone_type: str, owner_seat_id: int = None) -> Dict[str, str or int]:
+    def get_zone(self, zone_type: str, owner_seat_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Gets specified zone information
 
@@ -147,7 +147,7 @@ class GameStateSecondary(GameStateKernel):
         """
         pass
 
-    def get_turn_info(self) -> Dict[str, str or int]:
+    def get_turn_info(self) -> Optional[Dict[str, Any]]:
         """
         Gets all possible actions that are currently available
 
@@ -165,7 +165,7 @@ class GameStateSecondary(GameStateKernel):
         """
         pass
 
-    def get_annotations(self) -> List[Dict[str, str or int]]:
+    def get_annotations(self) -> List[Dict[str, Any]]:
         """
         Get annotation info
 
@@ -174,7 +174,7 @@ class GameStateSecondary(GameStateKernel):
         """
         pass
 
-    def get_game_info(self) -> Dict[str, str or int]:
+    def get_game_info(self) -> Dict[str, Any]:
         """
         Gets game info
 
@@ -183,7 +183,7 @@ class GameStateSecondary(GameStateKernel):
         """
         pass
 
-    def get_game_objects(self) -> List[Dict[str, str or int]]:
+    def get_game_objects(self) -> List[Dict[str, Any]]:
         """
         Returns:
              A list of properly formatted dictionaries with all gameObject info
@@ -203,7 +203,7 @@ class GameStateSecondary(GameStateKernel):
         """
         pass
 
-    def diff(self, state: 'GameStateSecondary') -> Dict[str, str or int]:
+    def diff(self, state: 'GameStateSecondary') -> Dict[str, Any]:
         """
         Returns the difference between the two states in a new state object
         """

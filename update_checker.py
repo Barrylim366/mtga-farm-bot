@@ -37,7 +37,7 @@ _VERSION_RE = re.compile(r"""__version__\s*=\s*['"]([^'"]+)['"]""")
 
 # Belt-and-suspenders: GitHub's archive already omits git-ignored user data,
 # but never let a stray archive entry clobber these local files/dirs.
-_OVERLAY_SKIP = {".git", ".venv", ".venv-macos", "runtime", "Accounts", "credentials.txt", ".claude"}
+_OVERLAY_SKIP = {".git", ".venv", ".venv-macos", "runtime", "Accounts", ".claude"}
 
 
 def _run_git(args: list[str], timeout: int = _GIT_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
@@ -342,7 +342,7 @@ def apply_zip_update(download_url: str = _ARCHIVE_URL) -> UpdateResult:
 
     Used by non-git (ZIP) installs. The archive only contains tracked files,
     so overlaying it never touches user data (runtime/, Accounts/, .venv,
-    credentials.txt, ...). Files removed upstream are left in place.
+    ...). Files removed upstream are left in place.
     """
     app_root = get_app_root()
     req_path = app_root / "requirements.txt"

@@ -228,7 +228,12 @@ class RoiWideningDiagnosticTests(unittest.TestCase):
 
     def test_click_template_is_never_widened(self):
         """Anchors may be searched client-wide; a click must not be, or a real
-        click can land on a widget outside the intended box."""
+        click can land on a widget outside the intended box.
+
+        POST_LOGIN_PLAY carries a coordinate fallback, so "no click at all" is no
+        longer the observable: what matters is that the click goes to the measured
+        point INSIDE the search ROI and never to the template's real position
+        outside it."""
         frame = _frame_with(
             (os.path.join(ASSETS, "home_anchor.png"), HOME_ANCHOR_TOPLEFT),
             # Play button parked far outside its search ROI.
@@ -236,9 +241,60 @@ class RoiWideningDiagnosticTests(unittest.TestCase):
             (os.path.join(ASSETS, "play_menu_anchor.png"), PLAY_MENU_ANCHOR_TOPLEFT),
         )
         h = _Harness(frame)
-        result = h.run(_specs_by_name()["POST_LOGIN_PLAY"])
+        spec = _specs_by_name()["POST_LOGIN_PLAY"]
+        h.run(spec)
+        rx, ry, rw, rh = spec.click_search_roi_rel
+        self.assertTrue(h.clicks, "the step neither matched nor fell back")
+        for x, y, tag in h.clicks:
+            self.assertEqual(tag, "POST_LOGIN_PLAY_FALLBACK", "clicked a widened match")
+            self.assertTrue(rx <= x <= rx + rw and ry <= y <= ry + rh,
+                            f"click ({x}, {y}) landed outside the search ROI")
+
+    def test_the_fallback_clicks_the_measured_play_button(self):
+        """The 2026-09-20 failure: the click template is on screen but scores
+        below the threshold (an always-on-top window over the button's lower
+        half). The step must still click, at the measured point, and say so."""
+        # Home, with nothing the Play button's template can match. The blade
+        # anchor is deliberately absent too, so the step still fails its
+        # post-assert -- what is under test is that a click was ATTEMPTED at the
+        # measured point instead of the step giving up at the click stage.
+        frame = _frame_with((os.path.join(ASSETS, "home_anchor.png"), HOME_ANCHOR_TOPLEFT))
+        spec = _specs_by_name()["POST_LOGIN_PLAY"]
+        self.assertIsNotNone(spec.click_fallback_rel, "POST_LOGIN_PLAY lost its fallback")
+        h = _Harness(frame)
+        h.run(spec)
+        self.assertIn(
+            (spec.click_fallback_rel[0], spec.click_fallback_rel[1],
+             "POST_LOGIN_PLAY_FALLBACK"),
+            h.clicks,
+        )
+        self.assertTrue(
+            any("ACTION_CLICK_FALLBACK" in d for d in h.diagnostics), h.diagnostics
+        )
+
+    def test_a_fallback_outside_its_roi_is_refused(self):
+        """A fallback point may not smuggle a click past the ROI bound."""
+        base = _specs_by_name()["POST_LOGIN_PLAY"]
+        spec = ActionSpec(
+            name=base.name,
+            required_state=base.required_state,
+            click_template=base.click_template,
+            click_search_roi_rel=base.click_search_roi_rel,
+            click_fallback_rel=(100, 100),
+            pre_assert_template=base.pre_assert_template,
+            pre_assert_roi_rel=base.pre_assert_roi_rel,
+            threshold=base.threshold,
+            pre_timeout_sec=0.3,
+            post_timeout_sec=0.3,
+        )
+        frame = _frame_with((os.path.join(ASSETS, "home_anchor.png"), HOME_ANCHOR_TOPLEFT))
+        h = _Harness(frame)
+        result = h.run(spec)
         self.assertFalse(result.ok)
         self.assertEqual(h.clicks, [])
+        self.assertTrue(
+            any("ACTION_FALLBACK_OUT_OF_ROI" in d for d in h.diagnostics), h.diagnostics
+        )
 
 
 class PostAssertlessStepTests(unittest.TestCase):

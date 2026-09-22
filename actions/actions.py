@@ -33,6 +33,18 @@ class ActionSpec:
     # account already had selected). Not finding its click target is then the
     # normal case, not a failure.
     optional: bool = False
+    # Measured 1920x1080-relative point to click when `click_template` does not
+    # match. Only for a widget that is at a FIXED place in the client and whose
+    # step has a post-assert, so the blind click is still verified -- otherwise a
+    # missed template would be answered by a click into an unknown screen.
+    #
+    # It exists because one stale or covered template must not be able to stop
+    # the whole flow at its first step. Measured live on 2026-09-20: Home's Play
+    # button was partly covered by an always-on-top window, play_btn.png scored
+    # 0.727 against the 0.85 threshold (0.895 on the rows that were not covered),
+    # POST_LOGIN_PLAY failed at step=click on all attempts, and Historic could
+    # never reach the deck screen -- so it refused to queue, every single tick.
+    click_fallback_rel: tuple[int, int] | None = None
     threshold: float = 0.88
     pre_timeout_sec: float = 1.2
     post_timeout_sec: float = 6.0
@@ -105,7 +117,7 @@ def run_action(
                 recover_once(spec.name, attempt)
             continue
 
-        click_done = _click_step(spec, vision, arena_region, click_abs)
+        click_done = _click_step(spec, vision, arena_region, click_abs, on_diagnostic)
         if not click_done and spec.optional:
             if on_diagnostic is not None:
                 on_diagnostic(
@@ -272,6 +284,7 @@ def _click_step(
     vision: VisionEngine,
     arena: tuple[int, int, int, int],
     click_abs: Callable[[int, int, str], None],
+    on_diagnostic: Callable[[str], None] | None = None,
 ) -> bool:
     if spec.click_rel is not None:
         x = int(arena[0] + spec.click_rel[0])
@@ -283,17 +296,75 @@ def _click_step(
         search_abs = _abs_region(arena, spec.click_search_roi_rel)
         vision.begin_tick()
         img = vision.capture(search_abs)
-        if img is None:
-            return False
-        match = vision.find_template(img, spec.click_template, threshold=spec.threshold)
-        if match is None:
-            return False
-        x = int(search_abs[0] + match.x)
-        y = int(search_abs[1] + match.y)
-        click_abs(x, y, spec.name)
-        return True
+        if img is not None:
+            match = vision.find_template(img, spec.click_template, threshold=spec.threshold)
+            if match is not None:
+                x = int(search_abs[0] + match.x)
+                y = int(search_abs[1] + match.y)
+                click_abs(x, y, spec.name)
+                return True
+        return _click_fallback(spec, arena, click_abs, on_diagnostic, searched=True)
 
-    return False
+    # No usable click template at all (none configured, or the asset is not in this
+    # install). Reported as such: saying the template "did not match" would claim a
+    # search happened and scored below threshold, which is a different fault with a
+    # different fix -- re-cut the template vs. put the file there.
+    return _click_fallback(spec, arena, click_abs, on_diagnostic, searched=False)
+
+
+def _click_fallback(
+    spec: ActionSpec,
+    arena: tuple[int, int, int, int],
+    click_abs: Callable[[int, int, str], None],
+    on_diagnostic: Callable[[str], None] | None,
+    *,
+    searched: bool = True,
+) -> bool:
+    """Click the step's measured position after its click template missed.
+
+    Reported as an error, not silently: the template is the thing that is
+    supposed to work, and a run that keeps falling back is a template that needs
+    re-cutting. The click itself is safe because a step only carries a fallback
+    when its widget is at a fixed place AND it post-asserts the result, so a
+    fallback that lands on nothing fails the step exactly as before.
+    """
+    if spec.click_fallback_rel is None:
+        return False
+    # The ROI the template search was allowed to use is also the bound on where
+    # the fallback may click: a point outside it is a misconfiguration, and
+    # clicking it would put a click on a widget this step never meant to touch.
+    if spec.click_search_roi_rel is not None:
+        rx, ry, rw, rh = spec.click_search_roi_rel
+        fx, fy = spec.click_fallback_rel
+        if not (rx <= fx <= rx + rw and ry <= fy <= ry + rh):
+            if on_diagnostic is not None:
+                on_diagnostic(
+                    "ACTION_FALLBACK_OUT_OF_ROI: {} fallback point {} is outside its "
+                    "click ROI {}; not clicking.".format(
+                        spec.name, spec.click_fallback_rel, spec.click_search_roi_rel
+                    )
+                )
+            return False
+    x = int(arena[0] + spec.click_fallback_rel[0])
+    y = int(arena[1] + spec.click_fallback_rel[1])
+    if on_diagnostic is not None:
+        if searched:
+            why = "click template {} did not match in roi_rel={} (threshold={:.2f})".format(
+                os.path.basename(spec.click_template or "-"),
+                tuple(spec.click_search_roi_rel or ()), spec.threshold,
+            )
+        else:
+            why = "has no usable click template ({} is not in this install)".format(
+                os.path.basename(spec.click_template or "none configured")
+            )
+        on_diagnostic(
+            "ACTION_CLICK_FALLBACK: {} {}; clicking the measured position {} "
+            "instead. The post-assert still has to confirm it.".format(
+                spec.name, why, spec.click_fallback_rel,
+            )
+        )
+    click_abs(x, y, f"{spec.name}_FALLBACK")
+    return True
 
 
 def _abs_region(

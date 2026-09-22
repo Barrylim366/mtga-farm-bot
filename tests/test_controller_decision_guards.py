@@ -230,7 +230,13 @@ class FreshMatchStateIsolationTest(unittest.TestCase):
         message.pop("actions")
         message.pop("timers")
 
-        with mock.patch("Controller.MTGAController.Controller.bot_logger.log_info") as log_info:
+        # Assert on the reset itself, not on a log line: the audit event this
+        # used to grep for no longer exists, and a missing phrase made the test
+        # green for the wrong reason.
+        real_reset = c._Controller__reset_live_game_state
+        with mock.patch.object(
+            c, "_Controller__reset_live_game_state", wraps=real_reset
+        ) as reset:
             c._Controller__update_game_state(first_diff)
             c._Controller__update_game_state(first_diff)
 
@@ -245,11 +251,11 @@ class FreshMatchStateIsolationTest(unittest.TestCase):
         self.assertEqual(c.get_current_match_id(), "new-match")
         self.assertEqual(c._Controller__retired_match_id, "old-match")
 
-        starts = [
-            call.args[0] for call in log_info.call_args_list
-            if call.args and '"event":"live_match_started"' in call.args[0]
-        ]
-        self.assertEqual(len(starts), 1)
+        # Exactly once: the first diff switches matches, the identical second
+        # one must not reset the baseline it just established.
+        self.assertEqual(reset.call_count, 1)
+        reason = reset.call_args.args[0]
+        self.assertIn("old-match -> new-match", reason)
 
     def test_late_retired_match_diff_is_rejected_before_merge(self):
         c = make_controller()

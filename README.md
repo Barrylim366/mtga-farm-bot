@@ -93,7 +93,7 @@ python -m venv .venv
 The bot checks GitHub for a newer version on startup and, when one is found, a dialog offers to install it and restarts the bot automatically. There are two channels, picked automatically:
 
 - **Git installs** (started from a `git clone` of this repository): the check works off git commit history (not the version number below), only fetches when the remote is actually ahead of local, and installs via a fast-forward `git pull`. If you have local, uncommitted changes to *tracked* files in the bot folder, the update is aborted rather than overwriting them, and the dialog lists which file(s) are affected. Untracked files (your venv, notes, …) never block an update.
-- **ZIP / website installs** (no `.git` folder): the bot compares its local `version.py` against the one on the `main` branch at GitHub. If `main` has a newer version, it downloads the branch archive and overlays it onto the install folder. The archive only contains tracked source files, so user data (`runtime/`, `Accounts/`, `.venv/`, `.venv-macos/`, `credentials.txt`, …) is never touched. Executable bits on the launcher scripts are preserved, so `start_macos.command` / `start_linux.sh` stay double-clickable after an update.
+- **ZIP / website installs** (no `.git` folder): the bot compares its local `version.py` against the one on the `main` branch at GitHub. If `main` has a newer version, it downloads the branch archive and overlays it onto the install folder. The archive only contains tracked source files, so user data (`runtime/`, `Accounts/`, `.venv/`, `.venv-macos/`, …) is never touched. Executable bits on the launcher scripts are preserved, so `start_macos.command` / `start_linux.sh` stay double-clickable after an update.
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
@@ -116,6 +116,27 @@ watchdog timer.
 If the Concede dialog cannot be completed after two attempts, normal play is
 resumed and that unchanged state is not retried until Arena reports real game
 progress.
+
+The 30-second deadline is checked and the concession is claimed as one
+indivisible step, so a prompt that changes (or the setting being switched off)
+while that check runs cancels the concede instead of being overtaken by it.
+The concede itself then runs outside that lock — it clicks and waits for
+Arena, which must never block the log thread.
+
+Every click of the concede sequence is authorised at the moment it happens,
+not when the sequence started. Searching the screen for the Concede and OK
+buttons takes up to 1.5 seconds each, and focusing the window, the Escape
+settle and re-acquiring the game area add more; the match can end or be
+replaced by the next one in that time. If it does, the remaining clicks are
+dropped rather than landing on whatever Arena is showing by then. The
+unconditional concede that follows an expired Arena turn timer is unaffected —
+it deliberately does not depend on a known match id.
+
+While a concede is running it holds sole ownership of mouse and keyboard, and
+a gameplay action that was authorised a moment earlier can no longer slip
+through: the permission check and the input itself are now a single step, so a
+claim waits for any action still in flight and the mouse is released only once
+that action has finished.
 
 ### Input backend
 
@@ -160,6 +181,8 @@ Each account has exactly one name: its **Arena Name**, the one Arena shows top-l
 #### Current / Next account
 
 While account switching is enabled, the main window shows **Current ACC** (playing now) and **Next ACC** (the account the next switch will log into). Click **Current ACC** to tell the bot which account is open in Arena right now. Use it when you changed account by hand: Arena writes the login only once, so after a while the bot can no longer read it from the log, and a manual pick sets rotation straight again. The pin is dropped automatically on the next switch the bot performs itself, and when the pinned account is renamed or deleted.
+
+Arena records a login in two ways — the match-server handshake and an `[Accounts - Login] Logged in successfully. Display Name: …` line — and the bot reads both, taking whichever is later in the log. Only the handshake used to count, and a re-login (the path taken after a rejected password) can be written without one at all, which left the bot naming the account it had just left. That name decides which account folder the Historic deck thumbnails come from, so it was not a cosmetic slip.
 
 A pin is also dropped when Arena logs a login for a *different* account after the pin was set — you changed account by hand again, so the log is newer than your pick. This only happens when that login can be matched to one of your configured accounts by its Arena Name; an unrecognised login never overrides your choice. A pin restored from the previous session additionally yields to a login that is *older* than it, since a restored pin says nothing about who is logged in now — so give every account its Arena Name if you want the bot to correct a stale pin on its own.
 
@@ -248,6 +271,12 @@ So a Historic account needs a deck thumbnail for the colors its quests ask for. 
 >
 > - **The final pre-queue gate searched the wrong part of the screen.** It looked for the "My Decks" and "Historic Play" anchors in one hand-written top-left box, and neither is top-left: measured live, "My Decks" sits at x=25–380, y=309–402 and the selected "Historic Play" row at x=1558–1769, y=554–618, so the box scored **0.30** and **0.46** against a 0.80 threshold. The gate failed on the very screen the navigation had just reached and verified, the selection was never cached, and the queue loop re-navigated and refused again every few seconds without ever queueing. The gate now reuses the navigation's own boxes (`actions/navigation_flow.py`), so the two cannot drift apart again.
 > - **The bot could not recognise its own selection.** MTGA lifts the selected deck tile, outlines it and fans the cards over the art, so the thumbnail captured from the normal grid scores ~0.44 against the deck the bot itself just picked — and "thumbnail not on screen" was treated as "this account has no deck for the quest", which refuses to queue. Besides the optional `<deck>.sel.png` selected-state capture, the bot now remembers the tile it last clicked for each account: MTGA keeps the deck selected between matches, so that record identifies the selection without a second image. It is written only after a confirmed click on a thumbnail matching the quest, and dropped on a new session, an account switch, and the no-quest first-tile fallback. The screen anchors are still checked afterwards, so this can shorten the selection step but never waves a wrong screen through to the queue click.
+
+> Fixed in this version: Historic still could not leave Home, for a second and unrelated reason — and then, once it could, it still would not queue. Both were measured live on 2026-09-20 and both are fixed:
+>
+> - **One template stood between the bot and the whole flow.** `POST_LOGIN_PLAY` clicks Home's Play button by locating `play_btn.png`, and nothing else. An always-on-top window (a terminal bubble parked in the bottom-right corner) covered the button's lower half, so the template scored **0.727** against the 0.85 threshold — **0.895** on the rows it did not cover, i.e. the template was fine and the button was exactly where it belongs. The click step failed on every retry, the navigation failed at its first action, and Historic refused to queue every few seconds, indefinitely. A navigation step may now carry a **measured coordinate fallback**: when its click template does not match, it clicks the position the button was measured at instead. The fallback is bounded to the step's own search box (a point outside it is refused and logged), it is reported as `ACTION_CLICK_FALLBACK` rather than passing silently, and the step's post-assert still has to confirm the result — so a fallback that lands on nothing fails the step exactly as before. Only Home's Play button has one; it does not move, and it is the single point the entire flow depends on.
+> - **The bot was looking in the wrong account's folder, and said so misleadingly.** Arena records a login in two different ways, and the bot read only one of them: `authenticateResponse.screenName`. A re-login — after two `401 | INVALID ACCOUNT CREDENTIALS`, which is how a mistyped or rate-limited attempt ends — was written **only** as `[Accounts - Login] Logged in successfully. Display Name: Name#12345`, 1.88 MB further into the log than the last `authenticateResponse`, which still named the *previous* account. So the bot kept calling itself by the old name, and since Historic matches deck thumbnails from the logged-in account's folder alone, it read an empty folder and logged `Historic: no deck thumbnail matched quest target colors=UB` on every queue tick, forever, while the decks sat in the folder of the account actually signed in. Both forms now count as a login, and the later one in the log wins. A login whose name carries a `#discriminator` also resolves to a configured account that has none, provided exactly one account shares that visible name and none of them specifies a discriminator — otherwise there is no spelling of that row such a login could ever match. Two accounts that both give a full `Name#digits` are still never confused for one another.
+> - **An account folder with no thumbnails at all was skipped in silence.** The only thing logged was the summary — "no deck thumbnail matched quest target colors=UB" — which blames the quest for what is really an empty directory, and sent a debugging session after the color matching. The bot now says `Historic: account 'X' (folder 'Y') has no deck thumbnails at all` and points out that the folder is named after the account's Arena screen name.
 
 > The post-login routine marks its own deck selection as verified only when it confirmed every step: state-asserted navigation, a configured thumbnail matching the quest, and the planned account's own folder. After the legacy image-only navigation fallback, a first-tile pick, or a deck taken from a different account's folder, the selection stays unverified and the first re-queue navigates and checks it again — that routine has already pressed Play and cannot re-inspect the screen, so it must not vouch for what it did not confirm.
 
@@ -368,7 +397,22 @@ Controller   DummyAI        ← AI decides what to play (generate_move / generat
 
 **Card data** (`AI/Utilities/CardInfo.py`) is loaded from a local export of MTGA's own card database and delta-synced with the Scryfall API for missing entries. Cards Scryfall does not have at all — Arena-only tokens, Alchemy rebalances — are remembered as such and not requested again for 30 days, and the whole startup sync is capped at 10 seconds, so an unreachable Scryfall cannot stall the start. A card that a later Arena update ships locally is dropped from the retry list without a request.
 
-Both `Controller` and `AI` follow an interface pattern (`ControllerInterface.py` / `AIInterface.py`) that decouples `Game.py` from the concrete implementations — making it straightforward to swap in a different AI or add a non-MTGA controller.
+`Controller` and `AI` each carry an informal interface file (`ControllerInterface.py` / `AIInterface.py`) documenting the methods `Game.py` relies on. Only one Controller (`Controller/MTGAController/Controller.py`, the real MTGA controller) and one AI (`AI/DummyAI.py`) are actually wired up today, and `Game.py` is typed directly against those two concrete classes — the interface files are documentation of the expected contract, not a runtime abstraction that makes swapping either one a drop-in change.
+
+### Static type checking
+
+A [Pyright](https://microsoft.github.io/pyright/) pass (developer-only, not run by the bot or its launchers) covers the AI decision layer -- `AI/`, `Game.py` and `Controller/Utilities/GameState.py` -- in `basic` (non-strict) mode, scoped via `pyrightconfig.json`. Run it from an activated project `.venv`:
+
+```
+python -m pip install -r requirements-dev.txt   # once, installs pyright
+python -m pyright                               # uses pyrightconfig.json
+```
+
+(Activate first: `source .venv/bin/activate` on Linux/macOS, `.venv\Scripts\activate` on Windows.)
+
+The rest of the codebase (`Controller/MTGAController/Controller.py`, `ui.py`, …) is out of scope for now.
+
+GitHub Actions runs the same Pyright check automatically for every push and pull request (`.github/workflows/pyright.yml`).
 
 ## Logs & Troubleshooting
 

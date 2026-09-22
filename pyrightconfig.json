@@ -1,0 +1,16 @@
+{
+  "include": [
+    "AI",
+    "Game.py",
+    "Controller/Utilities/GameState.py"
+  ],
+  "exclude": [
+    "**/__pycache__"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "error",
+  "reportMissingModuleSource": "warning"
+}

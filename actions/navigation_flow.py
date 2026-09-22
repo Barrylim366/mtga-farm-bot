@@ -29,7 +29,17 @@ DECKS_HEADER_ROI = (0, 250, 800, 220)      # "> My Decks" on the left
 DECKS_GRID_ROI = (0, 450, 800, 400)        # the "+" add-deck tile
 
 
-def build_post_login_navigation_actions(*, assets_dir: str, buttons_dir: str) -> list[ActionSpec]:
+# Home's Play button, centre, in the 1920x1080 client reference frame. Measured
+# from a live capture on 2026-09-20: the button rect is x=1595..1871,
+# y=974..1040. Used as POST_LOGIN_PLAY's coordinate fallback when play_btn.png
+# does not match -- the calibrated queue point is preferred when the caller
+# passes one, because it is the same button the queue click already uses.
+HOME_PLAY_POINT = (1733, 1007)
+
+
+def build_post_login_navigation_actions(
+    *, assets_dir: str, buttons_dir: str, home_play_rel: tuple[int, int] | None = None
+) -> list[ActionSpec]:
     # Historic queue navigation. The Starter Deck flow does NOT use this OOB
     # state-machine path (there are no player-log scenes for the Events blade, so
     # required_state gating would ESC-recover and get lost). Starter navigation
@@ -74,6 +84,7 @@ def build_post_login_navigation_actions(*, assets_dir: str, buttons_dir: str) ->
     format_list_roi = FORMAT_LIST_ROI
     decks_header_roi = DECKS_HEADER_ROI
     decks_grid_roi = DECKS_GRID_ROI
+    home_play_point = tuple(home_play_rel) if home_play_rel else HOME_PLAY_POINT
 
     return [
         ActionSpec(
@@ -81,6 +92,15 @@ def build_post_login_navigation_actions(*, assets_dir: str, buttons_dir: str) ->
             required_state=BotState.HOME,
             click_template=b("play_btn.png"),
             click_search_roi_rel=home_play_roi,
+            # This step is the whole flow's gate, and it hangs off ONE template on
+            # a button that sits under whatever else the desktop puts there.
+            # Measured live 2026-09-20 with an always-on-top window over its lower
+            # half: play_btn.png scored 0.727 here (0.895 on the uncovered rows),
+            # the click step failed on every attempt, and Historic refused to queue
+            # forever. The button does not move, so a measured point is a better
+            # answer than a failed navigation -- and post_assert below still has to
+            # see the blade open, so a fallback click that misses fails the step.
+            click_fallback_rel=home_play_point,
             pre_assert_template=a("home_anchor.png"),
             pre_assert_roi_rel=home_anchor_roi,
             # The blade may already be open -- the Home Play button is then
