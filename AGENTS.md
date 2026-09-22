@@ -8,3 +8,8 @@ repository. If it conflicts with system, developer, or explicit user
 instructions, follow the higher-priority instruction.
 
 If `CLAUDE.md` changes during a task, read it again before continuing.
+
+## Python Environment
+
+Run Python commands and the test suite through the repository virtual
+environment, using `.venv\\Scripts\\python.exe`, rather than the system Python.
