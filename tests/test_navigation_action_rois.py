@@ -100,9 +100,10 @@ class _FrameVision(VisionEngine):
 
 
 class _Harness:
-    def __init__(self, frame, state=BotState.HOME):
+    def __init__(self, frame, state=BotState.HOME, arena=ARENA):
         self.vision = _FrameVision(frame)
         self.state = state
+        self.arena = arena
         self.clicks = []
         self.recoveries = []
         self.diagnostics = []
@@ -112,7 +113,7 @@ class _Harness:
             spec,
             state_getter=lambda: self.state,
             vision=self.vision,
-            arena_region_getter=lambda: ARENA,
+            arena_region_getter=lambda: self.arena,
             click_abs=lambda x, y, tag: self.clicks.append((x, y, tag)),
             recover_once=lambda name, attempt: self.recoveries.append((name, attempt)),
             on_diagnostic=self.diagnostics.append,
@@ -295,6 +296,76 @@ class RoiWideningDiagnosticTests(unittest.TestCase):
         self.assertTrue(
             any("ACTION_FALLBACK_OUT_OF_ROI" in d for d in h.diagnostics), h.diagnostics
         )
+
+
+class ScaledClientTests(unittest.TestCase):
+    """The specs are in the 1920x1080 reference frame; the client often is not.
+
+    Reported 2026-09-23: a windowed MTGA at arena=(407, 165, 1366, 768).
+    POST_LOGIN_PLAY failed at step=pre_assert on every attempt and Historic never
+    queued, because the ROIs were added to the arena origin unscaled and the
+    1920-cut templates were matched against a 0.71x screen. Here the same Home
+    frame is shrunk into exactly that window on a larger desktop."""
+
+    SMALL_ARENA = (407, 165, 1366, 768)
+
+    def _desktop(self, client_1920):
+        import cv2
+
+        x, y, w, h = self.SMALL_ARENA
+        desktop = np.full((1080, 1920, 3), 30, dtype=np.uint8)
+        desktop[y:y + h, x:x + w] = cv2.resize(
+            client_1920, (w, h), interpolation=cv2.INTER_AREA
+        )
+        return desktop
+
+    def _inside_arena(self, x, y):
+        ax, ay, aw, ah = self.SMALL_ARENA
+        return ax <= x < ax + aw and ay <= y < ay + ah
+
+    def test_home_on_a_1366x768_client_passes_and_clicks_play(self):
+        client = _frame_with(
+            (os.path.join(ASSETS, "home_anchor.png"), HOME_ANCHOR_TOPLEFT),
+            (os.path.join(BUTTONS, "play_btn.png"), (1600, 900)),
+        )
+        spec = _specs_by_name()["POST_LOGIN_PLAY"]
+        h = _Harness(self._desktop(client), arena=self.SMALL_ARENA)
+        from actions.actions import _run_pre_assert
+        self.assertTrue(
+            _run_pre_assert(spec, h.vision, self.SMALL_ARENA),
+            "home_anchor.png must be found on a scaled Home screen",
+        )
+        h.run(spec)
+        self.assertTrue(h.clicks, "nothing was clicked")
+        x, y, tag = h.clicks[0]
+        self.assertEqual(tag, "POST_LOGIN_PLAY", "the template, not the fallback, must match")
+        # play_btn.png's centre, mapped into the small window.
+        tpl = imread_unicode(os.path.join(BUTTONS, "play_btn.png"))
+        th, tw = tpl.shape[:2]
+        sx, sy = 1366 / 1920, 768 / 1080
+        ex = 407 + (1600 + tw / 2) * sx
+        ey = 165 + (900 + th / 2) * sy
+        self.assertLess(abs(x - ex), 4, (x, ex))
+        self.assertLess(abs(y - ey), 4, (y, ey))
+
+    def test_the_fallback_point_lands_inside_a_scaled_client(self):
+        """HOME_PLAY_POINT (1733, 1007) is a reference point; applied unscaled it
+        lies below a 768-high window entirely."""
+        client = _frame_with((os.path.join(ASSETS, "home_anchor.png"), HOME_ANCHOR_TOPLEFT))
+        spec = _specs_by_name()["POST_LOGIN_PLAY"]
+        h = _Harness(self._desktop(client), arena=self.SMALL_ARENA)
+        h.run(spec)
+        fallbacks = [c for c in h.clicks if c[2] == "POST_LOGIN_PLAY_FALLBACK"]
+        self.assertTrue(fallbacks, h.diagnostics)
+        for x, y, _tag in fallbacks:
+            self.assertTrue(self._inside_arena(x, y), f"fallback ({x}, {y}) outside the client")
+
+    def test_a_1920_client_is_unchanged(self):
+        """Identity scale: the reference frame and the screen coincide."""
+        from actions.actions import _abs_point, _abs_region
+
+        self.assertEqual(_abs_region(ARENA, (1550, 40, 370, 220)), (1550, 40, 370, 220))
+        self.assertEqual(_abs_point((10, 20, 1920, 1080), (1733, 1007)), (1743, 1027))
 
 
 class PostAssertlessStepTests(unittest.TestCase):
