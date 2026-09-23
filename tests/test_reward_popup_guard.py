@@ -473,6 +473,34 @@ class StarterFirstTimeEntryTests(unittest.TestCase):
             ["STARTER_DECK_BOX", "STARTER_DECK_PICK_WG", "STARTER_SUBMIT_DECK"],
         )
 
+    def test_deck_box_click_that_does_nothing_moves_to_the_next_point(self):
+        """Measured live 2026-09-23: on an account with the event's three wins
+        done, (1730, 655) is the inert name plate under the deck box. Clicking the
+        same point five times kept the current deck for a whole session, so a
+        box click that leaves the Play page must try the next candidate point."""
+        self._screens([
+            Controller._STARTER_SCREEN_PLAY,
+            Controller._STARTER_SCREEN_PLAY,
+            Controller._STARTER_SCREEN_PLAY,
+            Controller._STARTER_SCREEN_CHOOSER,
+            Controller._STARTER_SCREEN_PLAY,
+        ])
+        mapped: list[tuple[int, int]] = []
+        real_map = self.c._map_abs_point_to_arena
+
+        def record_map(point, label=""):
+            if label == "STARTER_DECK_BOX":
+                mapped.append(tuple(point))
+            return real_map(point, label=label)
+
+        self.c._map_abs_point_to_arena = record_map
+
+        self.c._swap_starter_deck_for_quest("GW")
+
+        self.assertEqual(mapped, [(1730, 540), (1730, 655), (1730, 540)])
+        self.assertEqual(self.clicks.count("STARTER_DECK_BOX"), 3)
+        self.assertIn("STARTER_DECK_PICK_WG", self.clicks)
+
     def test_chooser_already_open_skips_straight_to_the_pick(self):
         self._screens([
             Controller._STARTER_SCREEN_CHOOSER,

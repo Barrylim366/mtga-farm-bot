@@ -4920,7 +4920,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # between the card and its name plate and selected nothing.
     _STARTER_DECK_COL_X = (183, 475, 767, 1059, 1353, 1645)
     _STARTER_DECK_ROW_Y = (386, 700)
-    _STARTER_DECK_BOX_BASE = (1730, 655)       # current-deck box on the event page
+    # Current-deck box on the event's Play landing page, tried in this order, one
+    # per step of _open_starter_deck_chooser. Only the box ART opens the grid;
+    # the name plate under it is inert. Measured live 2026-09-23 on an account
+    # with all three event wins done ("Keep playing until the event ends"): the
+    # art spans y~450..635, the plate y~638..680, so the old single point
+    # (1730, 655) sat on the plate -- five clicks, no chooser, the quest deck was
+    # never selected. (1730, 655) did open the grid on 2026-09-21, on an account
+    # mid-event, so the box is not always at the same height; it stays as the
+    # fallback.
+    _STARTER_DECK_BOX_BASES = ((1730, 540), (1730, 655))
     _STARTER_SUBMIT_DECK_BASE = (1730, 1006)   # "Submit Deck" button in the chooser
     # Bottom-right Play button ROI on the Starter Deck Duel event landing page
     # (1920x1080 reference frame). Shared by every event_play.png probe/click.
@@ -5072,6 +5081,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         "Inspect Event Decks" and drops the bot into the read-only card list.
         """
         backouts = 0
+        box_clicks = 0
         for step in range(self._STARTER_CHOOSER_MAX_STEPS):
             if not self._starter_navigation_may_act():
                 return False
@@ -5087,12 +5097,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
             if screen == self._STARTER_SCREEN_PLAY:
                 # A deck is already selected: the small deck box opens the grid.
-                box_target, box_src = self._map_abs_point_to_arena(
-                    self._STARTER_DECK_BOX_BASE, label="STARTER_DECK_BOX"
-                )
+                # Still on this page means the last box click did nothing, so
+                # move on to the next candidate point.
+                box_base = self._STARTER_DECK_BOX_BASES[box_clicks % len(self._STARTER_DECK_BOX_BASES)]
+                box_clicks += 1
+                box_target, box_src = self._map_abs_point_to_arena(box_base, label="STARTER_DECK_BOX")
                 bot_logger.log_info(
                     f"Starter: on the Play landing page; opening the deck chooser via the deck box "
-                    f"base={self._STARTER_DECK_BOX_BASE} -> {box_target} ({box_src})."
+                    f"base={box_base} -> {box_target} ({box_src})."
                 )
                 self._click_abs(box_target[0], box_target[1], "STARTER_DECK_BOX")
                 time.sleep(1.5)
