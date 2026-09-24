@@ -37,6 +37,58 @@ class OrderingInput(NullInputController):
 
 
 class ExclusiveInputControllerTest(unittest.TestCase):
+    def test_short_transaction_serializes_other_input_until_release(self):
+        raw = RecordingInput()
+        gated = ExclusiveInputController(raw)
+        entered = threading.Event()
+        finished = threading.Event()
+
+        def owner():
+            with gated.input_transaction(0.25) as acquired:
+                self.assertTrue(acquired)
+                entered.set()
+                self.assertTrue(finished.wait(timeout=2.0))
+                gated.left_click()
+
+        owner_thread = threading.Thread(target=owner)
+        owner_thread.start()
+        self.assertTrue(entered.wait(timeout=1.0))
+        worker = threading.Thread(target=gated.left_click)
+        worker.start()
+        worker.join(timeout=0.05)
+        self.assertTrue(worker.is_alive(), "other input should wait through the transaction")
+        finished.set()
+        owner_thread.join(timeout=1.0)
+        worker.join(timeout=1.0)
+        self.assertFalse(owner_thread.is_alive())
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(raw.clicks, 2)
+
+    def test_transaction_times_out_while_concede_owns_input(self):
+        gated = ExclusiveInputController(RecordingInput())
+        gated.claim_exclusive_for_current_thread()
+        acquired_values = []
+
+        def try_transaction():
+            with gated.input_transaction(0.01) as acquired:
+                acquired_values.append(acquired)
+
+        worker = threading.Thread(target=try_transaction)
+        worker.start()
+        worker.join(timeout=1.0)
+        self.assertEqual(acquired_values, [False])
+        gated.release_exclusive()
+
+    def test_transaction_owner_can_claim_persistent_exclusivity(self):
+        raw = RecordingInput()
+        gated = ExclusiveInputController(raw)
+        with gated.input_transaction(0.25) as acquired:
+            self.assertTrue(acquired)
+            gated.claim_exclusive_for_current_thread()
+        self.assertTrue(gated.left_click())
+        self.assertEqual(raw.clicks, 1)
+        gated.release_exclusive()
+
     def test_non_owner_retry_thread_cannot_click_during_concede(self):
         raw = RecordingInput()
         gated = ExclusiveInputController(raw)

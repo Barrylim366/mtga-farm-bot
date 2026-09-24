@@ -7,6 +7,7 @@ import stat
 import sys
 import time
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 
@@ -121,11 +122,45 @@ class ExclusiveInputController(InputController):
         # Reentrant: claim_exclusive_for_current_thread() delegates input of its
         # own while holding the gate.
         self._gate_lock = threading.RLock()
+        self._gate_changed = threading.Condition(self._gate_lock)
         self._exclusive = False
         self._owner_ident: int | None = None
+        self._transaction_depth = 0
+
+    @contextmanager
+    def input_transaction(self, timeout: float = 0.25):
+        """Temporarily serialize input for a short, safety-critical sequence."""
+        owner = threading.get_ident()
+        acquired = False
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._gate_changed:
+            while (self._transaction_depth and self._owner_ident != owner) or (
+                self._exclusive and self._owner_ident != owner
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._gate_changed.wait(remaining)
+            else:
+                if not self._exclusive or self._owner_ident == owner:
+                    if self._transaction_depth == 0:
+                        self._owner_ident = owner
+                    self._transaction_depth += 1
+                    acquired = True
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with self._gate_changed:
+                    self._transaction_depth -= 1
+                    if self._transaction_depth == 0 and not self._exclusive:
+                        self._owner_ident = None
+                    self._gate_changed.notify_all()
 
     def claim_exclusive_for_current_thread(self) -> None:
-        with self._gate_lock:
+        with self._gate_changed:
+            while self._transaction_depth and self._owner_ident != threading.get_ident():
+                self._gate_changed.wait()
             self._exclusive = True
             self._owner_ident = threading.get_ident()
             # A gameplay path may have pressed the mouse just before the claim.
@@ -138,9 +173,11 @@ class ExclusiveInputController(InputController):
                 pass
 
     def release_exclusive(self) -> None:
-        with self._gate_lock:
+        with self._gate_changed:
             self._exclusive = False
-            self._owner_ident = None
+            if self._transaction_depth == 0:
+                self._owner_ident = None
+            self._gate_changed.notify_all()
 
     def _allowed(self) -> bool:
         with self._gate_lock:
@@ -149,9 +186,12 @@ class ExclusiveInputController(InputController):
     def _gated(self, method_name: str, *args):
         """Run a delegate method only while the caller still holds permission."""
         with self._gate_lock:
+            while self._transaction_depth and self._owner_ident != threading.get_ident():
+                self._gate_changed.wait()
             if self._exclusive and threading.get_ident() != self._owner_ident:
-                return None
-            return getattr(self._delegate, method_name)(*args)
+                return False
+            getattr(self._delegate, method_name)(*args)
+            return True
 
     def move_abs(self, x: int, y: int) -> None:
         return self._gated("move_abs", x, y)

@@ -5,6 +5,8 @@ import threading
 import time
 import os
 import sys
+import ctypes
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -248,6 +250,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # MTGA_BOT_INPUT_BACKEND still overrides, so forcing a real backend
             # without touching the call site remains possible.
             selected_input_backend = input_backend or os.environ.get("MTGA_BOT_INPUT_BACKEND") or "null"
+            self._input_backend_name = str(selected_input_backend)
             created_input = create_input_controller(selected_input_backend)
             # Live backends are gated so a terminal recovery can atomically stop
             # already-running retry threads at the final mouse/keyboard boundary.
@@ -436,6 +439,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # costs ~6.6s of rope against a card the hand does not contain. Cleared
         # per game, and per id as soon as the id is hovered or remapped.
         self.__unreachable_cast_ids: dict[int, float] = {}
+        self.__cast_hover_failures: dict[int, tuple[str | None, int | None, int]] = {}
+        self.__last_cast_blocker_bundle_ts = 0.0
         self.__match_end_callback = None
         # Optional UI callback used to stop the bot from inside the controller
         # (e.g. when every configured account has finished its daily quests).
@@ -539,6 +544,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__cast_ack_seq = 0
         self.__cast_ack_attempts = {}
         self.__cast_ack_lock = threading.RLock()
+        self.__escape_cast_retries: dict[tuple, dict] = {}
+        self.__cast_escape_in_progress = False
         # cast() keeps its Boolean API. This distinguishes a stale decision
         # from a genuinely unreachable hand card for Game's fallback policy.
         self.__last_cast_abort_reason = None
@@ -4950,7 +4957,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # between the card and its name plate and selected nothing.
     _STARTER_DECK_COL_X = (183, 475, 767, 1059, 1353, 1645)
     _STARTER_DECK_ROW_Y = (386, 700)
-    _STARTER_DECK_BOX_BASE = (1730, 655)       # current-deck box on the event page
+    # Center of the current deck's art on the Play landing page. The old y=655
+    # landed on its nameplate and repeatedly failed to open the chooser.
+    _STARTER_DECK_BOX_BASE = (1730, 535)
     _STARTER_SUBMIT_DECK_BASE = (1730, 1006)   # "Submit Deck" button in the chooser
     # Bottom-right Play button ROI on the Starter Deck Duel event landing page
     # (1920x1080 reference frame). Shared by every event_play.png probe/click.
@@ -6570,9 +6579,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         except Exception as exc:
             encoded = json.dumps({"event": str(event), "encoding_error": type(exc).__name__})
-        bot_logger.log_info(f"[SOAK_CAST_ACK_V2] {encoded}")
+        bot_logger.log_info(f"[SOAK_CAST_ACK_V3] {encoded}")
 
-    def __begin_cast_ack(self, card_id: int, expected_match_id: str | None) -> str:
+    def __begin_cast_ack(self, card_id: int, expected_match_id: str | None,
+                         decision_context: dict | None = None) -> str:
         with self.__cast_ack_lock:
             self.__cast_ack_seq += 1
             attempt_id = f"{self.__soak_group_run_id}-cast-{self.__cast_ack_seq}"
@@ -6581,6 +6591,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "attempt_id": attempt_id,
                 "card_id": int(card_id),
                 "expected_match_id": expected_match_id,
+                "decision_context": decision_context,
                 "started_monotonic": time.monotonic(),
                 "start_snapshot": snapshot,
                 "scan_attempts": [],
@@ -6588,13 +6599,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "clicked": False,
             }
         self.__cast_ack_event(
-            "cast_selected", attempt_id=attempt_id, card_id=int(card_id), snapshot=snapshot
+            "cast_selected", attempt_id=attempt_id, card_id=int(card_id), snapshot=snapshot,
+            arena_geometry=self._arena_region,
+            screen_position=(self.input.position().x, self.input.position().y) if hasattr(self, "input") else None,
+            thread_id=threading.get_ident(),
+            input_backend=getattr(self, "_input_backend_name", type(getattr(self, "input", None)).__name__),
         )
         return attempt_id
 
     def __note_cast_ack_scan(
         self, attempt_id: str, *, scan_attempt: int, scan_start, scan_end,
-        hovered_id: int | None, click_position=None,
+        hovered_id: int | None, click_position=None, hover_source=None,
+        hover_observed_monotonic=None,
     ) -> None:
         with self.__cast_ack_lock:
             attempt = self.__cast_ack_attempts.get(attempt_id)
@@ -6604,6 +6620,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "scan_attempt": int(scan_attempt), "scan_start": scan_start,
                 "scan_end": scan_end, "hovered_id": hovered_id,
                 "click_position": click_position,
+                "hover_source": hover_source,
+                "hover_age_sec": (
+                    round(max(0.0, time.monotonic() - hover_observed_monotonic), 4)
+                    if hover_observed_monotonic is not None else None
+                ),
             }
             attempt["scan_attempts"].append(row)
         self.__cast_ack_event("scan_result", attempt_id=attempt_id, **row)
@@ -6617,6 +6638,63 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 elapsed_sec=round(time.monotonic() - attempt["started_monotonic"], 3),
                 scan_attempts=attempt.get("scan_attempts", []),
             )
+
+    def __cast_hover_retry_key(self, card_id: int, context: dict | None):
+        if not isinstance(context, dict):
+            return (self.__live_match_id or self.__last_seen_match_id, None)
+        return (context.get("match_id"), context.get("game_state_id"))
+
+    def __note_cast_hover_failure(self, card_id: int, context: dict | None,
+                                  attempt_id: str | None, *, after_press_1: bool = False) -> int:
+        """Count same-state hover failures; never count an unresolved first press."""
+        if after_press_1:
+            return 0
+        match_id, state_id = self.__cast_hover_retry_key(card_id, context)
+        with self.__cast_ack_lock:
+            previous = self.__cast_hover_failures.get(int(card_id))
+            count = previous[2] + 1 if previous and previous[:2] == (match_id, state_id) else 1
+            self.__cast_hover_failures[int(card_id)] = (match_id, state_id, count)
+        action = "retry_once" if count == 1 else "skip_until_state_change"
+        self.__cast_ack_event(
+            "cast_retry_policy", attempt_id=attempt_id, card_id=int(card_id),
+            game_state_id=state_id, reason="cast_hover_lost", failure_count=count,
+            action=action,
+        )
+        return count
+
+    def __clear_stale_cast_hover_failures(self, context: dict | None) -> None:
+        if not isinstance(context, dict):
+            return
+        key = self.__cast_hover_retry_key(-1, context)
+        with self.__cast_ack_lock:
+            stale = [card_id for card_id, (match_id, state_id, _count)
+                     in self.__cast_hover_failures.items()
+                     if (match_id, state_id) != key]
+            for card_id in stale:
+                del self.__cast_hover_failures[card_id]
+
+    def __parse_hover_observation(self, line: str) -> tuple[int | None, str | None]:
+        """Return (object id, source); bare Player.log fragments are local hovers."""
+        if not line:
+            return None, None
+        try:
+            start = line.find("{")
+            if start != -1:
+                payload = json.loads(line[start:])
+                messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
+                if messages:
+                    for msg in messages:
+                        ui_msg = msg.get("uiMessage") if isinstance(msg, dict) else None
+                        hover = ui_msg.get("onHover") if isinstance(ui_msg, dict) else None
+                        if isinstance(hover, dict) and isinstance(hover.get("objectId"), int):
+                            return hover["objectId"], "relayed_ui"
+                    return None, "relayed_ui"
+        except Exception:
+            pass
+        match = re.search(r'"objectId"\s*:\s*(\d+)', line)
+        if match:
+            return int(match.group(1)), "local_fragment"
+        return None, None
 
     @staticmethod
     def __same_cast_action(expected: dict, current: dict) -> bool:
@@ -6678,7 +6756,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_cast_abort_reason = "stale_decision_context"
         if cast_ack_id is not None:
             with self.__cast_ack_lock:
-                attempt = self.__cast_ack_attempts.pop(cast_ack_id, None)
+                attempt = self.__cast_ack_attempts.get(cast_ack_id)
+                partial = bool(attempt and int(attempt.get("press_count", 0)) > 0)
+                if not partial:
+                    attempt = self.__cast_ack_attempts.pop(cast_ack_id, None)
             if attempt is not None:
                 self.__cast_ack_event(
                     "stale_decision_context", attempt_id=cast_ack_id, card_id=card_id,
@@ -6687,6 +6768,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     current_snapshot=current,
                     elapsed_sec=round(time.monotonic() - attempt["started_monotonic"], 3),
                 )
+                if partial:
+                    attempt["partial_reason"] = "stale_decision_context"
+                    self.__note_cast_ack_click(
+                        cast_ack_id, attempt.get("click_position"),
+                        press_count=int(attempt.get("press_count", 1)),
+                        partial_reason="stale_decision_context",
+                    )
         else:
             self.__cast_ack_event(
                 "stale_decision_context", card_id=card_id, checkpoint=checkpoint,
@@ -6697,7 +6785,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             f"CAST_STALE_CONTEXT: card {card_id} at {checkpoint}; "
             f"reasons={','.join(mismatches)}."
         )
-        self.__schedule_decision_recovery(0.2, "stale_cast_decision")
+        if not (cast_ack_id is not None and attempt is not None and partial):
+            self.__schedule_decision_recovery(0.2, "stale_cast_decision")
         return True
 
     def get_last_cast_abort_reason(self) -> str | None:
@@ -6758,8 +6847,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         try:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             debug_dir = Path(bot_logger.ensure_debug_dir(f"cast-ack-failure-{stamp}"))
+            # Images are intentionally retained in memory until classification,
+            # but never embedded in JSON telemetry/bundles.
+            serializable = dict(payload)
+            attempt = dict(serializable.get("attempt") or {})
+            for key, name in (("pre_click_image", "arena_pre_click.png"),
+                              ("post_wait_image", "arena_post_wait.png"),
+                              ("delayed_image", "arena_delayed.png")):
+                image = attempt.get(key)
+                if image is not None and self._vision is not None:
+                    try:
+                        self._vision.save_image(image, str(debug_dir / name))
+                    except Exception:
+                        pass
+            for key in ("pre_click_image", "post_wait_image", "delayed_image"):
+                attempt.pop(key, None)
+            serializable["attempt"] = attempt
             with (debug_dir / "cast_ack_state.json").open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, default=str)
+                json.dump(serializable, handle, indent=2, default=str)
             tail = self._state_tracker.get_tail(260)
             if not tail:
                 tail = self._read_log_tail(self._log_path, max_bytes=300000)
@@ -6790,6 +6895,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__cast_ack_event("ack_cancelled", attempt_id=attempt_id, reason="match_changed")
             return
         current = self.__cast_ack_snapshot(attempt["card_id"])
+        if final_probe:
+            try:
+                if self._vision is not None and self._arena_region is not None:
+                    self._vision.begin_tick()
+                    attempt["delayed_image"] = self._vision.capture(self._arena_region)
+                else:
+                    attempt["delayed_image"] = None
+            except Exception:
+                attempt["delayed_image"] = None
+            with self.__cast_ack_lock:
+                active_attempt = self.__cast_ack_attempts.get(attempt_id)
+                if active_attempt is not None:
+                    active_attempt["delayed_image"] = attempt.get("delayed_image")
         baseline = attempt.get("pre_click_snapshot") or attempt["start_snapshot"]
         outcome, signals, reason = self.__classify_cast_ack(baseline, current)
         if outcome == "acknowledged":
@@ -6809,6 +6927,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 pre_click_snapshot=baseline,
                 post_click_snapshot=attempt["post_click_snapshot"], current_snapshot=current,
             )
+            with self.__cast_ack_lock:
+                self.__cast_hover_failures.pop(int(attempt["card_id"]), None)
+                decision = attempt.get("decision_context") or {}
+                retry_key = (attempt.get("expected_match_id"),
+                             decision.get("game_state_id")
+                             if decision.get("game_state_id") is not None
+                             else (attempt.get("start_snapshot") or {}).get("game_state_id"),
+                             int(attempt["card_id"]))
+                self.__escape_cast_retries.pop(retry_key, None)
             return
         if not final_probe:
             return
@@ -6830,6 +6957,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             reason=reason, signals=signals, elapsed_sec=payload["elapsed_sec"],
             start_snapshot=active["start_snapshot"], pre_click_snapshot=baseline,
             post_click_snapshot=active.get("post_click_snapshot"), current_snapshot=current,
+            bundle_images={
+                "pre_click": active.get("pre_click_image") is not None,
+                "post_wait": active.get("post_wait_image") is not None,
+                "delayed": active.get("delayed_image") is not None,
+            },
         )
         if outcome in {"click_ineffective", "ambiguous"}:
             worker = threading.Thread(
@@ -6837,6 +6969,168 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 name="CastAckBundle", daemon=True,
             )
             worker.start()
+        if int(active.get("press_count", 0)) == 2 and outcome == "click_ineffective":
+            self.__recover_ineffective_cast(attempt_id, active, current)
+            return
+        if int(active.get("press_count", 0)) == 1:
+            card_id = int(active["card_id"])
+            if outcome == "click_ineffective":
+                blocker = self.__cast_blocking_ui(active.get("delayed_image"))
+                foreground = _describe_foreground_window()
+                if blocker is not None:
+                    self.__cast_ack_event(
+                        "cast_retry_policy", attempt_id=attempt_id, card_id=card_id,
+                        action="wait_for_clear_screen", blocker=blocker,
+                        reason="cast_partial_ack_no_progress",
+                    )
+                    self.__schedule_cast_clear_poll(active.get("expected_match_id"))
+                    return
+                if foreground.get("is_mtga") is False:
+                    self.__cast_ack_event(
+                        "cast_retry_policy", attempt_id=attempt_id, card_id=card_id,
+                        action="wait_for_foreground", foreground=foreground,
+                        reason="cast_partial_ack_no_progress",
+                    )
+                    self.__schedule_decision_recovery(1.0, "cast_partial_wait_foreground")
+                    return
+                if active.get("partial_reason") == "cast_hover_lost":
+                    failures = self.__note_cast_hover_failure(
+                        card_id, active.get("decision_context"), attempt_id,
+                    )
+                    if failures >= 2:
+                        self.__last_cast_abort_reason = "cast_hover_retry_exhausted"
+                        self.__schedule_decision_recovery(0.2, "cast_hover_retry_exhausted")
+                        return
+                self.__schedule_decision_recovery(0.2, "cast_partial_ack_no_progress")
+                return
+            self.__cast_ack_event(
+                "cast_retry_policy", attempt_id=attempt_id, card_id=card_id,
+                press_count=1, action="wait_for_state_change_or_clear_screen",
+                reason=outcome,
+            )
+
+    def __recover_ineffective_cast(self, attempt_id: str, attempt: dict,
+                                   baseline: dict) -> None:
+        """Send guarded Escape once after a fully ineffective two-press cast."""
+        card_id = int(attempt["card_id"])
+        if self.__cast_blocking_ui(attempt.get("delayed_image")) is not None:
+            self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
+                card_id=card_id, phase="aborted", outcome="inconclusive", reason="blocker")
+            return
+        context = attempt.get("decision_context") or {}
+        key = (attempt.get("expected_match_id"), baseline.get("game_state_id"), card_id)
+        with self.__cast_ack_lock:
+            if self.__cast_escape_in_progress:
+                self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
+                    card_id=card_id, phase="aborted", outcome="inconclusive",
+                    reason="another_recovery_pending")
+                return
+            recovery = self.__escape_cast_retries.get(key)
+            if recovery and recovery.get("followup_attempt_id"):
+                recovery["exhausted"] = True
+                self.__last_cast_abort_reason = "cast_escape_retry_exhausted"
+                self.__cast_ack_event("cast_retry_policy", attempt_id=attempt_id,
+                    card_id=card_id, action="suppress_same_state_cast",
+                    reason="followup_cast_ineffective", followup_attempt_id=recovery["followup_attempt_id"])
+                return
+            self.__escape_cast_retries[key] = {"origin_attempt_id": attempt_id, "followup_attempt_id": None,
+                                               "exhausted": False}
+            self.__cast_escape_in_progress = True
+
+        before = self.__capture_cast_blocker_frame()
+        if before is not None:
+            self.__write_cast_escape_image(attempt, "before_escape", before)
+        self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
+                              card_id=card_id, phase="before_escape", state=baseline)
+        transaction = getattr(self.input, "input_transaction", None)
+        scope = transaction(0.25) if callable(transaction) else nullcontext(True)
+        outcome = "inconclusive"
+        try:
+            if not callable(getattr(self.input, "tap_escape", None)):
+                return
+            with scope as acquired:
+                if acquired is False or not self.can_execute_game_action(attempt.get("expected_match_id")):
+                    return
+                if self.__abort_stale_cast_context(None, card_id, context, "before_escape"):
+                    return
+                foreground = _describe_foreground_window()
+                snapshot = self.__cast_ack_snapshot(card_id)
+                still_ineffective, _, _ = self.__classify_cast_ack(baseline, snapshot)
+                if (foreground.get("is_mtga") is False
+                        or still_ineffective != "click_ineffective"
+                        or snapshot.get("match_id") != baseline.get("match_id")
+                        or snapshot.get("game_state_id") != baseline.get("game_state_id")
+                        or any((snapshot.get("prompt_flags") or {}).values())):
+                    return
+                if self.__cast_blocking_ui() is not None:
+                    return
+                self.input.tap_escape()
+                time.sleep(0.4)
+                after = self.__capture_cast_blocker_frame()
+                if after is not None:
+                    self.__write_cast_escape_image(attempt, "after_escape", after)
+                menu_open = self._options_overlay_visible()
+                if menu_open:
+                    second_foreground = _describe_foreground_window()
+                    if (second_foreground.get("is_mtga") is False
+                            or not self.can_execute_game_action(attempt.get("expected_match_id"))):
+                        return
+                    self.input.tap_escape()
+                    time.sleep(0.4)
+                    if self._options_overlay_visible():
+                        return
+                if not self.can_execute_game_action(attempt.get("expected_match_id")):
+                    return
+                after_snapshot = self.__cast_ack_snapshot(card_id)
+                if (after_snapshot.get("match_id") != baseline.get("match_id")
+                        or after_snapshot.get("game_state_id") != baseline.get("game_state_id")
+                        or any((after_snapshot.get("prompt_flags") or {}).values())):
+                    return
+                if self.__abort_stale_cast_context(None, card_id, context, "after_escape"):
+                    return
+                outcome = "clear"
+                self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
+                    card_id=card_id, phase="after_escape", outcome=outcome,
+                    options_menu_opened=menu_open, followup_status="pending",
+                    state=after_snapshot)
+        finally:
+            with self.__cast_ack_lock:
+                self.__cast_escape_in_progress = False
+            if outcome == "clear":
+                self.__schedule_decision_recovery(0.2, "cast_escape_recovered")
+            else:
+                self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
+                    card_id=card_id, phase="aborted", outcome="inconclusive")
+
+    def __write_cast_escape_image(self, attempt: dict, name: str, image) -> None:
+        try:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            debug_dir = Path(bot_logger.ensure_debug_dir(f"cast-escape-{stamp}"))
+            if self._vision is not None:
+                self._vision.save_image(image, str(debug_dir / f"{name}.png"))
+            with (debug_dir / "recovery.json").open("w", encoding="utf-8") as handle:
+                json.dump({"attempt_id": attempt.get("attempt_id"), "card_id": attempt.get("card_id"),
+                           "image": name}, handle, indent=2)
+        except Exception:
+            pass
+
+    def __schedule_cast_clear_poll(self, expected_match_id: str | None) -> None:
+        timer = threading.Timer(1.0, self.__poll_cast_clear, args=(expected_match_id,))
+        timer.daemon = True
+        timer.start()
+
+    def __poll_cast_clear(self, expected_match_id: str | None) -> None:
+        if self._stop_requested or not self.can_execute_game_action(expected_match_id):
+            return
+        blocker = self.__cast_blocking_ui()
+        if blocker:
+            self.__cast_ack_event(
+                "cast_retry_policy", action="wait_for_clear_screen",
+                blocker=blocker, expected_match_id=expected_match_id,
+            )
+            self.__schedule_cast_clear_poll(expected_match_id)
+            return
+        self.__schedule_decision_recovery(0.2, "cast_screen_cleared")
 
     def __note_cast_ack_pre_click(self, attempt_id: str, click_position) -> None:
         with self.__cast_ack_lock:
@@ -6846,20 +7140,40 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             snapshot = self.__cast_ack_snapshot(attempt["card_id"])
             attempt["pre_click_snapshot"] = snapshot
             attempt["click_position"] = click_position
+            try:
+                if self._vision and self._arena_region:
+                    self._vision.begin_tick()
+                    attempt["pre_click_image"] = self._vision.capture(self._arena_region)
+                else:
+                    attempt["pre_click_image"] = None
+            except Exception:
+                attempt["pre_click_image"] = None
         self.__cast_ack_event(
             "cast_click_ready", attempt_id=attempt_id, card_id=attempt["card_id"],
             click_position=click_position, pre_click_snapshot=snapshot,
         )
 
-    def __note_cast_ack_click(self, attempt_id: str, click_position) -> None:
+    def __note_cast_ack_click(self, attempt_id: str, click_position, *,
+                              press_count: int = 2, partial_reason: str | None = None) -> None:
         with self.__cast_ack_lock:
             attempt = self.__cast_ack_attempts.get(attempt_id)
             if attempt is None:
                 return
             attempt["clicked"] = True
+            attempt["press_count"] = max(
+                int(attempt.get("press_count", 0)), int(press_count)
+            )
             attempt["clicked_monotonic"] = time.monotonic()
             attempt["click_position"] = click_position
             attempt["post_click_snapshot"] = self.__cast_ack_snapshot(attempt["card_id"])
+            try:
+                if self._vision is not None and self._arena_region is not None:
+                    self._vision.begin_tick()
+                    attempt["post_wait_image"] = self._vision.capture(self._arena_region)
+                else:
+                    attempt["post_wait_image"] = None
+            except Exception:
+                attempt["post_wait_image"] = None
             timers = []
             for delay, final_probe in ((0.35, False), (1.1, False), (2.2, True)):
                 timer = threading.Timer(delay, self.__probe_cast_ack, args=(attempt_id, final_probe))
@@ -6868,13 +7182,367 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             attempt["timers"] = timers
             snapshot = attempt["post_click_snapshot"]
         self.__cast_ack_event(
-            "cast_clicked", attempt_id=attempt_id, card_id=attempt["card_id"],
+            "cast_partial_press" if partial_reason else "cast_clicked",
+            attempt_id=attempt_id, card_id=attempt["card_id"],
             click_position=click_position,
+            press_count=int(press_count), partial_reason=partial_reason,
             pre_click_snapshot=attempt.get("pre_click_snapshot"),
             post_click_snapshot=snapshot,
         )
+        self.__cast_ack_event(
+            "foreground_after_click", attempt_id=attempt_id,
+            foreground=_describe_foreground_window(),
+        )
         for timer in timers:
             timer.start()
+
+    def __note_cast_ack_physical_click(self, attempt_id: str, ordinal: int, *,
+                                       position, dispatched: bool, started: float,
+                                       finished: float, foreground: dict, cursor_after=None) -> None:
+        """Record the exact physical click call without retaining image data."""
+        with self.__cast_ack_lock:
+            attempt = self.__cast_ack_attempts.get(attempt_id)
+            if attempt is not None:
+                if dispatched:
+                    attempt["press_count"] = max(
+                        int(attempt.get("press_count", 0)), int(ordinal)
+                    )
+                attempt["last_press_dispatched"] = bool(dispatched)
+            attempt = attempt or {}
+            pre = attempt.get("pre_click_snapshot") or {}
+            hover_ts = attempt.get("hover_observed_monotonic")
+        self.__cast_ack_event(
+            f"PRESS_{int(ordinal)}", attempt_id=attempt_id,
+            click_position=position, dispatched=bool(dispatched),
+            gate_allowed=bool(dispatched),
+            click_started_monotonic=round(started, 6),
+            click_finished_monotonic=round(finished, 6),
+            click_duration_sec=round(max(0.0, finished - started), 6),
+            foreground=foreground,
+            foreground_owned=foreground.get("is_mtga"),
+            click_dispatched=bool(dispatched),
+            cursor_displacement_px=(
+                ((int(cursor_after[0]) - int(position[0])) ** 2 + (int(cursor_after[1]) - int(position[1])) ** 2) ** 0.5
+                if cursor_after is not None else None
+            ),
+            hover_to_click_delay_sec=(round(max(0.0, started - hover_ts), 6) if hover_ts else None),
+            prompt_flags=pre.get("prompt_flags", {}),
+        )
+
+    def __cast_blocking_ui(self, frame=None) -> str | None:
+        """Identify known cast blockers in one arena-normalized screenshot."""
+        if getattr(self, "_input_backend_name", None) == "null":
+            return None
+        if self._vision is None or self._arena_region is None:
+            return "screen_unavailable"
+        try:
+            import cv2
+            import numpy as np
+            if frame is None:
+                self._vision.begin_tick()
+            frame = self._vision.capture(self._arena_region) if frame is None else frame
+            if frame is None or getattr(frame, "size", 0) == 0:
+                return "screen_unavailable"
+            if frame.shape[1] != 1920 or frame.shape[0] != 1080:
+                frame = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_LINEAR)
+            probes = (
+                ("pay", (650, 390, 570, 160), 0.80),
+                ("cancel", (1550, 850, 370, 220), 0.90),
+            )
+            root = Path(__file__).resolve().parents[2] / "assets" / "assert" / "cast_blockers"
+            for name, (x, y, w, h), threshold in probes:
+                path = root / f"{name}.png"
+                if not path.exists():
+                    continue
+                template = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                roi = frame[y:y + h, x:x + w]
+                if template is None or roi.shape[0] < template.shape[0] or roi.shape[1] < template.shape[1]:
+                    continue
+                scores = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+                if float(np.max(scores)) >= threshold:
+                    return name
+            # Inspect only the YOUR TURN lettering, not the surrounding board.
+            # The orange edges can be separate for every glyph, so a single
+            # connected-component width is not a reliable banner test.
+            hsv_turn = cv2.cvtColor(frame[420:555, 680:1250], cv2.COLOR_BGR2HSV)
+            orange = cv2.inRange(
+                hsv_turn, np.array((8, 180, 170)), np.array((38, 255, 255))
+            )
+            letter_bands = [cv2.countNonZero(band) for band in np.array_split(orange, 4, axis=1)]
+            if sum(letter_bands) >= 4000 and min(letter_bands) >= 500:
+                return "your_turn"
+        except Exception as exc:
+            bot_logger.log_info(f"CAST_BLOCKER_PROBE_UNAVAILABLE: {type(exc).__name__}")
+            return "screen_unavailable"
+        return None
+
+    def __capture_cast_blocker_frame(self):
+        if (getattr(self, "_input_backend_name", None) == "null"
+                or self._vision is None or self._arena_region is None):
+            return None
+        try:
+            self._vision.begin_tick()
+            return self._vision.capture(self._arena_region)
+        except Exception:
+            return None
+
+    def __write_cast_blocker_bundle(self, frame, blocker: str, card_id: int,
+                                    cursor_position) -> None:
+        try:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            debug_dir = Path(bot_logger.ensure_debug_dir(f"cast-blocked-{stamp}"))
+            self._vision.save_image(frame, str(debug_dir / "arena.png"))
+            with (debug_dir / "blocker.json").open("w", encoding="utf-8") as handle:
+                json.dump({
+                    "blocker": blocker,
+                    "card_id": int(card_id),
+                    "cursor_position": cursor_position,
+                    "arena_region": self._arena_region,
+                }, handle, indent=2)
+            bot_logger.log_info(f"CAST_BLOCKER_BUNDLE: {debug_dir}")
+        except Exception as exc:
+            bot_logger.log_error(f"CAST_BLOCKER_BUNDLE_FAILED: {type(exc).__name__}")
+
+    def __schedule_cast_blocker_bundle(self, frame, blocker: str, card_id: int,
+                                       cursor_position) -> None:
+        if frame is None or time.monotonic() - self.__last_cast_blocker_bundle_ts < 30.0:
+            return
+        self.__last_cast_blocker_bundle_ts = time.monotonic()
+        worker = threading.Thread(
+            target=self.__write_cast_blocker_bundle,
+            args=(frame, blocker, card_id, cursor_position),
+            name="CastBlockerBundle", daemon=True,
+        )
+        worker.start()
+
+    def __cast_safety_abort(self, cast_ack_id: str | None, card_id: int,
+                            reason: str, *, decision_context: dict | None = None,
+                            **details) -> bool:
+        self.__last_cast_abort_reason = reason
+        acquired = reason != "cast_input_busy"
+        details.setdefault("input_transaction_acquired", acquired)
+        details.setdefault("input_transaction_owner", threading.get_ident() if acquired else None)
+        details.setdefault("hover_revalidated", False)
+        if details.get("after_press_1"):
+            details.setdefault("press_count", 1)
+        try:
+            pos = self.input.position()
+            details.setdefault("cursor_position", (int(pos.x), int(pos.y)))
+        except Exception:
+            details.setdefault("cursor_position", None)
+        if cast_ack_id is not None:
+            self.__cast_ack_event("cast_safety_abort", attempt_id=cast_ack_id,
+                                  card_id=card_id, reason=reason, **details)
+            if details.get("after_press_1"):
+                with self.__cast_ack_lock:
+                    attempt = self.__cast_ack_attempts.get(cast_ack_id)
+                    if attempt is not None:
+                        attempt["partial_reason"] = reason
+                        if decision_context is not None:
+                            attempt["decision_context"] = decision_context
+                        click_position = attempt.get("click_position")
+                    else:
+                        click_position = None
+                self.__note_cast_ack_click(
+                    cast_ack_id, click_position, press_count=1, partial_reason=reason,
+                )
+            else:
+                self.__finish_cast_ack_without_click(cast_ack_id, reason)
+        if not details.get("after_press_1"):
+            if reason == "cast_hover_lost":
+                failures = self.__note_cast_hover_failure(
+                    card_id, decision_context, cast_ack_id,
+                )
+                if failures >= 2:
+                    self.__last_cast_abort_reason = "cast_hover_retry_exhausted"
+                    return False
+            if reason == "cast_screen_blocked":
+                self.__schedule_cast_clear_poll(
+                    self.__live_match_id or self.__last_seen_match_id
+                )
+            else:
+                self.__schedule_decision_recovery(0.2, "cast_safety_abort")
+        return False
+
+    def __check_cast_hover_queue(self, card_id: int) -> tuple[bool, dict | None]:
+        """Reject a newer local hover that contradicts the scan's target."""
+        last_observation = None
+        while self.log_reader.has_new_line(self.patterns["hover_id"]):
+            line = self.log_reader.get_latest_line_containing_pattern(self.patterns["hover_id"])
+            hover_id, source = self.__parse_hover_observation(line)
+            last_observation = {"hover_id": hover_id, "hover_source": source}
+            if source == "local_fragment" and hover_id is not None and hover_id != card_id:
+                return False, last_observation
+        return True, last_observation
+
+    def __cast_final_clicks(self, card_id: int, *, click_position, hand_p1,
+                            expected_match_id, decision_context, cast_ack_id,
+                            attempt, hover_observation, hover_observed_monotonic) -> bool:
+        transaction = getattr(self.input, "input_transaction", None)
+        scope = transaction(0.25) if callable(transaction) else nullcontext(True)
+        with scope as acquired:
+            if acquired is False:
+                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_input_busy")
+            if not self.can_execute_game_action(expected_match_id):
+                self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_click")
+                return False
+            if self.__abort_stale_cast_context(cast_ack_id, card_id, decision_context,
+                                               "before_press_1", attempt):
+                return False
+            foreground = _describe_foreground_window()
+            if foreground.get("is_mtga") is False:
+                return self.__cast_safety_abort(cast_ack_id, card_id, "foreground_recovery_failed",
+                                                foreground=foreground)
+            hover_age = time.monotonic() - float(hover_observed_monotonic or 0.0)
+            if (not isinstance(hover_observation, dict)
+                    or hover_observation.get("hover_id") != card_id
+                    or hover_observation.get("hover_source") != "local_fragment"
+                    or hover_age < 0 or hover_age > 1.5):
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "cast_hover_lost",
+                    hover_revalidated=False, hover_age_sec=round(max(0.0, hover_age), 4),
+                    hover_observation=hover_observation,
+                )
+            blocker_frame = self.__capture_cast_blocker_frame()
+            blocker = self.__cast_blocking_ui(blocker_frame)
+            if blocker:
+                self.__schedule_cast_blocker_bundle(
+                    blocker_frame, blocker, card_id, click_position,
+                )
+                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_screen_blocked",
+                                                blocker=blocker)
+            hover_observed = float(hover_observed_monotonic)
+            if cast_ack_id is not None:
+                with self.__cast_ack_lock:
+                    ack_attempt = self.__cast_ack_attempts.get(cast_ack_id)
+                    if ack_attempt is not None:
+                        ack_attempt["hover_observed_monotonic"] = hover_observed
+                        ack_attempt["hover_source"] = (hover_observation or {}).get(
+                            "hover_source"
+                        )
+            pos = self.input.position()
+            actual = (int(pos.x), int(pos.y))
+            if max(abs(actual[0] - click_position[0]), abs(actual[1] - click_position[1])) > 2:
+                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_cursor_moved",
+                                                cursor_position=actual)
+            if cast_ack_id is not None:
+                self.__note_cast_ack_pre_click(cast_ack_id, click_position)
+            if not self.can_execute_game_action(expected_match_id):
+                self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_click")
+                return False
+            if self.__abort_stale_cast_context(cast_ack_id, card_id, decision_context,
+                                               "immediately_before_press_1", attempt):
+                return False
+            foreground = _describe_foreground_window()
+            if foreground.get("is_mtga") is False:
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "foreground_recovery_failed", foreground=foreground,
+                )
+            hover_ok, newer_hover = self.__check_cast_hover_queue(card_id)
+            if not hover_ok:
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "cast_hover_lost",
+                    decision_context=decision_context, hover_revalidated=False,
+                    hover_observation=newer_hover,
+                )
+            pos = self.input.position()
+            actual = (int(pos.x), int(pos.y))
+            if max(abs(actual[0] - click_position[0]), abs(actual[1] - click_position[1])) > 2:
+                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_cursor_moved",
+                                                cursor_position=actual)
+            hover_age = time.monotonic() - hover_observed
+            if hover_age < 0 or hover_age > 1.5:
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "cast_hover_lost",
+                    hover_revalidated=False, hover_age_sec=round(max(0.0, hover_age), 4),
+                    hover_observation=hover_observation,
+                )
+            if cast_ack_id is not None:
+                self.__cast_ack_event("cast_hover_revalidated", attempt_id=cast_ack_id,
+                                      hover_id=card_id,
+                                      hover_source=hover_observation.get("hover_source"),
+                                      hover_age_sec=round(max(0.0, hover_age), 4),
+                                      newer_hover=newer_hover,
+                                      cursor_position=actual,
+                                      input_transaction_owner=threading.get_ident())
+            pos = self.input.position()
+            actual = (int(pos.x), int(pos.y))
+            if max(abs(actual[0] - click_position[0]), abs(actual[1] - click_position[1])) > 2:
+                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_cursor_moved",
+                                                cursor_position=actual)
+            hover_age = time.monotonic() - hover_observed
+            if hover_age < 0 or hover_age > 1.5:
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "cast_hover_lost",
+                    hover_revalidated=False, hover_age_sec=round(max(0.0, hover_age), 4),
+                    hover_observation=hover_observation,
+                )
+            bot_logger.log_click(*click_position, f"CAST_CARD_PRESS_1 (id={card_id})")
+            started = time.monotonic()
+            dispatched = self.input.left_click(1)
+            finished = time.monotonic()
+            # Keep the interval between presses short. Capturing the screen,
+            # reading hover logs, serializing state, and writing telemetry can
+            # all outlast the game's select-then-cast click window.
+            time.sleep(max(0.0, 0.1 - (time.monotonic() - finished)))
+            pos = self.input.position()
+            actual = (int(pos.x), int(pos.y))
+            first_started, first_finished = started, finished
+            first_dispatched = dispatched is not False
+            def record_first_press():
+                if cast_ack_id is not None:
+                    self.__note_cast_ack_physical_click(
+                        cast_ack_id, 1, position=click_position,
+                        dispatched=first_dispatched, started=first_started,
+                        finished=first_finished, foreground=foreground,
+                        cursor_after=actual,
+                    )
+            if not first_dispatched:
+                record_first_press()
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "cast_input_busy", decision_context=decision_context,
+                )
+            if not self.can_execute_game_action(expected_match_id):
+                record_first_press()
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "action_cancelled_between_presses",
+                    after_press_1=True, decision_context=decision_context,
+                )
+            if max(abs(actual[0] - click_position[0]), abs(actual[1] - click_position[1])) > 2:
+                record_first_press()
+                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_cursor_moved",
+                                                after_press_1=True, cursor_position=actual)
+            # The pre-click foreground probe already verified the MTGA process.
+            # Comparing its window handle is enough here and avoids a second
+            # process lookup inside the short select-then-cast interval.
+            foreground_after_first = foreground
+            if os.name == "nt" and foreground.get("hwnd"):
+                try:
+                    current_hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+                    if current_hwnd != int(foreground["hwnd"]):
+                        foreground_after_first = {"hwnd": current_hwnd, "is_mtga": False}
+                except Exception:
+                    foreground_after_first = _describe_foreground_window()
+            else:
+                foreground_after_first = _describe_foreground_window()
+            if foreground_after_first.get("is_mtga") is False:
+                record_first_press()
+                return self.__cast_safety_abort(
+                    cast_ack_id, card_id, "foreground_recovery_failed",
+                    after_press_1=True, foreground=foreground_after_first,
+                )
+            started = time.monotonic()
+            dispatched = self.input.left_click(1)
+            finished = time.monotonic()
+            bot_logger.log_click(*click_position, f"CAST_CARD_PRESS_2 (id={card_id})")
+            pos_after = self.input.position()
+            record_first_press()
+            self.__note_cast_ack_physical_click(
+                cast_ack_id, 2, position=click_position, dispatched=dispatched is not False,
+                started=started, finished=finished, foreground=foreground_after_first,
+                cursor_after=(pos_after.x, pos_after.y),
+            ) if cast_ack_id is not None else None
+            return True
 
     def __clear_cast_ack_attempts(self, reason: str) -> None:
         with self.__cast_ack_lock:
@@ -6893,8 +7561,31 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """True if the card was actually clicked. False means the click never
         happened, and the caller must not leave the bot idling on it."""
         self.__last_cast_abort_reason = None
+        self.__clear_stale_cast_hover_failures(decision_context)
         expected_match_id = self.__live_match_id
         if not self.can_execute_game_action(expected_match_id):
+            return False
+        live_cast_snapshot = self.__cast_ack_snapshot(card_id)
+        retry_state = (
+            (decision_context or {}).get("match_id") or live_cast_snapshot.get("match_id"),
+            (decision_context or {}).get("game_state_id")
+            if (decision_context or {}).get("game_state_id") is not None
+            else live_cast_snapshot.get("game_state_id"),
+        )
+        with self.__cast_ack_lock:
+            self.__escape_cast_retries = {
+                key: value for key, value in self.__escape_cast_retries.items()
+                if key[:2] == retry_state
+            }
+        with self.__cast_ack_lock:
+            pending = self.__cast_escape_in_progress or any(
+                int(active.get("card_id", -1)) == int(card_id) and active.get("clicked")
+                for active in self.__cast_ack_attempts.values()
+            )
+        if pending:
+            self.__last_cast_abort_reason = "cast_ack_pending"
+            self.__cast_ack_event("cast_retry_policy", card_id=int(card_id),
+                                  action="suppress_duplicate_cast", reason="acknowledgement_pending")
             return False
         if self.should_defer_cast_for_target_selection(expected_match_id):
             self.__target_soak_event(
@@ -6910,7 +7601,20 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "not sweeping the hand again."
             )
             return False
-        cast_ack_id = self.__begin_cast_ack(card_id, expected_match_id)
+        cast_ack_id = self.__begin_cast_ack(card_id, expected_match_id, decision_context)
+        start_snapshot = self.__cast_ack_attempts.get(cast_ack_id, {}).get("start_snapshot", {})
+        retry_key = (start_snapshot.get("match_id"), start_snapshot.get("game_state_id"), int(card_id))
+        with self.__cast_ack_lock:
+            retry = self.__escape_cast_retries.get(retry_key)
+            if retry and retry.get("exhausted"):
+                self.__finish_cast_ack_without_click(cast_ack_id, "cast_escape_retry_exhausted")
+                self.__last_cast_abort_reason = "cast_escape_retry_exhausted"
+                return False
+            if retry and retry.get("followup_attempt_id") is None:
+                retry["followup_attempt_id"] = cast_ack_id
+                self.__cast_ack_event("cast_escape_followup", attempt_id=cast_ack_id,
+                    linked_attempt_id=retry.get("origin_attempt_id"), card_id=int(card_id),
+                    game_state_id=start_snapshot.get("game_state_id"))
         # MTGA sometimes emits a card's hover objectId a beat after our scan
         # passes it ("No hover update before bounds"), so a single pass can miss
         # a card that is really in hand. Retry a couple of times after a pause.
@@ -6927,7 +7631,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 cast_ack_id=cast_ack_id, decision_context=decision_context,
             ):
                 self.clear_cast_suppression(card_id)
+                with self.__cast_ack_lock:
+                    self.__cast_hover_failures.pop(int(card_id), None)
                 return True
+            if self.__last_cast_abort_reason in {
+                "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
+                "cast_screen_blocked", "foreground_recovery_failed",
+                "cast_hover_retry_exhausted",
+            }:
+                return False
             if not self.can_execute_game_action(expected_match_id):
                 self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_after_scan")
                 return False
@@ -7037,7 +7749,21 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # activation the strongest remaining suspect. Only ask Windows for
             # a focus transition when another window actually owns it.
             foreground = _describe_foreground_window()
-            if foreground.get("is_mtga") is not True:
+            if cast_ack_id is not None:
+                self.__cast_ack_event("foreground_before_scan", attempt_id=cast_ack_id, foreground=foreground)
+            if foreground.get("is_mtga") is False:
+                focus_mtga_window()
+                recovered = _describe_foreground_window()
+                if cast_ack_id is not None:
+                    self.__cast_ack_event("foreground_after_recovery", attempt_id=cast_ack_id, foreground=recovered)
+                if recovered.get("is_mtga") is False:
+                    self.__last_cast_abort_reason = "foreground_recovery_failed"
+                    self.__finish_cast_ack_without_click(cast_ack_id, "foreground_recovery_failed")
+                    self.__schedule_decision_recovery(0.2, "cast_foreground_recovery")
+                    return False
+            elif foreground.get("is_mtga") is not True:
+                # Ownership measurement is unavailable (non-Windows or an API
+                # failure); preserve the historical behavior.
                 focus_mtga_window()
             if not self.can_execute_game_action(expected_match_id):
                 self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_after_scan")
@@ -7070,6 +7796,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.input.move_abs(hand_p1[0], hand_p1[1])
 
             current_hovered_id = None
+            current_hovered_source = None
+            current_hover_observed_monotonic = None
             start_x = hand_p1[0]
             end_x = hand_p2[0]
 
@@ -7136,12 +7864,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         break
 
                 if self.log_reader.has_new_line(self.patterns['hover_id']):
-                    parsed = self.__parse_hover_id_line(
-                        self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                    hover_line = self.log_reader.get_latest_line_containing_pattern(
+                        self.patterns['hover_id']
                     )
+                    parsed, hover_source = self.__parse_hover_observation(hover_line)
                     if parsed is None:
                         continue
                     current_hovered_id = parsed
+                    current_hovered_source = hover_source
+                    current_hover_observed_monotonic = time.monotonic()
+                    if cast_ack_id is not None and current_hovered_id == card_id:
+                        with self.__cast_ack_lock:
+                            attempt_state = self.__cast_ack_attempts.get(cast_ack_id)
+                            if attempt_state is not None:
+                                attempt_state["hover_observed_monotonic"] = current_hover_observed_monotonic
+                                attempt_state["hover_observation"] = {
+                                    "hover_id": current_hovered_id,
+                                    "hover_source": current_hovered_source,
+                                }
                     # Seeing it proves it is in hand and reachable, so an earlier
                     # give-up on this id was wrong -- do not hold it against a
                     # card the mouse just passed over.
@@ -7166,7 +7906,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     )
                     break
 
-            clicked = current_hovered_id == card_id
+            clicked = (current_hovered_id == card_id
+                       and current_hovered_source == "local_fragment")
             click_position = None
             if clicked:
                 if not self.can_execute_game_action(expected_match_id):
@@ -7178,17 +7919,23 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     return False
                 click_pos = self.input.position()
                 click_position = (click_pos.x, click_pos.y)
-                bot_logger.log_click(click_pos.x, click_pos.y, f"CAST_CARD (id={card_id})")
                 time.sleep(0.5)
                 if not self.can_execute_game_action(expected_match_id):
                     return False
-                if cast_ack_id is not None:
-                    self.__note_cast_ack_pre_click(cast_ack_id, click_position)
-                self.input.left_click(1)
-                time.sleep(0.1)
-                if not self.can_execute_game_action(expected_match_id):
+                if not self.__cast_final_clicks(
+                    card_id, click_position=click_position, hand_p1=hand_p1,
+                    expected_match_id=expected_match_id,
+                    decision_context=decision_context, cast_ack_id=cast_ack_id,
+                    attempt=attempt,
+                    hover_observation={
+                        "hover_id": current_hovered_id,
+                        "hover_source": current_hovered_source,
+                    },
+                    hover_observed_monotonic=current_hover_observed_monotonic,
+                ):
                     return False
-                self.input.left_click(1)
+                # The exclusive input window ends with PRESS_2. This settling
+                # delay and its image capture are observational only.
                 time.sleep(0.7)
                 if cast_ack_id is not None:
                     self.__note_cast_ack_click(cast_ack_id, click_position)
@@ -7201,10 +7948,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     scan_end=hand_p2,
                     hovered_id=current_hovered_id,
                     click_position=click_position,
+                    hover_source=current_hovered_source,
+                    hover_observed_monotonic=current_hover_observed_monotonic,
                 )
 
             # Final reset position
-            if self.can_execute_game_action(expected_match_id):
+            if self.can_execute_game_action(expected_match_id) and not clicked:
                 reset_pos = (hand_p1[0], hand_p1[1] - 100)
                 bot_logger.log_move(reset_pos[0], reset_pos[1], "RESET_AFTER_CAST")
                 self.input.move_abs(reset_pos[0], reset_pos[1])
@@ -9351,6 +10100,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         self.__unreachable_cast_ids = {}
+        self.__cast_hover_failures = {}
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
@@ -9420,6 +10170,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
         self.__unreachable_cast_ids = {}
+        self.__cast_hover_failures = {}
         self.__pending_target_select = None
         self.__last_target_select_source_id = None
         self.__last_target_select_ts = 0.0

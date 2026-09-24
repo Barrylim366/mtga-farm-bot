@@ -711,8 +711,16 @@ class Game:
             # also already has its own retry-and-give-up handling in
             # Controller.__schedule_target_selection.
             _BREAKER_EXEMPT_MOVES = ('resolve', 'auto_pass', 'unconditional_auto_pass', 'select_target')
+            last_cast_abort = getattr(
+                self.controller, "get_last_cast_abort_reason", lambda: None
+            )()
+            cast_safety_wait = move_name == "cast" and last_cast_abort in {
+                "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
+                "cast_screen_blocked", "foreground_recovery_failed",
+            }
             if (
                 move_name not in _BREAKER_EXEMPT_MOVES
+                and not cast_safety_wait
                 and self._last_move_repeat_count >= self._STUCK_MOVE_RETRY_LIMIT
             ):
                 bot_logger.log_error(
@@ -812,9 +820,13 @@ class Game:
                             f"CAST_DEFERRED: target selection opened while casting card {inst_id}; "
                             "suppressing priority fallback."
                         )
-                    elif getattr(self.controller, "get_last_cast_abort_reason", lambda: None)() == "stale_decision_context":
+                    elif getattr(self.controller, "get_last_cast_abort_reason", lambda: None)() in {
+                        "stale_decision_context", "foreground_recovery_failed",
+                        "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
+                        "cast_screen_blocked", "cast_escape_retry_exhausted",
+                    }:
                         self._debug(
-                            f"CAST_STALE_CONTEXT: card {inst_id} was not clicked because the decision window changed."
+                            f"CAST_ABORTED: card {inst_id} was not clicked because the decision context or foreground became unsafe."
                         )
                         bot_logger.log_info(
                             f"CAST_STALE_CONTEXT: card {inst_id} cancelled; waiting for the recovery decision."

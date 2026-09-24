@@ -416,6 +416,83 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
         self.execute_cast(g)
         self.assertEqual(g.controller.calls, [("cast", 477)])
 
+    def test_safety_abort_does_not_let_repeat_guard_force_resolve(self):
+        class State:
+            def get_turn_info(inner):
+                return {
+                    "turnNumber": 3, "activePlayer": 2, "decisionPlayer": 2,
+                    "priorityPlayer": 2, "phase": "Phase_Main1", "step": "Step_Draw",
+                }
+
+            def get_actions(inner):
+                return [{"seatId": 2, "action": {
+                    "actionType": "ActionType_Cast", "instanceId": 477,
+                }}]
+
+            def get_full_state(inner):
+                return {
+                    "gameStateId": 50,
+                    "turnInfo": inner.get_turn_info(),
+                    "actions": inner.get_actions(),
+                }
+
+        class SafetyController(_StubController):
+            def __init__(inner):
+                super().__init__(False)
+                inner.last_abort = "cast_screen_blocked"
+
+            def get_current_match_id(inner):
+                return "match-1"
+
+            def reset_inactivity_timer(inner):
+                return None
+
+            def get_last_cast_abort_reason(inner):
+                return inner.last_abort
+
+            def get_inst_id_grp_id_dict(inner):
+                return {}
+
+            def should_defer_cast_for_target_selection(inner, _match):
+                return False
+
+            def cast(inner, inst_id, decision_context=None):
+                inner.calls.append(("cast", inst_id))
+                return False
+
+        game = GameModule.Game.__new__(GameModule.Game)
+        game._stop_requested = False
+        game.controller = SafetyController()
+        game.game_started = True
+        game._last_action_delay_turn = 3
+        game.last_logged_turn = 3
+        game.starting_hand_logged = True
+        game._last_move_signature = (
+            3, "Phase_Main1", "Step_Draw", 2, "cast", (477,),
+        )
+        game._last_move_repeat_count = 2
+        game.ai = SimpleNamespace(generate_move=lambda *_args: {"cast": [477]})
+        game._debug = lambda *_args, **_kwargs: None
+        game._get_card_id_str = lambda _inst_id: "test card"
+        game._recorder_seat = lambda: 2
+        game._recorder_match_id = lambda: "match-1"
+        fallback = []
+        game._pass_priority_on_uncastable = lambda *_args: fallback.append(True)
+        state = State()
+
+        with patch.object(GameModule.runtime_status, "clear_intentional_wait"), \
+             patch.object(GameModule.runtime_status, "set_mode"), \
+             patch.object(GameModule.runtime_status, "touch_decision"), \
+             patch.object(GameModule.bot_logger, "log_decision"), \
+             patch.object(GameModule.debug_recorder, "capture", return_value="snapshot"), \
+             patch.object(GameModule.debug_recorder, "attach_move"), \
+             patch.object(GameModule.CardInfo, "get_card_info", return_value=None):
+            game.decision_method(state)
+
+        self.assertEqual(game.controller.calls, [("cast", 477)])
+        self.assertEqual(fallback, [])
+        self.assertEqual(game._last_move_repeat_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
