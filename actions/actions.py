@@ -8,6 +8,30 @@ from typing import Callable
 from state.state_machine import BotState
 from vision.vision import VisionEngine
 
+try:
+    import cv2
+except Exception:  # pragma: no cover - cv2 is a hard dependency of the matcher
+    cv2 = None
+
+
+# Every ROI, point and template of an ActionSpec lives in the 1920x1080 client
+# reference frame -- that is the frame the templates were cut in and the
+# positions were measured in. The client is not always that size: a windowed
+# MTGA at 1366x768 (reported 2026-09-23, arena=(407, 165, 1366, 768)) has every
+# widget at 0.71x. These specs used to be applied to the arena unscaled, so on
+# such a client the boxes pointed at the wrong pixels and every 1920-sized
+# template was matched against a 0.71x screen -- home_anchor.png could not match
+# anywhere, POST_LOGIN_PLAY failed at step=pre_assert on every attempt, and
+# Historic never queued. The Starter flow worked on the same machine only because
+# it goes through the Controller's rescaled helpers.
+#
+# So: map every reference-frame box and point into the arena, and resize every
+# capture back to the reference frame before matching -- the same thing
+# Controller._locate_image_center_in_rescaled_region does. On a 1920x1080 client
+# both are the identity, and the behavior is exactly what it was.
+REF_W = 1920
+REF_H = 1080
+
 
 @dataclass(frozen=True)
 class ActionSpec:
@@ -152,11 +176,9 @@ def _already_satisfied(
     if not os.path.exists(spec.skip_if_template):
         return False
     vision.begin_tick()
-    return vision.assert_template(
-        _abs_region(arena, spec.skip_if_roi_rel),
-        spec.skip_if_template,
-        threshold=spec.threshold,
-    )
+    return _find_in_ref_region(
+        vision, arena, spec.skip_if_roi_rel, spec.skip_if_template, spec.threshold
+    ) is not None
 
 
 def _assert_anchor(
@@ -183,18 +205,13 @@ def _assert_anchor(
     never to a click template, where searching outside the intended box could put
     a real click on the wrong widget.
     """
-    if vision.assert_template(
-        _abs_region(arena, roi_rel), template, threshold=spec.threshold
-    ):
+    if _find_in_ref_region(vision, arena, roi_rel, template, spec.threshold) is not None:
         return True
-    full_rel = (0, 0, int(arena[2]), int(arena[3]))
+    full_rel = (0, 0, REF_W, REF_H)
     if tuple(roi_rel) == full_rel:
         return False
     vision.begin_tick()
-    match = None
-    image = vision.capture(_abs_region(arena, full_rel))
-    if image is not None:
-        match = vision.find_template(image, template, threshold=spec.threshold)
+    match = _find_in_ref_region(vision, arena, full_rel, template, spec.threshold)
     if match is None:
         return False
     if on_diagnostic is not None:
@@ -287,22 +304,20 @@ def _click_step(
     on_diagnostic: Callable[[str], None] | None = None,
 ) -> bool:
     if spec.click_rel is not None:
-        x = int(arena[0] + spec.click_rel[0])
-        y = int(arena[1] + spec.click_rel[1])
+        x, y = _abs_point(arena, spec.click_rel)
         click_abs(x, y, spec.name)
         return True
 
     if spec.click_template and spec.click_search_roi_rel and os.path.exists(spec.click_template):
-        search_abs = _abs_region(arena, spec.click_search_roi_rel)
         vision.begin_tick()
-        img = vision.capture(search_abs)
-        if img is not None:
-            match = vision.find_template(img, spec.click_template, threshold=spec.threshold)
-            if match is not None:
-                x = int(search_abs[0] + match.x)
-                y = int(search_abs[1] + match.y)
-                click_abs(x, y, spec.name)
-                return True
+        match = _find_in_ref_region(
+            vision, arena, spec.click_search_roi_rel, spec.click_template, spec.threshold
+        )
+        if match is not None:
+            rx, ry = spec.click_search_roi_rel[0], spec.click_search_roi_rel[1]
+            x, y = _abs_point(arena, (rx + match.x, ry + match.y))
+            click_abs(x, y, spec.name)
+            return True
         return _click_fallback(spec, arena, click_abs, on_diagnostic, searched=True)
 
     # No usable click template at all (none configured, or the asset is not in this
@@ -345,8 +360,7 @@ def _click_fallback(
                     )
                 )
             return False
-    x = int(arena[0] + spec.click_fallback_rel[0])
-    y = int(arena[1] + spec.click_fallback_rel[1])
+    x, y = _abs_point(arena, spec.click_fallback_rel)
     if on_diagnostic is not None:
         if searched:
             why = "click template {} did not match in roi_rel={} (threshold={:.2f})".format(
@@ -367,13 +381,58 @@ def _click_fallback(
     return True
 
 
+def _scale(arena: tuple[int, int, int, int]) -> tuple[float, float]:
+    return float(arena[2]) / REF_W, float(arena[3]) / REF_H
+
+
+def _abs_point(
+    arena: tuple[int, int, int, int],
+    rel_point: tuple[int, int],
+) -> tuple[int, int]:
+    """A reference-frame point, as a screen point inside `arena`."""
+    sx, sy = _scale(arena)
+    return (
+        int(round(arena[0] + rel_point[0] * sx)),
+        int(round(arena[1] + rel_point[1] * sy)),
+    )
+
+
 def _abs_region(
     arena_region: tuple[int, int, int, int],
     rel_region: tuple[int, int, int, int],
 ) -> tuple[int, int, int, int]:
+    """A reference-frame box, as the screen box it covers inside `arena`."""
+    sx, sy = _scale(arena_region)
+    left, top = _abs_point(arena_region, (rel_region[0], rel_region[1]))
     return (
-        int(arena_region[0] + rel_region[0]),
-        int(arena_region[1] + rel_region[1]),
-        int(rel_region[2]),
-        int(rel_region[3]),
+        left,
+        top,
+        max(1, int(round(rel_region[2] * sx))),
+        max(1, int(round(rel_region[3] * sy))),
     )
+
+
+def _find_in_ref_region(
+    vision: VisionEngine,
+    arena: tuple[int, int, int, int],
+    rel_region: tuple[int, int, int, int],
+    template: str,
+    threshold: float,
+):
+    """Match `template` inside a reference-frame box of the arena.
+
+    The capture is resized to the box's reference-frame size first, so the
+    1920x1080-cut template meets the screen at the scale it was cut at, and the
+    match comes back in coordinates relative to the box in the reference frame.
+    On a 1920x1080 arena there is nothing to resize and this is a plain
+    capture + find_template, exactly as before."""
+    image = vision.capture(_abs_region(arena, rel_region))
+    if image is None or getattr(image, "size", 0) == 0:
+        return None
+    ref_w, ref_h = max(1, int(rel_region[2])), max(1, int(rel_region[3]))
+    ih, iw = image.shape[:2]
+    if (int(arena[2]), int(arena[3])) != (REF_W, REF_H) and (iw, ih) != (ref_w, ref_h):
+        if cv2 is None:
+            return None
+        image = cv2.resize(image, (ref_w, ref_h), interpolation=cv2.INTER_LINEAR)
+    return vision.find_template(image, template, threshold=threshold)
