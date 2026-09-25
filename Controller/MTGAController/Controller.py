@@ -6791,6 +6791,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     def get_last_cast_abort_reason(self) -> str | None:
         return self.__last_cast_abort_reason
 
+    def __abort_cast_for_target_selection(
+        self, cast_ack_id: str | None, expected_match_id: str | None,
+    ) -> bool:
+        if not self.should_defer_cast_for_target_selection(expected_match_id):
+            return False
+        self.__last_cast_abort_reason = "target_selection_pending"
+        if cast_ack_id is not None:
+            self.__finish_cast_ack_without_click(cast_ack_id, "target_selection_pending")
+        return True
+
     def __cast_ack_signals(self, baseline: dict, current: dict) -> list[str]:
         """Return only evidence that the chosen card's cast actually progressed."""
         signals = []
@@ -7382,6 +7392,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         with scope as acquired:
             if acquired is False:
                 return self.__cast_safety_abort(cast_ack_id, card_id, "cast_input_busy")
+            if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                return False
             if not self.can_execute_game_action(expected_match_id):
                 self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_click")
                 return False
@@ -7424,6 +7436,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if not self.can_execute_game_action(expected_match_id):
                 self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_click")
                 return False
+            if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                return False
             if self.__abort_stale_cast_context(cast_ack_id, card_id, decision_context,
                                                "immediately_before_press_1", attempt):
                 return False
@@ -7462,6 +7476,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     hover_revalidated=False, hover_age_sec=round(max(0.0, hover_age), 4),
                     hover_observation=hover_observation,
                 )
+            if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                return False
             bot_logger.log_click(*click_position, f"CAST_CARD_PRESS_1 (id={card_id})")
             started = time.monotonic()
             dispatched = self.input.left_click(1)
@@ -7572,7 +7588,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__cast_ack_event("cast_retry_policy", card_id=int(card_id),
                                   action="suppress_duplicate_cast", reason="acknowledgement_pending")
             return False
-        if self.should_defer_cast_for_target_selection(expected_match_id):
+        if self.__abort_cast_for_target_selection(None, expected_match_id):
             return False
         if self._is_cast_suppressed(card_id):
             # Re-sweeping costs ~6.6s per attempt against the rope for a card the
@@ -7601,6 +7617,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # passes it ("No hover update before bounds"), so a single pass can miss
         # a card that is really in hand. Retry a couple of times after a pause.
         for attempt in range(len(self._CAST_SWEEP_PACING)):
+            if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                return False
             if self.__abort_stale_cast_context(
                 cast_ack_id, card_id, decision_context, "before_scan", attempt
             ):
@@ -7619,7 +7637,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if self.__last_cast_abort_reason in {
                 "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
                 "cast_screen_blocked", "foreground_recovery_failed",
-                "cast_hover_retry_exhausted",
+                "cast_hover_retry_exhausted", "target_selection_pending",
             }:
                 return False
             if not self.can_execute_game_action(expected_match_id):
@@ -7643,6 +7661,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 # so this visual probe is still the only way we can see it at all.
                 if not self.can_execute_game_action(expected_match_id):
                     self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_probe")
+                    return False
+                if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
                     return False
                 if self.__abort_stale_cast_context(
                     cast_ack_id, card_id, decision_context, "before_recovery_probe", attempt
@@ -7679,6 +7699,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if not self.can_execute_game_action(expected_match_id):
             self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_after_retries")
             return False
+        if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+            return False
         # All retries failed. Do NOT return silently: nothing we did changed the
         # game, so no fresh GameStateMessage arrives to re-trigger a decision and
         # the bot just idles until the rope (observed: 36s frozen while holding
@@ -7705,11 +7727,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         try:
             if not self.can_execute_game_action(expected_match_id):
                 return False
+            if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                return False
             if self.__abort_stale_cast_context(
                 cast_ack_id, card_id, decision_context, "scan_start", attempt
             ):
-                return False
-            if self.should_defer_cast_for_target_selection(expected_match_id):
                 return False
             if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
                 return False
@@ -7787,11 +7809,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             end_y = hand_p2[1]
 
             while current_hovered_id != card_id:
-                if (
-                    not self.can_execute_game_action(expected_match_id)
-                    or time.time() < self.__group_req_active_until
-                    or self.should_defer_cast_for_target_selection(expected_match_id)
-                ):
+                if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                    return False
+                if (not self.can_execute_game_action(expected_match_id)
+                        or time.time() < self.__group_req_active_until):
                     break
                 if self.__abort_stale_cast_context(
                     cast_ack_id, card_id, decision_context, "scan_loop", attempt
@@ -7817,6 +7838,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
                 # Inner loop: move until log updates or bounds hit
                 while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                    if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                        return False
                     if not self.can_execute_game_action(expected_match_id):
                         return False
                     if self.__abort_stale_cast_context(
@@ -7889,6 +7912,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                        and current_hovered_source == "local_fragment")
             click_position = None
             if clicked:
+                if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                    return False
                 if not self.can_execute_game_action(expected_match_id):
                     self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_before_probe")
                     return False
@@ -7899,6 +7924,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 click_pos = self.input.position()
                 click_position = (click_pos.x, click_pos.y)
                 time.sleep(0.5)
+                if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                    return False
                 if not self.can_execute_game_action(expected_match_id):
                     return False
                 if not self.__cast_final_clicks(

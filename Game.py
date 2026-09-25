@@ -701,6 +701,8 @@ class Game:
                 turn_num, phase, step, decision_player, move_name,
                 tuple(move_payload) if isinstance(move_payload, list) else move_payload,
             )
+            previous_move_signature = self._last_move_signature
+            previous_move_repeat_count = self._last_move_repeat_count
             if move_signature == self._last_move_signature:
                 self._last_move_repeat_count += 1
             else:
@@ -724,8 +726,13 @@ class Game:
             cast_safety_wait = move_name == "cast" and last_cast_abort in {
                 "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
                 "cast_screen_blocked", "foreground_recovery_failed",
-                "cast_ack_pending",
+                "cast_ack_pending", "target_selection_pending",
             }
+            if move_name == "cast" and not cast_safety_wait:
+                defer_for_breaker = getattr(
+                    self.controller, "should_defer_cast_for_target_selection", None
+                )
+                cast_safety_wait = callable(defer_for_breaker) and defer_for_breaker(expected_match_id)
             if (
                 move_name not in _BREAKER_EXEMPT_MOVES
                 and not cast_safety_wait
@@ -791,6 +798,8 @@ class Game:
                     self.controller, "should_defer_cast_for_target_selection", None
                 )
                 if callable(defer_cast) and defer_cast(expected_match_id):
+                    self._last_move_signature = previous_move_signature
+                    self._last_move_repeat_count = previous_move_repeat_count
                     self._debug(
                         f"CAST_DEFERRED: target selection is still blocking card {inst_id}."
                     )
@@ -805,7 +814,12 @@ class Game:
                     # A target prompt can arrive during the hand scan. Recheck
                     # before treating the failed click as an uncastable card.
                     blocked_now = callable(defer_cast) and defer_cast(expected_match_id)
-                    if blocked_now:
+                    abort_reason = getattr(
+                        self.controller, "get_last_cast_abort_reason", lambda: None
+                    )()
+                    if blocked_now or abort_reason == "target_selection_pending":
+                        self._last_move_signature = previous_move_signature
+                        self._last_move_repeat_count = previous_move_repeat_count
                         self._debug(
                             f"CAST_DEFERRED: target selection opened while casting card {inst_id}."
                         )
@@ -813,7 +827,7 @@ class Game:
                             f"CAST_DEFERRED: target selection opened while casting card {inst_id}; "
                             "suppressing priority fallback."
                         )
-                    elif getattr(self.controller, "get_last_cast_abort_reason", lambda: None)() in {
+                    elif abort_reason in {
                         "stale_decision_context", "foreground_recovery_failed",
                         "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
                         "cast_screen_blocked", "cast_escape_retry_exhausted",

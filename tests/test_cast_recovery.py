@@ -58,6 +58,8 @@ def make_controller() -> Controller:
     controller._Controller__system_seat_id = 1
     controller._get_state_from_log = lambda: BotState.IN_GAME
     controller._vision = None
+    controller._locate_image_center_in_scaled_arena_region = lambda *a, **k: None
+    controller._click_image_in_scaled_arena_region = lambda *a, **k: False
     return controller
 
 
@@ -198,6 +200,21 @@ class CastRecoveryTest(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(fake_input.clicks, [])
         self.assertEqual(self.controller.get_last_cast_abort_reason(), "cast_cursor_moved")
+
+    def test_target_prompt_after_hover_recheck_stops_before_first_press(self):
+        pending = [False]
+        self.controller.should_defer_cast_for_target_selection = lambda _match: pending[0]
+
+        def prompt_after_hover(_card_id):
+            pending[0] = True
+            return True, None
+
+        with mock.patch.object(self.controller, "_Controller__check_cast_hover_queue",
+                               side_effect=prompt_after_hover):
+            result, fake_input = self._run_final_clicks()
+        self.assertFalse(result)
+        self.assertEqual(fake_input.clicks, [])
+        self.assertEqual(self.controller.get_last_cast_abort_reason(), "target_selection_pending")
 
     def test_relayed_mismatched_hover_after_first_press_does_not_cancel_pair(self):
         result, fake_input = self._run_final_clicks(post_press_hover="relayed-other")

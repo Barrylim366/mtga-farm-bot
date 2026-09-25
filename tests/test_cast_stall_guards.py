@@ -47,6 +47,7 @@ class _FakeInput:
     def __init__(self):
         self._pos = _Pos(0, 0)
         self.moves = []
+        self.clicks = []
 
     def position(self):
         return self._pos
@@ -59,7 +60,7 @@ class _FakeInput:
         self._pos = _Pos(self._pos.x, self._pos.y)
 
     def left_click(self, n=1):
-        pass
+        self.clicks.append(n)
 
     # _click_abs uses the down/up pair, not left_click. Missing them is how this
     # harness used to blow up with AttributeError instead of failing cleanly --
@@ -168,6 +169,8 @@ class CastSuppressionTest(unittest.TestCase):
         """Silence is what let the decision loop wait for a state change that was
         never coming."""
         self.assertIs(self.cast(999), False)
+        self.assertTrue(self.c._is_cast_suppressed(999))
+        self.assertEqual(self.c.get_last_cast_abort_reason(), None)
 
     def test_a_second_attempt_does_not_sweep_the_hand_again(self):
         """Each sweep is ~6.6s of rope spent on a card the hand does not hold."""
@@ -216,6 +219,71 @@ class CastSuppressionTest(unittest.TestCase):
 
         self.assertFalse(self.c.cast(999))
         self.assertEqual(probes, [])
+        self.assertEqual(self.c.input.clicks, [])
+
+    def test_target_prompt_mid_scan_defers_without_suppression_or_rescue(self):
+        self.c._get_hand_scan_points_mapped = lambda **_k: ((0, 0), (30, 0))
+        pending = [False]
+        motions = []
+        self.c.should_defer_cast_for_target_selection = lambda _match: pending[0]
+        probes = []
+        events = []
+        self.c._Controller__cast_ack_event = lambda event, **details: events.append((event, details))
+        self.c._dismiss_are_you_sure_if_present = lambda **_k: probes.append("confirm")
+        self.c._dismiss_report_player_dialog = lambda **_k: probes.append("report")
+        self.c._dismiss_stray_done_overlay = lambda **_k: probes.append("done")
+        self.c._Controller__schedule_decision_recovery = lambda *_a: probes.append("recovery")
+
+        def move_rel(dx, dy):
+            motions.append((dx, dy))
+            self.c.input._pos = _Pos(self.c.input._pos.x + dx, self.c.input._pos.y + dy)
+            pending[0] = True
+
+        self.c.input.move_rel = move_rel
+        with patch("Controller.MTGAController.Controller._describe_foreground_window",
+                   return_value={"is_mtga": True}), patch("time.sleep", return_value=None):
+            self.assertFalse(self.c.cast(999))
+
+        self.assertEqual(self.c.get_last_cast_abort_reason(), "target_selection_pending")
+        self.assertFalse(self.c._is_cast_suppressed(999))
+        self.assertEqual(probes, [])
+        self.assertEqual(self.c.input.clicks, [])
+        self.assertEqual(len(motions), 1)
+        self.assertFalse(any(name == "cast_scan_failed" for name, _ in events))
+        self.assertEqual([details["reason"] for name, details in events
+                          if name == "cast_not_clicked"], ["target_selection_pending"])
+
+    def test_target_prompt_before_first_click_defers_without_click(self):
+        self.c._get_hand_scan_points_mapped = lambda **_k: ((0, 0), (30, 0))
+        pending = [False]
+        hover = [False]
+        self.c.should_defer_cast_for_target_selection = lambda _match: pending[0]
+        self.c.log_reader.has_new_line = lambda _pattern: hover[0]
+        self.c.log_reader.get_latest_line_containing_pattern = lambda _pattern: "target"
+        self.c._Controller__parse_hover_observation = lambda _line: (999, "local_fragment")
+        original_move_abs = self.c.input.move_abs
+
+        def move_abs(x, y):
+            original_move_abs(x, y)
+            if (x, y) == (0, 0):
+                hover[0] = True
+
+        self.c.input.move_abs = move_abs
+        sleeps = [0]
+
+        def prompt_on_click_pause(_seconds):
+            sleeps[0] += 1
+            if sleeps[0] == 2:
+                pending[0] = True
+
+        with patch("Controller.MTGAController.Controller._describe_foreground_window",
+                   return_value={"is_mtga": True}), patch("time.sleep", side_effect=prompt_on_click_pause):
+            self.assertFalse(self.c.cast(999))
+
+        self.assertEqual(self.c.get_last_cast_abort_reason(), "target_selection_pending")
+        self.assertFalse(self.c._is_cast_suppressed(999))
+        self.assertEqual(sleeps[0], 2)
+        self.assertEqual(self.c.input.clicks, [])
 
 
 class GameActionCancellationTest(unittest.TestCase):
@@ -603,6 +671,19 @@ class GameMoveRetryStateTest(unittest.TestCase):
         self.assertEqual(game._last_move_repeat_count, 2)
         self.decide(game, self.State(51))
         self.assertEqual(game.controller.calls, [("cast", 477), ("cast", 477)])
+        self.assertEqual(game._last_move_repeat_count, 1)
+
+    def test_closed_target_prompt_still_defers_without_breaker_count(self):
+        game = self.make_game([
+            (False, "target_selection_pending"),
+            (False, "target_selection_pending"),
+        ])
+        game._last_move_repeat_count = 1
+        original_signature = game._last_move_signature
+        self.decide(game, self.State(50))
+        self.decide(game, self.State(50))
+        self.assertEqual(game.controller.calls, [("cast", 477), ("cast", 477)])
+        self.assertEqual(game._last_move_signature, original_signature)
         self.assertEqual(game._last_move_repeat_count, 1)
 
 
