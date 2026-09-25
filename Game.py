@@ -717,6 +717,7 @@ class Game:
             cast_safety_wait = move_name == "cast" and last_cast_abort in {
                 "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
                 "cast_screen_blocked", "foreground_recovery_failed",
+                "cast_ack_pending",
             }
             if (
                 move_name not in _BREAKER_EXEMPT_MOVES
@@ -806,6 +807,7 @@ class Game:
                         "stale_decision_context", "foreground_recovery_failed",
                         "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
                         "cast_screen_blocked", "cast_escape_retry_exhausted",
+                        "cast_ack_pending",
                     }:
                         self._debug(
                             f"CAST_ABORTED: card {inst_id} was not clicked because the decision context or foreground became unsafe."

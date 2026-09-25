@@ -64,6 +64,17 @@ class GroupRecoveryTest(unittest.TestCase):
             if timer is not None and hasattr(timer, "cancel"):
                 timer.cancel()
 
+    def _set_recovery_decision(self, *, step="Step_Main"):
+        self.controller._suppress_selections = False
+        self.controller._stop_requested = False
+        self.controller.updated_game_state = GameState({
+            "gameStateId": 50,
+            "turnInfo": {
+                "turnNumber": 4, "phase": "Phase_Main1", "step": step,
+                "decisionPlayer": 1,
+            },
+        })
+
     def test_duplicate_group_prompt_does_not_replace_resume(self):
         with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer):
             self.controller._Controller__handle_group_req(group_line())
@@ -125,6 +136,54 @@ class GroupRecoveryTest(unittest.TestCase):
         self.assertFalse(group_timer.cancelled)
         self.assertEqual(group_timer.kwargs["prompt_seq"], 1)
         self.assertEqual(recovery_timer.kwargs["origin"], "modal_recovery")
+
+    def test_decision_recovery_retries_until_temporary_guard_clears(self):
+        self._set_recovery_decision()
+        ready = {"value": False}
+        self.controller._Controller__safe_to_redrive_decision = lambda: ready["value"]
+        calls = []
+        self.controller._Controller__invoke_decision_callback = (
+            lambda reason: calls.append(reason)
+        )
+        self.controller.reset_inactivity_timer = lambda: None
+
+        with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer), \
+             mock.patch("Controller.MTGAController.Controller.runtime_status.clear_intentional_wait"):
+            self.controller._Controller__schedule_decision_recovery(0.2, "modal_recovery")
+            first = self.controller._Controller__decision_recovery_timer
+            first.callback(**first.kwargs)
+            retry = self.controller._Controller__decision_recovery_timer
+            self.assertIsNot(retry, first)
+            self.assertEqual(retry.kwargs["match_id"], "match-1")
+            self.assertEqual(retry.kwargs["decision_key"], (4, "Phase_Main1", "Step_Main", 1))
+
+            ready["value"] = True
+            retry.callback(**retry.kwargs)
+
+        self.assertEqual(calls, ["modal recovery"])
+
+    def test_decision_recovery_stops_when_match_or_turn_decision_changes(self):
+        for change in ("match", "decision"):
+            with self.subTest(change=change):
+                _FakeTimer.instances = []
+                self._set_recovery_decision()
+                self.controller._Controller__safe_to_redrive_decision = lambda: True
+                calls = []
+                self.controller._Controller__invoke_decision_callback = (
+                    lambda reason: calls.append(reason)
+                )
+                with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer), \
+                     mock.patch("Controller.MTGAController.Controller.runtime_status.clear_intentional_wait"):
+                    self.controller._Controller__schedule_decision_recovery(0.2, "cast_failure")
+                    timer = self.controller._Controller__decision_recovery_timer
+                    if change == "match":
+                        self.controller._Controller__live_match_id = "match-2"
+                    else:
+                        self._set_recovery_decision(step="Step_Combat")
+                    timer.callback(**timer.kwargs)
+
+                self.assertEqual(calls, [])
+                self.assertIsNone(self.controller._Controller__decision_recovery_timer)
 
 
 if __name__ == "__main__":

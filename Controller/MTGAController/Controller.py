@@ -127,6 +127,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # hand-card clicks and modal overlays need a decision re-drive too, but
         # neither is evidence about a preceding scry/surveil prompt.
         self.__decision_recovery_timer = None
+        self.__decision_recovery_generation = 0
         self.__assign_damage_execution_thread = None
         self.__assign_damage_in_progress = False
         self.__mulligan_execution_thread = None
@@ -7418,11 +7419,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         ack_attempt["hover_source"] = (hover_observation or {}).get(
                             "hover_source"
                         )
-            pos = self.input.position()
-            actual = (int(pos.x), int(pos.y))
-            if max(abs(actual[0] - click_position[0]), abs(actual[1] - click_position[1])) > 2:
-                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_cursor_moved",
-                                                cursor_position=actual)
             if cast_ack_id is not None:
                 self.__note_cast_ack_pre_click(cast_ack_id, click_position)
             if not self.can_execute_game_action(expected_match_id):
@@ -7443,26 +7439,17 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     decision_context=decision_context, hover_revalidated=False,
                     hover_observation=newer_hover,
                 )
-            pos = self.input.position()
-            actual = (int(pos.x), int(pos.y))
-            if max(abs(actual[0] - click_position[0]), abs(actual[1] - click_position[1])) > 2:
-                return self.__cast_safety_abort(cast_ack_id, card_id, "cast_cursor_moved",
-                                                cursor_position=actual)
-            hover_age = time.monotonic() - hover_observed
-            if hover_age < 0 or hover_age > 1.5:
-                return self.__cast_safety_abort(
-                    cast_ack_id, card_id, "cast_hover_lost",
-                    hover_revalidated=False, hover_age_sec=round(max(0.0, hover_age), 4),
-                    hover_observation=hover_observation,
-                )
             if cast_ack_id is not None:
                 self.__cast_ack_event("cast_hover_revalidated", attempt_id=cast_ack_id,
                                       hover_id=card_id,
                                       hover_source=hover_observation.get("hover_source"),
                                       hover_age_sec=round(max(0.0, hover_age), 4),
                                       newer_hover=newer_hover,
-                                      cursor_position=actual,
+                                      cursor_position=click_position,
                                       input_transaction_owner=threading.get_ident())
+            # Recheck once after all snapshots and telemetry, immediately before
+            # press one. Earlier duplicate checks could become stale while those
+            # observations were collected.
             pos = self.input.position()
             actual = (int(pos.x), int(pos.y))
             if max(abs(actual[0] - click_position[0]), abs(actual[1] - click_position[1])) > 2:
@@ -12261,34 +12248,83 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__group_resume_timer.start()
 
     def __schedule_decision_recovery(self, delay: float, origin: str) -> None:
-        """Re-drive a non-group decision."""
+        """Re-drive the same decision after a temporary recovery blocker clears."""
         try:
             if self.__decision_recovery_timer is not None:
                 self.__decision_recovery_timer.cancel()
         except Exception:
             pass
+        self.__decision_recovery_generation += 1
+        generation = self.__decision_recovery_generation
+        match_id = self.__live_match_id or self.__last_seen_match_id
+        decision_key = self.__decision_recovery_key()
+        self.__arm_decision_recovery(
+            delay, str(origin), generation, match_id, decision_key,
+        )
+
+    def __decision_recovery_key(self):
+        """Identify the turn decision a recovery timer is allowed to resume."""
+        try:
+            turn = self.updated_game_state.get_turn_info() or {}
+        except Exception:
+            return None
+        keys = ("turnNumber", "phase", "step", "decisionPlayer")
+        values = tuple(turn.get(key) for key in keys)
+        return values if any(value is not None for value in values) else None
+
+    def __arm_decision_recovery(
+        self, delay: float, origin: str, generation: int,
+        match_id: str | None, decision_key,
+    ) -> None:
         self.__decision_recovery_timer = threading.Timer(
             max(0.2, float(delay)), self.__resume_decision_after_recovery,
-            kwargs={"origin": str(origin)},
+            kwargs={
+                "origin": origin,
+                "generation": generation,
+                "match_id": match_id,
+                "decision_key": decision_key,
+            },
         )
+        self.__decision_recovery_timer.daemon = True
         self.__decision_recovery_timer.start()
 
-    def __resume_decision_after_recovery(self, origin: str) -> None:
+    def __resume_decision_after_recovery(
+        self, origin: str, generation: int | None = None,
+        match_id: str | None = None, decision_key=None,
+    ) -> None:
         """Best-effort recovery for a non-group decision.
 
         This used to call the group/scry callback for both failed casts and
         modal overlays. Keeping it separate prevents an old group prompt from
-        claiming either kind of ordinary recovery.
+        claiming either kind of ordinary recovery. Temporary busy/prompt guards
+        rearm the callback while the match and decision identity remain stable.
         """
         try:
+            if (generation is not None
+                    and generation != self.__decision_recovery_generation):
+                return
             self.__decision_recovery_timer = None
             if self._stop_requested or self._suppress_selections:
+                return
+            current_match_id = self.__live_match_id or self.__last_seen_match_id
+            if generation is not None and current_match_id != match_id:
+                return
+            current_key = self.__decision_recovery_key()
+            if generation is not None and decision_key is not None and current_key != decision_key:
                 return
             if self.__decision_execution_thread is not None and getattr(
                 self.__decision_execution_thread, "is_alive", lambda: False
             )():
+                if generation is not None:
+                    self.__arm_decision_recovery(
+                        0.5, origin, generation, match_id, decision_key,
+                    )
                 return
             if not self.__safe_to_redrive_decision():
+                if generation is not None:
+                    self.__arm_decision_recovery(
+                        0.5, origin, generation, match_id, decision_key,
+                    )
                 return
             runtime_status.clear_intentional_wait()
             bot_logger.log_info(f"Re-driving decision after recovery origin={origin}.")

@@ -416,7 +416,7 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
         self.execute_cast(g)
         self.assertEqual(g.controller.calls, [("cast", 477)])
 
-    def test_safety_abort_does_not_let_repeat_guard_force_resolve(self):
+    def test_pending_cast_ack_does_not_pass_priority(self):
         class State:
             def get_turn_info(inner):
                 return {
@@ -439,7 +439,7 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
         class SafetyController(_StubController):
             def __init__(inner):
                 super().__init__(False)
-                inner.last_abort = "cast_screen_blocked"
+                inner.last_abort = "cast_ack_pending"
 
             def get_current_match_id(inner):
                 return "match-1"
