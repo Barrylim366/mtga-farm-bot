@@ -733,16 +733,6 @@ class Game:
                 self._last_move_signature = (turn_num, phase, step, decision_player, 'resolve', ())
                 self._last_move_repeat_count = 1
 
-            # TEMPORARY passive scry/surveil soak hook. It records the actual
-            # post-breaker move and current state but cannot replace the move or
-            # perform input. Remove with the [SOAK_GROUP_V1] instrumentation.
-            record_group_soak = getattr(self.controller, "record_group_soak_decision", None)
-            if callable(record_group_soak):
-                try:
-                    record_group_soak(move_name, move.get(move_name))
-                except Exception as e:
-                    self._debug(f"Group soak decision observation failed: {e}")
-
             runtime_status.touch_decision(
                 move_name=move_name,
                 turn_info={
@@ -800,14 +790,6 @@ class Game:
                     return
                 cast_context = self._cast_decision_context(cast_decision_base, inst_id)
                 cast_result = self.controller.cast(inst_id, decision_context=cast_context)
-                record_cast_result = getattr(
-                    self.controller, "record_group_soak_cast_result", None
-                )
-                if callable(record_cast_result):
-                    try:
-                        record_cast_result(inst_id, cast_result is not False)
-                    except Exception as e:
-                        self._debug(f"Group soak cast-result observation failed: {e}")
                 if cast_result is False:
                     # A target prompt can arrive during the hand scan. Recheck
                     # before treating the failed click as an uncastable card.

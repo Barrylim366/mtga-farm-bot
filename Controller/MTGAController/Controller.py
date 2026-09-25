@@ -127,10 +127,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # hand-card clicks and modal overlays need a decision re-drive too, but
         # neither is evidence about a preceding scry/surveil prompt.
         self.__decision_recovery_timer = None
-        # Set only while __invoke_decision_callback is executing. The passive
-        # group soak hook reads it synchronously from Game to identify what woke
-        # this particular decision (group resume vs. ordinary recovery).
-        self.__soak_group_decision_origin = None
         self.__assign_damage_execution_thread = None
         self.__assign_damage_in_progress = False
         self.__mulligan_execution_thread = None
@@ -460,7 +456,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # Target prompts are modal transactions.  Keep the transaction alive
         # until MTGA positively acknowledges it; an old annotation by itself
         # is not proof that the overlay disappeared.
-        self.__target_soak_last_event = None
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
@@ -529,18 +524,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_modal_choice_ts = 0.0
         self.__last_group_req_ts = 0.0
         self.__group_req_active_until = 0.0
-        # TEMPORARY soak-test telemetry for scry/surveil.  This is deliberately
-        # observational: it records what the existing click/decision paths do,
-        # but never suppresses, retries, or substitutes an action.  Remove the
-        # [SOAK_GROUP_V1] instrumentation after the overnight run is audited.
-        self.__soak_group_run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
-        self.__soak_group_seq = 0
-        self.__soak_group_context = None
-        self.__soak_group_raw_pending_count = None
-        self.__soak_group_raw_pending_state_id = None
-        # TEMPORARY observational probe for casts whose physical click does not
-        # result in an Arena acknowledgement. It never retries, suppresses, or
-        # changes a cast; it only follows the existing click to a later state.
+        self.__group_prompt_seq = 0
+        self.__group_prompt_match_id = None
+        self.__cast_ack_run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        # Track cast acknowledgement so ineffective presses can be recovered
+        # and repeated input is suppressed while the result is pending.
         self.__cast_ack_seq = 0
         self.__cast_ack_attempts = {}
         self.__cast_ack_lock = threading.RLock()
@@ -6551,7 +6539,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "card_prompt": self.__pending_card_prompt is not None,
                 "pay_costs": self.__should_pause_for_pay_costs(),
                 # Do not call __should_pause_for_casting_time_options here: that
-                # helper is allowed to clear an expired wait. This soak snapshot
+                # helper is allowed to clear an expired wait. This snapshot
                 # must be strictly observational.
                 "casting_options": bool(
                     self.__casting_time_options_until
@@ -6589,13 +6577,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         except Exception as exc:
             encoded = json.dumps({"event": str(event), "encoding_error": type(exc).__name__})
-        bot_logger.log_info(f"[SOAK_CAST_ACK_V3] {encoded}")
+        bot_logger.log_info(f"[CAST_ACK_V3] {encoded}")
 
     def __begin_cast_ack(self, card_id: int, expected_match_id: str | None,
                          decision_context: dict | None = None) -> str:
         with self.__cast_ack_lock:
             self.__cast_ack_seq += 1
-            attempt_id = f"{self.__soak_group_run_id}-cast-{self.__cast_ack_seq}"
+            attempt_id = f"{self.__cast_ack_run_id}-cast-{self.__cast_ack_seq}"
             snapshot = self.__cast_ack_snapshot(card_id)
             self.__cast_ack_attempts[attempt_id] = {
                 "attempt_id": attempt_id,
@@ -6887,9 +6875,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if self._arena_region is not None:
                     arena = self._vision.capture(self._arena_region)
                     self._vision.save_image(arena, str(debug_dir / "arena_region.png"))
-            bot_logger.log_error(f"SOAK_CAST_ACK_BUNDLE: {debug_dir}")
+            bot_logger.log_error(f"CAST_ACK_BUNDLE: {debug_dir}")
         except Exception as exc:
-            bot_logger.log_error(f"SOAK_CAST_ACK_BUNDLE_FAILED: {exc}")
+            bot_logger.log_error(f"CAST_ACK_BUNDLE_FAILED: {exc}")
 
     def __probe_cast_ack(self, attempt_id: str, final_probe: bool = False) -> None:
         with self.__cast_ack_lock:
@@ -7598,9 +7586,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                                   action="suppress_duplicate_cast", reason="acknowledgement_pending")
             return False
         if self.should_defer_cast_for_target_selection(expected_match_id):
-            self.__target_soak_event(
-                "cast_deferred", card_id=card_id, reason="target_transaction_active"
-            )
             return False
         if self._is_cast_suppressed(card_id):
             # Re-sweeping costs ~6.6s per attempt against the rope for a card the
@@ -7738,9 +7723,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             ):
                 return False
             if self.should_defer_cast_for_target_selection(expected_match_id):
-                self.__target_soak_event(
-                    "cast_deferred", card_id=card_id, reason="target_transaction_active"
-                )
                 return False
             if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
                 return False
@@ -8205,7 +8187,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_error(f"Failed to purge PlayerSelectingTargets annotations: {e}")
 
     def __clear_pending_target_select_state(self, reason: str) -> bool:
-        self.__target_soak_event("resolved", reason=reason)
         self.__purge_selecting_targets_annotations()
         had_target_select = self.__pending_target_select is not None
         if not had_target_select:
@@ -9539,35 +9520,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         bot_logger.log_info(f"CONCEDE_CLAIMED: reason={reason}")
         return True
 
-    def __target_soak_event(self, event: str, **details) -> None:
-        """Temporary target-modal telemetry for the next overnight soak run."""
-        try:
-            pending = self.__pending_target_select or {}
-            payload = {
-                "event": event,
-                "match_id": self.__live_match_id or self.__last_seen_match_id,
-                "source_id": pending.get("source_id"),
-                "target_id": pending.get("last_target"),
-                "token": pending.get("token"),
-                "attempt": pending.get("attempts", 0),
-                "game_state_id": self.__read_game_state_id(),
-                "selected": pending.get("selected"),
-                "min": pending.get("min"),
-                "max": pending.get("max"),
-                **details,
-            }
-            # Avoid duplicate heartbeat noise while retaining every meaningful
-            # lifecycle transition and retry.
-            signature = (event, payload.get("token"), payload.get("attempt"), details.get("reason"))
-            if event == "pause" and signature == self.__target_soak_last_event:
-                return
-            self.__target_soak_last_event = signature
-            bot_logger.log_info(
-                "[SOAK_TARGET_RECOVERY_V1] " + json.dumps(payload, default=str, sort_keys=True)
-            )
-        except Exception as exc:
-            bot_logger.log_error(f"Target soak telemetry failed: {exc}")
-
     def should_defer_cast_for_target_selection(self, expected_match_id=None) -> bool:
         """Return true while a local target prompt still owns the UI."""
         if expected_match_id is not None and not self.__is_live_match(expected_match_id):
@@ -9576,8 +9528,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             blocked = self.__pending_target_select is not None or self.__is_selecting_targets()
         except Exception:
             blocked = self.__pending_target_select is not None
-        if blocked:
-            self.__target_soak_event("pause", reason="cast_guard")
         return blocked
 
     def __attempt_stall_concede(self, arm_id=None, expected_signature=None,
@@ -10082,12 +10032,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     def reset_for_new_game(self):
         """Reset controller state for a new game - complete fresh start"""
         bot_logger.log_info("Resetting controller state for new game")
-        if self.__soak_group_context is not None:
-            self.__soak_group_event("context_reset", reason="reset_for_new_game")
         self.__clear_cast_ack_attempts("reset_for_new_game")
-        self.__soak_group_context = None
-        self.__soak_group_raw_pending_count = None
-        self.__soak_group_raw_pending_state_id = None
+        self.__group_prompt_seq += 1
+        self.__group_prompt_match_id = None
         self.__has_mulled_keep = False
         self.__system_seat_id = None
         self.__last_match_won = None
@@ -10154,12 +10101,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         preserve_retired_match_id: str | None = None,
     ) -> None:
         preserved_seat = preserve_system_seat_id if preserve_system_seat_id is not None else self.__system_seat_id
-        if self.__soak_group_context is not None:
-            self.__soak_group_event("context_reset", reason=reason)
         self.__clear_cast_ack_attempts("state_reset")
-        self.__soak_group_context = None
-        self.__soak_group_raw_pending_count = None
-        self.__soak_group_raw_pending_state_id = None
+        self.__group_prompt_seq += 1
+        self.__group_prompt_match_id = None
         self.__has_mulled_keep = False
         self.__concession_claimed = False
         self.__concession_claim_reason = None
@@ -10185,7 +10129,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_target_select_source_id = None
         self.__last_target_select_ts = 0.0
         self.__last_submit_targets_ts = 0.0
-        self.__target_soak_last_event = None
         self.__pending_select_n = None
         self.__select_n_in_progress = False
         self.__select_n_in_progress_since = 0.0
@@ -10395,14 +10338,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if outcome is not None:
                 self.__last_match_won = outcome
             self.__log_match_summary(line_containing_pattern)
-            if self.__soak_group_context is not None:
-                self.__soak_group_event(
-                    "match_ended",
-                    outcome=outcome,
-                    progress_logged=bool(self.__soak_group_context.get("progress_logged")),
-                    decision_count=self.__soak_group_context.get("decision_count", 0),
-                    anomalies=self.__soak_group_context.get("anomalies", []),
-                )
             self.__leave_live_match("match completed", outcome="match_completed")
             # A match was played -> reset the anti-storm switch guard.
             self._switches_without_match = 0
@@ -10466,7 +10401,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         elif pattern == self.patterns["client_select_targets_resp"]:
             bot_logger.log_info("CLIENT_EVENT: SelectTargetsResp sent — a target click registered in the MTGA client.")
             self.__last_submit_targets_ts = time.time()
-            self.__target_soak_event("click_acknowledged", reason="client_select_targets_resp")
             self.__clear_pending_target_select_state(
                 "Target selection cleared: client SelectTargetsResp acknowledgement received."
             )
@@ -12207,358 +12141,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception as e:
             bot_logger.log_error(f"Failed to handle modal choice: {e}")
 
-    # -- TEMPORARY scry/surveil soak instrumentation ---------------------
-    @staticmethod
-    def __soak_group_mana_total(mana_cost) -> int:
-        total = 0
-        for entry in mana_cost or []:
-            try:
-                total += int((entry or {}).get("count", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-        return total
-
-    @staticmethod
-    def __soak_group_source_colors(action: dict, inst_map: dict) -> list[str]:
-        color = CardInfo.get_mana_color_from_ability(action.get("abilityGrpId"))
-        if color:
-            return [str(color)]
-        # Do not call get_land_produced_colors here: its fallback can use the
-        # network, and diagnostics must add no latency under Arena's rope. Same
-        # assumption as DummyAI for an unresolved ability: wildcard source.
-        return ["black", "blue", "green", "red", "white"]
-
-    @staticmethod
-    def __soak_group_can_pay(mana_cost, sources: list[set[str]]) -> bool:
-        color_map = {
-            "ManaColor_White": "white", "ManaColor_Blue": "blue",
-            "ManaColor_Black": "black", "ManaColor_Red": "red",
-            "ManaColor_Green": "green", "ManaColor_Generic": "generic",
-        }
-        total_needed = 0
-        requirements: list[set[str]] = []
-        for entry in mana_cost or []:
-            try:
-                count = int((entry or {}).get("count", 0) or 0)
-            except (TypeError, ValueError):
-                count = 0
-            total_needed += count
-            options = {
-                color_map.get(value, "generic")
-                for value in ((entry or {}).get("color", []) or [])
-            }
-            if options and "generic" not in options:
-                requirements.extend([options] * count)
-        if len(sources) < total_needed:
-            return False
-        requirements.sort(key=lambda options: sum(bool(options & source) for source in sources))
-
-        def assign(index: int, used: set[int]) -> bool:
-            if index >= len(requirements):
-                return True
-            for source_index, source in enumerate(sources):
-                if source_index in used or not (requirements[index] & source):
-                    continue
-                used.add(source_index)
-                if assign(index + 1, used):
-                    return True
-                used.remove(source_index)
-            return False
-
-        return assign(0, set())
-
-    def __soak_group_snapshot(self) -> dict:
-        try:
-            state = self.updated_game_state.get_full_state() or {}
-        except Exception:
-            state = {}
-        zones = state.get("zones", []) or []
-        objects = state.get("gameObjects", []) or []
-        actions = state.get("actions", []) or []
-        my_seat = self.__system_seat_id
-        membership: dict[int, list[str]] = {}
-        hand_ids: set[int] = set()
-        stack_ids: list[int] = []
-        for zone in zones:
-            if not isinstance(zone, dict):
-                continue
-            zone_type = str(zone.get("type") or "")
-            ids = [value for value in (zone.get("objectInstanceIds", []) or []) if value is not None]
-            for instance_id in ids:
-                membership.setdefault(instance_id, []).append(zone_type)
-            if zone_type == "ZoneType_Hand" and zone.get("ownerSeatId") == my_seat:
-                hand_ids.update(ids)
-            if zone_type == "ZoneType_Stack":
-                stack_ids.extend(ids)
-        object_rows = {
-            obj.get("instanceId"): obj for obj in objects
-            if isinstance(obj, dict) and obj.get("instanceId") is not None
-        }
-        action_rows = []
-        action_ids: set[int] = set()
-        mana_rows = []
-        local_sources: list[set[str]] = []
-        all_sources: list[set[str]] = []
-        for wrapper in actions:
-            if not isinstance(wrapper, dict):
-                continue
-            action = wrapper.get("action", wrapper) or {}
-            if not isinstance(action, dict):
-                continue
-            seat_id = wrapper.get("seatId")
-            row = {
-                "seat_id": seat_id,
-                "type": action.get("actionType"),
-                "instance_id": action.get("instanceId"),
-                "grp_id": action.get("grpId"),
-                "mana_cost": action.get("manaCost", []) or [],
-                "ability_grp_id": action.get("abilityGrpId"),
-            }
-            action_rows.append(row)
-            if action.get("instanceId") is not None:
-                action_ids.add(action.get("instanceId"))
-            if action.get("actionType") != "ActionType_Activate_Mana":
-                continue
-            colors = self.__soak_group_source_colors(action, self.__inst_id_grp_id_dict)
-            source = set(colors)
-            all_sources.append(source)
-            if seat_id == my_seat:
-                local_sources.append(source)
-            mana_rows.append({
-                "seat_id": seat_id,
-                "instance_id": action.get("instanceId"),
-                "grp_id": action.get("grpId") or self.__inst_id_grp_id_dict.get(action.get("instanceId")),
-                "colors": colors,
-            })
-        turn = state.get("turnInfo", {}) or {}
-        relevant_ids = hand_ids | set(stack_ids) | action_ids
-        if self.__soak_group_context:
-            relevant_ids.update(self.__soak_group_context.get("instance_ids", []) or [])
-        return {
-            "game_state_id": state.get("gameStateId") or self.__read_game_state_id(),
-            "turn": {
-                key: turn.get(key) for key in (
-                    "turnNumber", "phase", "step", "activePlayer",
-                    "priorityPlayer", "decisionPlayer",
-                )
-            },
-            "my_seat": my_seat,
-            "hand_ids": sorted(hand_ids),
-            "stack_ids": sorted(set(stack_ids)),
-            "membership": {
-                str(key): sorted(set(value)) for key, value in membership.items()
-                if key in relevant_ids
-            },
-            "objects": {
-                str(key): {
-                    "grp_id": value.get("grpId"),
-                    "zone_id": value.get("zoneId"),
-                    "owner_seat_id": value.get("ownerSeatId"),
-                    "controller_seat_id": value.get("controllerSeatId"),
-                    "card_types": value.get("cardTypes", []) or [],
-                }
-                for key, value in object_rows.items() if key in relevant_ids
-            },
-            "actions": action_rows,
-            "mana_sources": mana_rows,
-            "local_mana_source_count": len(local_sources),
-            "all_mana_source_count": len(all_sources),
-            "raw_pending_message_count": self.__soak_group_raw_pending_count,
-            "raw_pending_state_id": self.__soak_group_raw_pending_state_id,
-        }
-
-    def __soak_group_event(self, event: str, **details) -> None:
-        context = self.__soak_group_context or {}
-        payload = {
-            "event": str(event),
-            "run_id": self.__soak_group_run_id,
-            "prompt_seq": context.get("prompt_seq"),
-            "match_id": context.get("match_id") or self.__live_match_id or self.__last_seen_match_id,
-            "context": context.get("context"),
-            "prompt_id": context.get("prompt_id"),
-            "source_id": context.get("source_id"),
-            "age_sec": round(max(0.0, time.monotonic() - context.get("started_monotonic", time.monotonic())), 3),
-        }
-        payload.update(details)
-        try:
-            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-        except Exception as exc:
-            encoded = json.dumps({"event": str(event), "encoding_error": type(exc).__name__})
-        bot_logger.log_info(f"[SOAK_GROUP_V1] {encoded}")
-
-    def __write_group_soak_bundle(self, payload: dict) -> None:
-        try:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            debug_dir = Path(bot_logger.ensure_debug_dir(f"group-soak-{stamp}"))
-            with (debug_dir / "group_soak_state.json").open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, default=str)
-            tail = self._state_tracker.get_tail(220)
-            if not tail:
-                tail = self._read_log_tail(self._log_path, max_bytes=250000)
-            with (debug_dir / "player_log_tail.txt").open("w", encoding="utf-8") as handle:
-                handle.write(tail or "")
-            if self._vision is not None:
-                self._vision.begin_tick()
-                full = self._vision.capture(None)
-                self._vision.save_image(full, str(debug_dir / "full_screen.jpg"))
-                if self._arena_region is not None:
-                    arena = self._vision.capture(self._arena_region)
-                    self._vision.save_image(arena, str(debug_dir / "arena_region.png"))
-            bot_logger.log_error(f"SOAK_GROUP_BUNDLE: {debug_dir}")
-        except Exception as exc:
-            bot_logger.log_error(f"SOAK_GROUP_BUNDLE_FAILED: {exc}")
-
-    def __soak_group_anomaly(self, anomaly: str, **details) -> None:
-        context = self.__soak_group_context
-        if not context:
-            return
-        anomalies = context.setdefault("anomalies", [])
-        if anomaly not in anomalies:
-            anomalies.append(anomaly)
-        self.__soak_group_event("anomaly", anomaly=anomaly, **details)
-        if context.get("bundle_written"):
-            return
-        context["bundle_written"] = True
-        payload = {
-            "anomaly": anomaly,
-            "details": details,
-            "context": context,
-            "snapshot": self.__soak_group_snapshot(),
-            "recent_clicks": self.__recent_clicks_for_bundle(),
-        }
-        try:
-            frozen = json.loads(json.dumps(payload, default=str))
-        except Exception:
-            frozen = payload
-        worker = threading.Thread(
-            target=self.__write_group_soak_bundle,
-            args=(frozen,),
-            name="GroupSoakBundle",
-            daemon=True,
-        )
-        worker.start()
-
-    def __note_soak_group_raw_state(self, raw_dict: dict) -> None:
-        try:
-            messages = raw_dict.get("greToClientEvent", {}).get("greToClientMessages", []) or []
-            newest_state_id = None
-            for message in messages:
-                if message.get("type") != "GREMessageType_GameStateMessage":
-                    continue
-                state = message.get("gameStateMessage", {}) or {}
-                state_id = state.get("gameStateId") or message.get("gameStateId")
-                if state_id is not None:
-                    newest_state_id = state_id
-                if "pendingMessageCount" in state:
-                    self.__soak_group_raw_pending_count = state.get("pendingMessageCount")
-                    self.__soak_group_raw_pending_state_id = state_id
-            context = self.__soak_group_context
-            if not context or newest_state_id is None:
-                return
-            if newest_state_id != context.get("start_state_id") and not context.get("progress_logged"):
-                context["progress_logged"] = True
-                self.__soak_group_event(
-                    "state_progress",
-                    from_state_id=context.get("start_state_id"),
-                    to_state_id=newest_state_id,
-                    raw_pending_message_count=self.__soak_group_raw_pending_count,
-                )
-        except Exception as exc:
-            bot_logger.log_error(f"SOAK_GROUP raw-state observation failed: {exc}")
-
-    def record_group_soak_decision(self, move_name: str, move_payload) -> None:
-        """TEMPORARY passive hook called by Game after the AI chooses a move."""
-        context = self.__soak_group_context
-        live_match = self.__live_match_id or self.__last_seen_match_id
-        if (
-            not context
-            or context.get("match_id") != live_match
-            or (time.monotonic() - context.get("started_monotonic", 0.0)) > 45.0
-        ):
-            return
-        snapshot = self.__soak_group_snapshot()
-        context["decision_count"] = int(context.get("decision_count", 0)) + 1
-        details = {
-            "decision_number": context["decision_count"],
-            "decision_origin": self.__soak_group_decision_origin or "state_update",
-            "move_name": move_name,
-            "move_payload": move_payload,
-            "snapshot": snapshot,
-        }
-        if move_name != "cast" or not isinstance(move_payload, list) or not move_payload:
-            self.__soak_group_event("post_group_decision", **details)
-            return
-        try:
-            instance_id = int(move_payload[0])
-        except (TypeError, ValueError):
-            self.__soak_group_event("post_group_decision", **details)
-            return
-        actions = [row for row in snapshot["actions"] if row.get("instance_id") == instance_id]
-        local_actions = [row for row in actions if row.get("seat_id") == snapshot.get("my_seat")]
-        selected_action = (local_actions or actions or [{}])[0]
-        mana_cost = selected_action.get("mana_cost", []) or []
-        local_source_sets = [
-            set(row.get("colors", []) or []) for row in snapshot["mana_sources"]
-            if row.get("seat_id") == snapshot.get("my_seat")
-        ]
-        all_source_sets = [set(row.get("colors", []) or []) for row in snapshot["mana_sources"]]
-        hand_member = instance_id in set(snapshot.get("hand_ids", []))
-        local_payable = self.__soak_group_can_pay(mana_cost, local_source_sets)
-        all_payable = self.__soak_group_can_pay(mana_cost, all_source_sets)
-        grp_id = selected_action.get("grp_id") or self.__inst_id_grp_id_dict.get(instance_id)
-        nominal_cmc = None
-        card_name = None
-        try:
-            card_info = CardInfo.get_card_info_local(int(grp_id)) if grp_id else None
-            if card_info:
-                card_name = card_info.get("name")
-                nominal_cmc = CardInfo.calculate_cmc(card_info.get("manaCost", "") or "")
-        except Exception:
-            pass
-        cast_details = {
-            "decision_number": context["decision_count"],
-            "decision_origin": self.__soak_group_decision_origin or "state_update",
-            "instance_id": instance_id,
-            "grp_id": grp_id,
-            "card_name": card_name,
-            "nominal_cmc": nominal_cmc,
-            "zones": snapshot.get("membership", {}).get(str(instance_id), []),
-            "hand_member": hand_member,
-            "action_seat_ids": sorted({row.get("seat_id") for row in actions}, key=repr),
-            "mana_cost": mana_cost,
-            "mana_total": self.__soak_group_mana_total(mana_cost),
-            "local_mana_source_count": len(local_source_sets),
-            "all_mana_source_count": len(all_source_sets),
-            "payable_with_local_sources": local_payable,
-            "payable_with_all_sources": all_payable,
-            "stack_ids": snapshot.get("stack_ids", []),
-            "raw_pending_message_count": snapshot.get("raw_pending_message_count"),
-            "game_state_id": snapshot.get("game_state_id"),
-        }
-        self.__soak_group_event("post_group_cast_selected", **cast_details)
-        if not hand_member:
-            self.__soak_group_anomaly("cast_not_in_hand", **cast_details)
-        if actions and not local_actions:
-            self.__soak_group_anomaly("cast_owned_by_other_seat", **cast_details)
-        if not local_payable and all_payable:
-            self.__soak_group_anomaly("affordable_only_with_foreign_mana", **cast_details)
-
-    def record_group_soak_cast_result(self, instance_id: int, clicked: bool) -> None:
-        context = self.__soak_group_context
-        live_match = self.__live_match_id or self.__last_seen_match_id
-        if (
-            not context
-            or context.get("match_id") != live_match
-            or (time.monotonic() - context.get("started_monotonic", 0.0)) > 45.0
-        ):
-            return
-        self.__soak_group_event(
-            "post_group_cast_result",
-            instance_id=instance_id,
-            clicked=bool(clicked),
-            decision_origin=self.__soak_group_decision_origin or "state_update",
-        )
-
     def __handle_group_req(self, line: str) -> None:
         """Scry / surveil / other ordered-grouping prompts. No reordering logic
         for now -- just click Done so the bot does not stall. Leaving the cards
@@ -12585,42 +12167,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 now = time.time()
                 if now - self.__last_group_req_ts < 2.0:
                     bot_logger.log_info("GroupReq ignored: duplicate within 2s window.")
-                    self.__soak_group_event(
-                        "duplicate_ignored",
-                        incoming_context=context,
-                        incoming_prompt_id=(message.get("prompt", {}) or {}).get("promptId"),
-                        incoming_source_id=group_req.get("sourceId"),
-                        incoming_instance_ids=group_req.get("instanceIds", []) or [],
-                    )
                     return
                 self.__last_group_req_ts = now
-                self.__soak_group_seq += 1
-                start_snapshot = self.__soak_group_snapshot()
-                self.__soak_group_context = {
-                    "prompt_seq": self.__soak_group_seq,
-                    "match_id": self.__live_match_id or self.__last_seen_match_id,
-                    "context": context,
-                    "prompt_id": (message.get("prompt", {}) or {}).get("promptId"),
-                    "source_id": group_req.get("sourceId"),
-                    "instance_ids": group_req.get("instanceIds", []) or [],
-                    "group_specs": group_req.get("groupSpecs", []) or [],
-                    "started_monotonic": time.monotonic(),
-                    "start_state_id": message.get("gameStateId") or start_snapshot.get("game_state_id"),
-                    "decision_count": 0,
-                    "progress_logged": False,
-                    "bundle_written": False,
-                    "anomalies": [],
-                    "start_snapshot": start_snapshot,
-                }
-                prompt_seq = self.__soak_group_seq
-                prompt_match_id = self.__soak_group_context["match_id"]
-                self.__soak_group_event(
-                    "prompt_received",
-                    instance_ids=self.__soak_group_context["instance_ids"],
-                    group_specs=self.__soak_group_context["group_specs"],
-                    start_state_id=self.__soak_group_context["start_state_id"],
-                    snapshot=start_snapshot,
-                )
+                self.__group_prompt_seq += 1
+                self.__group_prompt_match_id = self.__live_match_id or self.__last_seen_match_id
+                prompt_seq = self.__group_prompt_seq
+                prompt_match_id = self.__group_prompt_match_id
                 # A running decision/cast hand-scan moves the mouse and would
                 # race the Done click. Signal scans to abort and pause new
                 # decisions until the scry resolves.
@@ -12631,20 +12183,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 def _click_done() -> None:
                     try:
                         if self._suppress_selections or self._stop_requested:
-                            self.__soak_group_event("done_cancelled", reason="input_suppressed_or_stopped")
                             return
-                        current = self.__soak_group_context or {}
                         if (
-                            current.get("prompt_seq") != prompt_seq
-                            or current.get("match_id") != prompt_match_id
+                            self.__group_prompt_seq != prompt_seq
+                            or self.__group_prompt_match_id != prompt_match_id
                         ):
-                            self.__soak_group_anomaly(
-                                "late_done_callback",
-                                callback_prompt_seq=prompt_seq,
-                                current_prompt_seq=current.get("prompt_seq"),
-                                callback_match_id=prompt_match_id,
-                                current_match_id=current.get("match_id"),
-                            )
+                            return
                         # Locate the orange "Done" button by template first. The
                         # button is visually identical in scry and surveil but can
                         # sit at slightly different heights, so a single fixed pixel
@@ -12661,10 +12205,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                             confidence=0.78, timeout=1.5,
                         ):
                             bot_logger.log_info("GROUP_REQ Done click: matched scry_done.png template.")
-                            self.__soak_group_event(
-                                "done_attempt", method="template", click_reported=True,
-                                callback_prompt_seq=prompt_seq,
-                            )
                             return
                         # Fallback fixed coordinate (base 1920x1080), measured from
                         # real captures: scry's Done button centres at (960, 878),
@@ -12679,17 +12219,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         # which Unity registers reliably (a bare left_click can be
                         # dropped).
                         self._click_abs(int(target[0]), int(target[1]), "SCRY_DONE")
-                        self.__soak_group_event(
-                            "done_attempt", method="fixed_fallback", click_reported=True,
-                            base_point=base_point, target=target,
-                            callback_prompt_seq=prompt_seq,
-                        )
                     except Exception as e:
                         bot_logger.log_error(f"GroupReq Done click failed: {e}")
-                        self.__soak_group_event(
-                            "done_attempt", method="exception", click_reported=False,
-                            error=type(e).__name__, callback_prompt_seq=prompt_seq,
-                        )
 
                 # Let the scry overlay finish animating in before clicking.
                 threading.Timer(0.8, _click_done).start()
@@ -12711,9 +12242,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         match_id: str | None = None,
     ) -> None:
         """(Re)arm a resume that belongs to one specific group prompt."""
-        context = self.__soak_group_context or {}
-        prompt_seq = context.get("prompt_seq") if prompt_seq is None else prompt_seq
-        match_id = context.get("match_id") if match_id is None else match_id
+        prompt_seq = self.__group_prompt_seq if prompt_seq is None else prompt_seq
+        match_id = self.__group_prompt_match_id if match_id is None else match_id
         try:
             if self.__group_resume_timer is not None:
                 self.__group_resume_timer.cancel()
@@ -12731,7 +12261,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__group_resume_timer.start()
 
     def __schedule_decision_recovery(self, delay: float, origin: str) -> None:
-        """Re-drive a non-group decision without touching scry telemetry."""
+        """Re-drive a non-group decision."""
         try:
             if self.__decision_recovery_timer is not None:
                 self.__decision_recovery_timer.cancel()
@@ -12763,58 +12293,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             runtime_status.clear_intentional_wait()
             bot_logger.log_info(f"Re-driving decision after recovery origin={origin}.")
             self.reset_inactivity_timer()
-            self.__invoke_decision_callback(
-                str(origin).replace("_", " "), soak_origin=str(origin)
-            )
+            self.__invoke_decision_callback(str(origin).replace("_", " "))
         except Exception as e:
             bot_logger.log_error(f"Decision recovery failed ({origin}): {e}")
-
-    def __soak_group_resume_shadow_guard(self, snapshot: dict) -> None:
-        """Log the stricter post-group gate we may adopt later; never block input.
-
-        A non-empty stack can be a legal priority window, so this deliberately
-        records a recommendation instead of treating stack presence as a bug.
-        """
-        context = self.__soak_group_context or {}
-        turn = snapshot.get("turn", {}) or {}
-        my_seat = snapshot.get("my_seat")
-        raw_pending = snapshot.get("raw_pending_message_count")
-        pending_is_current = str(snapshot.get("raw_pending_state_id")) == str(
-            snapshot.get("game_state_id")
-        )
-        try:
-            pending_positive = int(raw_pending or 0) > 0
-        except (TypeError, ValueError):
-            pending_positive = bool(raw_pending)
-        action_types = [row.get("type") for row in snapshot.get("actions", [])]
-        decision_is_ours = my_seat is not None and turn.get("decisionPlayer") == my_seat
-        priority_is_ours = my_seat is not None and turn.get("priorityPlayer") == my_seat
-        stack_present = bool(snapshot.get("stack_ids"))
-        if pending_positive and pending_is_current:
-            recommendation = "wait_for_current_raw_pending"
-        elif stack_present and decision_is_ours and (
-            "ActionType_Pass" in action_types or bool(action_types)
-        ):
-            recommendation = "allow_legal_stack_priority"
-        elif stack_present:
-            recommendation = "wait_for_stack_resolution"
-        else:
-            recommendation = "allow_clean_priority"
-        self.__soak_group_event(
-            "resume_shadow_guard",
-            mode="observe_only",
-            recommendation=recommendation,
-            decision_is_ours=decision_is_ours,
-            priority_is_ours=priority_is_ours,
-            stack_present=stack_present,
-            stack_count=len(snapshot.get("stack_ids", []) or []),
-            pass_available="ActionType_Pass" in action_types,
-            action_count=len(action_types),
-            raw_pending_message_count=raw_pending,
-            raw_pending_state_id=snapshot.get("raw_pending_state_id"),
-            raw_pending_is_current=pending_is_current,
-            context_active=bool(context),
-        )
 
     def __resume_decision_after_group_req(
         self,
@@ -12829,48 +12310,26 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         with no decision already in flight."""
         try:
             self.__group_resume_timer = None
-            snapshot = self.__soak_group_snapshot()
-            context = self.__soak_group_context or {}
             if (
-                context.get("prompt_seq") != prompt_seq
-                or context.get("match_id") != match_id
+                self.__group_prompt_seq != prompt_seq
+                or self.__group_prompt_match_id != match_id
             ):
-                self.__soak_group_event(
-                    "resume_rejected",
-                    reason="stale_prompt_or_match",
-                    callback_prompt_seq=prompt_seq,
-                    callback_match_id=match_id,
-                    current_prompt_seq=context.get("prompt_seq"),
-                    current_match_id=context.get("match_id"),
-                )
                 return
-            self.__soak_group_event(
-                "resume_timer_fired",
-                attempts=attempts,
-                callback_prompt_seq=prompt_seq,
-                callback_match_id=match_id,
-                snapshot=snapshot,
-            )
-            self.__soak_group_resume_shadow_guard(snapshot)
             if self._stop_requested or self._suppress_selections:
-                self.__soak_group_event("resume_rejected", reason="input_suppressed_or_stopped")
                 return
             # Still inside the scry/group window (or a new one arrived): wait it out.
             if time.time() < self.__group_req_active_until:
-                self.__soak_group_event("resume_deferred", reason="group_window_active")
                 self.__schedule_group_resume(0.6, attempts, prompt_seq, match_id)
                 return
             # A normal GameStateMessage already re-armed a decision: nothing to do.
             if self.__decision_execution_thread is not None and getattr(
                 self.__decision_execution_thread, "is_alive", lambda: False
             )():
-                self.__soak_group_event("resume_rejected", reason="decision_already_alive")
                 return
             # Targets/assign-damage pauses clear on their own; give them a bounded
             # number of retries before giving up, same as before this predicate was
             # unified with the heartbeat's (see __safe_to_redrive_decision).
             if (self.__should_pause_for_targets() or self.__should_pause_for_assign_damage()) and attempts < 8:
-                self.__soak_group_event("resume_deferred", reason="target_or_damage_pause")
                 self.__schedule_group_resume(0.8, attempts + 1, prompt_seq, match_id)
                 return
             # Shared guard (also used by the heartbeat): seat known, mulligan kept,
@@ -12880,46 +12339,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # gap where a PayCostsReq or SelectNReq shortly after the scry window
             # used to let this timer fire a decision into an open selection prompt.
             if not self.__safe_to_redrive_decision():
-                self.__soak_group_event("resume_rejected", reason="safe_to_redrive_false")
                 return
-            if snapshot.get("stack_ids"):
-                self.__soak_group_anomaly(
-                    "resume_with_stack", stack_ids=snapshot.get("stack_ids"),
-                    raw_pending_message_count=snapshot.get("raw_pending_message_count"),
-                    game_state_id=snapshot.get("game_state_id"),
-                )
-            pending_is_current = str(snapshot.get("raw_pending_state_id")) == str(
-                snapshot.get("game_state_id")
-            )
-            if (
-                snapshot.get("raw_pending_message_count") not in (None, 0)
-                and pending_is_current
-            ):
-                self.__soak_group_anomaly(
-                    "resume_with_pending_messages",
-                    raw_pending_message_count=snapshot.get("raw_pending_message_count"),
-                    raw_pending_state_id=snapshot.get("raw_pending_state_id"),
-                )
-            elif snapshot.get("raw_pending_message_count") not in (None, 0):
-                self.__soak_group_event(
-                    "stale_pending_observation",
-                    raw_pending_message_count=snapshot.get("raw_pending_message_count"),
-                    raw_pending_state_id=snapshot.get("raw_pending_state_id"),
-                    current_state_id=snapshot.get("game_state_id"),
-                )
-            if not (self.__soak_group_context or {}).get("progress_logged"):
-                self.__soak_group_anomaly(
-                    "done_without_progress",
-                    start_state_id=(self.__soak_group_context or {}).get("start_state_id"),
-                    current_state_id=snapshot.get("game_state_id"),
-                )
             runtime_status.clear_intentional_wait()
             bot_logger.log_info(
                 "Resuming decision after scry/group prompt (no fresh GameStateMessage arrived)."
             )
             self.reset_inactivity_timer()
-            self.__soak_group_event("resume_invoked", callback_origin="group_resume")
-            self.__invoke_decision_callback("group/scry resume", soak_origin="group_resume")
+            self.__invoke_decision_callback("group/scry resume")
         except Exception as e:
             bot_logger.log_error(f"Resume-after-group decision failed: {e}")
 
@@ -14131,7 +13557,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             )
         return False
 
-    def __invoke_decision_callback(self, reason: str, *, soak_origin: str | None = None) -> bool:
+    def __invoke_decision_callback(self, reason: str) -> bool:
         """Run the AI decision (and its mouse work) under __decision_exec_lock.
 
         Skips rather than queues when a decision is already executing: the game
@@ -14145,8 +13571,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 f"Decision skipped: another decision is already executing ({reason})."
             )
             return False
-        previous_origin = self.__soak_group_decision_origin
-        self.__soak_group_decision_origin = soak_origin or reason
         try:
             self.__decision_callback(self.updated_game_state)
             return True
@@ -14154,7 +13578,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # Stamp on completion, so the heartbeat measures idle time since the
             # decision actually finished (a cast's hand scan runs for seconds).
             self.__last_decision_ts = time.time()
-            self.__soak_group_decision_origin = previous_origin
             self.__decision_exec_lock.release()
 
     # Modal "Choose one" spells whose SECOND (right) plate is the mode we want.
@@ -14685,8 +14108,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if allow_cancel is not _TARGET_FIELD_UNSET:
             pending["allow_cancel"] = allow_cancel
         self.__pending_target_select = pending
-        if is_new:
-            self.__target_soak_event("opened", source_id=source_id)
 
     def __get_effective_decision_delay(self) -> float:
         delay = max(0.0, float(self.__decision_delay or 0.0))
@@ -15212,7 +14633,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             "select_target", "target_creature",
             {"target": creature_id, "side": side, "source": source_id, "reason": reason},
         )
-        self.__target_soak_event("target_chosen", target_id=creature_id, side=side)
 
         def _valid() -> bool:
             pending = self.__pending_target_select or {}
@@ -15223,7 +14643,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return
             if self.__pending_target_ready_to_submit():
                 self.__last_submit_targets_ts = time.time()
-                self.__target_soak_event("submit_attempt", attempt=attempt)
                 submitted = self.submit_selection(
                     reason="creature_target_submit",
                     expected_match_id=expected_match_id,
@@ -15245,15 +14664,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 threading.Timer(0.7, _confirm_if_still_valid).start()
                 return
             if attempt < 2:
-                self.__target_soak_event("retry_scheduled", attempt=attempt + 1)
                 threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
             else:
-                self.__target_soak_event("retry_exhausted", reason="target_not_acknowledged")
                 self.__write_target_debug_bundle("target_click_ack_timeout")
                 if (self.__pending_target_select or {}).get("allow_cancel") == "AllowCancel_Abort":
                     if _valid() and self.can_execute_game_action(expected_match_id):
                         try:
-                            self.__target_soak_event("cancel_attempt", reason="retry_exhausted")
                             self.input.tap_escape()
                         except Exception as exc:
                             bot_logger.log_error(f"Target cancellation failed: {exc}")
@@ -15272,7 +14688,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_info(
                 f"CREATURE_TARGET click: id={creature_id} side={side} found={clicked} attempt={attempt}"
             )
-            self.__target_soak_event("target_click", target_id=creature_id, clicked=clicked, attempt=attempt)
             threading.Timer(0.5, lambda: _attempt_submit(attempt)).start()
 
         delay_remaining = self.__get_delay_timer_remaining()
@@ -17112,10 +16527,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__inst_id_grp_id_dict[instance_id] = grp_id
 
     def __update_game_state(self, raw_dict: dict):
-        # TEMPORARY soak probe: retain raw pendingMessageCount/state progress for
-        # correlation only. GameState.GAME_STATE_KEYS intentionally does not
-        # carry pendingMessageCount today; this does not change that behavior.
-        self.__note_soak_group_raw_state(raw_dict)
         incoming_match_id = self.__extract_match_id_from_raw_dict(raw_dict)
         if (
             incoming_match_id

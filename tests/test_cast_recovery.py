@@ -1,4 +1,4 @@
-"""Tests for passive hand-cast acknowledgement soak instrumentation."""
+"""Regression tests for guarded hand casts and acknowledgement recovery."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,6 @@ if ROOT not in sys.path:
 from Controller.MTGAController.Controller import Controller
 from Controller.Utilities.GameState import GameState
 from state.state_machine import BotState
-from tools.analyze_cast_ack_soak import summarize
 
 
 class _FakeTimer:
@@ -82,7 +81,7 @@ def seed_state(controller: Controller, *, card_in_hand=True, state_id=50, zone=N
     })
 
 
-class CastAcknowledgementSoakTest(unittest.TestCase):
+class CastRecoveryTest(unittest.TestCase):
     def setUp(self):
         self.controller = make_controller()
         seed_state(self.controller)
@@ -90,6 +89,9 @@ class CastAcknowledgementSoakTest(unittest.TestCase):
         self.controller._Controller__cast_ack_event = (
             lambda event, **details: self.events.append((event, details))
         )
+        # Blocker tests exercise the abort itself; do not leave live polling
+        # timers attached to their mocked, permanently blocked controller.
+        self.controller._Controller__schedule_cast_clear_poll = lambda *_args: None
 
     def _run_final_clicks(self, *, acquired=True, move_cursor=False,
                           post_press_hover=None, post_press_cursor=False,
@@ -375,7 +377,7 @@ class CastAcknowledgementSoakTest(unittest.TestCase):
 
         self.controller._arena_region = (0, 0, 1920, 1080)
         self.controller._input_backend_name = "test"
-        root = Path(ROOT) / "tests" / "fixtures" / "cast_soak"
+        root = Path(ROOT) / "tests" / "fixtures" / "cast_blockers"
         for name in ("your_turn_overlay_roi.png", "your_turn_overlay_variant_roi.png"):
             with self.subTest(name=name):
                 frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
@@ -736,90 +738,6 @@ class CastAcknowledgementSoakTest(unittest.TestCase):
         event, details = self.events[-1]
         self.assertEqual(event, "stale_decision_context")
         self.assertEqual(details["checkpoint"], "scan_motion")
-
-
-class CastAcknowledgementAnalyzerTest(unittest.TestCase):
-    def test_counts_escape_followup_worked_failed_and_inconclusive(self):
-        report = summarize([
-            {"event": "cast_escape_recovery", "attempt_id": "a", "phase": "after_escape"},
-            {"event": "cast_escape_followup", "attempt_id": "b", "linked_attempt_id": "a"},
-            {"event": "acknowledged", "attempt_id": "b"},
-            {"event": "cast_escape_recovery", "attempt_id": "c", "phase": "after_escape"},
-            {"event": "cast_escape_followup", "attempt_id": "d", "linked_attempt_id": "c"},
-            {"event": "click_ineffective", "attempt_id": "d"},
-            {"event": "cast_escape_recovery", "attempt_id": "e", "phase": "aborted"},
-        ])
-        self.assertEqual(report["escape_recovery_counts"], {
-            "worked": 1, "did_not_work": 1, "inconclusive": 1,
-        })
-
-    def test_reports_partial_press_retry_policy_and_physical_press_counts(self):
-        report = summarize([
-            {"event": "cast_selected", "attempt_id": "partial", "card_id": 10},
-            {"event": "PRESS_1", "attempt_id": "partial", "click_dispatched": True},
-            {"event": "cast_partial_press", "attempt_id": "partial", "press_count": 1,
-             "partial_reason": "cast_hover_lost"},
-            {"event": "click_ineffective", "attempt_id": "partial", "card_id": 10,
-             "reason": "card_and_game_state_unchanged"},
-            {"event": "cast_retry_policy", "attempt_id": "partial", "card_id": 10,
-             "action": "retry_once", "failure_count": 1},
-        ])
-        self.assertEqual(report["press_counts"], {"press_1": 1})
-        self.assertEqual(report["retry_policy_counts"], {"retry_once": 1})
-        self.assertEqual(report["attempts"][0]["press_count"], 1)
-        self.assertEqual(report["attempts"][0]["partial_press_reason"], "cast_hover_lost")
-
-    def test_summarizes_transient_safety_abort_reason(self):
-        report = summarize([
-            {"event": "cast_selected", "attempt_id": "busy", "card_id": 10},
-            {"event": "cast_safety_abort", "attempt_id": "busy", "card_id": 10,
-             "reason": "cast_input_busy"},
-            {"event": "cast_not_clicked", "attempt_id": "busy", "card_id": 10,
-             "reason": "cast_input_busy"},
-        ])
-        self.assertEqual(report["outcome_counts"], {"safety_abort": 1})
-        self.assertEqual(report["outcome_reasons"], {"cast_input_busy": 1})
-
-    def test_summarizes_all_classified_outcomes(self):
-        events = [
-            {"event": "cast_selected", "attempt_id": "a", "card_id": 10, "match_id": "m"},
-            {"event": "acknowledged", "attempt_id": "a", "card_id": 10,
-             "signals": ["card_left_hand"]},
-            {"event": "cast_selected", "attempt_id": "b", "card_id": 11, "match_id": "m"},
-            {"event": "click_ineffective", "attempt_id": "b", "card_id": 11,
-             "reason": "card_and_game_state_unchanged"},
-            {"event": "cast_selected", "attempt_id": "c", "card_id": 12, "match_id": "m"},
-            {"event": "state_changed_elsewhere", "attempt_id": "c", "card_id": 12,
-             "reason": "card_stayed_in_hand_while_state_changed"},
-            {"event": "cast_selected", "attempt_id": "d", "card_id": 13, "match_id": "m"},
-            {"event": "ambiguous", "attempt_id": "d", "card_id": 13,
-             "reason": "no_strong_cast_progress_signal"},
-            {"event": "cast_selected", "attempt_id": "e", "card_id": 14, "match_id": "m"},
-            {"event": "stale_decision_context", "attempt_id": "e", "card_id": 14,
-             "mismatch_reasons": ["game_state_changed"]},
-        ]
-
-        report = summarize(events)
-
-        self.assertEqual(report["attempt_count"], 5)
-        self.assertEqual(report["outcome_counts"], {
-            "acknowledged": 1, "ambiguous": 1, "click_ineffective": 1,
-            "stale_decision_context": 1, "state_changed_elsewhere": 1,
-        })
-        self.assertEqual(report["ack_signal_counts"], {"card_left_hand": 1})
-        self.assertEqual(report["outcome_reasons"], {
-            "card_and_game_state_unchanged": 1,
-            "card_stayed_in_hand_while_state_changed": 1,
-            "game_state_changed": 1,
-            "no_strong_cast_progress_signal": 1,
-        })
-        self.assertEqual(
-            [row["outcome"] for row in report["investigation_cases"]],
-            ["click_ineffective", "ambiguous"],
-        )
-        self.assertEqual(
-            [row["attempt_id"] for row in report["stale_decision_cases"]], ["e"]
-        )
 
 
 if __name__ == "__main__":

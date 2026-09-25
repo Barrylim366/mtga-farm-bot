@@ -287,6 +287,8 @@ class SafeToRedriveDecisionTest(unittest.TestCase):
         self.addCleanup(_cleanup_controller, c)
         c._Controller__system_seat_id = 1
         c._Controller__has_mulled_keep = True
+        c._Controller__group_prompt_seq = 1
+        c._Controller__group_prompt_match_id = "test-match-1"
         seed_state(c, decision_player=1, active_player=1)
         return c
 
@@ -318,7 +320,7 @@ class SafeToRedriveDecisionTest(unittest.TestCase):
         invoked = []
         c._Controller__decision_callback = lambda *a, **k: invoked.append((a, k))
 
-        c._Controller__resume_decision_after_group_req()
+        c._Controller__resume_decision_after_group_req(prompt_seq=1, match_id="test-match-1")
 
         self.assertEqual(invoked, [], "resume must not invoke the decision callback while pay costs is pending")
 
@@ -328,7 +330,7 @@ class SafeToRedriveDecisionTest(unittest.TestCase):
         invoked = []
         c._Controller__decision_callback = lambda *a, **k: invoked.append((a, k))
 
-        c._Controller__resume_decision_after_group_req()
+        c._Controller__resume_decision_after_group_req(prompt_seq=1, match_id="test-match-1")
 
         self.assertEqual(invoked, [], "resume must not invoke the decision callback while a SelectN prompt is open")
 
@@ -337,7 +339,7 @@ class SafeToRedriveDecisionTest(unittest.TestCase):
         invoked = []
         c._Controller__decision_callback = lambda *a, **k: invoked.append((a, k))
 
-        c._Controller__resume_decision_after_group_req()
+        c._Controller__resume_decision_after_group_req(prompt_seq=1, match_id="test-match-1")
 
         self.assertEqual(len(invoked), 1)
 

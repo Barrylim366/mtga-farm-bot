@@ -1,4 +1,4 @@
-"""Summarize temporary V2/V3 cast acknowledgement telemetry.
+"""Summarize cast acknowledgement and Escape recovery diagnostics.
 
 Read-only. It groups each attempted hand-card cast by its attempt id, reports
 which acknowledgement signal arrived, and lists genuine/ambiguous failures.
@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 from runtime_paths import runtime_file
 
 
-MARKERS = ("[SOAK_CAST_ACK_V3] ", "[SOAK_CAST_ACK_V2] ")
+MARKERS = ("[CAST_ACK_V3] ", "[SOAK_CAST_ACK_V3] ", "[SOAK_CAST_ACK_V2] ")
 TIMESTAMP_RE = re.compile(r"^\[(?P<timestamp>[^]]+)]")
 
 
