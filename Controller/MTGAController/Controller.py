@@ -14222,6 +14222,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             pending["max"] = max_t
         if selected is not _TARGET_FIELD_UNSET:
             pending["selected"] = selected
+            try:
+                int(selected)
+            except (TypeError, ValueError):
+                pass
+            else:
+                pending["selected_update_seq"] = pending.get("selected_update_seq", 0) + 1
         if allow_cancel is not _TARGET_FIELD_UNSET:
             pending["allow_cancel"] = allow_cancel
         self.__pending_target_select = pending
@@ -14735,10 +14741,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_target_select_source_id = source_id if source_id is not None else -1
         self.__last_target_select_ts = now
         self.__update_pending_target_select(source_id)
+        pending = self.__pending_target_select or {}
+        if (pending.get("creature_target_flow_active")
+                and pending.get("creature_target_flow_target") == creature_id):
+            return
         # Which creature this prompt is aimed at, so a cancelled confirm knows what
         # to blacklist.
         if self.__pending_target_select is not None:
             self.__pending_target_select["last_target"] = creature_id
+            self.__pending_target_select["creature_target_flow_target"] = creature_id
+            self.__pending_target_select["creature_target_flow_active"] = True
         selection_token = (self.__pending_target_select or {}).get("token")
         side = "friendly" if friendly else "enemy"
         # Price the target's ward now, while the board and the mana are both
@@ -14753,9 +14765,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         def _valid() -> bool:
             pending = self.__pending_target_select or {}
-            return pending.get("source_id") == source_id and pending.get("token") == selection_token
+            return (pending.get("source_id") == source_id
+                    and pending.get("token") == selection_token
+                    and pending.get("creature_target_flow_target") == creature_id)
 
-        def _attempt_submit(attempt: int = 0) -> None:
+        def _attempt_submit(attempt: int = 0, *, clicked: bool = False,
+                            selected_update_seq: int = 0,
+                            acknowledgement_deadline: float | None = None) -> None:
             if not _valid():
                 return
             if self.__pending_target_ready_to_submit():
@@ -14779,6 +14795,26 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     )
 
                 threading.Timer(0.7, _confirm_if_still_valid).start()
+                return
+            pending = self.__pending_target_select or {}
+            if clicked and pending.get("selected_update_seq", 0) <= selected_update_seq:
+                # Silence is not evidence that the click failed. A second click
+                # can deselect a target whose acknowledgement is merely late.
+                if (acknowledgement_deadline is not None
+                        and time.monotonic() < acknowledgement_deadline):
+                    threading.Timer(0.5, lambda: _attempt_submit(
+                        attempt, clicked=True,
+                        selected_update_seq=selected_update_seq,
+                        acknowledgement_deadline=acknowledgement_deadline,
+                    )).start()
+                    return
+                self.__write_target_debug_bundle("target_click_ack_timeout")
+                if pending.get("allow_cancel") == "AllowCancel_Abort":
+                    if _valid() and self.can_execute_game_action(expected_match_id):
+                        try:
+                            self.input.tap_escape()
+                        except Exception as exc:
+                            bot_logger.log_error(f"Target cancellation failed: {exc}")
                 return
             if attempt < 2:
                 threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
@@ -14805,7 +14841,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_info(
                 f"CREATURE_TARGET click: id={creature_id} side={side} found={clicked} attempt={attempt}"
             )
-            threading.Timer(0.5, lambda: _attempt_submit(attempt)).start()
+            selected_update_seq = (self.__pending_target_select or {}).get("selected_update_seq", 0)
+            deadline = time.monotonic() + 3.0 if clicked else None
+            threading.Timer(0.5, lambda: _attempt_submit(
+                attempt, clicked=clicked,
+                selected_update_seq=selected_update_seq,
+                acknowledgement_deadline=deadline,
+            )).start()
 
         delay_remaining = self.__get_delay_timer_remaining()
         start_delay = 0.8
