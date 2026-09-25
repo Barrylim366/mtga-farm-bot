@@ -79,7 +79,8 @@ class Game:
         return context
 
     def _pass_priority_on_uncastable(
-        self, inst_id, turn_num, phase, step, decision_player, expected_match_id=None
+        self, inst_id, turn_num, phase, step, decision_player,
+        expected_match_id=None, game_state_id=None,
     ) -> None:
         """The cast's click never reached the game, so nothing about the state
         will change and the AI will pick this same card again on the next tick.
@@ -99,6 +100,7 @@ class Game:
         # Record the pass, not the failed cast: leaving the cast's signature in
         # place would let the breaker count a move that never ran.
         self._last_move_signature = (
+            expected_match_id, game_state_id,
             turn_num, phase, step, decision_player, 'resolve', (),
         )
         self._last_move_repeat_count = 1
@@ -135,9 +137,9 @@ class Game:
         self._match_slot = 0
         self._timers: list[threading.Timer] = []
         self._last_action_delay_turn = -1
-        # Tracks (turn, phase, step, decisionPlayer, move_name, move_payload) of
-        # the last move actually executed, plus how many times in a row it has
-        # repeated -- see _STUCK_MOVE_RETRY_LIMIT.
+        # Tracks (matchId, gameStateId, turn, phase, step, decisionPlayer,
+        # move_name, move_payload) of the last move actually executed, plus how
+        # many times in a row it has repeated -- see _STUCK_MOVE_RETRY_LIMIT.
         self._last_move_signature = None
         self._last_move_repeat_count = 0
         # Epoch when the current match actually started (first mulligan / inferred
@@ -690,7 +692,12 @@ class Game:
 
             move_name = list(move.keys())[0]
             move_payload = move.get(move_name)
+            game_state_id = (
+                cast_decision_base.get("game_state_id")
+                if cast_decision_base is not None else None
+            )
             move_signature = (
+                expected_match_id, game_state_id,
                 turn_num, phase, step, decision_player, move_name,
                 tuple(move_payload) if isinstance(move_payload, list) else move_payload,
             )
@@ -731,7 +738,10 @@ class Game:
                 )
                 move = {'resolve': []}
                 move_name = 'resolve'
-                self._last_move_signature = (turn_num, phase, step, decision_player, 'resolve', ())
+                self._last_move_signature = (
+                    expected_match_id, game_state_id,
+                    turn_num, phase, step, decision_player, 'resolve', (),
+                )
                 self._last_move_repeat_count = 1
 
             runtime_status.touch_decision(
@@ -817,7 +827,8 @@ class Game:
                         )
                     else:
                         self._pass_priority_on_uncastable(
-                            inst_id, turn_num, phase, step, decision_player, expected_match_id
+                            inst_id, turn_num, phase, step, decision_player,
+                            expected_match_id, game_state_id,
                         )
             elif move_name == 'all_attack':
                 self._debug("Executing all_attack")

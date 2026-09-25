@@ -395,8 +395,18 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
         count a move that never actually ran."""
         g = self.game(False)
         self.execute_cast(g)
-        self.assertEqual(g._last_move_signature[4], "resolve")
+        self.assertEqual(g._last_move_signature[6], "resolve")
         self.assertEqual(g._last_move_repeat_count, 1)
+
+    def test_the_pass_records_the_same_match_and_state(self):
+        g = self.game(False)
+        g._pass_priority_on_uncastable(
+            477, 1, "Phase_Main1", "Step_Draw", 2, "match-1", 50
+        )
+        self.assertEqual(
+            g._last_move_signature,
+            ("match-1", 50, 1, "Phase_Main1", "Step_Draw", 2, "resolve", ()),
+        )
 
     def test_a_successful_cast_does_not_pass_priority(self):
         g = self.game(True)
@@ -468,7 +478,7 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
         game.last_logged_turn = 3
         game.starting_hand_logged = True
         game._last_move_signature = (
-            3, "Phase_Main1", "Step_Draw", 2, "cast", (477,),
+            "match-1", 50, 3, "Phase_Main1", "Step_Draw", 2, "cast", (477,),
         )
         game._last_move_repeat_count = 2
         game.ai = SimpleNamespace(generate_move=lambda *_args: {"cast": [477]})
@@ -492,6 +502,108 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
         self.assertEqual(game.controller.calls, [("cast", 477)])
         self.assertEqual(fallback, [])
         self.assertEqual(game._last_move_repeat_count, 3)
+
+
+class GameMoveRetryStateTest(unittest.TestCase):
+    class State:
+        def __init__(self, game_state_id):
+            self.game_state_id = game_state_id
+
+        def get_turn_info(self):
+            return {
+                "turnNumber": 3, "activePlayer": 2, "decisionPlayer": 2,
+                "priorityPlayer": 2, "phase": "Phase_Main1", "step": "Step_Draw",
+            }
+
+        def get_actions(self):
+            return [{"seatId": 2, "action": {
+                "actionType": "ActionType_Cast", "instanceId": 477,
+            }}]
+
+        def get_full_state(self):
+            return {
+                "gameStateId": self.game_state_id,
+                "turnInfo": self.get_turn_info(),
+                "actions": self.get_actions(),
+            }
+
+    class Controller(_StubController):
+        def __init__(self, cast_results):
+            super().__init__(True)
+            self.cast_results = iter(cast_results)
+            self.last_abort = None
+
+        def get_current_match_id(self):
+            return "match-1"
+
+        def reset_inactivity_timer(self):
+            pass
+
+        def get_last_cast_abort_reason(self):
+            return self.last_abort
+
+        def should_defer_cast_for_target_selection(self, _match):
+            return False
+
+        def cast(self, inst_id, decision_context=None):
+            self.calls.append(("cast", inst_id))
+            result, self.last_abort = next(self.cast_results)
+            return result
+
+    def make_game(self, cast_results):
+        game = GameModule.Game.__new__(GameModule.Game)
+        game._stop_requested = False
+        game.controller = self.Controller(cast_results)
+        game.game_started = True
+        game._last_action_delay_turn = 3
+        game.last_logged_turn = 3
+        game.starting_hand_logged = True
+        game._last_move_signature = (
+            "match-1", 50, 3, "Phase_Main1", "Step_Draw", 2, "cast", (477,),
+        )
+        game._last_move_repeat_count = 2
+        game.ai = SimpleNamespace(generate_move=lambda *_args: {"cast": [477]})
+        game._debug = lambda *_args, **_kwargs: None
+        game._get_card_id_str = lambda _inst_id: "test card"
+        game._recorder_seat = lambda: 2
+        game._recorder_match_id = lambda: "match-1"
+        return game
+
+    def decide(self, game, state):
+        with patch.object(GameModule.runtime_status, "clear_intentional_wait"), \
+             patch.object(GameModule.runtime_status, "set_mode"), \
+             patch.object(GameModule.runtime_status, "touch_decision"), \
+             patch.object(GameModule.bot_logger, "log_decision"), \
+             patch.object(GameModule.bot_logger, "log_error"), \
+             patch.object(GameModule.debug_recorder, "capture", return_value="snapshot"), \
+             patch.object(GameModule.debug_recorder, "attach_move"), \
+             patch.object(GameModule.CardInfo, "get_card_info", return_value=None):
+            game.decision_method(state)
+
+    def test_new_game_state_resets_cast_repeat_count(self):
+        game = self.make_game([(True, None)])
+        self.decide(game, self.State(51))
+        self.assertEqual(game.controller.calls, [("cast", 477)])
+        self.assertEqual(game._last_move_repeat_count, 1)
+        self.assertEqual(game._last_move_signature[:2], ("match-1", 51))
+
+    def test_third_cast_in_same_game_state_triggers_breaker(self):
+        game = self.make_game([])
+        self.decide(game, self.State(50))
+        self.assertEqual(game.controller.calls, [("resolve", None)])
+        self.assertEqual(game._last_move_signature,
+                         ("match-1", 50, 3, "Phase_Main1", "Step_Draw", 2, "resolve", ()))
+        self.assertEqual(game._last_move_repeat_count, 1)
+
+    def test_stale_cast_is_reconsidered_from_new_state_without_pass(self):
+        game = self.make_game([(False, "stale_decision_context"), (True, None)])
+        game._last_move_repeat_count = 1
+        self.decide(game, self.State(50))
+        self.assertEqual(game.controller.calls, [("cast", 477)])
+        self.assertEqual(game._last_move_repeat_count, 2)
+        self.decide(game, self.State(51))
+        self.assertEqual(game.controller.calls, [("cast", 477), ("cast", 477)])
+        self.assertEqual(game._last_move_repeat_count, 1)
 
 
 if __name__ == "__main__":

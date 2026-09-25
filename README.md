@@ -103,6 +103,8 @@ The app's current version (`1.5.1`, sourced from `version.py`) is shown in **Set
 
 - Fixed a gameplay stall after MTGA is moved or resized during a match: the bot now refuses obsolete screen coordinates instead of slowly sweeping empty space while trying to play cards. Restore a visible 16:9 game window and it will safely retry on the next game-state update.
 
+Cast retry protection now counts repeated moves within the same match and Arena game state. When Arena reports a newer state, the bot can reconsider a cast that was cancelled because its decision became stale; three identical attempts in one unchanged state still trigger a priority pass.
+
 ## Configuration
 
 ### Auto-concede stalled matches
