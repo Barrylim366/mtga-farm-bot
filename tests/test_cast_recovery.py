@@ -550,6 +550,46 @@ class CastRecoveryTest(unittest.TestCase):
         self.assertEqual(details["linked_attempt_id"], "origin")
         self.assertEqual(details["game_state_id"], 50)
 
+    def test_ineffective_followup_wakes_decision_and_blocks_third_cast(self):
+        key = ("match-1", 50, 10)
+        self.controller._Controller__escape_cast_retries[key] = {
+            "origin_attempt_id": "origin", "followup_attempt_id": "followup",
+            "exhausted": False,
+        }
+        self.controller._Controller__cast_blocking_ui = mock.Mock(return_value=None)
+        recovery = mock.Mock()
+        self.controller._Controller__schedule_decision_recovery = recovery
+
+        self.controller._Controller__recover_ineffective_cast(
+            "followup", {
+                "attempt_id": "followup", "card_id": 10,
+                "expected_match_id": "match-1",
+            }, {"game_state_id": 50},
+        )
+
+        self.assertTrue(self.controller._Controller__escape_cast_retries[key]["exhausted"])
+        recovery.assert_called_once_with(0.2, "cast_escape_retry_exhausted")
+        self.assertFalse(self.controller._Controller__cast_escape_in_progress)
+        self.controller.can_execute_game_action = lambda _match: True
+        self.controller._cast_once = mock.Mock()
+        self.assertFalse(self.controller.cast(10, decision_context=self._decision_context()))
+        self.assertEqual(self.controller.get_last_cast_abort_reason(), "cast_escape_retry_exhausted")
+        self.controller._cast_once.assert_not_called()
+
+    def test_exhausted_cast_does_not_pass_stale_decision_to_game(self):
+        self.controller._Controller__escape_cast_retries[("match-1", 50, 10)] = {
+            "origin_attempt_id": "origin", "followup_attempt_id": "followup",
+            "exhausted": True,
+        }
+        self.controller.can_execute_game_action = lambda _match: True
+        self.controller._Controller__schedule_decision_recovery = mock.Mock()
+        self.controller._cast_once = mock.Mock()
+        self.assertFalse(self.controller.cast(
+            10, decision_context=self._decision_context(phase="Phase_Main2")
+        ))
+        self.assertEqual(self.controller.get_last_cast_abort_reason(), "stale_decision_context")
+        self.controller._cast_once.assert_not_called()
+
     def test_failed_bundle_serializes_state_and_saves_all_three_images(self):
         class FakeVision:
             def __init__(inner):

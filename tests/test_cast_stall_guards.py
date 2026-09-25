@@ -673,6 +673,20 @@ class GameMoveRetryStateTest(unittest.TestCase):
         self.assertEqual(game.controller.calls, [("cast", 477), ("cast", 477)])
         self.assertEqual(game._last_move_repeat_count, 1)
 
+    def test_exhausted_cast_passes_priority_without_another_retry(self):
+        game = self.make_game([(False, "cast_escape_retry_exhausted")])
+        game._last_move_repeat_count = 0
+        self.decide(game, self.State(50))
+        self.assertEqual(game.controller.calls, [("cast", 477), ("resolve", None)])
+        self.assertEqual(game._last_move_signature[-2:], ("resolve", ()))
+
+    def test_recovery_can_choose_another_card(self):
+        game = self.make_game([(True, None)])
+        game._last_move_repeat_count = 0
+        game.ai = SimpleNamespace(generate_move=lambda *_args: {"cast": [478]})
+        self.decide(game, self.State(50))
+        self.assertEqual(game.controller.calls, [("cast", 478)])
+
     def test_closed_target_prompt_still_defers_without_breaker_count(self):
         game = self.make_game([
             (False, "target_selection_pending"),

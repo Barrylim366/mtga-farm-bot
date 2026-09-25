@@ -81,6 +81,7 @@ class Game:
     def _pass_priority_on_uncastable(
         self, inst_id, turn_num, phase, step, decision_player,
         expected_match_id=None, game_state_id=None,
+        reason="card not reachable in hand",
     ) -> None:
         """The cast's click never reached the game, so nothing about the state
         will change and the AI will pick this same card again on the next tick.
@@ -95,7 +96,7 @@ class Game:
         )
         bot_logger.log_error(
             f"CAST_UNAVAILABLE: move cast=[{inst_id}] could not be executed "
-            "(card not reachable in hand); passing priority to keep the turn moving."
+            f"({reason}); passing priority to keep the turn moving."
         )
         # Record the pass, not the failed cast: leaving the cast's signature in
         # place would let the breaker count a move that never ran.
@@ -827,10 +828,16 @@ class Game:
                             f"CAST_DEFERRED: target selection opened while casting card {inst_id}; "
                             "suppressing priority fallback."
                         )
+                    elif abort_reason == "cast_escape_retry_exhausted":
+                        self._pass_priority_on_uncastable(
+                            inst_id, turn_num, phase, step, decision_player,
+                            expected_match_id, game_state_id,
+                            reason="cast retry exhausted after two ineffective attempts",
+                        )
                     elif abort_reason in {
                         "stale_decision_context", "foreground_recovery_failed",
                         "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
-                        "cast_screen_blocked", "cast_escape_retry_exhausted",
+                        "cast_screen_blocked",
                         "cast_ack_pending",
                     }:
                         self._debug(

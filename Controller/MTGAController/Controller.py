@@ -7028,6 +7028,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return
         context = attempt.get("decision_context") or {}
         key = (attempt.get("expected_match_id"), baseline.get("game_state_id"), card_id)
+        followup_attempt_id = None
         with self.__cast_ack_lock:
             if self.__cast_escape_in_progress:
                 self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
@@ -7038,13 +7039,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if recovery and recovery.get("followup_attempt_id"):
                 recovery["exhausted"] = True
                 self.__last_cast_abort_reason = "cast_escape_retry_exhausted"
-                self.__cast_ack_event("cast_retry_policy", attempt_id=attempt_id,
-                    card_id=card_id, action="suppress_same_state_cast",
-                    reason="followup_cast_ineffective", followup_attempt_id=recovery["followup_attempt_id"])
-                return
-            self.__escape_cast_retries[key] = {"origin_attempt_id": attempt_id, "followup_attempt_id": None,
-                                               "exhausted": False}
-            self.__cast_escape_in_progress = True
+                followup_attempt_id = recovery["followup_attempt_id"]
+            else:
+                self.__escape_cast_retries[key] = {"origin_attempt_id": attempt_id, "followup_attempt_id": None,
+                                                   "exhausted": False}
+                self.__cast_escape_in_progress = True
+
+        if followup_attempt_id is not None:
+            self.__cast_ack_event("cast_retry_policy", attempt_id=attempt_id,
+                card_id=card_id, action="suppress_same_state_cast",
+                reason="followup_cast_ineffective", followup_attempt_id=followup_attempt_id)
+            self.__schedule_decision_recovery(0.2, "cast_escape_retry_exhausted")
+            return
 
         before = self.__capture_cast_blocker_frame()
         if before is not None:
@@ -7604,10 +7610,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         retry_key = (start_snapshot.get("match_id"), start_snapshot.get("game_state_id"), int(card_id))
         with self.__cast_ack_lock:
             retry = self.__escape_cast_retries.get(retry_key)
-            if retry and retry.get("exhausted"):
-                self.__finish_cast_ack_without_click(cast_ack_id, "cast_escape_retry_exhausted")
-                self.__last_cast_abort_reason = "cast_escape_retry_exhausted"
+            retry_exhausted = bool(retry and retry.get("exhausted"))
+        if retry_exhausted:
+            if self.__abort_stale_cast_context(
+                cast_ack_id, card_id, decision_context, "before_exhausted_fallback"
+            ):
                 return False
+            self.__finish_cast_ack_without_click(cast_ack_id, "cast_escape_retry_exhausted")
+            self.__last_cast_abort_reason = "cast_escape_retry_exhausted"
+            return False
+        with self.__cast_ack_lock:
             if retry and retry.get("followup_attempt_id") is None:
                 retry["followup_attempt_id"] = cast_ack_id
                 self.__cast_ack_event("cast_escape_followup", attempt_id=cast_ack_id,
