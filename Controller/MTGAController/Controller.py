@@ -535,6 +535,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__cast_ack_lock = threading.RLock()
         self.__escape_cast_retries: dict[tuple, dict] = {}
         self.__cast_escape_in_progress = False
+        self.__cast_clear_poll_key = None
         # cast() keeps its Boolean API. This distinguishes a stale decision
         # from a genuinely unreachable hand card for Game's fallback policy.
         self.__last_cast_abort_reason = None
@@ -6992,7 +6993,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         action="wait_for_clear_screen", blocker=blocker,
                         reason="cast_partial_ack_no_progress",
                     )
-                    self.__schedule_cast_clear_poll(active.get("expected_match_id"))
+                    self.__schedule_cast_clear_poll(
+                        active.get("expected_match_id"), baseline.get("game_state_id"))
                     return
                 if foreground.get("is_mtga") is False:
                     self.__cast_ack_event(
@@ -7025,6 +7027,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if self.__cast_blocking_ui(attempt.get("delayed_image")) is not None:
             self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
                 card_id=card_id, phase="aborted", outcome="inconclusive", reason="blocker")
+            self.__schedule_cast_clear_poll(
+                attempt.get("expected_match_id"), baseline.get("game_state_id"))
             return
         context = attempt.get("decision_context") or {}
         key = (attempt.get("expected_match_id"), baseline.get("game_state_id"), card_id)
@@ -7041,8 +7045,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 self.__last_cast_abort_reason = "cast_escape_retry_exhausted"
                 followup_attempt_id = recovery["followup_attempt_id"]
             else:
-                self.__escape_cast_retries[key] = {"origin_attempt_id": attempt_id, "followup_attempt_id": None,
-                                                   "exhausted": False}
                 self.__cast_escape_in_progress = True
 
         if followup_attempt_id is not None:
@@ -7060,6 +7062,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         transaction = getattr(self.input, "input_transaction", None)
         scope = transaction(0.25) if callable(transaction) else nullcontext(True)
         outcome = "inconclusive"
+        escape_sent = False
         try:
             if not callable(getattr(self.input, "tap_escape", None)):
                 return
@@ -7080,6 +7083,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if self.__cast_blocking_ui() is not None:
                     return
                 self.input.tap_escape()
+                escape_sent = True
                 time.sleep(0.4)
                 after = self.__capture_cast_blocker_frame()
                 if after is not None:
@@ -7104,6 +7108,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if self.__abort_stale_cast_context(None, card_id, context, "after_escape"):
                     return
                 outcome = "clear"
+                with self.__cast_ack_lock:
+                    self.__escape_cast_retries[key] = {
+                        "origin_attempt_id": attempt_id, "followup_attempt_id": None,
+                        "exhausted": False,
+                    }
                 self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
                     card_id=card_id, phase="after_escape", outcome=outcome,
                     options_menu_opened=menu_open, followup_status="pending",
@@ -7116,6 +7125,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             else:
                 self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
                     card_id=card_id, phase="aborted", outcome="inconclusive")
+                if (not escape_sent
+                        and self.can_execute_game_action(attempt.get("expected_match_id"))
+                        and self.__read_game_state_id() == baseline.get("game_state_id")):
+                    self.__schedule_decision_recovery(0.2, "cast_escape_deferred")
 
     def __write_cast_escape_image(self, attempt: dict, name: str, image) -> None:
         try:
@@ -7129,21 +7142,50 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception:
             pass
 
-    def __schedule_cast_clear_poll(self, expected_match_id: str | None) -> None:
-        timer = threading.Timer(1.0, self.__poll_cast_clear, args=(expected_match_id,))
+    def __schedule_cast_clear_poll(self, expected_match_id: str | None,
+                                   game_state_id=None) -> None:
+        if game_state_id is None:
+            game_state_id = self.__read_game_state_id()
+        key = (expected_match_id, game_state_id)
+        with self.__cast_ack_lock:
+            if self.__cast_clear_poll_key == key:
+                return
+            self.__cast_clear_poll_key = key
+        self.__arm_cast_clear_poll(key)
+
+    def __arm_cast_clear_poll(self, key: tuple) -> None:
+        timer = threading.Timer(1.0, self.__poll_cast_clear, args=key)
         timer.daemon = True
         timer.start()
 
-    def __poll_cast_clear(self, expected_match_id: str | None) -> None:
-        if self._stop_requested or not self.can_execute_game_action(expected_match_id):
+    def __poll_cast_clear(self, expected_match_id: str | None,
+                          game_state_id=None) -> None:
+        key = (expected_match_id, game_state_id)
+        with self.__cast_ack_lock:
+            if self.__cast_clear_poll_key != key:
+                return
+        if (not self.can_execute_game_action(expected_match_id)
+                or self.__read_game_state_id() != game_state_id):
+            with self.__cast_ack_lock:
+                if self.__cast_clear_poll_key == key:
+                    self.__cast_clear_poll_key = None
             return
         blocker = self.__cast_blocking_ui()
+        with self.__cast_ack_lock:
+            if self.__cast_clear_poll_key != key:
+                return
+            if (not self.can_execute_game_action(expected_match_id)
+                    or self.__read_game_state_id() != game_state_id):
+                self.__cast_clear_poll_key = None
+                return
+            if not blocker:
+                self.__cast_clear_poll_key = None
         if blocker:
             self.__cast_ack_event(
                 "cast_retry_policy", action="wait_for_clear_screen",
                 blocker=blocker, expected_match_id=expected_match_id,
             )
-            self.__schedule_cast_clear_poll(expected_match_id)
+            self.__arm_cast_clear_poll(key)
             return
         self.__schedule_decision_recovery(0.2, "cast_screen_cleared")
 

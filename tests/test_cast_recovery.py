@@ -518,6 +518,7 @@ class CastRecoveryTest(unittest.TestCase):
         phases = [details.get("phase") for event, details in self.events
                   if event == "cast_escape_recovery"]
         self.assertIn("after_escape", phases)
+        self.assertIn(("match-1", 1, 10), self.controller._Controller__escape_cast_retries)
 
     def test_escape_recovery_sends_no_key_when_transaction_is_busy(self):
         input_stub = mock.Mock()
@@ -527,13 +528,77 @@ class CastRecoveryTest(unittest.TestCase):
         self.controller.input = input_stub
         self.controller.can_execute_game_action = lambda _match: True
         self.controller._Controller__cast_blocking_ui = mock.Mock(return_value=None)
-        self.controller._Controller__schedule_decision_recovery = lambda *_args: None
+        recovery = mock.Mock()
+        self.controller._Controller__schedule_decision_recovery = recovery
         self.controller._Controller__recover_ineffective_cast("origin", {
             "attempt_id": "origin", "card_id": 10, "expected_match_id": "match-1",
             "decision_context": {"match_id": "match-1", "game_state_id": 1},
-        }, {"game_state_id": 1})
+        }, {"game_state_id": 50})
         input_stub.tap_escape.assert_not_called()
         self.assertFalse(self.controller._Controller__cast_escape_in_progress)
+        self.assertEqual(self.controller._Controller__escape_cast_retries, {})
+        recovery.assert_called_once_with(0.2, "cast_escape_deferred")
+
+    def test_blocked_two_click_cast_polls_without_escape(self):
+        poll = mock.Mock()
+        self.controller._Controller__schedule_cast_clear_poll = poll
+        self.controller._Controller__cast_blocking_ui = mock.Mock(return_value="pay")
+        self.controller.input = mock.MagicMock()
+        self.controller._Controller__recover_ineffective_cast("origin", {
+            "card_id": 10, "expected_match_id": "match-1", "delayed_image": object(),
+        }, {"game_state_id": 50})
+        poll.assert_called_once_with("match-1", 50)
+        self.controller.input.tap_escape.assert_not_called()
+        self.assertEqual(self.controller._Controller__escape_cast_retries, {})
+
+    def test_clear_poll_resumes_once_and_stops_on_state_or_match_change(self):
+        del self.controller._Controller__schedule_cast_clear_poll
+        armed = []
+        self.controller._Controller__arm_cast_clear_poll = lambda key: armed.append(key)
+        self.controller.can_execute_game_action = lambda match: match == self.controller._Controller__live_match_id
+        blockers = iter(["pay", None])
+        self.controller._Controller__cast_blocking_ui = lambda: next(blockers)
+        recovery = mock.Mock()
+        self.controller._Controller__schedule_decision_recovery = recovery
+        poll = self.controller._Controller__schedule_cast_clear_poll
+        fire = self.controller._Controller__poll_cast_clear
+        poll("match-1", 50)
+        poll("match-1", 50)
+        self.assertEqual(armed, [("match-1", 50)])
+        fire("match-1", 50)
+        self.assertEqual(len(armed), 2)
+        fire("match-1", 50)
+        fire("match-1", 50)
+        recovery.assert_called_once_with(0.2, "cast_screen_cleared")
+
+        poll("match-1", 50)
+        seed_state(self.controller, state_id=51)
+        fire("match-1", 50)
+        self.assertIsNone(self.controller._Controller__cast_clear_poll_key)
+        self.assertEqual(len(armed), 3)
+        poll("match-1", 51)
+        self.controller._Controller__live_match_id = "match-2"
+        fire("match-1", 51)
+        self.assertIsNone(self.controller._Controller__cast_clear_poll_key)
+        recovery.assert_called_once()
+
+    def test_lost_focus_before_escape_keeps_retry_available(self):
+        self.controller.input = mock.MagicMock()
+        self.controller.can_execute_game_action = lambda _match: True
+        self.controller._Controller__cast_blocking_ui = mock.Mock(return_value=None)
+        unchanged = {"game_state_id": 50, "match_id": "match-1", "prompt_flags": {}}
+        self.controller._Controller__cast_ack_snapshot = mock.Mock(return_value=unchanged)
+        self.controller._Controller__abort_stale_cast_context = mock.Mock(return_value=False)
+        recovery = mock.Mock()
+        self.controller._Controller__schedule_decision_recovery = recovery
+        with mock.patch("Controller.MTGAController.Controller._describe_foreground_window",
+                        return_value={"is_mtga": False}):
+            self.controller._Controller__recover_ineffective_cast("origin", {
+                "card_id": 10, "expected_match_id": "match-1",
+            }, unchanged)
+        self.controller.input.tap_escape.assert_not_called()
+        self.assertEqual(self.controller._Controller__escape_cast_retries, {})
+        recovery.assert_called_once_with(0.2, "cast_escape_deferred")
 
     def test_followup_telemetry_uses_live_state_when_decision_context_omits_it(self):
         self.controller._Controller__escape_cast_retries[("match-1", 50, 10)] = {
