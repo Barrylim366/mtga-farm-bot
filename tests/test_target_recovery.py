@@ -109,6 +109,43 @@ class CreatureTargetRetryTest(unittest.TestCase):
             self._run_next()  # Retry click.
             self.assertEqual(self.clicks, [99, 99])
 
+    def test_silent_uncancellable_target_click_retries_after_ack_window(self):
+        with patch.object(threading, "Timer", self._timer), patch("time.monotonic") as clock:
+            clock.return_value = 100.0
+            self.controller._Controller__schedule_creature_target_selection(
+                42, 99, "test", friendly=True,
+            )
+            self._run_next()  # First click; no selection update follows.
+            clock.return_value = 104.0
+            self._run_next()  # Acknowledgement window expired.
+            self.assertEqual(self.clicks, [99])
+            self._run_next()  # Bounded retry.
+            clock.return_value = 108.0
+            self._run_next()
+            self._run_next()
+            clock.return_value = 112.0
+            self._run_next()  # Final timeout releases the duplicate-request guard.
+
+        self.assertEqual(self.clicks, [99, 99, 99])
+        self.assertEqual(self.submissions, [])
+        self.assertFalse(self.controller._Controller__pending_target_select["creature_target_flow_active"])
+        self.assertEqual(self.callbacks, [])
+
+    def test_late_target_ack_before_retry_submits_without_second_click(self):
+        with patch.object(threading, "Timer", self._timer), patch("time.monotonic") as clock:
+            clock.return_value = 100.0
+            self.controller._Controller__schedule_creature_target_selection(
+                42, 99, "test", friendly=True,
+            )
+            self._run_next()
+            clock.return_value = 104.0
+            self._run_next()  # Timeout arms a retry.
+            self.controller._Controller__update_pending_target_select(42, selected=1)
+            self._run_next()  # The retry sees the late acknowledgement.
+
+        self.assertEqual(self.clicks, [99])
+        self.assertEqual(len(self.submissions), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

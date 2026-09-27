@@ -99,7 +99,8 @@ class CastRecoveryTest(unittest.TestCase):
                           post_press_hover=None, post_press_cursor=False,
                           post_press_foreground=False, cast_ack_id=None, blocker=None,
                           capture_on_reset=False, queued_hover=None,
-                          hover_source="local_fragment", hover_age=0.0):
+                          hover_source="local_fragment", hover_age=0.0,
+                          decision_context=None):
         class FakeLog:
             def __init__(inner):
                 inner.available = queued_hover is not None
@@ -177,7 +178,7 @@ class CastRecoveryTest(unittest.TestCase):
                         side_effect=foregrounds), mock.patch("time.sleep", return_value=None):
             result = self.controller._Controller__cast_final_clicks(
                 10, click_position=(100, 900), hand_p1=(20, 900),
-                expected_match_id="match-1", decision_context=None,
+                expected_match_id="match-1", decision_context=decision_context,
                 cast_ack_id=cast_ack_id, attempt=0,
                 hover_observation={"hover_id": 10, "hover_source": hover_source},
                 hover_observed_monotonic=time.monotonic() - hover_age,
@@ -796,6 +797,17 @@ class CastRecoveryTest(unittest.TestCase):
             ),
             1,
         )
+
+        # Exercise the actual stale-hover call site, including its decision
+        # context, across the cleanup performed before the next cast.
+        for expected_reason in ("cast_hover_lost", "cast_hover_retry_exhausted"):
+            self.controller._Controller__clear_stale_cast_hover_failures(context)
+            result, fake_input = self._run_final_clicks(
+                hover_age=1.6, decision_context=context,
+            )
+            self.assertFalse(result)
+            self.assertEqual(fake_input.clicks, [])
+            self.assertEqual(self.controller.get_last_cast_abort_reason(), expected_reason)
 
     def test_removed_selected_action_is_stale_even_while_card_remains_in_hand(self):
         recovery = []

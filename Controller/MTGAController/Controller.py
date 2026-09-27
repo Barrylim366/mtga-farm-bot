@@ -7459,6 +7459,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     or hover_age < 0 or hover_age > 1.5):
                 return self.__cast_safety_abort(
                     cast_ack_id, card_id, "cast_hover_lost",
+                    decision_context=decision_context,
                     hover_revalidated=False, hover_age_sec=round(max(0.0, hover_age), 4),
                     hover_observation=hover_observation,
                 )
@@ -7521,6 +7522,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if hover_age < 0 or hover_age > 1.5:
                 return self.__cast_safety_abort(
                     cast_ack_id, card_id, "cast_hover_lost",
+                    decision_context=decision_context,
                     hover_revalidated=False, hover_age_sec=round(max(0.0, hover_age), 4),
                     hover_observation=hover_observation,
                 )
@@ -14815,6 +14817,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                             self.input.tap_escape()
                         except Exception as exc:
                             bot_logger.log_error(f"Target cancellation failed: {exc}")
+                    return
+                # Silence for the full acknowledgement window can also mean a
+                # missed click. Retry only after that window and stop after two
+                # retries so a delayed acknowledgement cannot cause a click loop.
+                if attempt < 2 and _valid() and self.can_execute_game_action(expected_match_id):
+                    threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
+                elif _valid():
+                    # Let a fresh SelectTargetsReq start another flow if Arena
+                    # keeps the prompt open after all local attempts.
+                    pending["creature_target_flow_active"] = False
                 return
             if attempt < 2:
                 threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
@@ -14829,6 +14841,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         def _do_click(attempt: int = 0) -> None:
             if not _valid():
+                return
+            if self.__pending_target_ready_to_submit():
+                _attempt_submit(attempt)
                 return
             clicked = False
             try:
