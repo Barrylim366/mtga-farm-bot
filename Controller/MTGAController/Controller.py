@@ -9574,17 +9574,31 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def __claim_concession(self, reason: str) -> bool:
         # The stall timer and the Arena inactivity timer run on separate
-        # threads, so claiming must be atomic rather than merely a boolean check.
+        # threads. Keep the claim lock through input acquisition so a failed
+        # acquisition cannot leave a claimed concede with no input owner.
         with self.__concession_claim_lock:
             if self._stop_requested or self.__concession_claimed:
                 bot_logger.log_info(f"CONCEDE_CLAIM_REJECTED: {reason}")
                 return False
+            claim_input = getattr(self.input, "claim_exclusive_for_current_thread", None)
+            if callable(claim_input):
+                try:
+                    if claim_input() is False:
+                        bot_logger.log_info(f"CONCEDE_CLAIM_DEFERRED: input busy reason={reason}")
+                        return False
+                except Exception as exc:
+                    bot_logger.log_error(
+                        f"CONCEDE_CLAIM_DEFERRED: input claim failed reason={reason} error={exc}"
+                    )
+                    return False
+            if self._stop_requested:
+                release_input = getattr(self.input, "release_exclusive", None)
+                if callable(release_input):
+                    release_input()
+                return False
             self.__concession_claimed = True
             self.__concession_claim_reason = reason
             self.__concede_completed_event.clear()
-        claim_input = getattr(self.input, "claim_exclusive_for_current_thread", None)
-        if callable(claim_input):
-            claim_input()
         self.__clear_stall_watchdog("concession claimed")
         self.__cancel_emergency_concede_timer("concession claimed")
         bot_logger.log_info(f"CONCEDE_CLAIMED: reason={reason}")
@@ -9653,6 +9667,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return
             trigger_signature = getattr(self, "_Controller__stall_context_signature", None)
             if not self.__claim_concession("stalled_local_context"):
+                if not getattr(self, "_stop_requested", False) and not self.__concession_claimed:
+                    self.__arm_stall_watchdog_timer(
+                        self.__stall_watchdog_generation,
+                        trigger_signature,
+                        started_at,
+                        expected_match_id,
+                        1.0,
+                    )
                 return
         bot_logger.log_info(f"STALL_WATCHDOG_TRIGGERED: age={age:.1f}s reason=stalled_local_context")
         self.__cancel_pending_decisions_for_concede()
@@ -9863,6 +9885,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception:
             pass
         if not self.__claim_concession("arena_inactivity_emergency"):
+            if not self._stop_requested and not self.__concession_claimed:
+                self.__emergency_concede_timer = threading.Timer(
+                    1.0, self.__attempt_emergency_concede
+                )
+                self.__emergency_concede_timer.daemon = True
+                self.__emergency_concede_timer.start()
             return
         self.__emergency_concede_in_progress = True
         try:

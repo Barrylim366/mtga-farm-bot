@@ -139,6 +139,9 @@ a gameplay action that was authorised a moment earlier can no longer slip
 through: the permission check and the input itself are now a single step, so a
 claim waits for any action still in flight and the mouse is released only once
 that action has finished.
+If input remains busy, the claim stops waiting after one second and the bot
+retries the stall or emergency concede shortly afterward. It does not start
+the concede clicks without owning input.
 
 ### Input backend
 
