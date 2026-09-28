@@ -23,6 +23,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -90,6 +91,21 @@ def make_controller() -> Controller:
     return c
 
 
+def mtga_in_foreground(testcase):
+    """Report MTGA as the foreground window for the rest of the test.
+
+    Since the cast path checks the foreground before the hand sweep, a test
+    that does not pin it reads the real desktop -- the terminal running the
+    suite -- and aborts with foreground_recovery_failed before it reaches the
+    sweep it means to exercise (and calls the real focus_mtga_window)."""
+    patcher = patch(
+        "Controller.MTGAController.Controller._describe_foreground_window",
+        return_value={"hwnd": 1, "title": "MTGA", "is_mtga": True},
+    )
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 class StrayDoneOverlayTest(unittest.TestCase):
     """The graveyard/selection overlay case: 5 of 31 failures, and invisible to
     every existing net (casting_time_options_open was False each time and the
@@ -141,6 +157,7 @@ class CastProbeBudgetTest(unittest.TestCase):
 
     def setUp(self):
         self.c = make_controller()
+        mtga_in_foreground(self)
         self.report = []
         self.done = []
         self.c._dismiss_report_player_dialog = (

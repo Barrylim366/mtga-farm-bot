@@ -102,6 +102,21 @@ def make_controller() -> Controller:
     return c
 
 
+def mtga_in_foreground(testcase):
+    """Report MTGA as the foreground window for the rest of the test.
+
+    Since the cast path checks the foreground before the hand sweep, a test
+    that does not pin it reads the real desktop -- the terminal running the
+    suite -- and aborts with foreground_recovery_failed before it reaches the
+    sweep it means to exercise (and calls the real focus_mtga_window)."""
+    patcher = patch(
+        "Controller.MTGAController.Controller._describe_foreground_window",
+        return_value={"hwnd": 1, "title": "MTGA", "is_mtga": True},
+    )
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 def call_private(controller, name, *args):
     """Reach a name-mangled private method without hard-coding the mangling at
     every call site."""
@@ -114,6 +129,7 @@ class InstanceIdRemapTest(unittest.TestCase):
 
     def setUp(self):
         self.c = make_controller()
+        mtga_in_foreground(self)
 
     def update(self, objects):
         call_private(self.c, "update_inst_id__grp_id_dict", objects)
@@ -159,6 +175,7 @@ class InstanceIdRemapTest(unittest.TestCase):
 class CastSuppressionTest(unittest.TestCase):
     def setUp(self):
         self.c = make_controller()
+        mtga_in_foreground(self)
 
     def cast(self, card_id):
         with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \
@@ -171,6 +188,27 @@ class CastSuppressionTest(unittest.TestCase):
         self.assertIs(self.cast(999), False)
         self.assertTrue(self.c._is_cast_suppressed(999))
         self.assertEqual(self.c.get_last_cast_abort_reason(), None)
+
+    def test_a_failed_focus_recovery_aborts_without_suppression(self):
+        """MTGA not owning the foreground says nothing about the hand, so the
+        card must not be suppressed and no sweep or recovery probe may run."""
+        probes = []
+        recoveries = []
+        self.c._dismiss_are_you_sure_if_present = lambda **_k: probes.append("confirm")
+        self.c._dismiss_report_player_dialog = lambda **_k: probes.append("report")
+        self.c._dismiss_stray_done_overlay = lambda **_k: probes.append("done")
+        self.c._Controller__schedule_decision_recovery = lambda *a: recoveries.append(a)
+        with patch("Controller.MTGAController.Controller._describe_foreground_window",
+                   return_value={"hwnd": 2, "title": "Terminal", "is_mtga": False}), \
+             patch("Controller.MTGAController.Controller.focus_mtga_window") as focus, \
+             patch("time.sleep", return_value=None):
+            self.assertIs(self.c.cast(999), False)
+        focus.assert_called_once_with()
+        self.assertEqual(self.c.get_last_cast_abort_reason(), "foreground_recovery_failed")
+        self.assertFalse(self.c._is_cast_suppressed(999))
+        self.assertEqual(self.c.input.moves, [])
+        self.assertEqual(probes, [])
+        self.assertEqual(recoveries, [(0.2, "cast_foreground_recovery")])
 
     def test_a_second_attempt_does_not_sweep_the_hand_again(self):
         """Each sweep is ~6.6s of rope spent on a card the hand does not hold."""
