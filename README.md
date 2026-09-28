@@ -103,6 +103,8 @@ The app's current version (`1.5.1`, sourced from `version.py`) is shown in **Set
 
 - Fixed a gameplay stall after MTGA is moved or resized during a match: the bot now refuses obsolete screen coordinates instead of slowly sweeping empty space while trying to play cards. Restore a visible 16:9 game window and it will safely retry on the next game-state update.
 
+Cast retry protection now counts repeated moves within the same match and Arena game state. When Arena reports a newer state, the bot can reconsider a cast that was cancelled because its decision became stale; three identical attempts in one unchanged state still trigger a priority pass.
+
 ## Configuration
 
 ### Auto-concede stalled matches
@@ -137,6 +139,9 @@ a gameplay action that was authorised a moment earlier can no longer slip
 through: the permission check and the input itself are now a single step, so a
 claim waits for any action still in flight and the mouse is released only once
 that action has finished.
+If input remains busy, the claim stops waiting after one second and the bot
+retries the stall or emergency concede shortly afterward. It does not start
+the concede clicks without owning input.
 
 ### Input backend
 
@@ -335,6 +340,9 @@ The bot maximizes mana usage each turn:
 - The mid-screen "Choose One" overlay — kicker plates, a modal spell's or creature's mode plates (e.g. Apothecary Stomper's enter-the-battlefield choice), and the "sacrifice or pay" buttons — is treated as blocking: while it is up, no other move is dispatched, and the chosen plate is clicked again if the game has not moved on. Previously a single click that failed to register left the dialog open and the bot immediately swept the hand row for its next play behind the overlay, which could not be reached — the match then idled until it was conceded. "Has the game moved on?" is answered by the newest `gameStateId` seen on **any** GRE message, including the timer messages that never reach the merged game state — reading only the merged state made an already-answered dialog look open for another two seconds, and the retry then clicked onto the battlefield behind it
 - Client-side "Are You Sure?" confirmations are handled reactively after a failed cast attempt, avoiding speculative screen probes during normal casts
 - Decision recovery is guarded against open payment/selection prompts and resumes safely after modal, stack, or scry interruptions
+- If a target-selection prompt appears during a hand scan or before the first cast click, the cast is deferred without clicking, retrying the sweep, or marking the card unreachable. The target handler resumes decisions after the prompt; a completed scan that cannot find the card still uses the existing 20-second cast suppression.
+- A creature target is clicked again only when a newer Arena target update confirms that no target was selected. A delayed or missing acknowledgement alone does not trigger another click, which could otherwise unselect the target.
+- After a two-click cast leaves the card, game state, and cast action unchanged, the bot waits for a known screen blocker to clear, then asks the AI for a fresh decision. This poll stops if the match or game state changes. On a clear screen, the bot checks that the same decision is still active and sends a guarded Escape. If that opens Options, a second Escape closes it. Only a completed Escape permits one fresh cast decision; busy input or lost focus before Escape leaves that retry available. If the follow-up also has no effect, it promptly asks for another decision; if the AI still chooses that card, the bot passes priority without a third click. Failed attempts save screenshots and state under `runtime/debug/`; `tools/analyze_cast_recovery.py` summarizes recovery outcomes from the log
 - Ties between otherwise equal casting plans favor lifegain-payoff creatures, so decks built around gaining life develop toward their game plan sooner
 - Removal only ever targets creatures still on the battlefield and never redirects a harmful spell at your own board when no valid enemy target exists
 - Ward is priced before a target is chosen, not discovered afterwards. A warded creature makes Magic Arena raise a confirmation window that exists only in the client — it is announced nowhere in the game's own messages, so nothing tells the bot it is there. Declining it hands back the same board the bot just looked at, so it picks the same target, and the same window opens again; a single such loop burned six minutes across four turns. Now the ward's cost is read from the card and weighed against the mana left over once the spell is paid for. Affordable, and the bot pays it and kills the creature — refusing to ever pay would make removal useless against the cards it most needs to answer. Unaffordable, and it picks a different target, or holds the spell rather than feeding it to a counter. A target it does back out of is remembered for the rest of the match, so nothing can loop even if the pricing is wrong

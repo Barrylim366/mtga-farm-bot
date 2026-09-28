@@ -37,6 +37,58 @@ class OrderingInput(NullInputController):
 
 
 class ExclusiveInputControllerTest(unittest.TestCase):
+    def test_short_transaction_serializes_other_input_until_release(self):
+        raw = RecordingInput()
+        gated = ExclusiveInputController(raw)
+        entered = threading.Event()
+        finished = threading.Event()
+
+        def owner():
+            with gated.input_transaction(0.25) as acquired:
+                self.assertTrue(acquired)
+                entered.set()
+                self.assertTrue(finished.wait(timeout=2.0))
+                gated.left_click()
+
+        owner_thread = threading.Thread(target=owner)
+        owner_thread.start()
+        self.assertTrue(entered.wait(timeout=1.0))
+        worker = threading.Thread(target=gated.left_click)
+        worker.start()
+        worker.join(timeout=0.05)
+        self.assertTrue(worker.is_alive(), "other input should wait through the transaction")
+        finished.set()
+        owner_thread.join(timeout=1.0)
+        worker.join(timeout=1.0)
+        self.assertFalse(owner_thread.is_alive())
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(raw.clicks, 2)
+
+    def test_transaction_times_out_while_concede_owns_input(self):
+        gated = ExclusiveInputController(RecordingInput())
+        gated.claim_exclusive_for_current_thread()
+        acquired_values = []
+
+        def try_transaction():
+            with gated.input_transaction(0.01) as acquired:
+                acquired_values.append(acquired)
+
+        worker = threading.Thread(target=try_transaction)
+        worker.start()
+        worker.join(timeout=1.0)
+        self.assertEqual(acquired_values, [False])
+        gated.release_exclusive()
+
+    def test_transaction_owner_can_claim_persistent_exclusivity(self):
+        raw = RecordingInput()
+        gated = ExclusiveInputController(raw)
+        with gated.input_transaction(0.25) as acquired:
+            self.assertTrue(acquired)
+            gated.claim_exclusive_for_current_thread()
+        self.assertTrue(gated.left_click())
+        self.assertEqual(raw.clicks, 1)
+        gated.release_exclusive()
+
     def test_non_owner_retry_thread_cannot_click_during_concede(self):
         raw = RecordingInput()
         gated = ExclusiveInputController(raw)
@@ -89,6 +141,48 @@ class ExclusiveInputControllerTest(unittest.TestCase):
         # of it and never before it.
         self.assertEqual(raw.events, ["click_enter", "click_exit", "left_up"])
 
+    def test_claim_times_out_without_taking_input_from_a_stuck_call(self):
+        raw = OrderingInput()
+        gated = ExclusiveInputController(raw)
+        worker = threading.Thread(target=gated.left_click)
+        worker.start()
+        self.assertTrue(raw.in_flight.wait(timeout=1.0))
+
+        try:
+            self.assertFalse(gated.claim_exclusive_for_current_thread(timeout=0.05))
+            self.assertEqual(raw.events, ["click_enter"])
+        finally:
+            raw.proceed.set()
+            worker.join(timeout=1.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(gated.claim_exclusive_for_current_thread(timeout=0.05))
+        self.assertEqual(raw.events, ["click_enter", "click_exit", "left_up"])
+
+    def test_other_input_times_out_while_transaction_owns_the_gate(self):
+        raw = RecordingInput()
+        gated = ExclusiveInputController(raw)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_transaction():
+            with gated.input_transaction(0.25) as acquired:
+                self.assertTrue(acquired)
+                entered.set()
+                release.wait(timeout=1.0)
+
+        owner = threading.Thread(target=hold_transaction)
+        owner.start()
+        self.assertTrue(entered.wait(timeout=1.0))
+        try:
+            self.assertFalse(gated._gated("left_click", 1, timeout=0.05))
+            self.assertEqual(raw.clicks, 0)
+        finally:
+            release.set()
+            owner.join(timeout=1.0)
+        self.assertFalse(owner.is_alive())
+        self.assertTrue(gated.left_click())
+        self.assertEqual(raw.clicks, 1)
+
     def test_no_non_owner_input_reaches_the_delegate_after_a_claim(self):
         raw = OrderingInput()
         raw.proceed.set()  # nothing needs to block in this one
@@ -105,6 +199,63 @@ class ExclusiveInputControllerTest(unittest.TestCase):
 
 
 class ClaimedConcedeRetryTest(unittest.TestCase):
+    def test_busy_input_does_not_claim_concede_or_clear_retry_timer(self):
+        controller = Controller.__new__(Controller)
+        controller._stop_requested = False
+        controller._Controller__concession_claimed = False
+        controller._Controller__concession_claim_reason = None
+        controller._Controller__concession_claim_lock = threading.Lock()
+        controller._Controller__concede_completed_event = threading.Event()
+        controller.input = mock.Mock()
+        controller.input.claim_exclusive_for_current_thread.return_value = False
+
+        with mock.patch.object(controller, "_Controller__clear_stall_watchdog") as clear, \
+             mock.patch.object(controller, "_Controller__cancel_emergency_concede_timer") as cancel:
+            claimed = controller._Controller__claim_concession("stalled_local_context")
+
+        self.assertFalse(claimed)
+        self.assertFalse(controller._Controller__concession_claimed)
+        self.assertIsNone(controller._Controller__concession_claim_reason)
+        clear.assert_not_called()
+        cancel.assert_not_called()
+
+    def test_stop_during_input_claim_releases_ownership(self):
+        controller = Controller.__new__(Controller)
+        controller._stop_requested = False
+        controller._Controller__concession_claimed = False
+        controller._Controller__concession_claim_lock = threading.Lock()
+        controller.input = mock.Mock()
+
+        def claim():
+            controller._stop_requested = True
+            return True
+
+        controller.input.claim_exclusive_for_current_thread.side_effect = claim
+        self.assertFalse(controller._Controller__claim_concession("stalled_local_context"))
+        controller.input.release_exclusive.assert_called_once_with()
+        self.assertFalse(controller._Controller__concession_claimed)
+
+    def test_emergency_concede_retries_if_input_claim_is_busy(self):
+        controller = Controller.__new__(Controller)
+        controller._stop_requested = False
+        controller._Controller__concession_claimed = False
+        controller._Controller__emergency_concede_timer = None
+        controller._Controller__emergency_concede_threshold_sec = 20.0
+        controller._Controller__emergency_concede_scheduled_at = 0.0
+        controller._Controller__get_running_inactivity_timer_remaining = lambda: 5.0
+        controller._Controller__should_allow_emergency_concede_now = lambda: (True, "local")
+
+        with mock.patch.object(controller, "_Controller__claim_concession", return_value=False), \
+             mock.patch.object(controller, "_Controller__run_claimed_concede_sequence") as run, \
+             mock.patch("Controller.MTGAController.Controller.runtime_status.read_status",
+                        return_value={}), \
+             mock.patch("Controller.MTGAController.Controller.threading.Timer") as timer:
+            controller._Controller__attempt_emergency_concede()
+
+        run.assert_not_called()
+        self.assertEqual(timer.call_args.args[0], 1.0)
+        self.assertIs(controller._Controller__emergency_concede_timer, timer.return_value)
+
     def test_claimed_sequence_retries_until_match_completion(self):
         controller = Controller.__new__(Controller)
         controller._stop_requested = False

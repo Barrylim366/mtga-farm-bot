@@ -412,7 +412,13 @@ class StarterFirstTimeEntryTests(unittest.TestCase):
         self.c._choose_starter_deck_template = lambda colors: "assets/assert/starter_decks/WG.PNG"
 
         self.clicks: list[str] = []
-        self.c._click_abs = lambda x, y, tag, **kw: self.clicks.append(tag)
+        self.points: list[tuple[int, int, str]] = []
+
+        def record_click(x, y, tag, **kw):
+            self.clicks.append(tag)
+            self.points.append((x, y, tag))
+
+        self.c._click_abs = record_click
 
         def click_tpl(image_path, label, **kw):
             self.clicks.append(label)
@@ -472,6 +478,7 @@ class StarterFirstTimeEntryTests(unittest.TestCase):
             self.clicks,
             ["STARTER_DECK_BOX", "STARTER_DECK_PICK_WG", "STARTER_SUBMIT_DECK"],
         )
+        self.assertIn((1730, 540, "STARTER_DECK_BOX"), self.points)
 
     def test_deck_box_click_that_does_nothing_moves_to_the_next_point(self):
         """Measured live 2026-09-23: on an account with the event's three wins

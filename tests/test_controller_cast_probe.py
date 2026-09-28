@@ -59,9 +59,25 @@ def make_controller() -> Controller:
     return controller
 
 
+def mtga_in_foreground(testcase):
+    """Report MTGA as the foreground window for the rest of the test.
+
+    Since the cast path checks the foreground before the hand sweep, a test
+    that does not pin it reads the real desktop -- the terminal running the
+    suite -- and aborts with foreground_recovery_failed before it reaches the
+    sweep it means to exercise (and calls the real focus_mtga_window)."""
+    patcher = patch(
+        "Controller.MTGAController.Controller._describe_foreground_window",
+        return_value={"hwnd": 1, "title": "MTGA", "is_mtga": True},
+    )
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
 class CastProbeIsReactiveTest(unittest.TestCase):
     def setUp(self):
         self.c = make_controller()
+        mtga_in_foreground(self)
         self.c.input = _FakeInput()
         # Hand scan bounds equal (p1 == p2): the scan loop's bounds check
         # trips immediately on the first iteration, so _cast_once returns

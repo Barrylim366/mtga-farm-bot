@@ -321,7 +321,12 @@ class CastingTimeOptionsRetryTest(unittest.TestCase):
         class RecordingTimer(FakeTimer):
             def __init__(self, delay, fn, *args, **kwargs):
                 super().__init__(delay, fn, *args, **kwargs)
-                outer.timers.append(self)
+                # Other controllers can arm timers while this global patch is
+                # active. Step only the option-click chain under test.
+                if getattr(fn, "__qualname__", "").startswith(
+                    "Controller.__handle_casting_time_options_req.<locals>."
+                ):
+                    outer.timers.append(self)
 
         self.timer_patch = mock.patch.object(controller_module.threading, "Timer", RecordingTimer)
         self.timer_patch.start()

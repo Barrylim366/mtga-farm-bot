@@ -53,7 +53,7 @@ class ControllerKernel:
         """
         pass
 
-    def cast(self, card_id: int) -> bool:
+    def cast(self, card_id: int, decision_context: dict | None = None) -> bool:
         """
         Casts the card with the given id from the player's hand.
 
@@ -65,6 +65,20 @@ class ControllerKernel:
             Returns True only if the card was actually clicked. False means no
             click reached the game -- the caller must act on that rather than
             wait for a game-state change that will never come.
+        """
+        return False
+
+    def get_last_cast_abort_reason(self) -> str | None:
+        """Why the most recent cast stopped before clicking, if known."""
+        return None
+
+    def should_defer_cast_for_target_selection(self, expected_match_id=None) -> bool:
+        """Whether a target-selection transaction currently owns the UI.
+
+        A deferred cast must not be converted into a priority pass: the target
+        handler is still responsible for finishing the modal interaction.
+        Alternate controllers do not have this state machine, so their safe
+        default is to allow normal casting.
         """
         return False
 

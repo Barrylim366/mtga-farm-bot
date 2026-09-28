@@ -7,6 +7,7 @@ import stat
 import sys
 import time
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 
@@ -123,35 +124,97 @@ class ExclusiveInputController(InputController):
         self._gate_lock = threading.RLock()
         self._exclusive = False
         self._owner_ident: int | None = None
+        self._transaction_depth = 0
 
-    def claim_exclusive_for_current_thread(self) -> None:
-        with self._gate_lock:
-            self._exclusive = True
-            self._owner_ident = threading.get_ident()
-            # A gameplay path may have pressed the mouse just before the claim.
-            # Releasing directly avoids leaving Arena in a drag state. Inside
-            # the gate on purpose: any call that was already delegating has
-            # finished by now, and none that is refused can follow this up.
+    def _acquire_gate_until(self, deadline: float) -> bool:
+        """Bound lock acquisition even when a delegate call holds the gate."""
+        return self._gate_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+
+    @contextmanager
+    def input_transaction(self, timeout: float = 0.25):
+        """Temporarily serialize input for a short, safety-critical sequence."""
+        owner = threading.get_ident()
+        acquired = False
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while self._acquire_gate_until(deadline):
             try:
-                self._delegate.left_up()
-            except Exception:
-                pass
+                busy = ((self._transaction_depth or self._exclusive)
+                        and self._owner_ident != owner)
+                if not busy:
+                    if self._transaction_depth == 0:
+                        self._owner_ident = owner
+                    self._transaction_depth += 1
+                    acquired = True
+                    break
+            finally:
+                self._gate_lock.release()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.01, remaining))
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with self._gate_lock:
+                    self._transaction_depth -= 1
+                    if self._transaction_depth == 0 and not self._exclusive:
+                        self._owner_ident = None
+
+    def claim_exclusive_for_current_thread(self, timeout: float = 1.0) -> bool:
+        """Claim input only after in-flight input has finished, or fail boundedly."""
+        owner = threading.get_ident()
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while self._acquire_gate_until(deadline):
+            try:
+                busy = ((self._transaction_depth or self._exclusive)
+                        and self._owner_ident != owner)
+                if not busy:
+                    self._exclusive = True
+                    self._owner_ident = owner
+                    # An in-flight press has finished; release any drag before
+                    # the concede sequence starts.
+                    try:
+                        self._delegate.left_up()
+                    except Exception:
+                        pass
+                    return True
+            finally:
+                self._gate_lock.release()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.01, remaining))
+        return False
 
     def release_exclusive(self) -> None:
         with self._gate_lock:
             self._exclusive = False
-            self._owner_ident = None
+            if self._transaction_depth == 0:
+                self._owner_ident = None
 
     def _allowed(self) -> bool:
         with self._gate_lock:
             return not self._exclusive or threading.get_ident() == self._owner_ident
 
-    def _gated(self, method_name: str, *args):
+    def _gated(self, method_name: str, *args, timeout: float = 5.0):
         """Run a delegate method only while the caller still holds permission."""
-        with self._gate_lock:
-            if self._exclusive and threading.get_ident() != self._owner_ident:
-                return None
-            return getattr(self._delegate, method_name)(*args)
+        owner = threading.get_ident()
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while self._acquire_gate_until(deadline):
+            try:
+                if self._exclusive and owner != self._owner_ident:
+                    return False
+                if not self._transaction_depth or owner == self._owner_ident:
+                    getattr(self._delegate, method_name)(*args)
+                    return True
+            finally:
+                self._gate_lock.release()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.01, remaining))
+        return False
 
     def move_abs(self, x: int, y: int) -> None:
         return self._gated("move_abs", x, y)

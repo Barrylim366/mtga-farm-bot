@@ -327,6 +327,26 @@ class StallWatchdogSafetyTest(StallSignatureTest):
         self.controller._Controller__stall_concede_threshold_sec = 30.0
         self.controller._Controller__stall_watchdog_generation = 0
 
+    def test_busy_input_claim_rearms_the_same_stall_context(self):
+        self.controller.updated_game_state = GameState(_state())
+        signature = self.controller._Controller__local_stall_signature()
+        self.controller._Controller__stall_context_signature = signature
+        self.controller._Controller__stall_context_started_at = 10.0
+        self.controller._Controller__stall_watchdog_generation = 1
+
+        with mock.patch.object(self.controller, "_Controller__claim_concession", return_value=False), \
+             mock.patch.object(self.controller, "_Controller__run_claimed_concede_sequence") as run, \
+             mock.patch("Controller.MTGAController.Controller.threading.Timer") as timer, \
+             mock.patch("Controller.MTGAController.Controller.time.monotonic", return_value=41.0):
+            self.controller._Controller__attempt_stall_concede(
+                1, signature, 10.0, "match-1"
+            )
+
+        self.assertFalse(self.controller._Controller__concession_claimed)
+        run.assert_not_called()
+        self.assertEqual(timer.call_args.args[0], 1.0)
+        self.assertIs(self.controller._Controller__stall_watchdog_timer, timer.return_value)
+
     def test_stale_or_menu_state_cannot_arm_watchdog(self):
         self.controller.updated_game_state = GameState(_state())
         self.controller._Controller__live_match_id = None

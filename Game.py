@@ -33,8 +33,55 @@ class Game:
     # STUCK_ACTION_RETRY_LIMIT below.
     _STUCK_MOVE_RETRY_LIMIT = 3
 
+    @staticmethod
+    def _capture_cast_decision_base(current_game_state, expected_match_id):
+        """Freeze the state used by the AI before log updates can replace it."""
+        try:
+            state = current_game_state.get_full_state() or {}
+            turn = state.get("turnInfo", {}) or {}
+            actions = []
+            for wrapper in state.get("actions", []) or []:
+                action = (wrapper or {}).get("action", {}) or {}
+                if action.get("actionType") not in {"ActionType_Cast", "ActionType_Play"}:
+                    continue
+                actions.append({
+                    "card_id": action.get("instanceId"),
+                    "seat_id": wrapper.get("seatId"),
+                    "type": action.get("actionType"),
+                    "mana_cost": list(action.get("manaCost", []) or []),
+                    "ability_grp_id": action.get("abilityGrpId"),
+                })
+            return {
+                "match_id": expected_match_id,
+                "game_state_id": state.get("gameStateId"),
+                "turn": {key: turn.get(key) for key in (
+                    "turnNumber", "phase", "step", "activePlayer",
+                    "priorityPlayer", "decisionPlayer",
+                )},
+                "cast_actions": actions,
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cast_decision_context(base, card_id):
+        if not isinstance(base, dict):
+            return None
+        selected = [
+            dict(action) for action in base.get("cast_actions", [])
+            if action.get("card_id") == card_id
+        ]
+        context = dict(base)
+        context["card_id"] = card_id
+        context["selected_actions"] = selected
+        context["selected_action_observed"] = bool(selected)
+        context.pop("cast_actions", None)
+        return context
+
     def _pass_priority_on_uncastable(
-        self, inst_id, turn_num, phase, step, decision_player, expected_match_id=None
+        self, inst_id, turn_num, phase, step, decision_player,
+        expected_match_id=None, game_state_id=None,
+        reason="card not reachable in hand",
     ) -> None:
         """The cast's click never reached the game, so nothing about the state
         will change and the AI will pick this same card again on the next tick.
@@ -49,11 +96,12 @@ class Game:
         )
         bot_logger.log_error(
             f"CAST_UNAVAILABLE: move cast=[{inst_id}] could not be executed "
-            "(card not reachable in hand); passing priority to keep the turn moving."
+            f"({reason}); passing priority to keep the turn moving."
         )
         # Record the pass, not the failed cast: leaving the cast's signature in
         # place would let the breaker count a move that never ran.
         self._last_move_signature = (
+            expected_match_id, game_state_id,
             turn_num, phase, step, decision_player, 'resolve', (),
         )
         self._last_move_repeat_count = 1
@@ -90,9 +138,9 @@ class Game:
         self._match_slot = 0
         self._timers: list[threading.Timer] = []
         self._last_action_delay_turn = -1
-        # Tracks (turn, phase, step, decisionPlayer, move_name, move_payload) of
-        # the last move actually executed, plus how many times in a row it has
-        # repeated -- see _STUCK_MOVE_RETRY_LIMIT.
+        # Tracks (matchId, gameStateId, turn, phase, step, decisionPlayer,
+        # move_name, move_payload) of the last move actually executed, plus how
+        # many times in a row it has repeated -- see _STUCK_MOVE_RETRY_LIMIT.
         self._last_move_signature = None
         self._last_move_repeat_count = 0
         # Epoch when the current match actually started (first mulligan / inferred
@@ -626,7 +674,11 @@ class Game:
             except Exception as e:
                 self._debug(f"Decision recorder capture failed: {e}")
 
-            # Generate move
+            # Generate move. Freeze cast context first: updated_game_state is
+            # shared with the log-reader thread and may advance during a scan.
+            cast_decision_base = self._capture_cast_decision_base(
+                current_game_state, expected_match_id
+            )
             self._debug("Calling AI.generate_move()")
             move = self.ai.generate_move(current_game_state, self.controller.get_inst_id_grp_id_dict())
             self._debug(f"AI returned move: {move}")
@@ -641,10 +693,17 @@ class Game:
 
             move_name = list(move.keys())[0]
             move_payload = move.get(move_name)
+            game_state_id = (
+                cast_decision_base.get("game_state_id")
+                if cast_decision_base is not None else None
+            )
             move_signature = (
+                expected_match_id, game_state_id,
                 turn_num, phase, step, decision_player, move_name,
                 tuple(move_payload) if isinstance(move_payload, list) else move_payload,
             )
+            previous_move_signature = self._last_move_signature
+            previous_move_repeat_count = self._last_move_repeat_count
             if move_signature == self._last_move_signature:
                 self._last_move_repeat_count += 1
             else:
@@ -662,8 +721,22 @@ class Game:
             # also already has its own retry-and-give-up handling in
             # Controller.__schedule_target_selection.
             _BREAKER_EXEMPT_MOVES = ('resolve', 'auto_pass', 'unconditional_auto_pass', 'select_target')
+            last_cast_abort = getattr(
+                self.controller, "get_last_cast_abort_reason", lambda: None
+            )()
+            cast_safety_wait = move_name == "cast" and last_cast_abort in {
+                "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
+                "cast_screen_blocked", "foreground_recovery_failed",
+                "cast_ack_pending", "target_selection_pending",
+            }
+            if move_name == "cast" and not cast_safety_wait:
+                defer_for_breaker = getattr(
+                    self.controller, "should_defer_cast_for_target_selection", None
+                )
+                cast_safety_wait = callable(defer_for_breaker) and defer_for_breaker(expected_match_id)
             if (
                 move_name not in _BREAKER_EXEMPT_MOVES
+                and not cast_safety_wait
                 and self._last_move_repeat_count >= self._STUCK_MOVE_RETRY_LIMIT
             ):
                 bot_logger.log_error(
@@ -673,7 +746,10 @@ class Game:
                 )
                 move = {'resolve': []}
                 move_name = 'resolve'
-                self._last_move_signature = (turn_num, phase, step, decision_player, 'resolve', ())
+                self._last_move_signature = (
+                    expected_match_id, game_state_id,
+                    turn_num, phase, step, decision_player, 'resolve', (),
+                )
                 self._last_move_repeat_count = 1
 
             runtime_status.touch_decision(
@@ -719,10 +795,62 @@ class Game:
                         self._debug(f"Cast {card_id_str}")
                 else:
                     self._debug(f"Cast {card_id_str}")
-                if self.controller.cast(inst_id) is False:
-                    self._pass_priority_on_uncastable(
-                        inst_id, turn_num, phase, step, decision_player, expected_match_id
+                defer_cast = getattr(
+                    self.controller, "should_defer_cast_for_target_selection", None
+                )
+                if callable(defer_cast) and defer_cast(expected_match_id):
+                    self._last_move_signature = previous_move_signature
+                    self._last_move_repeat_count = previous_move_repeat_count
+                    self._debug(
+                        f"CAST_DEFERRED: target selection is still blocking card {inst_id}."
                     )
+                    bot_logger.log_info(
+                        f"CAST_DEFERRED: target selection is still blocking card {inst_id}; "
+                        "leaving priority fallback untouched."
+                    )
+                    return
+                cast_context = self._cast_decision_context(cast_decision_base, inst_id)
+                cast_result = self.controller.cast(inst_id, decision_context=cast_context)
+                if cast_result is False:
+                    # A target prompt can arrive during the hand scan. Recheck
+                    # before treating the failed click as an uncastable card.
+                    blocked_now = callable(defer_cast) and defer_cast(expected_match_id)
+                    abort_reason = getattr(
+                        self.controller, "get_last_cast_abort_reason", lambda: None
+                    )()
+                    if blocked_now or abort_reason == "target_selection_pending":
+                        self._last_move_signature = previous_move_signature
+                        self._last_move_repeat_count = previous_move_repeat_count
+                        self._debug(
+                            f"CAST_DEFERRED: target selection opened while casting card {inst_id}."
+                        )
+                        bot_logger.log_info(
+                            f"CAST_DEFERRED: target selection opened while casting card {inst_id}; "
+                            "suppressing priority fallback."
+                        )
+                    elif abort_reason == "cast_escape_retry_exhausted":
+                        self._pass_priority_on_uncastable(
+                            inst_id, turn_num, phase, step, decision_player,
+                            expected_match_id, game_state_id,
+                            reason="cast retry exhausted after two ineffective attempts",
+                        )
+                    elif abort_reason in {
+                        "stale_decision_context", "foreground_recovery_failed",
+                        "cast_input_busy", "cast_hover_lost", "cast_cursor_moved",
+                        "cast_screen_blocked",
+                        "cast_ack_pending",
+                    }:
+                        self._debug(
+                            f"CAST_ABORTED: card {inst_id} was not clicked because the decision context or foreground became unsafe."
+                        )
+                        bot_logger.log_info(
+                            f"CAST_STALE_CONTEXT: card {inst_id} cancelled; waiting for the recovery decision."
+                        )
+                    else:
+                        self._pass_priority_on_uncastable(
+                            inst_id, turn_num, phase, step, decision_player,
+                            expected_match_id, game_state_id,
+                        )
             elif move_name == 'all_attack':
                 self._debug("Executing all_attack")
                 self.controller.all_attack()
