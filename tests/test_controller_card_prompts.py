@@ -296,9 +296,13 @@ class DecisionPathGateTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def _decision_timers(self):
+        # Only count timers armed by this test's controller. A real recovery
+        # timer leaked by an earlier cast test can fire mid-test on its own
+        # controller and re-arm through the patched Timer.
         return [
             t for t in self.timers
             if "decision" in getattr(t.function, "__name__", "").lower()
+            and getattr(t.function, "__self__", self.c) is self.c
         ]
 
     def _push_update(self):
