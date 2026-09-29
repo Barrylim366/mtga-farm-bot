@@ -30,6 +30,7 @@ Accounts/*
 # state -- so they are tracked.
 .claude/*
 !.claude/skills/
+!.claude/settings.json
 
 # Internal AI/session files
 learning.md
