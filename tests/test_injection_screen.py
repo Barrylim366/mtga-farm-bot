@@ -31,6 +31,16 @@ class AskJevTest(unittest.TestCase):
         self.assertEqual(seen["payload"]["model"], "jev-latest")
         self.assertEqual(seen["payload"]["questions"][screen.QUESTION_ID]["type"], "noul")
 
+    def test_openrouter_key_goes_to_openrouter(self):
+        seen = {}
+
+        def post(url, payload, headers):
+            seen.update(url=url, model=payload["model"])
+            return _jev_body(0.2)
+
+        screen.ask_jev("text", "sk-or-v1-abc", post=post)
+        self.assertEqual(seen, {"url": screen.OPENROUTER_JEV_URL, "model": screen.OPENROUTER_JEV_MODEL})
+
     def test_retries_rate_limit_then_succeeds(self):
         calls = []
 

@@ -32,7 +32,8 @@ A classifier is a filter, not a security boundary. The rules in CLAUDE.md
 (untrusted text is data, never instructions) apply whether or not a label is
 set.
 
-Setup: repository secret JEV_API_KEY. Optional repository variable
+Setup: repository secret JEV_API_KEY -- a TypeSafe key or an OpenRouter key
+(`sk-or-...`), the endpoint follows the key. Optional repository variable
 JEV_INJECTION_THRESHOLD (default 0.5) -- keep it a variable, not a value in
 this file, so the exact cutoff is not public. Standard library only, so the
 workflow does not have to install anything.
@@ -49,8 +50,13 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+# Jev is reachable directly at TypeSafe or through OpenRouter, which serves the
+# same System One request format. The key decides which: OpenRouter keys start
+# with `sk-or-` and TypeSafe rejects them with 401 (and vice versa).
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-latest"
+OPENROUTER_JEV_URL = "https://openrouter.ai/api/v1/systemone"
+OPENROUTER_JEV_MODEL = "jev-1.13"
 GITHUB_API = "https://api.github.com"
 
 LABEL_FLAGGED = "possible-injection"
@@ -201,13 +207,21 @@ def normalize_api_key(raw: str | None) -> str | None:
     return key or None
 
 
+def jev_endpoint(api_key: str) -> tuple[str, str]:
+    """(URL, model) for the service this key belongs to."""
+    if api_key.startswith("sk-or-"):
+        return OPENROUTER_JEV_URL, OPENROUTER_JEV_MODEL
+    return JEV_URL, JEV_MODEL
+
+
 def ask_jev(state: str, api_key: str, *, post=_post_json, sleep=time.sleep) -> float:
     """Jev's yes-probability (0..1) that `state` is an injection attempt."""
-    payload = {"state": state, "model": JEV_MODEL, "questions": {QUESTION_ID: QUESTION}}
+    url, model = jev_endpoint(api_key)
+    payload = {"state": state, "model": model, "questions": {QUESTION_ID: QUESTION}}
     headers = {"Authorization": f"Bearer {api_key}"}
     for attempt in range(_MAX_ATTEMPTS):
         try:
-            body = post(JEV_URL, payload, headers)
+            body = post(url, payload, headers)
             break
         except urllib.error.HTTPError as exc:
             if exc.code in _RETRY_STATUSES and attempt < _MAX_ATTEMPTS - 1:
