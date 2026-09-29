@@ -1,0 +1,66 @@
+name: Injection screen
+
+# Screens text that outside contributors (and review bots) write on PRs and
+# issues for prompt injection aimed at AI agents, and labels the PR/issue when
+# Jev flags it. See tools/injection_screen.py.
+#
+# pull_request_target (not pull_request) so fork PRs get the JEV_API_KEY
+# secret. That is only safe because this workflow NEVER checks out or runs the
+# PR's code: the checkout below fetches GITHUB_SHA, which for
+# pull_request_target is the base branch, and the PR is only read as event
+# JSON. Never change the checkout to the PR head.
+#
+# Event fields are never interpolated into `run:` with ${{ }} -- the script
+# reads them from $GITHUB_EVENT_PATH, so a PR title cannot inject shell.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  # Manual run: screens built-in samples only (--self-test), labels nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: injection-screen-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event.comment.id || github.event.review.id || 'body' }}
+  cancel-in-progress: false
+
+jobs:
+  screen:
+    # Skip our own label events and GitHub's bot, which cannot inject anything.
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out base branch (never the PR head)
+        shell: bash
+        run: |
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Screen and label
+        env:
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+          JEV_INJECTION_THRESHOLD: ${{ vars.JEV_INJECTION_THRESHOLD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            python3 tools/injection_screen.py --self-test
+          else
+            python3 tools/injection_screen.py --github-event
+          fi

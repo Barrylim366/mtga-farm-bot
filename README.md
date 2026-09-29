@@ -426,6 +426,10 @@ The rest of the codebase (`Controller/MTGAController/Controller.py`, `ui.py`, â€
 
 GitHub Actions runs the same Pyright check automatically for every push and pull request (`.github/workflows/pyright.yml`).
 
+### Prompt-injection screen
+
+PR and issue text is screened for prompt injection aimed at AI agents (`.github/workflows/injection-screen.yml`, using the [Jev](https://docs.typesafe.ai/api) classification model). Flagged items get the label `possible-injection`; `injection-unscreened` means the screen could not run. Setup and details: `tools/injection_screen.py` and `CLAUDE.md`.
+
 ## Logs & Troubleshooting
 
 | File | Location | Purpose |
