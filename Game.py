@@ -432,7 +432,7 @@ class Game:
         return None
 
     def _refresh_card_data(self):
-        """Refresh cards.json from local MTGA data (Linux/macOS/Windows Steam paths).
+        """Refresh cards.json from local MTGA data (native and Steam installs).
 
         Deliberately no Scryfall bulk download here. The local export already
         contains every Arena grpId, so a bulk merge can only ever skip cards it
@@ -460,6 +460,9 @@ class Game:
                 os.path.expanduser("~/.steam/steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
                 os.path.expanduser("~/.steam/root/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
                 os.path.expanduser("~/Library/Application Support/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"),
+                # Native macOS client. Unlike the Steam build, this stores
+                # Downloads directly beneath its application-support bundle.
+                os.path.expanduser("~/Library/Application Support/com.wizards.mtga/Downloads/Raw"),
                 os.path.expanduser(
                     "~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw"
                 ),

@@ -9,16 +9,17 @@ The account switch then typed a wrong e-mail and -- invisibly -- a wrong
 password, and the login simply failed.
 
 pynput inserts the literal character instead (CGEventKeyboardSetUnicodeString
-on macOS, keymap remapping on X11), so type_text routes through it.
+on macOS, keymap remapping on X11). macOS now pastes through `pbcopy` instead:
+constructing pynput's keyboard controller from the bot worker thread calls
+Text Services off its required queue and macOS terminates Python.
 
 That assumption held on macOS and Windows and turned out to be **false on
 X11/XWayland**: pynput resolves `@` to its AltGr level (AltGr+Q on a German
 layout) and then presses Q without AltGr. Measured 2026-08-23 on a live run:
 `a@b` arrived as `aqb`, the account e-mail was typed as `...qmail.de`, the
 login failed, and the bot span for an hour in GO_HOME on a login screen it
-believed it had passed. Linux therefore pastes via the clipboard (Ctrl+V
-carries no character, so no layout can distort it) while Windows and macOS keep
-the keystroke path exactly as it was.
+believed it had passed. Linux and macOS therefore paste via the clipboard (the
+modifier shortcut carries no character, so no layout can distort it).
 
 Every test here pins the platform: the routing is per-platform now, so a test
 that does not say which one it means would assert whatever the dev box happens
@@ -82,33 +83,47 @@ def pin_platform(testcase, name):
     testcase.addCleanup(patcher.stop)
 
 
-class TypeTextLayoutTest(unittest.TestCase):
-    """The keystroke path -- Windows and macOS, unchanged by the Linux fix."""
+class TypeTextMacClipboardTest(unittest.TestCase):
+    """macOS uses pasteboard input, avoiding worker-thread Text Services."""
 
     def setUp(self):
         pin_platform(self, "Darwin")
-    def test_text_goes_through_pynput_not_typewrite(self):
-        """The regression itself: typewrite() is what mistypes `@` on QWERTZ."""
+    def test_text_is_pasted_not_typed(self):
         keyboard = FakeKeyboard()
         backend = make_backend(keyboard)
-        backend.type_text(EMAIL)
-        self.assertEqual(keyboard.typed, [EMAIL])
-        self.assertEqual(backend._pyautogui.typed, [], "typewrite must not be used when pynput is available")
-
-    def test_falls_back_to_typewrite_only_when_pynput_is_missing(self):
-        """Typing nothing at all would be worse than typing it via the US map."""
-        backend = make_backend(None)
-        backend.type_text(EMAIL)
-        self.assertEqual(backend._pyautogui.typed, [EMAIL])
-
-    def test_a_failure_mid_string_raises_instead_of_retyping(self):
-        """pynput types character by character, so a partial failure has already
-        put text in the field. Retyping the whole string would duplicate it --
-        for a password that is unrecoverable and invisible."""
-        backend = make_backend(FakeKeyboard(fail_at="@"))
-        with self.assertRaises(InputControllerError):
+        with mock.patch.object(
+            backend, "_type_text_via_macos_clipboard", return_value=True
+        ) as paste:
             backend.type_text(EMAIL)
-        self.assertEqual(backend._pyautogui.typed, [], "must not fall back and duplicate input")
+        paste.assert_called_once_with(EMAIL)
+        self.assertEqual(keyboard.typed, [])
+        self.assertEqual(backend._pyautogui.typed, [])
+
+    def test_constructor_does_not_create_pynput_keyboard(self):
+        fake_module = mock.Mock()
+        fake_module.FAILSAFE = False
+        fake_module.PAUSE = 0.0
+        fake_module.position.return_value = (100, 100)
+        fake_module.size.return_value = (1920, 1080)
+        with mock.patch.dict(sys.modules, {"pyautogui": fake_module}), mock.patch.object(
+            PyAutoGUIInputController,
+            "_make_unicode_keyboard",
+            side_effect=AssertionError("pynput must not initialize on macOS"),
+        ), mock.patch.object(
+            PyAutoGUIInputController, "_verify_mouse_control"
+        ):
+            backend = PyAutoGUIInputController()
+        self.assertIsNone(backend._unicode_keyboard)
+
+    def test_a_failed_paste_raises_instead_of_using_us_keycodes(self):
+        backend = make_backend(FakeKeyboard())
+        with mock.patch.object(
+            backend, "_type_text_via_macos_clipboard", return_value=False
+        ):
+            with self.assertRaises(InputControllerError) as caught:
+                backend.type_text(EMAIL)
+        self.assertIn("pasteboard", str(caught.exception))
+        self.assertEqual(backend._pyautogui.typed, [])
 
     def test_empty_text_touches_no_backend(self):
         keyboard = FakeKeyboard()
@@ -117,6 +132,41 @@ class TypeTextLayoutTest(unittest.TestCase):
         backend.type_text(None)
         self.assertEqual(keyboard.typed, [])
         self.assertEqual(backend._pyautogui.typed, [])
+
+    def test_pasteboard_selects_the_field_before_pasting(self):
+        backend = make_backend(FakeKeyboard())
+        with mock.patch(
+            "Controller.Utilities.input_controller.subprocess.run"
+        ) as run, mock.patch(
+            "Controller.Utilities.input_controller.time.sleep"
+        ):
+            self.assertTrue(backend._type_text_via_macos_clipboard("x@y"))
+        run.assert_called_once_with(
+            ["pbcopy"], input="x@y", text=True, timeout=5, check=True
+        )
+        self.assertEqual(
+            backend._pyautogui.hotkeys, [("command", "a"), ("command", "v")]
+        )
+
+
+class TypeTextWindowsTest(unittest.TestCase):
+    """Windows retains its existing layout-correct pynput path."""
+
+    def setUp(self):
+        pin_platform(self, "Windows")
+
+    def test_text_goes_through_pynput_not_typewrite(self):
+        keyboard = FakeKeyboard()
+        backend = make_backend(keyboard)
+        backend.type_text(EMAIL)
+        self.assertEqual(keyboard.typed, [EMAIL])
+        self.assertEqual(backend._pyautogui.typed, [])
+
+    def test_a_failure_mid_string_raises_instead_of_retyping(self):
+        backend = make_backend(FakeKeyboard(fail_at="@"))
+        with self.assertRaises(InputControllerError):
+            backend.type_text(EMAIL)
+        self.assertEqual(backend._pyautogui.typed, [], "must not fall back and duplicate input")
 
 
 class TypeTextLinuxClipboardTest(unittest.TestCase):
