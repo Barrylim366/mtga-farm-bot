@@ -232,3 +232,44 @@ class NormalizeApiKeyTest(unittest.TestCase):
         for raw in (None, "", "  ", '""'):
             with self.subTest(raw=raw):
                 self.assertIsNone(screen.normalize_api_key(raw))
+
+
+class RescreenTest(unittest.TestCase):
+    ENV = {"GITHUB_REPOSITORY": "o/r", "GITHUB_TOKEN": "T", "JEV_API_KEY": "K"}
+
+    def _run(self, number, verdicts):
+        items = [(f"item {i}", f"TEXT-{i}") for i in range(len(verdicts))]
+        labelled = []
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = screen.run_rescreen(
+                number, self.ENV,
+                collect=lambda repo, n, token: items,
+                screen=lambda text, _k, threshold: verdicts[int(text.split("-")[1])],
+                label=lambda repo, n, label, token: labelled.append((n, label)),
+            )
+        return code, labelled, out.getvalue()
+
+    def test_flagged_item_labels_and_text_is_never_printed(self):
+        code, labelled, out = self._run("66", [screen.Verdict(False), screen.Verdict(True, score=0.9)])
+        self.assertEqual(code, 0)
+        self.assertEqual(labelled, [(66, screen.LABEL_FLAGGED)])
+        self.assertNotIn("TEXT-", out)
+        self.assertIn("2 item(s), 1 flagged", out)
+
+    def test_clean_thread_adds_and_removes_nothing(self):
+        _code, labelled, _out = self._run("66", [screen.Verdict(False)] * 3)
+        self.assertEqual(labelled, [])
+
+    def test_non_numeric_input_is_rejected(self):
+        code, labelled, _out = self._run("66; rm -rf /", [])
+        self.assertEqual((code, labelled), (1, []))
+
+    def test_collect_covers_pr_reviews_and_inline_comments(self):
+        responses = {
+            "/repos/o/r/issues/7": {"title": "T", "body": "B", "pull_request": {}},
+            "/repos/o/r/issues/7/comments": [{"id": 1, "user": {"login": "a"}, "body": "c"}],
+            "/repos/o/r/pulls/7/reviews": [{"id": 2, "user": {"login": "coderabbitai[bot]"}, "body": "r"}],
+            "/repos/o/r/pulls/7/comments": [{"id": 3, "user": {"login": "b"}, "body": "l"}],
+        }
+        items = screen.collect_thread_texts("o/r", 7, "T", get=lambda path, _t: responses[path])
+        self.assertEqual([text for _what, text in items], ["T\n\nB", "c", "r", "l"])

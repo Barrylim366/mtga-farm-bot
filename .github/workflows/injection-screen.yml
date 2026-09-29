@@ -24,8 +24,16 @@ on:
     types: [submitted, edited]
   pull_request_review_comment:
     types: [created, edited]
-  # Manual run: screens built-in samples only (--self-test), labels nothing.
+  # Manual run. Without a number: screens built-in samples only (--self-test)
+  # and labels nothing. With a number: screens that whole PR/issue (body, all
+  # comments and reviews) with the current code; adds possible-injection when
+  # flagged, never removes a label.
   workflow_dispatch:
+    inputs:
+      number:
+        description: "PR/issue number to rescreen (empty = self-test)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -57,9 +65,12 @@ jobs:
           JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
           JEV_INJECTION_THRESHOLD: ${{ vars.JEV_INJECTION_THRESHOLD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESCREEN_NUMBER: ${{ inputs.number }}
         shell: bash
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${RESCREEN_NUMBER}" ]; then
+            python3 tools/injection_screen.py --rescreen "${RESCREEN_NUMBER}"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             python3 tools/injection_screen.py --self-test
           else
             python3 tools/injection_screen.py --github-event

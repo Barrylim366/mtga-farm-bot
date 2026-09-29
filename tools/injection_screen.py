@@ -387,11 +387,80 @@ def run_self_test(env=os.environ, *, ask=ask_jev) -> int:
     return 1 if failures else 0
 
 
+def _github_get_all(path: str, token: str) -> list | dict:
+    """GET with pagination for list endpoints (100 per page)."""
+    results: list = []
+    page = 1
+    while True:
+        sep = "&" if "?" in path else "?"
+        request = urllib.request.Request(f"{GITHUB_API}{path}{sep}per_page=100&page={page}", headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "burning-lotus-injection-screen",
+        })
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:  # noqa: S310 (fixed HTTPS host)
+            data = json.loads(response.read().decode("utf-8"))
+        if not isinstance(data, list):
+            return data
+        results.extend(data)
+        if len(data) < 100:
+            return results
+        page += 1
+
+
+def collect_thread_texts(repo: str, number: int, token: str, *, get=_github_get_all) -> list[tuple[str, str]]:
+    """(item description, untrusted text) for everything on a PR or issue:
+    title+body, every comment, and -- for a PR -- every review and inline
+    review comment. The description names the item, never quotes it."""
+    issue = get(f"/repos/{repo}/issues/{number}", token)
+    items = [("body", _join(issue.get("title"), issue.get("body")))]
+    for c in get(f"/repos/{repo}/issues/{number}/comments", token):
+        items.append((f"comment {c.get('id')} by {(c.get('user') or {}).get('login')}", c.get("body") or ""))
+    if "pull_request" in issue:  # present (even empty) only on PRs
+        for r in get(f"/repos/{repo}/pulls/{number}/reviews", token):
+            items.append((f"review {r.get('id')} by {(r.get('user') or {}).get('login')}", r.get("body") or ""))
+        for c in get(f"/repos/{repo}/pulls/{number}/comments", token):
+            items.append((f"review comment {c.get('id')} by {(c.get('user') or {}).get('login')}", c.get("body") or ""))
+    return items
+
+
+def run_rescreen(number_raw: str, env=os.environ, *, collect=collect_thread_texts,
+                 screen=screen_text, label=apply_label) -> int:
+    """Screens a whole existing PR/issue with the current code (manual run).
+
+    Adds `possible-injection` when anything is flagged. Never removes a label:
+    clearing `injection-unscreened` after a clean result is a human decision.
+    """
+    if not number_raw.strip().isdigit():
+        print(f"rescreen: not a PR/issue number: {number_raw!r}")
+        return 1
+    number = int(number_raw)
+    repo, token = env["GITHUB_REPOSITORY"], env["GITHUB_TOKEN"]
+    api_key = normalize_api_key(env.get("JEV_API_KEY"))
+    threshold = _threshold(env)
+
+    flagged = unscreened = 0
+    items = collect(repo, number, token)
+    for what, text in items:
+        verdict = screen(text, api_key, threshold=threshold)
+        flagged += verdict.flagged
+        unscreened += verdict.unscreened and not verdict.flagged
+        print(f"rescreen: #{number} {what}: {json.dumps(verdict.as_dict())}")
+
+    if flagged:
+        label(repo, number, LABEL_FLAGGED, token)
+        print(f"rescreen: #{number} labelled {LABEL_FLAGGED}")
+    print(f"rescreen: #{number} {len(items)} item(s), {flagged} flagged, {unscreened} unscreened")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--github-event", action="store_true", help="screen $GITHUB_EVENT_PATH and label")
     source.add_argument("--self-test", action="store_true", help="screen built-in samples, print scores")
+    source.add_argument("--rescreen", metavar="NUMBER", help="screen a whole existing PR/issue (Actions only)")
     source.add_argument("--file", help="screen this file (default: stdin)")
     args = parser.parse_args(argv)
 
@@ -399,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_github_event()
     if args.self_test:
         return run_self_test()
+    if args.rescreen is not None:
+        return run_rescreen(args.rescreen)
 
     if args.file:
         with open(args.file, encoding="utf-8", errors="replace") as f:
