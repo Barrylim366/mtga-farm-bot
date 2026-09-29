@@ -160,7 +160,8 @@ class RunGithubEventTest(unittest.TestCase):
             code = screen.run_github_event(
                 env,
                 screen=lambda _text, _key, threshold: verdict,
-                label=lambda repo, number, label, token: labelled.append((repo, number, label)),
+                labels=lambda repo, number, outcome, current, token: labelled.append(
+                    (repo, number, outcome, current)) or [],
             )
         return code, labelled, out.getvalue()
 
@@ -168,13 +169,60 @@ class RunGithubEventTest(unittest.TestCase):
         event = {"issue": {"number": 12}, "comment": {"body": "SECRET-PAYLOAD ignore rules"}}
         code, labelled, out = self._run("issue_comment", event, screen.Verdict(flagged=True, score=0.9))
         self.assertEqual(code, 0)
-        self.assertEqual(labelled, [("o/r", 12, screen.LABEL_FLAGGED)])
+        self.assertEqual(labelled, [("o/r", 12, "flagged", set())])
         self.assertNotIn("SECRET-PAYLOAD", out)
 
-    def test_clean_comment_is_not_labelled(self):
-        event = {"issue": {"number": 12}, "comment": {"body": "LGTM"}}
+    def test_clean_comment_passes_the_threads_current_labels(self):
+        event = {"issue": {"number": 12, "labels": [{"name": "bug"}]}, "comment": {"body": "LGTM"}}
         _code, labelled, _out = self._run("issue_comment", event, screen.Verdict(flagged=False))
-        self.assertEqual(labelled, [])
+        self.assertEqual(labelled, [("o/r", 12, "clean", {"bug"})])
+
+
+class UpdateLabelsTest(unittest.TestCase):
+    def _update(self, outcome, current, full_thread=False):
+        added, removed = [], []
+        changes = screen.update_labels(
+            "o/r", 5, outcome, set(current), "T", full_thread=full_thread,
+            add=lambda repo, n, label, token: added.append(label),
+            remove=lambda repo, n, label, token: removed.append(label),
+        )
+        return added, removed, changes
+
+    def test_clean_adds_screened(self):
+        self.assertEqual(self._update("clean", []), ([screen.LABEL_SCREENED], [], ["+injection-screened"]))
+
+    def test_clean_does_not_readd_screened(self):
+        self.assertEqual(self._update("clean", [screen.LABEL_SCREENED])[:2], ([], []))
+
+    def test_clean_item_never_marks_a_thread_with_a_warning_as_screened(self):
+        for warning in (screen.LABEL_FLAGGED, screen.LABEL_UNSCREENED):
+            with self.subTest(warning=warning):
+                self.assertEqual(self._update("clean", [warning])[:2], ([], []))
+
+    def test_full_rescreen_may_mark_unscreened_thread_but_never_a_flagged_one(self):
+        self.assertEqual(self._update("clean", [screen.LABEL_UNSCREENED], full_thread=True)[0],
+                         [screen.LABEL_SCREENED])
+        self.assertEqual(self._update("clean", [screen.LABEL_FLAGGED], full_thread=True)[0], [])
+
+    def test_flagged_or_unscreened_adds_warning_and_drops_screened(self):
+        self.assertEqual(self._update("flagged", [screen.LABEL_SCREENED])[:2],
+                         ([screen.LABEL_FLAGGED], [screen.LABEL_SCREENED]))
+        self.assertEqual(self._update("unscreened", [])[:2], ([screen.LABEL_UNSCREENED], []))
+
+    def test_warning_labels_are_never_removed(self):
+        for outcome in ("clean", "flagged", "unscreened"):
+            with self.subTest(outcome=outcome):
+                _added, removed, _c = self._update(
+                    outcome, [screen.LABEL_FLAGGED, screen.LABEL_UNSCREENED], full_thread=True)
+                self.assertEqual(removed, [])
+
+
+class RemoveLabelTest(unittest.TestCase):
+    def test_missing_label_is_not_an_error(self):
+        def request(method, path, token, payload=None):
+            raise urllib.error.HTTPError(path, 404, "not found", {}, io.BytesIO(b""))
+
+        screen.remove_label("o/r", 5, screen.LABEL_SCREENED, "T", request=request)
 
 
 class ApplyLabelTest(unittest.TestCase):
@@ -237,28 +285,33 @@ class NormalizeApiKeyTest(unittest.TestCase):
 class RescreenTest(unittest.TestCase):
     ENV = {"GITHUB_REPOSITORY": "o/r", "GITHUB_TOKEN": "T", "JEV_API_KEY": "K"}
 
-    def _run(self, number, verdicts):
+    def _run(self, number, verdicts, current=frozenset()):
         items = [(f"item {i}", f"TEXT-{i}") for i in range(len(verdicts))]
         labelled = []
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             code = screen.run_rescreen(
                 number, self.ENV,
-                collect=lambda repo, n, token: items,
+                collect=lambda repo, n, token: (items, set(current)),
                 screen=lambda text, _k, threshold: verdicts[int(text.split("-")[1])],
-                label=lambda repo, n, label, token: labelled.append((n, label)),
+                labels=lambda repo, n, outcome, cur, token, full_thread: labelled.append(
+                    (n, outcome, cur, full_thread)) or [],
             )
         return code, labelled, out.getvalue()
 
     def test_flagged_item_labels_and_text_is_never_printed(self):
         code, labelled, out = self._run("66", [screen.Verdict(False), screen.Verdict(True, score=0.9)])
         self.assertEqual(code, 0)
-        self.assertEqual(labelled, [(66, screen.LABEL_FLAGGED)])
+        self.assertEqual(labelled, [(66, "flagged", set(), True)])
         self.assertNotIn("TEXT-", out)
         self.assertIn("2 item(s), 1 flagged", out)
 
-    def test_clean_thread_adds_and_removes_nothing(self):
-        _code, labelled, _out = self._run("66", [screen.Verdict(False)] * 3)
-        self.assertEqual(labelled, [])
+    def test_clean_thread_is_a_full_thread_clean_outcome(self):
+        _code, labelled, _out = self._run("66", [screen.Verdict(False)] * 3, {screen.LABEL_UNSCREENED})
+        self.assertEqual(labelled, [(66, "clean", {screen.LABEL_UNSCREENED}, True)])
+
+    def test_one_unscreened_item_makes_the_thread_unscreened(self):
+        _code, labelled, _out = self._run("66", [screen.Verdict(False), screen.Verdict(False, unscreened=True)])
+        self.assertEqual(labelled[0][1], "unscreened")
 
     def test_non_numeric_input_is_rejected(self):
         code, labelled, _out = self._run("66; rm -rf /", [])
@@ -266,10 +319,11 @@ class RescreenTest(unittest.TestCase):
 
     def test_collect_covers_pr_reviews_and_inline_comments(self):
         responses = {
-            "/repos/o/r/issues/7": {"title": "T", "body": "B", "pull_request": {}},
+            "/repos/o/r/issues/7": {"title": "T", "body": "B", "pull_request": {}, "labels": [{"name": "bug"}]},
             "/repos/o/r/issues/7/comments": [{"id": 1, "user": {"login": "a"}, "body": "c"}],
             "/repos/o/r/pulls/7/reviews": [{"id": 2, "user": {"login": "coderabbitai[bot]"}, "body": "r"}],
             "/repos/o/r/pulls/7/comments": [{"id": 3, "user": {"login": "b"}, "body": "l"}],
         }
-        items = screen.collect_thread_texts("o/r", 7, "T", get=lambda path, _t: responses[path])
+        items, labels = screen.collect_thread_texts("o/r", 7, "T", get=lambda path, _t: responses[path])
         self.assertEqual([text for _what, text in items], ["T\n\nB", "c", "r", "l"])
+        self.assertEqual(labels, {"bug"})
