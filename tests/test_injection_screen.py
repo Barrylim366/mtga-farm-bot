@@ -212,3 +212,13 @@ class ThresholdTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NormalizeApiKeyTest(unittest.TestCase):
+    def test_paste_mistakes_are_tolerated(self):
+        for raw in ("abc", " abc\n", '"abc"', "Bearer abc", "bearer  abc \r\n"):
+            with self.subTest(raw=raw):
+                self.assertEqual(screen.normalize_api_key(raw), "abc")
+        for raw in (None, "", "  ", '""'):
+            with self.subTest(raw=raw):
+                self.assertIsNone(screen.normalize_api_key(raw))

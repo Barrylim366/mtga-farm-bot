@@ -180,6 +180,27 @@ def _post_json(url: str, payload: dict, headers: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _error_detail(exc: urllib.error.HTTPError) -> str:
+    """TypeSafe's own error message, short. It is the API's text, not the
+    screened input, so it is safe for the job log."""
+    try:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    return f": {body[:200]}" if body else ""
+
+
+def normalize_api_key(raw: str | None) -> str | None:
+    """Tolerates the usual paste mistakes in a secret: whitespace, a trailing
+    newline, surrounding quotes, or a copied `Bearer ` prefix."""
+    if not raw:
+        return None
+    key = raw.strip().strip('"').strip("'").strip()
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    return key or None
+
+
 def ask_jev(state: str, api_key: str, *, post=_post_json, sleep=time.sleep) -> float:
     """Jev's yes-probability (0..1) that `state` is an injection attempt."""
     payload = {"state": state, "model": JEV_MODEL, "questions": {QUESTION_ID: QUESTION}}
@@ -192,7 +213,7 @@ def ask_jev(state: str, api_key: str, *, post=_post_json, sleep=time.sleep) -> f
             if exc.code in _RETRY_STATUSES and attempt < _MAX_ATTEMPTS - 1:
                 sleep(2 ** attempt)
                 continue
-            raise ScreenError(f"Jev HTTP {exc.code}") from exc
+            raise ScreenError(f"Jev HTTP {exc.code}{_error_detail(exc)}") from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ScreenError(f"Jev request failed: {type(exc).__name__}") from exc
     try:
@@ -301,7 +322,7 @@ def run_github_event(env=os.environ, *, screen=screen_text, label=apply_label) -
         print(f"injection-screen: nothing to screen for event {event_name!r}")
         return 0
 
-    verdict = screen(text, env.get("JEV_API_KEY"), threshold=_threshold(env))
+    verdict = screen(text, normalize_api_key(env.get("JEV_API_KEY")), threshold=_threshold(env))
     # Only the verdict goes into the job log, never the text itself.
     print(f"injection-screen: #{number} {json.dumps(verdict.as_dict())}")
     if verdict.label:
@@ -332,7 +353,7 @@ SELF_TEST_SAMPLES = (
 
 
 def run_self_test(env=os.environ, *, ask=ask_jev) -> int:
-    api_key = env.get("JEV_API_KEY")
+    api_key = normalize_api_key(env.get("JEV_API_KEY"))
     if not api_key:
         print("self-test: JEV_API_KEY not set")
         return 1
@@ -370,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             text = f.read()
     else:
         text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    verdict = screen_text(text, os.environ.get("JEV_API_KEY"), threshold=_threshold(os.environ))
+    verdict = screen_text(text, normalize_api_key(os.environ.get("JEV_API_KEY")), threshold=_threshold(os.environ))
     print(json.dumps(verdict.as_dict()))
     return 1 if verdict.label else 0
 
