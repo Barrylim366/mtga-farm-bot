@@ -542,7 +542,12 @@ class PyAutoGUIInputController(InputController):
             self._pyautogui.PAUSE = 0.0
         except Exception:
             pass
-        self._unicode_keyboard = self._make_unicode_keyboard()
+        # Do not construct pynput's keyboard controller on macOS. The bot
+        # creates this backend in its worker thread and current macOS releases
+        # abort the process when pynput queries Text Services from that queue.
+        self._unicode_keyboard = (
+            None if platform.system().lower() == "darwin" else self._make_unicode_keyboard()
+        )
         self._win32_motion = _win32_mouse_motion_or_none()
         if platform.system().lower() == "darwin":
             self._verify_mouse_control()
@@ -648,6 +653,13 @@ class PyAutoGUIInputController(InputController):
         text = text or ""
         if not text:
             return
+        if platform.system().lower() == "darwin":
+            if self._type_text_via_macos_clipboard(text):
+                return
+            raise InputControllerError(
+                "macOS: could not paste text through the system pasteboard, so "
+                "nothing was typed."
+            )
         if platform.system().lower() == "linux":
             if self._type_text_via_clipboard(text):
                 return
@@ -675,6 +687,30 @@ class PyAutoGUIInputController(InputController):
             # text into the field and retyping the whole string would duplicate
             # it. A visible error beats a silently half-typed password.
             raise InputControllerError(f"Failed to type text: {e}") from e
+
+    def _type_text_via_macos_clipboard(self, text: str) -> bool:
+        """Paste Unicode text without accessing macOS Text Services in a worker.
+
+        `pynput.keyboard.Controller()` queries the active input source. On
+        macOS 26 that API asserts when called from the bot worker thread and
+        terminates Python. `pbcopy` keeps the pasteboard operation external;
+        Command-V is layout-independent.
+        """
+        try:
+            subprocess.run(
+                ["pbcopy"],
+                input=text,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+            self._pyautogui.hotkey("command", "a")
+            time.sleep(0.15)
+            self._pyautogui.hotkey("command", "v")
+            time.sleep(0.35)
+            return True
+        except Exception:
+            return False
 
     def _type_text_via_clipboard(self, text: str) -> bool:
         """Paste the text instead of typing it. Linux only.
