@@ -39,3 +39,10 @@ learning.md
 
 
 temp.md
+
+# Forge brain (see FORGE.md): the Forge clone, the JDK/Maven, build output, logs, caches
+/forge/
+/forge_tools/
+/forge_advisor/build/
+/forge_advisor/run/
+/forge_bridge/cache/

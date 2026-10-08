@@ -5,6 +5,13 @@ Free, open-source Magic the Gathering Arena (MTGA) bot for automating daily ques
 
 Feel free to inspect the code, request a feature, or report a bug via GitHub Issues or open a pull request. Discord: https://discord.gg/5v6V6HvCRn
 
+## Forge brain (optional)
+
+This fork can let the [Forge](https://github.com/Card-Forge/forge) rules engine and AI choose the
+bot's plays: lands and spells, attackers, blocks, instants on the opponent's turn, scry and surveil.
+It is started with `start_with_forge.bat` instead of `start_windows.bat` and leaves the bot's own
+code untouched. Setup, settings and limits are in [FORGE.md](FORGE.md).
+
 ## Requirements
 
 - **OS**: Windows 10/11, macOS 12+, or Linux (X11 or Wayland; tested on Debian and CachyOS)
