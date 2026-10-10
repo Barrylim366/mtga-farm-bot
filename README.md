@@ -112,7 +112,11 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.6.2`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.6.3`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+
+### Version 1.6.3
+
+- Fixed: since 1.6.0 the bot could sit on Home forever without queueing, clicking Home every few seconds and logging `Quest reroll: stale data`. Seen with a **1600×900** Arena window: the reroll's Home check was rejected one pixel off the edge of the screen there, so the Profile → Home refresh never ran, and the queue loop kept waiting for a reroll that could never happen. The Home check now works at that size, and a reroll that cannot run is given up after three attempts so the bot always goes on to queue.
 
 ### Version 1.6.2
 
@@ -266,6 +270,8 @@ Before its first match at **Start**, and after each account login, the bot autom
 The bot verifies Home, the daily-quest tile, and Arena's **Confirm Swap** dialog using captured UI templates, then uses the dialog's fixed, scaled button positions for **OK** and **Cancel**. If clicking an already-active Home tab produces no new quest response, it makes one bounded **Profile → Home** refresh. The same re-entry can obtain the post-swap response, which Arena does not always log immediately. Missing/stale data or an unrecognized dialog skip the attempt. If a 500-gold tile cannot be recognized, the bot skips the reroll only after it confirms Home is still visible; an uncertain or overlaid screen remains blocked for a later safe retry. After submission it waits up to 10 seconds for verification and never repeats an uncertain confirmation; an unresolved dialog prevents the queue loop from starting. A reroll that cannot run for a recoverable reason still lets the post-login routine pick this account's deck — only an unresolved swap dialog, a stop, or a running match/account switch skips deck selection. No error from the check can escape into the queue loop. Quest replacement is not counted as quest completion or gold earned. Outcomes are recorded as `Quest reroll:` in `bot.log`.
 
 If Home navigation succeeds but the reroll's stricter Home recognition fails twice, startup and post-login checks try a verified **Profile → Home** re-entry to redraw the screen. Recovery makes at most three return attempts, with an 8-second cooldown between re-entries. It requires a visible, enabled Profile tab and pauses for a match, swap dialog, stop request, or another thread's account switch. Home must still pass recognition before reroll or deck selection proceeds. Recovery is logged as `QUEST_HOME_REENTRY`.
+
+A landing that keeps the reroll for later without clicking anything (no fresh quest response, Home not verified, 500-gold tile not recognized, a screen-check error) counts as one attempt; after three, the reroll is dropped for this login (`Quest reroll: skipped (… giving up after 3 attempts)`) and the bot queues normally. Each login re-arms it. Before 1.6.3 there was no limit, and a check that could never succeed kept the queue loop waiting on it forever. The brightness check that rejects dimmed controls also tolerates a crop up to 4 px past the frame edge: Home's anchor sits flush against the top edge, and through a 1600×900 client the matched point rounded to one pixel above it, which rejected every Home check there.
 
 Validated against the live English Arena UI at 1280×720 with Windows display scaling at 175%: one 500-gold quest was replaced by a 750-gold quest, the other two quests were preserved, and the refreshed log/cache still showed three incomplete quests. Arena omits `canSwap` when false; only an explicit `true` enables a reroll. The standalone `tools/validate_quest_reroll.py --log-path <Player.log>` inspects controls without input; `--cancel` closes a recognized swap dialog, and `--reroll` runs one real startup check. Use it with the bot stopped; it never queues a match.
 

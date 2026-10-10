@@ -387,6 +387,29 @@ class LandingTests(RerollCase):
         self.c.reroll_quest_on_landing()
         self.assertIn("QUEST_REROLL_CONFIRM", self.tags())
 
+    def test_reroll_without_fresh_response_is_given_up_after_bounded_retries(self):
+        # Live 2026-10-10 (1600x900 client): no fresh quest response ever came,
+        # every landing retained the one-shot, and the queue loop waited on it
+        # forever without queueing.
+        c = self.c
+        c._arm_quest_reroll()
+        for _ in range(c._QUEST_REROLL_MAX_RETAINS - 1):
+            self.assertTrue(c.reroll_quest_on_landing())
+            self.assertTrue(c._quest_reroll_pending)
+        self.assertTrue(c.reroll_quest_on_landing())
+        self.assertFalse(c._quest_reroll_pending)
+        c._click_abs.assert_not_called()
+
+    def test_rearming_on_login_resets_the_retry_bound(self):
+        c = self.c
+        c._arm_quest_reroll()
+        for _ in range(c._QUEST_REROLL_MAX_RETAINS):
+            c.reroll_quest_on_landing()
+        self.assertFalse(c._quest_reroll_pending)
+        c._arm_quest_reroll()
+        self.assertTrue(c.reroll_quest_on_landing())
+        self.assertTrue(c._quest_reroll_pending)
+
     def test_black_home_defers_one_shot_and_next_landing_submits_once(self):
         c = self.c
         c._arm_quest_reroll()
@@ -716,6 +739,23 @@ class VisionGuardTests(RerollCase):
         self.assertIsNotNone(c._reroll_match("confirm", (960, 570, 340, 110)))
         frame[y:y+h, x:x+w] = (template * 0.25).astype(np.uint8)
         self.assertIsNone(c._reroll_match("confirm", (960, 570, 340, 110)))
+
+    @unittest.skipIf(cv2 is None, "OpenCV not installed")
+    def test_home_anchor_flush_with_top_edge_matches_through_a_1600x900_client(self):
+        # The anchor's crop starts at y == 0 in 1920x1080. A 1600x900 match maps
+        # back to y == -1, which used to reject every Home check silently.
+        c = self.c
+        template = cv2.imread(c._app_path("assets", "assert", "home_anchor.png"))
+        self.assertIsNotNone(template, "real Arena template must be shipped")
+        h, w = template.shape[:2]
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        frame[0:h, 43:43+w] = template
+        c._ensure_arena_region.return_value = (0, 0, 1600, 900)
+        c._vision.capture.return_value = frame
+        # Screen point of the anchor's centre in a 1600x900 client; 32 * 1.2
+        # rounds to 38, one pixel above the template's half-height of 39.
+        c._locate_image_center_in_scaled_arena_region.return_value = (87, 32)
+        self.assertIsNotNone(c._reroll_match("home", (0, 0, 240, 150)))
 
     def test_cleanup_only_cancels_recognized_dialog_and_verifies_home(self):
         c = self.c

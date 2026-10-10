@@ -62,15 +62,33 @@ class QuestRerollMixin:
     # One continuous daily-quest band in the normalized 1920x1080 frame.
     # Its right edge excludes daily/weekly win rewards.
     _QUEST_TILE_ROI = (50, 750, 860, 210)
+    # How many landings may retain the one-shot (no click sent, try again
+    # later) before it is given up. Without a bound, a check that can never
+    # succeed on this setup -- e.g. no fresh quest response ever arriving --
+    # keeps the queue loop waiting on the reroll forever and it never queues.
+    _QUEST_REROLL_MAX_RETAINS = 3
 
     def _arm_quest_reroll(self):
         self._quest_reroll_pending = True
+        self._quest_reroll_retains = 0
         self._quest_home_failures = 0
         self._quest_home_reentry_after = 0.0
         self._quest_reroll_floor = self._get_log_size(self._log_path)
         self._quest_reroll_data_floor = None
         self._quest_reroll_unverified_before = None
         self._quest_reroll_dialog_open = getattr(self, "_quest_reroll_dialog_open", False)
+
+    def _retain_quest_reroll(self, why):
+        """Keep the one-shot for a later landing, up to _QUEST_REROLL_MAX_RETAINS.
+
+        Only for outcomes where no dialog-opening click was sent. Past the bound
+        the reroll is dropped for this login so normal queueing can continue."""
+        self._quest_reroll_retains = getattr(self, "_quest_reroll_retains", 0) + 1
+        if self._quest_reroll_retains >= self._QUEST_REROLL_MAX_RETAINS:
+            self._quest_reroll_pending = False
+            self._reroll_log("skipped", f"{why}; giving up after {self._quest_reroll_retains} attempts")
+            return
+        self._quest_reroll_pending = True
 
     def _reroll_log(self, outcome, detail=""):
         bot_logger.log_info(f"Quest reroll: {outcome}" + (f" ({detail})" if detail else "") + ".")
@@ -132,7 +150,7 @@ class QuestRerollMixin:
                 self._reroll_log("stale data", "no fresh startup/login quest response")
                 # No click was sent. A later Home landing can still obtain the
                 # authoritative response, so do not consume the one-shot.
-                self._quest_reroll_pending = True
+                self._retain_quest_reroll("no fresh quest response")
                 return True
             if before.get("canSwap") is not True:
                 self._reroll_log("unavailable", "canSwap is false or unknown")
@@ -147,7 +165,7 @@ class QuestRerollMixin:
                 self._reroll_log("failed", "Home not verified")
                 # No dialog-opening click was sent. A black login-transition
                 # frame must not consume this account's one allowed reroll.
-                self._quest_reroll_pending = True
+                self._retain_quest_reroll("Home not verified")
                 return False
             # Re-read after navigation in case the user changed quests meanwhile.
             before = self._extract_latest_quest_snapshot(min_offset=self._quest_reroll_floor)
@@ -163,9 +181,9 @@ class QuestRerollMixin:
                 # later queue tick cannot pass an uncertain/overlaid screen.
                 if self._quest_reroll_home_visible():
                     self._reroll_log("skipped", "500-gold quest tile not recognized; Home rechecked")
-                    self._quest_reroll_pending = True
+                    self._retain_quest_reroll("500-gold quest tile not recognized")
                     return True
-                self._quest_reroll_pending = True
+                self._retain_quest_reroll("500-gold quest tile not recognized")
                 return False
             if not self._reroll_can_act():
                 return False
@@ -228,7 +246,7 @@ class QuestRerollMixin:
                     return False
             # A pre-click vision/navigation exception is safe to retry. Once
             # the dialog could have opened, the flag above prevents repeats.
-            self._quest_reroll_pending = True
+            self._retain_quest_reroll("pre-click error")
             return False
         finally:
             # A failed confirmation must not freeze quest reads for the rest of
@@ -325,8 +343,15 @@ class QuestRerollMixin:
         y = round((point[1] - arena[1]) * 1080 / arena[3])
         h, w = template.shape[:2]
         x, y = x - w // 2, y - h // 2
-        if x < 0 or y < 0:
+        # Home's anchor sits flush against the top edge (crop y == 0 at
+        # 1920x1080). Through a smaller client, rounding the matched point back
+        # to 1920x1080 lands a pixel past the edge (y == -1 at 1600x900), which
+        # silently rejected every Home check there. Clamp a few pixels of slack.
+        slack = 4
+        fh, fw = frame.shape[:2]
+        if x < -slack or y < -slack or x + w > fw + slack or y + h > fh + slack:
             return None
+        x, y = min(max(x, 0), fw - w), min(max(y, 0), fh - h)
         crop = frame[y:y+h, x:x+w]
         if crop.shape != template.shape or crop.mean() < template.mean() * 0.75:
             return None
