@@ -661,9 +661,6 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         # Where _check_foreign_event_entry has read Player.log up to. Armed in
         # begin_session(); None means "not armed" (the guard is then idle).
         self._event_entry_scan_offset = None
-        # Screen name the unconfigured-account warning last fired for, so it
-        # is logged once per account rather than on every queue tick.
-        self._unconfigured_account_warned_for = None
         # {account key: balance already reported as below its baseline}, so the
         # warning fires on a change rather than on every poll.
         self._last_gold_below_baseline: dict[str, int] = {}
@@ -11472,29 +11469,6 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return True
         return False
 
-    def _warn_if_unconfigured_account(self) -> None:
-        """Log once when the logged-in account is not one of the configured ones.
-
-        Warning only: rows saved before screen_name became a field can resolve
-        to None for a legitimately configured account, so refusing to queue here
-        would strand those users. The event gates are what keep an unexpected
-        account out of Drafts."""
-        screen = self._current_account_screen_name
-        if not screen or screen == self._unconfigured_account_warned_for:
-            return
-        try:
-            accounts = self._load_accounts_from_dirs() or []
-        except Exception:
-            return
-        if not accounts or self._current_account_config() is not None:
-            return
-        self._unconfigured_account_warned_for = screen
-        bot_logger.log_error(
-            f"UNCONFIGURED_ACCOUNT: logged in as '{screen}', which matches none of the "
-            f"{len(accounts)} configured account(s). The bot keeps playing, but quest, "
-            "gold and switch tracking may be wrong -- add it in Manage Accounts."
-        )
-
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
             if self._account_switch_in_progress:
@@ -11502,7 +11476,6 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 return
             if self._check_foreign_event_entry():
                 return
-            self._warn_if_unconfigured_account()
             # A transient startup/login failure retains this account's reroll.
             # Resolve it before the switch branch can leave the account, even
             # when its farming target is already met.

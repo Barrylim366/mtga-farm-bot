@@ -112,12 +112,15 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.6.1`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.6.2`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+
+### Version 1.6.2
+
+- Removed the `UNCONFIGURED_ACCOUNT` warning that 1.6.1 logged when the logged-in account was not one of the accounts configured in Manage Accounts.
 
 ### Version 1.6.1
 
 - Fixed: the bot could enter or play **whatever event was last open on the account** — for example a Draft left in progress — instead of Starter Deck Duel. Every Play press now has to prove which screen it is on (see *Never another event's Play button* under Quest-Based Deck Selection), and the bot stops itself if Arena is ever told to join or queue an event it must not enter.
-- The bot now logs a warning (`UNCONFIGURED_ACCOUNT`) when the logged-in account is not one of the accounts configured in Manage Accounts.
 
 ### Version 1.5.1
 

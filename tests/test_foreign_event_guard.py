@@ -262,26 +262,5 @@ class ForeignEventEntryTests(_GuardTestBase):
         self.assertEqual(self.c._event_entry_scan_offset, os.path.getsize(self.log_path))
 
 
-class UnconfiguredAccountWarningTests(_GuardTestBase):
-    def test_warns_once_for_an_account_not_in_the_config(self):
-        self.c._load_accounts_from_dirs = lambda: [{"name": "Barrylim", "screen_name": "Barrylim#08112"}]
-        self.c._current_account_config = lambda: None
-        self.c._current_account_screen_name = "Stranger#12345"
-        with patch("Controller.MTGAController.Controller.bot_logger.log_error") as log_error:
-            self.c._warn_if_unconfigured_account()
-            self.c._warn_if_unconfigured_account()
-        self.assertEqual(log_error.call_count, 1)
-        self.assertIn("Stranger#12345", log_error.call_args[0][0])
-
-    def test_configured_account_is_silent(self):
-        account = {"name": "Barrylim", "screen_name": "Barrylim#08112"}
-        self.c._load_accounts_from_dirs = lambda: [account]
-        self.c._current_account_config = lambda: account
-        self.c._current_account_screen_name = "Barrylim#08112"
-        with patch("Controller.MTGAController.Controller.bot_logger.log_error") as log_error:
-            self.c._warn_if_unconfigured_account()
-        log_error.assert_not_called()
-
-
 if __name__ == "__main__":
     unittest.main()
