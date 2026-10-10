@@ -1,4 +1,7 @@
 # Burning Lotus Bot
+
+Startup reward recovery requires Claim text, preventing orange Play and Submit Deck buttons from being mistaken for rewards.
+Pending startup/login rerolls are retried before an account switch, including accounts that already met their farming target.
 <img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
 
 Free, open-source Magic the Gathering Arena (MTGA) bot for automating daily quests, daily wins, and account switching. Burning Lotus runs on Windows, macOS, and Linux without code injection or subscriptions. Built in Python with a graphical UI, no command-line knowledge required.
@@ -34,6 +37,16 @@ Python dependencies are installed automatically by the launcher scripts:
 - OS display scaling: **any (the bot converts coordinates for scaled displays)**
 
 Keep the entire MTGA window visible while the bot is running. If the game is moved or resized to an unsupported/off-screen geometry mid-match, the bot now stops visual input instead of reusing obsolete coordinates and sweeping empty space for cards; restore a visible 16:9 window and let the next game-state update retry.
+
+Seasonal rewards and other overlays showing **Claim Rewards** or **Click to Continue** are recovered after five seconds without meaningful progress, including during startup and account login. Recovery checks the text even if the log still says matchmaking or gameplay, claims rewards first, and searches again before another click. When an overlay hides the normal navigation anchors, recovery searches within the freshly detected Arena window. A verified disconnect dialog takes priority over rewards behind it: after two minutes without progress, the bot clicks **Reconnect** and checks the screen again before any later action. Continue text uses a 0.70 matching threshold to tolerate its changing background; recovery respects Stop and existing input ownership.
+
+Reward recovery runs before quest reroll and Home navigation. While a verified popup is waiting to be handled, reroll and deck navigation pause. Text checks include buttons that say only **Claim**. If text recognition misses, recovery waits for a later observation; it never falls back to the generic orange Claim-button shape. After three consecutive unrecognized-screen checks, Starter navigation uses a Continue-position click, followed by a centre click only if a fresh check still reports an unrecognized screen in the same Arena window. A recognized page, a popup, changed or invalid geometry, or a failed check prevents the centre click. Claim, Claim Rewards, Click to Continue and Reconnect text take priority over generic clicks. The fallback rechecks that matchmaking/gameplay has not started before sending input, rejects unsupported or off-screen window geometry, and sends no clicks if window focusing fails on Windows.
+
+During cost payment, the bot looks for **Auto Pay** if Submit is unavailable. If another selection is still using the controller, payment retries for up to 16 seconds while the same payment prompt remains active. Normal play stays paused until the game acknowledges advancement after payment.
+
+Quest reroll searches for the 500 Gold label in one continuous daily-quest area (x=50–910, y=750–960 in the normalized 1920×1080 Arena window). This avoids clipping labels at internal search boundaries while leaving win rewards farther to the right outside the search. The existing matching threshold and brightness checks still apply.
+
+Scry and Surveil keep normal gameplay paused until their central overlay is confirmed closed in two settled observations. Done is located again for each of up to three attempts, with input ownership held across recognition and the press. Surveil's fixed-position fallback requires its visible heading. Missing captures never count as completion. Recovery requires successful window focusing on Windows; Linux and macOS verify the visible overlay without requiring the Windows focus helper. The stall watchdog identifies the pending prompt and allows one final recovery attempt with a five-second grace period before conceding; recovery attempts do not reset the original stall age.
 
 ## Quick Start
 
@@ -242,6 +255,8 @@ Before its first match at **Start**, and after each account login, the bot autom
 
 The bot verifies Home, the daily-quest tile, and Arena's **Confirm Swap** dialog using captured UI templates, then uses the dialog's fixed, scaled button positions for **OK** and **Cancel**. If clicking an already-active Home tab produces no new quest response, it makes one bounded **Profile → Home** refresh. The same re-entry can obtain the post-swap response, which Arena does not always log immediately. Missing/stale data or an unrecognized dialog skip the attempt. If a 500-gold tile cannot be recognized, the bot skips the reroll only after it confirms Home is still visible; an uncertain or overlaid screen remains blocked for a later safe retry. After submission it waits up to 10 seconds for verification and never repeats an uncertain confirmation; an unresolved dialog prevents the queue loop from starting. A reroll that cannot run for a recoverable reason still lets the post-login routine pick this account's deck — only an unresolved swap dialog, a stop, or a running match/account switch skips deck selection. No error from the check can escape into the queue loop. Quest replacement is not counted as quest completion or gold earned. Outcomes are recorded as `Quest reroll:` in `bot.log`.
 
+If Home navigation succeeds but the reroll's stricter Home recognition fails twice, startup and post-login checks try a verified **Profile → Home** re-entry to redraw the screen. Recovery makes at most three return attempts, with an 8-second cooldown between re-entries. It requires a visible, enabled Profile tab and pauses for a match, swap dialog, stop request, or another thread's account switch. Home must still pass recognition before reroll or deck selection proceeds. Recovery is logged as `QUEST_HOME_REENTRY`.
+
 Validated against the live English Arena UI at 1280×720 with Windows display scaling at 175%: one 500-gold quest was replaced by a 750-gold quest, the other two quests were preserved, and the refreshed log/cache still showed three incomplete quests. Arena omits `canSwap` when false; only an explicit `true` enables a reroll. The standalone `tools/validate_quest_reroll.py --log-path <Player.log>` inspects controls without input; `--cancel` closes a recognized swap dialog, and `--reroll` runs one real startup check. Use it with the bot stopped; it never queues a match.
 
 On **Start**, and after each account switch, the bot picks a deck based on active quests. Quests are read fresh at start: everything already in Arena's log is ignored and the bot briefly returns to Home to make Arena log the current list (up to 30 seconds; it falls back to the newest entry it has if none arrives). Without this, a quest you re-rolled or finished by hand before pressing Start was read as still active, and the first matches were played on the wrong deck.
@@ -334,6 +349,8 @@ for Convoke are not incorrectly counted as mana available for Ward.
 The bot maximizes mana usage each turn:
 - Prefers the highest-value spell(s) that spend the most mana
 - Respects color requirements and discounted costs
+- Treasure tokens count as one source that can pay any color. Unresolved mana sources remain explicitly marked unknown and emit `UNRESOLVED_MANA_DIAGNOSTIC` with their ability IDs and game-object details; the payment estimate conservatively counts them for generic costs only.
+- Target submission keeps brief lock retries, but stops waiting after eight seconds from the first contention, saves a debug bundle, and leaves the prompt for existing recovery. It never releases another operation's lock.
 - Type priority when CMC is tied: creature → instant → sorcery → enchantment
 - Supports Convoke (untapped creatures as mana sources)
 - Kicker: the "Cast with Kicker?" chooser is answered automatically (always the plain, non-kicked version for now) so the bot never stalls on it
@@ -342,12 +359,16 @@ The bot maximizes mana usage each turn:
 - Decision recovery is guarded against open payment/selection prompts and resumes safely after modal, stack, or scry interruptions
 - If a target-selection prompt appears during a hand scan or before the first cast click, the cast is deferred without clicking, retrying the sweep, or marking the card unreachable. The target handler resumes decisions after the prompt; a completed scan that cannot find the card still uses the existing 20-second cast suppression.
 - A creature target is clicked again only when a newer Arena target update confirms that no target was selected. A delayed or missing acknowledgement alone does not trigger another click, which could otherwise unselect the target.
-- After a two-click cast leaves the card, game state, and cast action unchanged, the bot waits for a known screen blocker to clear, then asks the AI for a fresh decision. This poll stops if the match or game state changes. On a clear screen, the bot checks that the same decision is still active and sends a guarded Escape. If that opens Options, a second Escape closes it. Only a completed Escape permits one fresh cast decision; busy input or lost focus before Escape leaves that retry available. If the follow-up also has no effect, it promptly asks for another decision; if the AI still chooses that card, the bot passes priority without a third click. Failed attempts save screenshots and state under `runtime/debug/`; `tools/analyze_cast_recovery.py` summarizes recovery outcomes from the log
+- Once required targets are selected, a failed Submit search retries up to three total attempts for the same prompt. Retries stop when the prompt changes, the match ends, or the bot stops; a successful Submit click is not repeated by this recovery.
+- Fiery Annihilation selects its required creature first, then tries one bounded scan for an opponent-controlled Equipment offered by Arena. If the Equipment cannot be selected, it uses **Submit 0** to skip that optional target. Target recovery also checks for Submit 0 when existing retries or submission attempts fail, provided every required target group is satisfied; it does not wait for the stall-concede deadline. Both own-player and opponent-player targets are checked against Arena's legal choices. Submission clicks must be followed by prompt advancement rather than being treated as proof of success.
+- Submit 0 uses a dedicated color template at **0.85 confidence**, with no Okay or coordinate fallback. Ordinary logs record Equipment scan attempts and Submit 0 attempts, failures, and acknowledged prompt advancement; the audit index includes these events.
+- After a two-click cast leaves the card, game state, and cast action unchanged, the bot waits for a known screen blocker to clear, then asks the AI for a fresh decision. This poll stops if the match or game state changes. On a clear screen, the bot checks that the same decision is still active and sends a guarded Escape. If that opens Options, a second Escape closes it. Only a completed Escape permits one fresh cast decision; busy input or lost focus before Escape leaves that retry available. If the follow-up also has no effect, it promptly asks for another decision; if the AI still chooses that card, the bot passes priority without a third click. Cast acknowledgement failures, Escape recovery, and detected cast blockers save text diagnostics only under `runtime/debug/`; frames used for live recovery checks are not saved as screenshots. `tools/analyze_cast_recovery.py` summarizes recovery outcomes from the log
 - Ties between otherwise equal casting plans favor lifegain-payoff creatures, so decks built around gaining life develop toward their game plan sooner
 - Removal only ever targets creatures still on the battlefield and never redirects a harmful spell at your own board when no valid enemy target exists
 - Ward is priced before a target is chosen, not discovered afterwards. A warded creature makes Magic Arena raise a confirmation window that exists only in the client — it is announced nowhere in the game's own messages, so nothing tells the bot it is there. Declining it hands back the same board the bot just looked at, so it picks the same target, and the same window opens again; a single such loop burned six minutes across four turns. Now the ward's cost is read from the card and weighed against the mana left over once the spell is paid for. Affordable, and the bot pays it and kills the creature — refusing to ever pay would make removal useless against the cards it most needs to answer. Unaffordable, and it picks a different target, or holds the spell rather than feeding it to a counter. A target it does back out of is remembered for the rest of the match, so nothing can loop even if the pricing is wrong
 - Damage marked on a creature is forgotten when the turn ends, as the rules say it should be. Magic Arena announces damage but never announces its removal — it sends the field once and then simply stops mentioning it — and since the game state is merged from diffs, nothing would otherwise unset it. Left alone the damage accumulated for the rest of the match and every "how much toughness is left" reading drifted below the truth, until creatures that were healthy and attacking looked to the bot like they were already dead. That number decides which creatures removal can kill, which fights are winnable, and which blocks are worth making
 - When a card lets you choose which creature to return from the graveyard or exile, the bot ranks candidates by their role in the deck's strategy instead of taking whatever the game offers first
+- Resolution prompts requiring exactly one card from your own graveyard also use the central chooser, including Inspiration from Beyond. The bot ranks creatures using the existing strategy and other cards by mana value, clicks once, submits, and waits for game-state advancement. Retries are bounded; an unconfirmed choice keeps normal plays paused and saves a debug bundle. Multi-card and opponent-graveyard choices remain outside this path.
 - A card in hand is located by sweeping the mouse across the hand row until Magic Arena logs a hover naming it — the client never says where a card is drawn, so this is the only way to find one. When that sweep failed, all three retries used to re-run the *identical* 1000 px/s pass, each taking exactly 2.0s. Retrying at the same speed cannot find what the first pass missed: a hover is only logged after a client → server → log round trip, so it is not synchronous with the mouse, and a fast sweep can cross a card without one ever being emitted. Observed live: the bot decided to play a land on nine consecutive decisions, executed none of them, passed priority every time, kept an empty board from turn 2 to turn 6 and sat there until Arena's 150-second inactivity timer expired twice. Each retry now sweeps slower and in finer steps (10px/10ms → 8px/18ms → 7px/24ms). Only a failing sweep pays for it — the loop stops the moment the target card is hovered, so a healthy hand still resolves at the original speed (measured live: 0.45–1.40s per card). Note that a sweep can also fail for a reason no pacing fixes: see "Arena's Unity 6 update" below
 - Hover lines are read only from log entries that actually describe a hover. A game-state message is packed with object ids and describes no hover at all, yet the old parser fell through to a generic nested search and then a regex over the whole line, so the scan could adopt an unrelated object as "the card under the cursor" and clear its cast suppression. Note that seat filtering is deliberately *not* attempted: the incoming hover shape carries two complementary seat fields and which one identifies the player doing the hovering could not be established from the logs, while a filter with the polarity inverted would discard the bot's own hovers and keep only the opponent's — turning an intermittent failure into a permanent one. It is safe to leave open because instance ids are unique per game, so a foreign id can never match the card being looked for; the sweep simply continues. Measured over a 21 MB `Player.log`, every one of the 1382 bare `"objectId"` hover fragments — the shape behind roughly 97% of identifications — originates in an *outgoing* client message, i.e. the local player's own hover
 - A second copy of a legendary permanent already on our board is never cast. The action is legal, so Magic Arena offers it and the AI used to pick it — and then the client raises its own "Are You Sure?" confirm, which no game message announces. Observed live: the cast never lands, the hand sweep retries three times, `_dismiss_are_you_sure_if_present` answers No (the right default for a question the bot did not understand, so the loop cannot resolve itself), and the card is finally written off as unreachable although it was in hand the whole time — around 20 seconds of the inactivity timer per decision. Confirming would be no better: the copy resolves and the legend rule immediately bins one of the two, leaving the same board and a card fewer. The check needs no card database — the game state carries `superTypes` on the objects themselves (on hand objects too, not just battlefield ones) and matches the copies on `name`, which is a title id shared by every printing of a card, so an older reprint of a legend is still recognised where a grpId comparison would miss it. It fails open in both directions that matter: an unknown battlefield zone or a card with no supertype information means "cast it", because refusing a second Llanowar Elves, or refusing every cast on the turns Arena has not re-declared its battlefield zone, would cost far more than the loop being avoided. Known gap: land plays go through a separate path that never sees the board, so a duplicate legendary *land* is still cast — no starter or precon deck the bot farms contains one
@@ -530,5 +551,68 @@ Two things this was *not*, both of which cost a round of investigation:
 
 Diagnosing this class of failure: check `Initialize engine version` at the top of `Player.log` before blaming bot code, and count `"objectId"` occurrences in it — a session with none of them is an input problem, not a scan problem.
 
+### Session diagnostics
+
+The session watchdog records `combat_recovery_failed`, `submit_failed`,
+`pay_costs_unresolved`, `chooser_unconfirmed`, and `unsupported_cast` in
+`runtime/analysis/alerts.log` and per-match records. Recovery attempts and
+individual image-search misses are kept in history but are not counted as
+failures unless recovery is exhausted or no submit control is recognized.
+After a session, inspect those alerts, the matching lines in
+`runtime/analysis/history.log`, and any
+`runtime/debug/hand-select-*` bundle with reason
+`opponent_battlefield_select_failed`. A stall concede line includes the local
+seat, both priority fields, phase, step, and prompt. The target timeout line
+includes the cursor position and number of hover events seen before stopping.
+
+Unsupported casts are counted once per card name per match even if the decision
+loop considers the same card repeatedly. Stall concessions, target scans, and
+quest reroll outcomes remain available in ordinary history logs. Temporary soak
+recorders and their dedicated tests have been removed; regression tests for the
+recovery behavior remain.
+
+### Concede screenshots
+
+Bot-triggered stall and inactivity-timer concedes automatically create an incident
+under `runtime/concedes/` (or `MTGA_RUNTIME_DIR/concedes/`). Each incident contains
+up to two `attempt-N.jpg` images and `incident.json` with the reason, session/match
+IDs, attempt and capture status, and final sequence outcome. The newest 30
+incidents are retained independently of other debug bundles.
+
+Images contain only the verified Arena client area, with solid masks over both
+player-name areas. They fit within 1280×720, preserve aspect ratio, and use JPEG
+quality 80. No original desktop image, player names or raw log excerpts are saved
+in these bundles. Masking supports the normal 16:9 in-match layout; arbitrary
+overlays and other diagnostic files are outside this feature's masking scope.
+Missing windows, unsupported layouts and capture/write failures are recorded
+without blocking concession. Existing capture-backend latency still applies.
+`match_completion_observed` records completion after an attempt, not proof that
+the bot's concede caused the result. Log entries beginning `CONCEDE_INCIDENT_`
+link attempts to their folders; audit summaries also index the retained metadata.
+
+### Audit history CSV
+
+The `audit-logs` summary updates the gitignored `audit-history.csv` in the project
+root, with one row per audited session. It stores UTC dates/timestamps, completed
+match counts, wins/losses, win rate, confirmed concede counts/attempts and concede
+rate for later plotting. Rates are fractions (0–1) using completed matches as the
+denominator. Repeat audits update the session's row; running sessions are marked
+provisional. Unknown concede rates are blank. Previous established rates survive
+log rotation when the completed-match count is unchanged. Historical sessions
+use first/last match times when full session times are unavailable.
+Pass `--no-csv` for a read-only summary or `--csv <path>` for another destination.
+The audit also reports the deck for each game and writes gitignored
+`audit-matches.csv`, with account, result, UTC game times, deck label and log
+evidence. Completed selections are marked `logged_selection`; selections carried
+into later games are `inferred`. A saved hand with at least three distinct known
+nonland cards fitting exactly one local Starter list can also supply an inferred
+deck, with snapshot evidence, when Starter event context is logged. Missing or
+unconfirmed deck choices without supporting snapshots are `unknown`.
+Account switches and bot restarts clear carried selections. Repeat audits retain
+previously established deck evidence after log rotation when the game is unchanged.
+Use `--matches-csv <path>` for another destination; `--no-csv` disables both CSVs.
+Invalid saved Gold values are skipped so they do not prevent the audit report.
+
 ## See also on
+
 [elitepvpers](https://www.elitepvpers.com/)

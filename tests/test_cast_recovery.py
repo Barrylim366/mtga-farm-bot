@@ -252,21 +252,20 @@ class CastRecoveryTest(unittest.TestCase):
                 self.assertEqual(fake_input.clicks, [])
                 self.assertEqual(self.controller.get_last_cast_abort_reason(), "cast_hover_lost")
 
-    def test_persistent_blocker_bundle_contains_the_checked_frame(self):
+    def test_persistent_blocker_bundle_saves_metadata_without_screenshots(self):
         frame = np.zeros((16, 16, 3), dtype=np.uint8)
         with tempfile.TemporaryDirectory() as temp_dir:
             self.controller._arena_region = (0, 0, 16, 16)
             self.controller._vision = mock.Mock()
-            self.controller._vision.save_image.side_effect = (
-                lambda image, path: cv2.imwrite(path, image)
-            )
             with mock.patch("Controller.MTGAController.Controller.bot_logger.ensure_debug_dir",
                             return_value=temp_dir):
                 self.controller._Controller__write_cast_blocker_bundle(
                     frame, "cancel", 10, (100, 900),
                 )
             saved = Path(temp_dir)
-            self.assertTrue((saved / "arena.png").exists())
+            self.assertEqual({path.name for path in saved.iterdir()}, {"blocker.json"})
+            self.controller._vision.save_image.assert_not_called()
+            self.controller._vision.capture.assert_not_called()
             metadata = json.loads((saved / "blocker.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["blocker"], "cancel")
             self.assertEqual(metadata["cursor_position"], [100, 900])
@@ -656,28 +655,16 @@ class CastRecoveryTest(unittest.TestCase):
         self.assertEqual(self.controller.get_last_cast_abort_reason(), "stale_decision_context")
         self.controller._cast_once.assert_not_called()
 
-    def test_failed_bundle_serializes_state_and_saves_all_three_images(self):
-        class FakeVision:
-            def __init__(inner):
-                inner.frame = np.zeros((16, 16, 3), dtype=np.uint8)
-
-            def save_image(inner, frame, path):
-                cv2.imwrite(path, frame)
-
-            def begin_tick(inner):
-                return None
-
-            def capture(inner, _region):
-                return inner.frame
-
+    def test_failed_bundle_serializes_state_without_screenshots(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            self.controller._vision = FakeVision()
+            self.controller._vision = mock.Mock()
+            frame = np.zeros((16, 16, 3), dtype=np.uint8)
             self.controller._arena_region = (0, 0, 16, 16)
             payload = {
                 "attempt": {
-                    "pre_click_image": self.controller._vision.frame.copy(),
-                    "post_wait_image": self.controller._vision.frame.copy(),
-                    "delayed_image": self.controller._vision.frame.copy(),
+                    "pre_click_image": frame.copy(),
+                    "post_wait_image": frame.copy(),
+                    "delayed_image": frame.copy(),
                     "press_count": 2,
                 },
                 "outcome": "click_ineffective",
@@ -687,13 +674,38 @@ class CastRecoveryTest(unittest.TestCase):
                 return_value=temp_dir,
             ):
                 self.controller._Controller__write_cast_ack_bundle(payload)
-            for name in ("arena_pre_click.png", "arena_post_wait.png", "arena_delayed.png"):
-                self.assertTrue((Path(temp_dir) / name).exists(), name)
+            self.assertEqual(
+                {path.name for path in Path(temp_dir).iterdir()},
+                {"cast_ack_state.json", "player_log_tail.txt"},
+            )
+            self.controller._vision.save_image.assert_not_called()
+            self.controller._vision.capture.assert_not_called()
             with (Path(temp_dir) / "cast_ack_state.json").open(encoding="utf-8") as handle:
                 serialized = json.load(handle)
             self.assertEqual(serialized["outcome"], "click_ineffective")
             self.assertEqual(serialized["attempt"]["press_count"], 2)
-            self.assertNotIn("delayed_image", serialized["attempt"])
+            for key in ("pre_click_image", "post_wait_image", "delayed_image"):
+                self.assertNotIn(key, serialized["attempt"])
+                self.assertIsNotNone(payload["attempt"][key])
+
+    def test_escape_bundle_saves_metadata_without_screenshots(self):
+        self.controller._vision = mock.Mock()
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "Controller.MTGAController.Controller.bot_logger.ensure_debug_dir",
+            return_value=temp_dir,
+        ):
+            self.controller._Controller__write_cast_escape_bundle(
+                {"attempt_id": "cast-1", "card_id": 10}, "after_escape",
+            )
+            self.assertEqual(
+                {path.name for path in Path(temp_dir).iterdir()}, {"recovery.json"},
+            )
+            metadata = json.loads((Path(temp_dir) / "recovery.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata, {
+                "attempt_id": "cast-1", "card_id": 10, "phase": "after_escape",
+            })
+        self.controller._vision.save_image.assert_not_called()
+        self.controller._vision.capture.assert_not_called()
 
     def test_state_advancing_while_card_stays_in_hand_is_not_bundled(self):
         attempt_id = self._begin_and_click()

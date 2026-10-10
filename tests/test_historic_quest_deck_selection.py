@@ -396,6 +396,8 @@ class _PostLoginTestBase(_HistoricTestBase):
         c = self.controller
         c._game_mode = "historic"
         c.reroll_quest_on_landing = lambda: True
+        c._navigate_to_home = lambda: True
+        c._quest_reroll_home_visible = lambda: True
         c._account_switch_due = lambda: False
         self.play_clicks = []
         c._click_image_in_scaled_arena_region = (

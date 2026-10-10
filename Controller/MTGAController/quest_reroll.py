@@ -59,9 +59,14 @@ def replacement_verified(before, after):
 
 class QuestRerollMixin:
     _QUEST_REROLL_TIMEOUT = 10.0
+    # One continuous daily-quest band in the normalized 1920x1080 frame.
+    # Its right edge excludes daily/weekly win rewards.
+    _QUEST_TILE_ROI = (50, 750, 860, 210)
 
     def _arm_quest_reroll(self):
         self._quest_reroll_pending = True
+        self._quest_home_failures = 0
+        self._quest_home_reentry_after = 0.0
         self._quest_reroll_floor = self._get_log_size(self._log_path)
         self._quest_reroll_data_floor = None
         self._quest_reroll_unverified_before = None
@@ -104,6 +109,10 @@ class QuestRerollMixin:
             return False
         if self._account_switch_in_progress and self._switch_owner_ident != threading.get_ident():
             return False
+        # Recover rewards before consuming the reroll or seeking fresh Home
+        # data. Otherwise Home-not-visible retries can starve reward handling.
+        if self._dismiss_reward_popup():
+            return False
         if self._quest_reroll_dialog_open:
             try:
                 return self._close_quest_reroll_dialog()
@@ -121,6 +130,9 @@ class QuestRerollMixin:
                 before = self._freshen_quest_reroll_snapshot()
             if before is None:
                 self._reroll_log("stale data", "no fresh startup/login quest response")
+                # No click was sent. A later Home landing can still obtain the
+                # authoritative response, so do not consume the one-shot.
+                self._quest_reroll_pending = True
                 return True
             if before.get("canSwap") is not True:
                 self._reroll_log("unavailable", "canSwap is false or unknown")
@@ -131,9 +143,11 @@ class QuestRerollMixin:
             if not self._quest_reroll_templates_ready():
                 self._reroll_log("failed", "real Arena UI references are missing")
                 return True
-            if (not self._reroll_can_act() or not self._navigate_to_home()
-                    or not self._quest_reroll_home_visible()):
+            if not self._ensure_quest_reroll_home():
                 self._reroll_log("failed", "Home not verified")
+                # No dialog-opening click was sent. A black login-transition
+                # frame must not consume this account's one allowed reroll.
+                self._quest_reroll_pending = True
                 return False
             # Re-read after navigation in case the user changed quests meanwhile.
             before = self._extract_latest_quest_snapshot(min_offset=self._quest_reroll_floor)
@@ -149,6 +163,7 @@ class QuestRerollMixin:
                 # later queue tick cannot pass an uncertain/overlaid screen.
                 if self._quest_reroll_home_visible():
                     self._reroll_log("skipped", "500-gold quest tile not recognized; Home rechecked")
+                    self._quest_reroll_pending = True
                     return True
                 self._quest_reroll_pending = True
                 return False
@@ -211,7 +226,10 @@ class QuestRerollMixin:
                     return self._close_quest_reroll_dialog()
                 except Exception:
                     return False
-            return not self._stop_requested
+            # A pre-click vision/navigation exception is safe to retry. Once
+            # the dialog could have opened, the flag above prevents repeats.
+            self._quest_reroll_pending = True
+            return False
         finally:
             # A failed confirmation must not freeze quest reads for the rest of
             # the session. During verification a disappearing quest is rejected;
@@ -267,11 +285,15 @@ class QuestRerollMixin:
             return None
         if deadline is None:
             deadline = time.monotonic() + 8.0
-        while self._reroll_can_act() and time.monotonic() < deadline:
+        # Navigation may finish at the deadline after Arena already wrote its
+        # response. Read it once before applying the polling timeout.
+        while self._reroll_can_act():
             snapshot = self._extract_latest_quest_snapshot(min_offset=self._quest_reroll_floor)
             if snapshot is not None:
                 self.refresh_quests_cache()
                 return snapshot
+            if time.monotonic() >= deadline:
+                break
             time.sleep(0.2)
         return None
 
@@ -311,17 +333,10 @@ class QuestRerollMixin:
         return point
 
     def _find_500_gold_quest_tile(self):
-        # Measured from Arena Home at 1280x720, normalized to the existing
-        # 1920x1080 frame. Each band contains one daily quest; daily/weekly win
-        # rewards begin to the RIGHT of these three bands and are excluded.
-        for x in (150, 450, 750):
-            # The reward emblem is small and has changed slightly between Arena
-            # client releases. Keep this tolerant match within only the three
-            # daily-quest bands; the brightness guard still rejects dimmed UI.
-            point = self._reroll_match("gold_500", (x, 750, 300, 210), confidence=0.82)
-            if point is not None:
-                return point
-        return None
+        # Splitting this area into overlapping bands clipped a live 500 label
+        # at x=608..687 in both neighbouring searches. Keep the full label
+        # searchable regardless of the quest's position within the daily band.
+        return self._reroll_match("gold_500", self._QUEST_TILE_ROI, confidence=0.82)
 
     def _quest_reroll_dialog_visible(self):
         return self._reroll_match("dialog", (760, 390, 420, 140)) is not None
@@ -339,6 +354,44 @@ class QuestRerollMixin:
 
     def _quest_reroll_home_visible(self):
         return self._reroll_match("home", (0, 0, 240, 150)) is not None
+
+    @serialized_home_navigation
+    def _ensure_quest_reroll_home(self):
+        """Recover a stale Home display with a bounded, verified tab re-entry."""
+        def can_navigate():
+            return (self._reroll_can_act()
+                    and not self._quest_reroll_dialog_open
+                    and (not self._account_switch_in_progress
+                         or self._switch_owner_ident == threading.get_ident()))
+
+        if not can_navigate() or not self._navigate_to_home():
+            return False
+        if self._quest_reroll_home_visible():
+            self._quest_home_failures = 0
+            return True
+        self._quest_home_failures = getattr(self, "_quest_home_failures", 0) + 1
+        now = time.monotonic()
+        if (self._quest_home_failures < 2
+                or now < getattr(self, "_quest_home_reentry_after", 0.0)):
+            return False
+        # A failed Home anchor must not justify blind clicks on loading screens
+        # or overlays. The independent Profile template includes a brightness
+        # guard, and every later input rechecks who owns the screen.
+        self._quest_home_reentry_after = now + 8.0
+        profile = self._reroll_match("profile", (155, 0, 140, 150))
+        if profile is None or not can_navigate():
+            return False
+        bot_logger.log_info("QUEST_HOME_REENTRY: repeated Home recognition failures; trying Profile -> Home.")
+        self._click_abs(*profile, "QUEST_HOME_REENTRY_PROFILE")
+        for _ in range(3):
+            time.sleep(1.0)
+            if not can_navigate():
+                return False
+            if self._navigate_to_home() and self._quest_reroll_home_visible():
+                self._quest_home_failures = 0
+                bot_logger.log_info("QUEST_HOME_REENTRY: Home verified after tab re-entry.")
+                return True
+        return False
 
     def _close_quest_reroll_dialog(self):
         if not self._reroll_can_act():

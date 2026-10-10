@@ -1,0 +1,6 @@
+interface:
+  display_name: "Audit Bot Logs"
+  short_description: "Summarize bot sessions, Gold, and bug evidence"
+  default_prompt: "Use $audit-logs to audit the latest bot session."
+policy:
+  allow_implicit_invocation: false

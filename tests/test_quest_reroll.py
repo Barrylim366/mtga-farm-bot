@@ -66,6 +66,99 @@ class RerollCase(unittest.TestCase):
         return [call.args[2] for call in self.c._click_abs.call_args_list]
 
 
+
+class HomeReentryTests(RerollCase):
+    def test_refresh_reads_response_when_home_navigation_finishes_after_deadline(self):
+        c = self.c
+        c._reroll_match = Mock(return_value=(210, 40))
+        clock = [90.0]
+
+        def navigate():
+            self.append([quest("replacement")], canSwap=False)
+            clock[0] = 101.0
+            return True
+
+        c._navigate_to_home.side_effect = navigate
+        with patch("Controller.MTGAController.quest_reroll.time.monotonic", side_effect=lambda: clock[0]):
+            snapshot = Controller._freshen_quest_reroll_snapshot(c, deadline=100.0)
+        self.assertIsNotNone(snapshot)
+        self.assertFalse(snapshot["canSwap"])
+        self.assertEqual(snapshot["quests"][0]["questId"], "replacement")
+
+    def test_repeated_misses_reenter_home_then_reroll_once(self):
+        c = self.c
+        self.append(canSwap=True)
+        c._quest_reroll_home_visible.side_effect = [False, False, True]
+        c._reroll_match = Mock(return_value=(210, 40))
+        c._click_abs.side_effect = lambda x, y, tag: self.append(
+            [quest("replacement", 750)], canSwap=False
+        ) if tag == "QUEST_REROLL_CONFIRM" else None
+        self.assertFalse(c.reroll_quest_on_landing())
+        self.assertTrue(c._quest_reroll_pending)
+        c._reroll_match.assert_not_called()
+        self.assertTrue(c.reroll_quest_on_landing())
+        self.assertEqual(self.tags(), ["QUEST_HOME_REENTRY_PROFILE",
+                                      "QUEST_REROLL_OPEN", "QUEST_REROLL_CONFIRM"])
+        self.assertEqual(c._quest_home_failures, 0)
+
+    def test_failed_reentry_is_bounded_and_has_cooldown(self):
+        c = self.c
+        c._quest_reroll_home_visible.return_value = False
+        c._reroll_match = Mock(return_value=(210, 40))
+        with patch("Controller.MTGAController.quest_reroll.time.monotonic", return_value=100):
+            for _ in range(5):
+                self.assertFalse(c._ensure_quest_reroll_home())
+        self.assertEqual(self.tags(), ["QUEST_HOME_REENTRY_PROFILE"])
+        self.assertEqual(c._navigate_to_home.call_count, 8)
+        with patch("Controller.MTGAController.quest_reroll.time.monotonic", return_value=107.9):
+            self.assertFalse(c._ensure_quest_reroll_home())
+        self.assertEqual(self.tags(), ["QUEST_HOME_REENTRY_PROFILE"])
+        with patch("Controller.MTGAController.quest_reroll.time.monotonic", return_value=108):
+            self.assertFalse(c._ensure_quest_reroll_home())
+        self.assertEqual(self.tags(), ["QUEST_HOME_REENTRY_PROFILE"] * 2)
+        c._arm_quest_reroll()
+        self.assertEqual(c._quest_home_failures, 0)
+        self.assertEqual(c._quest_home_reentry_after, 0)
+
+    def test_missing_profile_does_not_click(self):
+        c = self.c
+        c._quest_reroll_home_visible.return_value = False
+        c._reroll_match = Mock(return_value=None)
+        self.assertFalse(c._ensure_quest_reroll_home())
+        self.assertFalse(c._ensure_quest_reroll_home())
+        c._click_abs.assert_not_called()
+
+    def test_healthy_home_does_not_reenter(self):
+        c = self.c
+        c._reroll_match = Mock()
+        for _ in range(3):
+            self.assertTrue(c._ensure_quest_reroll_home())
+        c._reroll_match.assert_not_called()
+        c._click_abs.assert_not_called()
+
+    def test_match_dialog_stop_and_foreign_switch_block_navigation(self):
+        c = self.c
+        for field, value in (("_stop_requested", True),
+                             ("_quest_reroll_dialog_open", True),
+                             ("_account_switch_in_progress", True)):
+            with self.subTest(field=field), patch.object(c, field, value):
+                self.assertFalse(c._ensure_quest_reroll_home())
+        for state in (BotState.IN_GAME, BotState.FIND_MATCH):
+            c._get_state_from_log.return_value = state
+            self.assertFalse(c._ensure_quest_reroll_home())
+        c._navigate_to_home.assert_not_called()
+
+    def test_stop_after_profile_click_prevents_return_click(self):
+        c = self.c
+        c._quest_reroll_home_visible.return_value = False
+        c._reroll_match = Mock(return_value=(210, 40))
+        c._click_abs.side_effect = lambda *args: setattr(c, "_stop_requested", True)
+        self.assertFalse(c._ensure_quest_reroll_home())
+        self.assertFalse(c._ensure_quest_reroll_home())
+        self.assertEqual(c._navigate_to_home.call_count, 2)
+        self.assertEqual(self.tags(), ["QUEST_HOME_REENTRY_PROFILE"])
+
+
 class SnapshotTests(RerollCase):
     def test_boolean_availability_and_compatibility(self):
         for value in (True, False, None, "true", 1, {}, []):
@@ -265,7 +358,7 @@ class LandingTests(RerollCase):
 
         self.assertTrue(c._run_post_login_routine({"name": "incoming"}, []))
 
-        self.assertEqual(c._quest_reroll_home_visible.call_count, 2)
+        self.assertEqual(c._quest_reroll_home_visible.call_count, 3)
         c._run_post_login_navigation_oob.assert_called_once()
         c._choose_deck_image.assert_called_once_with({"name": "incoming"}, "", None)
         self.assertEqual(
@@ -283,7 +376,50 @@ class LandingTests(RerollCase):
         self.assertFalse(c.reroll_quest_on_landing())
         self.assertTrue(c._quest_reroll_pending)
         self.assertTrue(c.reroll_quest_on_landing())
+        self.assertTrue(c._quest_reroll_pending)
+
+    def test_missing_fresh_quest_response_is_retried_on_next_landing(self):
+        self.c._arm_quest_reroll()
+        self.assertTrue(self.c.reroll_quest_on_landing())
+        self.assertTrue(self.c._quest_reroll_pending)
+        self.c._click_abs.assert_not_called()
+        self.append(canSwap=True)
+        self.c.reroll_quest_on_landing()
+        self.assertIn("QUEST_REROLL_CONFIRM", self.tags())
+
+    def test_black_home_defers_one_shot_and_next_landing_submits_once(self):
+        c = self.c
+        c._arm_quest_reroll()
+        self.append(canSwap=True)
+        c._navigate_to_home.side_effect = [False, True]
+        self.assertFalse(c.reroll_quest_on_landing())
+        self.assertTrue(c._quest_reroll_pending)
+        self.assertEqual(self.tags(), [])
+        self.assertTrue(c.reroll_quest_on_landing())
+        self.assertEqual(self.tags().count("QUEST_REROLL_CONFIRM"), 1)
         self.assertFalse(c._quest_reroll_pending)
+        self.assertTrue(c.reroll_quest_on_landing())
+        self.assertEqual(self.tags().count("QUEST_REROLL_CONFIRM"), 1)
+
+    def test_post_login_black_home_does_not_select_deck(self):
+        c = self.c
+        c._POST_LOGIN_HOME_READY_TIMEOUT = 0
+        c._navigate_to_home.return_value = False
+        c._game_mode = "starter"
+        c._run_starter_deck_routine = Mock(return_value=True)
+        self.assertFalse(c._run_post_login_routine({}, []))
+        c._run_starter_deck_routine.assert_not_called()
+        c._click_abs.assert_not_called()
+        self.assertTrue(c._quest_reroll_pending)
+
+    def test_navigation_probe_error_before_dialog_keeps_reroll_pending(self):
+        c = self.c
+        c._arm_quest_reroll()
+        self.append(canSwap=True)
+        c._navigate_to_home.side_effect = OSError("screen capture unavailable")
+        self.assertFalse(c.reroll_quest_on_landing())
+        self.assertTrue(c._quest_reroll_pending)
+        c._click_abs.assert_not_called()
 
     def test_dialog_cleanup_exception_keeps_flag_and_next_landing_resumes(self):
         c = self.c
@@ -364,15 +500,50 @@ class LandingTests(RerollCase):
         c._select_best_quest.assert_not_called()
         c._click_abs.assert_not_called()
 
-    def test_recoverable_reroll_failure_still_selects_a_deck(self):
-        # The post-login routine runs once per login/switch, so a self-healing
-        # reroll failure must not cost the account its deck selection.
+    def test_pending_reroll_failure_defers_deck_selection(self):
         c = self.c
         c._game_mode = "starter"
         c._run_starter_deck_routine = Mock(return_value=True)
         c.reroll_quest_on_landing = Mock(return_value=False)
-        self.assertTrue(c._run_post_login_routine({}, []))
-        c._run_starter_deck_routine.assert_called_once()
+        self.assertFalse(c._run_post_login_routine({}, []))
+        c._run_starter_deck_routine.assert_not_called()
+
+    def test_due_switch_retries_pending_reroll_before_leaving_account(self):
+        c = self.c
+        c._stop_queue_spam = False
+        c._account_switch_due = Mock(return_value=True)
+        c.start_game_from_home_screen = Mock()
+        c._perform_account_switch = Mock()
+        order = []
+
+        def reroll():
+            order.append("reroll")
+            if len(order) == 2:
+                c._quest_reroll_pending = False
+                return True
+            return False
+
+        c.reroll_quest_on_landing = Mock(side_effect=reroll)
+        with patch("Controller.MTGAController.Controller.time.sleep"), patch(
+            "Controller.MTGAController.Controller.threading.Thread"
+        ) as worker:
+            c._queue_spam_loop()
+        self.assertEqual(order, ["reroll", "reroll"])
+        worker.assert_called_once_with(target=c._perform_account_switch, daemon=True)
+        c.start_game_from_home_screen.assert_not_called()
+
+    def test_pending_reroll_blocks_switch_even_when_check_returns_true(self):
+        c = self.c
+        c._stop_queue_spam = False
+        c._account_switch_due = Mock(return_value=True)
+        c.start_game_from_home_screen = Mock()
+        c.reroll_quest_on_landing = Mock(return_value=True)
+        with patch("Controller.MTGAController.Controller.time.sleep", side_effect=lambda _: setattr(
+            c, "_stop_queue_spam", True
+        )), patch("Controller.MTGAController.Controller.threading.Thread") as worker:
+            c._queue_spam_loop()
+        worker.assert_not_called()
+        c.start_game_from_home_screen.assert_not_called()
 
     def test_post_login_skips_deck_and_queue_when_switch_is_due(self):
         c = self.c
@@ -450,13 +621,85 @@ class LandingTests(RerollCase):
 
 
 class VisionGuardTests(RerollCase):
-    def test_leftmost_visual_tile_not_log_order(self):
+    @unittest.skipIf(cv2 is None, "OpenCV not installed")
+    def test_partial_progress_ring_still_matches_existing_500_template(self):
+        tile = cv2.imread(str(Path(__file__).parent / "fixtures" / "quest_gold_500_partial.png"))
+        template = cv2.imread(self.c._app_path("assets", "assert", "quest_reroll", "gold_500.png"),
+                              cv2.IMREAD_GRAYSCALE)
+        self.assertIsNotNone(tile)
+        self.assertIsNotNone(template)
+        scores = cv2.matchTemplate(cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY),
+                                   template, cv2.TM_CCOEFF_NORMED)
+        _, score, _, point = cv2.minMaxLoc(scores)
+        self.assertGreater(score, 0.82)
+        x, y = point
+        h, w = template.shape
+        reference = cv2.imread(self.c._app_path("assets", "assert", "quest_reroll", "gold_500.png"))
+        self.assertGreaterEqual(tile[y:y+h, x:x+w].mean(), reference.mean() * 0.75)
+
+    @unittest.skipIf(cv2 is None, "OpenCV not installed")
+    def test_live_500_label_is_detected_in_each_daily_quest_slot(self):
+        """Replay the real Home reward pixels without accessing the desktop."""
         c = self.c
-        c._reroll_match = Mock(side_effect=[None, (540, 900), (830, 900)])
+        tile = cv2.imread(str(Path(__file__).parent / "fixtures" / "quest_gold_500.png"))
+        self.assertIsNotNone(tile)
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        c._vision.capture.return_value = frame
+
+        def locate(path, label, *, rel_region, confidence, **kwargs):
+            x, y, w, h = rel_region
+            template = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            crop = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
+            _, score, _, pos = cv2.minMaxLoc(cv2.matchTemplate(
+                crop, template, cv2.TM_CCOEFF_NORMED))
+            if score < confidence:
+                return None
+            return (x + pos[0] + template.shape[1] // 2,
+                    y + pos[1] + template.shape[0] // 2)
+
+        c._locate_image_center_in_scaled_arena_region.side_effect = locate
+        for tile_x in (80, 280, 360, 580, 640, 940):
+            with self.subTest(tile_x=tile_x):
+                frame[:] = 0
+                frame[810:940, tile_x:tile_x+130] = tile
+                point = Controller._find_500_gold_quest_tile(c)
+                if tile_x == 940:
+                    self.assertIsNone(point, "win rewards must be excluded")
+                else:
+                    self.assertIsNotNone(point)
+                    self.assertAlmostEqual(point[0], tile_x + 62, delta=2)
+
+    def test_uses_one_continuous_daily_quest_region(self):
+        c = self.c
+        c._reroll_match = Mock(return_value=(540, 900))
         self.assertEqual(Controller._find_500_gold_quest_tile(c), (540, 900))
-        self.assertEqual([call.args[1][0] for call in c._reroll_match.call_args_list], [150, 450])
-        self.assertTrue(all(call.kwargs["confidence"] == 0.82
-                            for call in c._reroll_match.call_args_list))
+        c._reroll_match.assert_called_once_with("gold_500", (50, 750, 860, 210), confidence=0.82)
+
+    @unittest.skipIf(cv2 is None, "OpenCV not installed")
+    def test_real_home_label_crossing_old_search_boundary_is_detected(self):
+        from vision.vision import VisionEngine
+        c = self.c
+        crop = cv2.imread(str(Path(__file__).parent / "fixtures" / "quest_gold_500_boundary.png"))
+        self.assertIsNotNone(crop)
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        frame[750:960, 50:910] = crop
+        c._vision.capture.return_value = frame
+        matcher = VisionEngine()
+
+        def locate(path, label, *, rel_region, confidence, **kwargs):
+            x, y, w, h = rel_region
+            match = matcher.find_template(frame[y:y+h, x:x+w], path, threshold=confidence)
+            return (x + match.x, y + match.y) if match else None
+
+        c._locate_image_center_in_scaled_arena_region.side_effect = locate
+        path = c._app_path("assets", "assert", "quest_reroll", "gold_500.png")
+        # The same pixels fail in both former neighbouring search regions.
+        self.assertIsNone(matcher.find_template(frame[750:960, 330:630], path, threshold=0.82))
+        self.assertIsNone(matcher.find_template(frame[750:960, 610:910], path, threshold=0.82))
+        point = Controller._find_500_gold_quest_tile(c)
+        self.assertIsNotNone(point)
+        self.assertAlmostEqual(point[0], 647, delta=2)
+        self.assertAlmostEqual(point[1], 905, delta=2)
 
     @unittest.skipIf(cv2 is None, "OpenCV not installed")
     def test_dimmed_control_is_rejected_despite_template_match(self):

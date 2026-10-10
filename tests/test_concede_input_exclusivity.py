@@ -265,17 +265,25 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         controller._Controller__concede_outcome = None
         controller._get_state_from_log = lambda: BotState.IN_GAME
         attempts = []
+        order = []
+
+        incident = mock.Mock()
+        incident.start_attempt.side_effect = lambda attempt: order.append(f"attempt-{attempt}")
 
         def perform(label):
             attempts.append(label)
+            order.append(label)
             if len(attempts) == 2:
                 controller._Controller__concede_outcome = "match_completed"
                 controller._Controller__concede_completed_event.set()
 
         controller._Controller__perform_concede = lambda label, *_args: perform(label)
-        controller._Controller__run_claimed_concede_sequence("STALL_CONCEDE")
+        with mock.patch("Controller.MTGAController.Controller.ConcedeIncident.create", return_value=incident):
+            controller._Controller__run_claimed_concede_sequence("STALL_CONCEDE")
+        incident.finish.assert_called_once_with("match_completion_observed")
 
         self.assertEqual(attempts, ["STALL_CONCEDE_1", "STALL_CONCEDE_2"])
+        self.assertEqual(order, ["attempt-1", "STALL_CONCEDE_1", "attempt-2", "STALL_CONCEDE_2"])
 
     def test_attempt_limit_releases_input_and_suppresses_same_signature(self):
         class NeverCompletes:

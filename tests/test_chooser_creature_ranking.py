@@ -18,6 +18,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -196,6 +197,22 @@ class ChooserTargetTest(unittest.TestCase):
     def test_no_legal_targets_returns_none(self):
         seed(self.c, [card(340, HINTERLAND_SANCTIFIER)])
         self.assertIsNone(self.c._Controller__pick_chooser_target({"targets": []}))
+
+    def test_noncreature_graveyard_choice_picks_highest_mana_value(self):
+        objects = [
+            card(350, 1001, creature=False),
+            card(351, 1002, creature=False),
+            card(352, 1003, creature=False),
+        ]
+        seed(self.c, objects)
+        costs = {1001: "{U}", 1002: "{2}{U}", 1003: "{4}{B}"}
+        with patch(
+            "Controller.MTGAController.Controller.CardInfo.get_card_info_local",
+            side_effect=lambda grp_id: {"manaCost": costs[grp_id]},
+        ):
+            picked, is_stack = self.c._Controller__pick_chooser_target(req(350, 351, 352))
+        self.assertFalse(is_stack)
+        self.assertEqual(picked, 352)
 
 
 if __name__ == "__main__":

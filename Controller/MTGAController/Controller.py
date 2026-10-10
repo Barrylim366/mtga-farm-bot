@@ -18,6 +18,8 @@ import AI.Utilities.CounterLogic as CounterLogic
 import AI.Utilities.CardInfo as CardInfo
 import AI.Utilities.LifegainLogic as LifegainLogic
 from Controller.MTGAController.LogReader import LogReader
+from Controller.MTGAController.popup_recovery import PopupRecoveryMixin
+from Controller.MTGAController.group_recovery import GroupRecoveryMixin
 from Controller.MTGAController.quest_reroll import (
     QuestRerollMixin, replacement_verified, serialized_home_navigation,
 )
@@ -40,6 +42,7 @@ from vision.window_locator import (
 )
 import bot_logger
 import debug_recorder
+from concede_diagnostics import ConcedeIncident
 import runtime_status
 from runtime_paths import runtime_file
 
@@ -72,7 +75,7 @@ _MY_TIMER_TYPES = {
 }
 
 
-class Controller(QuestRerollMixin, ControllerSecondary):
+class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, ControllerSecondary):
 
     # MTGA holds up to 3 daily quests; completed ones drop out of the list. Used
     # to derive absolute completions (slots - remaining) for the switch decision.
@@ -81,7 +84,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # start_game_from_home_screen). After this many failed attempts the bot gives
     # up reading and just plays, rather than dipping to Home forever.
     _HOME_QUEST_CHECK_MAX_ATTEMPTS = 3
+    _POST_LOGIN_HOME_READY_TIMEOUT = 20.0
     _STALL_CONCEDE_MAX_ATTEMPTS = 2
+    _READY_TARGET_SUBMIT_MAX_ATTEMPTS = 3
+    _TARGET_SUBMIT_LOCK_WAIT_SEC = 8.0
+    _OPPONENT_BATTLEFIELD_SCAN_TIMEOUT = 4.0
     # Class-level fallback so instances built without __init__ (tests use
     # Controller.__new__) still serialise correctly; __init__ replaces it with a
     # per-instance lock.
@@ -114,6 +121,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # with a land play, which kicked off an unpayable cast and stalled the
         # bot on the pay-costs screen).
         self.__decision_exec_lock = threading.Lock()
+        self._init_popup_recovery()
         self.__mulligan_decision_callback = None
         self.__action_success_callback = None
         self.__decision_execution_thread = None
@@ -488,6 +496,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__card_prompt_token_counter = 0
         self.__target_submit_cooldown_sec = 1.0
         self.__pending_pay_costs_ts = 0.0
+        self.__pending_pay_costs_submit_state_id = None
         # Stack-deferral watchdog. The "Deferring decision: stack has N object(s)"
         # gate had no escape hatch: it re-deferred on every message, so a stack that
         # never resolved idled the bot into the rope (observed: 34s frozen on turn 16
@@ -525,6 +534,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__last_modal_choice_ts = 0.0
         self.__last_group_req_ts = 0.0
         self.__group_req_active_until = 0.0
+        self._group_prompt = None
+        self._group_recovery_lock = threading.Lock()
         self.__group_prompt_seq = 0
         self.__group_prompt_match_id = None
         self.__cast_ack_run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
@@ -1622,6 +1633,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 "current_pos": [int(current_pos[0]), int(current_pos[1])] if current_pos is not None else None,
                 "current_hovered_id": current_hovered_id,
                 "pending_select_n": self.__pending_select_n,
+                "pending_target_select": self.__pending_target_select,
                 "select_n_in_progress": self.__select_n_in_progress,
                 # An open search/order window is the one state that makes a hand
                 # scan hopeless -- record it so a bundle answers "was a modal
@@ -2758,13 +2770,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # - Horizontal space only (`[ \t]*`) between its parts. With `\s*` the pattern
     #   spans newlines, so two unrelated fragments that happen to end and begin
     #   with those words would splice into a login event that was never logged.
-    # - The name is one whitespace-free token, not "the rest of the line". Arena
-    #   names have no spaces (`Name#12345`), and `[^\r\n]+` would swallow anything
-    #   the client appends after the name into the identity string -- which is then
-    #   the key for gold attribution, round tracking and the deck folder lookup.
+    # - A display name may contain spaces (live: `Lass E#94890`). Read through
+    #   its #discriminator, then stop: the client may append metadata such as
+    #   `(cached)` after the name. Old unhashed names retain the single-token
+    #   fallback instead of swallowing the rest of the line.
     _LOGIN_IDENTITY_RE = re.compile(
         r'"authenticateResponse"\s*:\s*\{[^}]*?"screenName"\s*:\s*"([^"]+)"'
-        r'|Logged in successfully\.[ \t]*Display Name:[ \t]*([^\s]+)'
+        r'|Logged in successfully\.[ \t]*Display Name:[ \t]*([^\r\n]*?#[0-9]+|[^\s]+)'
     )
 
     @classmethod
@@ -3830,6 +3842,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         on Home (its anchor then matches). Returns True only if Home was reached."""
         if self._stop_requested:
             return False
+        if self._dismiss_reward_popup():
+            # Let the claimed/continued/reconnected screen settle before Home
+            # navigation. The next probe must observe the resulting screen.
+            return False
         arena = self._ensure_arena_region(force_reacquire=True)
         if arena is None:
             return False
@@ -4158,72 +4174,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         return self._navigate_starter_deck()
 
     def _dismiss_reward_popup(self) -> bool:
-        """Click 'Claim' on the Starter Deck Duel reward screen.
+        """Recover verified popup text; orange button shape is ambiguous.
 
-        After winning games the event shows a full-window 'Reward' popup with a
-        Claim button; it covers the Play/Events controls, so the queue loop gets
-        stuck retrying navigation forever. This is template-gated (Buttons/claim.png)
-        so it is a safe no-op on any screen where the Claim button is absent.
-
-        The template alone is NOT a sufficient gate: claim.png scores above
-        threshold on the event landing page's orange "Play" button, which lives in
-        the same bottom-right corner -- claim_roi below covers essentially all of
-        _EVENT_PLAY_ROI. That false positive made the bot press Play, which starts
-        the next match immediately with whatever deck is selected, so the queue
-        path that swaps in the quest-matched deck was never reached and the bot
-        kept replaying the first deck it ever picked (observed live: 18 "Reward
-        screen detected" events in a session with zero wins, i.e. no reward screen
-        existed at all). So a match is only trusted after confirming we are NOT on
-        the event landing page.
-
-        That cross-check ASSUMES the reward popup is full-window and covers the
-        event Play button, i.e. the two screens are mutually exclusive -- verified
-        from logs, not from a pixel measurement of the popup. If the assumption ever
-        breaks the way the original bug did (event_play.png false-matching a real
-        Claim button), this refuses to claim -- but it does NOT deadlock: the caller
-        falls through to _queue_from_event_landing, which clicks event_play.png at
-        that same false match, i.e. lands on Claim and dismisses the popup anyway.
-        Worst case is one wasted navigation cycle, and _swap_starter_deck_for_quest
-        in between verifies the deck chooser really opened before touching the grid.
+        Includes the persistence wait so navigation yields to a recognized
+        popup. A missing text match leaves recovery to a later observation.
         """
-        if not self._starter_navigation_may_act():
-            return False
-        claim_btn = os.path.join(self._buttons_dir(), "claim.png")
-        if not os.path.exists(claim_btn):
-            return False
-        runtime_status.set_startup_phase("Checking for reward popups")
-        point = self._locate_image_center_in_scaled_arena_region(
-            claim_btn, "REWARD_CLAIM", rel_region=self._REWARD_CLAIM_ROI,
-            confidence=0.80, timeout=1.5,
-        )
-        if point is None or not self._starter_navigation_may_act():
-            return False
-        # Candidate match -- verify before clicking. Done only now, so the extra
-        # probe costs nothing on the common path where no claim-like button is up.
-        if self._on_starter_event_landing_page("REWARD_CLAIM_EVENT_PLAY_GUARD"):
-            bot_logger.log_info(
-                "Reward claim candidate ignored: the event Play button is visible, so this "
-                "is the event landing page and not a reward popup (clicking would start a "
-                "match with the wrong deck)."
-            )
-            return False
-        if not self._starter_navigation_may_act():
-            return False
-        self._click_abs(point[0], point[1], "REWARD_CLAIM")
-        bot_logger.log_info("Reward screen detected: clicked Claim to continue.")
-        time.sleep(1.0)
-        return True
+        return self._recover_blocking_popup(block_navigation=True)
 
+    @serialized_home_navigation
     def _dismiss_match_end_screen(self) -> bool:
-        """Safety net for a DEFEAT/VICTORY result screen the post-match timer
-        failed to dismiss, so the queue loop never stalls on it.
-
-        The full-screen result hides every nav anchor, so detect() returns not-ok
-        -- but so do brief loading transitions. To avoid clicking mid-transition we
-        only act after the screen has stayed unrecognized across several
-        consecutive navigation attempts, then click the continue prompt + center
-        (language-independent, no result-text template needed). Returns True if it
-        clicked, so the caller restarts navigation on the next loop."""
+        """After three unknown-screen probes, try popup text then Continue/centre."""
         if not self._starter_navigation_may_act():
             self._unknown_screen_strikes = 0
             return False
@@ -4232,38 +4192,69 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception:
             det = None
         if det is not None and det.ok:
-            # Back on a recognizable Arena screen -- let normal navigation proceed.
             self._unknown_screen_strikes = 0
             return False
-        # Unrecognized/blank screen. Require persistence so a normal loading
-        # transition is not mistaken for a stuck result screen.
+        if det is not None and det.code in {"window_wrong_size", "window_off_screen"}:
+            # A rejected rectangle is not an unknown result screen. Do not
+            # bypass the geometry restrictions by using det.region directly.
+            self._unknown_screen_strikes = 0
+            return False
         self._unknown_screen_strikes = getattr(self, "_unknown_screen_strikes", 0) + 1
         if self._unknown_screen_strikes < 3:
             return False
-        arena = det.region if (det is not None and det.region is not None) else self._get_ui_action_arena_region(
+        # A recognized popup owns recovery, including its persistence wait.
+        # In particular, do not click through a disconnect while Reconnect waits.
+        if self._recover_blocking_popup(block_navigation=True):
+            return True
+        if not self._starter_navigation_may_act():
+            return False
+        arena = det.region if det is not None and det.region is not None else self._get_ui_action_arena_region(
             force_reacquire=True, label="MATCH_END_RECOVER"
         )
         if arena is None:
             return False
-        cx = int(arena[0] + (arena[2] // 2))
-        continue_y = int(arena[1] + (arena[3] * 0.93))
-        center_y = int(arena[1] + (arena[3] // 2))
-        bot_logger.log_info(
-            f"Match-end recovery: screen unrecognized for {self._unknown_screen_strikes} tries; clicking continue to advance."
-        )
-        if focus_mtga_window():
-            time.sleep(0.2)
-        for ty in (continue_y, center_y):
-            if not self._starter_navigation_may_act():
-                break
-            self.input.move_abs(cx, ty)
-            time.sleep(0.25)
-            if not self._starter_navigation_may_act():
-                break
-            self.input.left_click(1)
-            time.sleep(0.5)
-        self._unknown_screen_strikes = 0
-        return True
+        if not self.__decision_exec_lock.acquire(False):
+            return True
+        try:
+            with self.input.input_transaction(timeout=0.0) as acquired:
+                if not acquired or not self._starter_navigation_may_act():
+                    return False
+                cx = int(arena[0] + arena[2] // 2)
+                bot_logger.log_info(
+                    f"Match-end recovery: screen unrecognized for {self._unknown_screen_strikes} tries; clicking continue to advance."
+                )
+                focused = focus_mtga_window()
+                if not focused and sys.platform == "win32":
+                    return False
+                if focused:
+                    time.sleep(0.2)
+                for index, ty in enumerate((int(arena[1] + arena[3] * 0.93), int(arena[1] + arena[3] // 2))):
+                    if index:
+                        # The first press may already have dismissed the result.
+                        # Never send the centre press onto a recognized page,
+                        # a popup, or changed/unverifiable window geometry.
+                        try:
+                            after = self._arena_region_provider.detect(write_debug_on_fail=False)
+                        except Exception:
+                            break
+                        if (after is None or after.ok
+                                or after.code != "anchor_not_found"
+                                or after.region != arena):
+                            break
+                        if self._recover_blocking_popup(block_navigation=True):
+                            break
+                    if not self._starter_navigation_may_act():
+                        break
+                    self.input.move_abs(cx, ty)
+                    time.sleep(0.25)
+                    if not self._starter_navigation_may_act():
+                        break
+                    self.input.left_click(1)
+                    time.sleep(0.5)
+                self._unknown_screen_strikes = 0
+                return True
+        finally:
+            self.__decision_exec_lock.release()
 
     def _queue_from_event_landing(self, target_colors: str) -> bool:
         """Re-queue directly from the Starter Deck Duel event landing page.
@@ -4648,9 +4639,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if not self._starter_navigation_may_act():
             return False
 
-        # Safety net: a DEFEAT/VICTORY result screen the post-match timer failed
-        # to dismiss also covers the Play/Events controls. Clear it so the queue
-        # loop never spins forever on a screen that still shows the result.
         if self._dismiss_match_end_screen():
             return False
         if not self._starter_navigation_may_act():
@@ -4972,14 +4960,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     # both title positions: the first-time pages indent it past a back arrow, the
     # normal landing page starts flush left.
     _STARTER_TITLE_ROI = (20, 100, 700, 110)
-    # Search area for the reward popup's Claim button, same reference frame.
-    # NOTE: this deliberately overlaps _EVENT_PLAY_ROI above -- both buttons live
-    # in the bottom-right corner and claim.png matches the event Play button, so
-    # _dismiss_reward_popup CANNOT rely on the template alone and cross-checks
-    # _on_starter_event_landing_page before clicking. Keep them as constants so
-    # tests can assert that overlap still holds (tests/test_reward_popup_guard.py).
-    _REWARD_CLAIM_ROI = (1450, 850, 470, 230)
-
     # --- Starter Deck Duel screen identification --------------------------
     #
     # The event has FOUR screens that all look alike to a template matcher: one
@@ -5004,7 +4984,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     _STARTER_SCREEN_CHOOSER = "chooser"
     _STARTER_SCREEN_UNKNOWN = "unknown"
     # Any screen that is the event's own landing page, i.e. one press away from
-    # queueing. _dismiss_reward_popup must refuse to "claim" on all of these.
+    # queueing. These must stay distinct from reward/continue text.
     _STARTER_LANDING_SCREENS = (
         _STARTER_SCREEN_PLAY, _STARTER_SCREEN_START, _STARTER_SCREEN_CHOOSE_DECK,
     )
@@ -5058,10 +5038,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """True if we are on one of the event's landing pages, i.e. a single click
         in the bottom-right corner would join/queue.
 
-        Used both as the reward-popup guard (claim.png matches those pills, so a
-        blind click there starts a match with the wrong deck) and by the deck-swap
-        flow. Covers the first-time "Start" / "Choose Your Deck" pages too, not
-        just "Play" -- clicking them has the same consequence.
+        Used by queue navigation and the deck-swap flow. Covers the first-time
+        "Start" / "Choose Your Deck" pages too, not just "Play" -- clicking
+        them also changes event/deck selection.
         """
         return self._detect_starter_screen(label) in self._STARTER_LANDING_SCREENS
 
@@ -5949,7 +5928,30 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # round this login belongs to.
         if self._stop_requested:
             return False
+        # A login can report HOME in Player.log while Unity still shows a black
+        # transition frame. Wait for a visible Home before any reroll or deck
+        # click; a failed check leaves the pending reroll for the queue loop.
+        deadline = time.monotonic() + self._POST_LOGIN_HOME_READY_TIMEOUT
+        while not self._stop_requested:
+            try:
+                # A pending swap dialog must go through reroll cleanup first;
+                # Home recovery cannot navigate while that dialog owns the UI.
+                ready = self._quest_reroll_dialog_open or self._ensure_quest_reroll_home()
+            except Exception as exc:
+                ready = False
+                bot_logger.log_error(f"Post-login: Home readiness probe failed: {exc}")
+            if ready:
+                break
+            if time.monotonic() >= deadline:
+                bot_logger.log_error("Post-login: Home not visible; deferring reroll and deck selection.")
+                return False
+            time.sleep(1.0)
+        else:
+            return False
         if not self.reroll_quest_on_landing():
+            if self._quest_reroll_pending:
+                bot_logger.log_info("Post-login: reroll still pending; deferring deck selection.")
+                return False
             # This routine runs ONCE per login/switch (_post_login_action_done),
             # so returning False here drops the account's deck selection for good
             # -- it then queues with whatever deck the previous account left
@@ -6088,6 +6090,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     @serialized_home_navigation
     def start_game_from_home_screen(self):
+        if self._dismiss_reward_popup():
+            return
         if not self.reroll_quest_on_landing():
             return
         # Quests-mode switch decision must reflect THIS account's real quest state
@@ -6295,6 +6299,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         session is starting' an explicit act of the start path, instead of a side
         effect buried in a quest helper -- and makes it a no-op to call twice."""
         self._stop_requested = False
+        self._start_popup_recovery()
         # Nothing is known about what the user (or a previous session) left
         # selected in MTGA, so the first Historic queue of a session must
         # navigate and select explicitly rather than trust the Play button.
@@ -6363,6 +6368,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def end_game(self) -> None:
         self._stop_requested = True
+        self._popup_recovery_stop.set()
         self.__clear_cast_ack_attempts("bot_stopped")
         self.__concede_outcome = "stop_requested"
         self.__concede_completed_event.set()
@@ -6857,19 +6863,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         try:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             debug_dir = Path(bot_logger.ensure_debug_dir(f"cast-ack-failure-{stamp}"))
-            # Images are intentionally retained in memory until classification,
-            # but never embedded in JSON telemetry/bundles.
+            # Frames remain in memory for recovery checks; diagnostics are text-only.
             serializable = dict(payload)
             attempt = dict(serializable.get("attempt") or {})
-            for key, name in (("pre_click_image", "arena_pre_click.png"),
-                              ("post_wait_image", "arena_post_wait.png"),
-                              ("delayed_image", "arena_delayed.png")):
-                image = attempt.get(key)
-                if image is not None and self._vision is not None:
-                    try:
-                        self._vision.save_image(image, str(debug_dir / name))
-                    except Exception:
-                        pass
             for key in ("pre_click_image", "post_wait_image", "delayed_image"):
                 attempt.pop(key, None)
             serializable["attempt"] = attempt
@@ -6880,13 +6876,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 tail = self._read_log_tail(self._log_path, max_bytes=300000)
             with (debug_dir / "player_log_tail.txt").open("w", encoding="utf-8") as handle:
                 handle.write(tail or "")
-            if self._vision is not None:
-                self._vision.begin_tick()
-                full = self._vision.capture(None)
-                self._vision.save_image(full, str(debug_dir / "full_screen.jpg"))
-                if self._arena_region is not None:
-                    arena = self._vision.capture(self._arena_region)
-                    self._vision.save_image(arena, str(debug_dir / "arena_region.png"))
             bot_logger.log_error(f"CAST_ACK_BUNDLE: {debug_dir}")
         except Exception as exc:
             bot_logger.log_error(f"CAST_ACK_BUNDLE_FAILED: {exc}")
@@ -7054,9 +7043,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__schedule_decision_recovery(0.2, "cast_escape_retry_exhausted")
             return
 
-        before = self.__capture_cast_blocker_frame()
-        if before is not None:
-            self.__write_cast_escape_image(attempt, "before_escape", before)
+        self.__write_cast_escape_bundle(attempt, "before_escape")
         self.__cast_ack_event("cast_escape_recovery", attempt_id=attempt_id,
                               card_id=card_id, phase="before_escape", state=baseline)
         transaction = getattr(self.input, "input_transaction", None)
@@ -7085,9 +7072,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 self.input.tap_escape()
                 escape_sent = True
                 time.sleep(0.4)
-                after = self.__capture_cast_blocker_frame()
-                if after is not None:
-                    self.__write_cast_escape_image(attempt, "after_escape", after)
+                self.__write_cast_escape_bundle(attempt, "after_escape")
                 menu_open = self._options_overlay_visible()
                 if menu_open:
                     second_foreground = _describe_foreground_window()
@@ -7130,15 +7115,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         and self.__read_game_state_id() == baseline.get("game_state_id")):
                     self.__schedule_decision_recovery(0.2, "cast_escape_deferred")
 
-    def __write_cast_escape_image(self, attempt: dict, name: str, image) -> None:
+    def __write_cast_escape_bundle(self, attempt: dict, phase: str) -> None:
         try:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             debug_dir = Path(bot_logger.ensure_debug_dir(f"cast-escape-{stamp}"))
-            if self._vision is not None:
-                self._vision.save_image(image, str(debug_dir / f"{name}.png"))
             with (debug_dir / "recovery.json").open("w", encoding="utf-8") as handle:
                 json.dump({"attempt_id": attempt.get("attempt_id"), "card_id": attempt.get("card_id"),
-                           "image": name}, handle, indent=2)
+                           "phase": phase}, handle, indent=2)
         except Exception:
             pass
 
@@ -7348,7 +7331,6 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         try:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             debug_dir = Path(bot_logger.ensure_debug_dir(f"cast-blocked-{stamp}"))
-            self._vision.save_image(frame, str(debug_dir / "arena.png"))
             with (debug_dir / "blocker.json").open("w", encoding="utf-8") as handle:
                 json.dump({
                     "blocker": blocker,
@@ -7868,7 +7850,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
                     return False
                 if (not self.can_execute_game_action(expected_match_id)
-                        or time.time() < self.__group_req_active_until):
+                        or self._group_prompt_blocks_gameplay()):
                     break
                 if self.__abort_stale_cast_context(
                     cast_ack_id, card_id, decision_context, "scan_loop", attempt
@@ -8305,6 +8287,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def __has_pending_mulligan_state(self, raw_dict: dict | None = None) -> bool:
         try:
+            if getattr(self, "_Controller__has_mulled_keep", False):
+                return False
             if raw_dict is not None and self.__has_local_mulligan_request(raw_dict):
                 return True
             turn_info = self.updated_game_state.get_turn_info() or {}
@@ -8519,7 +8503,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             while current_hovered_id != card_id:
                 if (
                     not self.can_execute_game_action(expected_match_id)
-                    or time.time() < self.__group_req_active_until
+                    or self._group_prompt_blocks_gameplay()
                 ):
                     return False
                 current_x = self.input.position().x
@@ -8719,7 +8703,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         """
         return self.select_opponent_battlefield_permanent(card_id, clicks=clicks)
 
-    def select_opponent_battlefield_permanent(self, card_id: int, clicks: int = 1) -> bool:
+    def select_opponent_battlefield_permanent(self, card_id: int, clicks: int = 1,
+                                             *, max_scan_sec: float | None = None) -> bool:
         """Select an opponent's permanent by hover-scanning the upper arena band
         for the matching objectId. Mirror of select_battlefield_permanent.
 
@@ -8736,12 +8721,22 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 step=self.battlefield_scan_step,
                 clicks=clicks,
                 label="OPP_BATTLEFIELD_ITEM",
-                max_scan_sec=4.0,
+                max_scan_sec=(self._OPPONENT_BATTLEFIELD_SCAN_TIMEOUT
+                              if max_scan_sec is None else max_scan_sec),
             ):
                 return True
             bot_logger.log_error(
                 f"Opponent battlefield select failed for card_id={card_id} "
                 f"(scan {scan_p1}->{scan_p2}); region may need calibration."
+            )
+            current_pos = self.input.position()
+            self._write_hand_select_debug_bundle(
+                reason="opponent_battlefield_select_failed",
+                card_id=card_id,
+                scan_start=scan_p1,
+                scan_end=scan_p2,
+                current_pos=(current_pos.x, current_pos.y),
+                current_hovered_id=None,
             )
             return False
         finally:
@@ -8770,8 +8765,21 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         reason: str = "unknown",
         force: bool = False,
         expected_match_id: str | None = None,
+        allow_okay_fallback: bool = True,
+        expected_pay_costs_ts: float | None = None,
+        pay_costs_retry_attempt: int = 0,
     ) -> bool:
         expected_match_id = expected_match_id or self.__live_match_id
+        is_payment = reason.startswith("pay_costs")
+        if is_payment:
+            if expected_pay_costs_ts is None:
+                expected_pay_costs_ts = self.__pending_pay_costs_ts
+            if (not expected_pay_costs_ts
+                    or self.__pending_pay_costs_ts != expected_pay_costs_ts):
+                return False
+        pay_costs_submit_state_id = (
+            self.__read_game_state_id() if reason.startswith("pay_costs") else None
+        )
         if not self.can_execute_game_action(expected_match_id):
             bot_logger.log_info(
                 f"SubmitSelection cancelled: live match ended or input was suppressed. reason={reason}"
@@ -8779,10 +8787,23 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return False
         if not self.__submit_selection_lock.acquire(blocking=False):
             bot_logger.log_info(f"SubmitSelection skipped (already running). reason={reason}")
+            if is_payment and pay_costs_retry_attempt < 80:
+                # Retry contention for at most 16 seconds. The captured prompt
+                # timestamp prevents a queued retry from paying a later cast.
+                threading.Timer(0.2, lambda: self.submit_selection(
+                    reason=reason, force=force, expected_match_id=expected_match_id,
+                    allow_okay_fallback=allow_okay_fallback,
+                    expected_pay_costs_ts=expected_pay_costs_ts,
+                    pay_costs_retry_attempt=pay_costs_retry_attempt + 1,
+                )).start()
             return False
+        target_token = (self.__pending_target_select or {}).get("token")
+        target_clicked = False
         try:
             def _still_active() -> bool:
-                return self.can_execute_game_action(expected_match_id)
+                return (self.can_execute_game_action(expected_match_id)
+                        and (not is_payment or
+                             self.__pending_pay_costs_ts == expected_pay_costs_ts))
 
             def _locate_and_click(
                 image_path: str,
@@ -8791,6 +8812,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 rel_region: tuple[int, int, int, int] | None = None,
                 scaled: bool = False,
             ) -> bool:
+                nonlocal target_clicked
                 if not _still_active():
                     return False
                 if scaled:
@@ -8810,6 +8832,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 if point is None or not _still_active():
                     return False
                 self._click_abs(point[0], point[1], label)
+                target_clicked = True
+                return True
+
+            def _try_auto_pay() -> bool:
+                if not is_payment:
+                    return False
+                image_path = os.path.join(self._buttons_dir(), "auto_pay_text.png")
+                if not os.path.exists(image_path):
+                    return False
+                if not _locate_and_click(
+                    image_path, "PAY_COSTS_AUTO_PAY",
+                    rel_region=(1320, 720, 600, 320), scaled=True,
+                ):
+                    return False
+                self.__last_submit_selection_ts = time.time()
+                self.__pending_pay_costs_submit_state_id = (
+                    pay_costs_submit_state_id if pay_costs_submit_state_id is not None else -1
+                )
                 return True
 
             if not force and not self.__selection_submit_allowed():
@@ -8825,14 +8865,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     scaled=True,
                 ):
                     self.__last_submit_selection_ts = time.time()
+                    if reason.startswith("pay_costs"):
+                        self.__pending_pay_costs_submit_state_id = (
+                            pay_costs_submit_state_id if pay_costs_submit_state_id is not None else -1
+                        )
                     return True
                 if not _still_active():
                     return False
                 if _locate_and_click(submit_img, "SUBMIT_SELECTION_IMG"):
                     self.__last_submit_selection_ts = time.time()
+                    if reason.startswith("pay_costs"):
+                        self.__pending_pay_costs_submit_state_id = (
+                            pay_costs_submit_state_id if pay_costs_submit_state_id is not None else -1
+                        )
+                    return True
+                if _try_auto_pay():
                     return True
                 # submit_btn not on screen — try okay_btn as fallback (e.g. combat confirm)
-                if os.path.exists(okay_img):
+                if allow_okay_fallback and os.path.exists(okay_img):
                     if _locate_and_click(
                         okay_img,
                         "SUBMIT_OKAY_FALLBACK_IMG",
@@ -8848,8 +8898,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         bot_logger.log_info("SUBMIT_SELECTION: submit_btn not found, clicked okay_btn as fallback")
                         self.__last_submit_selection_ts = time.time()
                         return True
+                bot_logger.log_error(
+                    f"SUBMIT_SELECTION_FAILED: no submit control recognized (reason={reason})"
+                )
                 return False
+            if is_payment:
+                return _try_auto_pay()
             if not _still_active():
+                return False
+            if not allow_okay_fallback:
+                bot_logger.log_error(
+                    f"SUBMIT_SELECTION_FAILED: submit template unavailable; refusing coordinate fallback "
+                    f"(reason={reason})"
+                )
                 return False
             target, source = self._map_abs_point_to_arena(
                 self.main_br_button_coordinates,
@@ -8874,10 +8935,17 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 source=source, region_age=self._region_age(), arena=self._arena_region,
             )
             self.input.left_click(1)
+            target_clicked = True
             self.__last_submit_selection_ts = time.time()
+            if reason.startswith("pay_costs"):
+                self.__pending_pay_costs_submit_state_id = (
+                    pay_costs_submit_state_id if pay_costs_submit_state_id is not None else -1
+                )
             return True
         finally:
             self.__submit_selection_lock.release()
+            if target_token is not None:
+                self.__watch_target_submission(target_token, target_clicked, reason)
 
     def resolve(self) -> None:
         expected_match_id = self.__live_match_id
@@ -8966,6 +9034,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         y_min, y_max = (y1, y2) if y1 <= y2 else (y2, y1)
         step = max(10, int(step))
         start_ts = time.time()
+        hover_count = 0
+        last_hovered_id = None
 
         reset_x = x_min
         reset_y = max(self.screen_bounds[0][1], y_min - 80)
@@ -8980,7 +9050,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     return False
                 if max_scan_sec is not None and (time.time() - start_ts) > max_scan_sec:
                     bot_logger.log_error(
-                        f"{label}_TIMEOUT: card {card_id} not found within {max_scan_sec:.1f}s"
+                        f"{label}_TIMEOUT: card {card_id} not found within {max_scan_sec:.1f}s "
+                        f"at=({x},{y}) bounds={p1}->{p2} step={step} "
+                        f"hovers={hover_count} last_hover={last_hovered_id}"
                     )
                     return False
                 self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
@@ -8993,6 +9065,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 )
                 if parsed is None:
                     continue
+                hover_count += 1
+                last_hovered_id = parsed
                 bot_logger.log_hover(parsed)
                 if parsed != card_id:
                     continue
@@ -9006,7 +9080,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     time.sleep(0.1)
                 return True
 
-        bot_logger.log_error(f"{label}_FAILED: Card {card_id} not found in scan region")
+        bot_logger.log_error(
+            f"{label}_FAILED: Card {card_id} not found in scan region "
+            f"bounds={p1}->{p2} step={step} hovers={hover_count} last_hover={last_hovered_id}"
+        )
         return False
 
     def unconditional_auto_pass(self) -> None:
@@ -9402,6 +9479,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if getattr(self, "_Controller__concession_claimed", False):
             self.__concede_outcome = outcome
             self.__concede_completed_event.set()  # wake a retry; outcome says why.
+        self._clear_group_prompt()
+        self.__group_prompt_seq += 1
+        self.__group_prompt_match_id = None
         self.__retired_match_id = self.__live_match_id or self.__last_seen_match_id
         self.__live_match_id = None
         self.__last_seen_match_id = None
@@ -9450,9 +9530,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return None
         turn = self.updated_game_state.get_turn_info() or {}
         my_seat = self.__system_seat_id
+        # A delayed opponent decision can leave our old prompt state in the
+        # merged GameState. Explicit opponent priority rules out a local stall.
+        priority_seat = turn.get("priorityPlayer")
+        if (my_seat is not None and priority_seat is not None
+                and priority_seat != my_seat):
+            return None
         local_priority = my_seat is not None and turn.get("decisionPlayer") == my_seat
         prompt_kind = None
-        if self.__has_pending_mulligan_state():
+        if getattr(self, "_group_prompt", None) is not None:
+            context = self._group_prompt["context"].lower()
+            prompt_kind = "surveil" if "surveil" in context else "scry" if "scry" in context else "group"
+        elif self.__has_pending_mulligan_state():
             prompt_kind = "mulligan"
         elif self.__pending_card_prompt:
             prompt_kind = str(self.__pending_card_prompt.get("kind") or "card")
@@ -9466,6 +9555,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             prompt_kind = "assign_damage"
         elif self.__casting_time_options_until > time.time():
             prompt_kind = "casting_options"
+        # A prompt cached from an earlier GRE message is not sufficient proof
+        # that we still own the decision. In particular, Player.pendingMessageType
+        # can remain MulliganResp after the opponent has started their mulligan;
+        # priorityPlayer may be absent during that transition. Only arm recovery
+        # for a prompt when the current turn data assigns us the decision.
+        if prompt_kind is not None and not local_priority and priority_seat != my_seat:
+            return None
         if not local_priority and prompt_kind is None:
             return None
         try:
@@ -9511,7 +9607,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception:
             action_keys, zones, zone_objects, players = (), (), (), ()
         prompt_identity = ()
-        if isinstance(self.__pending_card_prompt, dict):
+        if getattr(self, "_group_prompt", None) is not None:
+            prompt_identity = (self._group_prompt["seq"], self._group_prompt["context"])
+        elif isinstance(self.__pending_card_prompt, dict):
             prompt_identity = (
                 self.__pending_card_prompt.get("kind"),
                 self.__pending_card_prompt.get("source_id"),
@@ -9666,6 +9764,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 )
                 return
             trigger_signature = getattr(self, "_Controller__stall_context_signature", None)
+            if self._group_watchdog_recovery():
+                self.__arm_stall_watchdog_timer(
+                    arm_id, trigger_signature, started_at, expected_match_id, 5.0,
+                )
+                return
             if not self.__claim_concession("stalled_local_context"):
                 if not getattr(self, "_stop_requested", False) and not self.__concession_claimed:
                     self.__arm_stall_watchdog_timer(
@@ -9676,7 +9779,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         1.0,
                     )
                 return
-        bot_logger.log_info(f"STALL_WATCHDOG_TRIGGERED: age={age:.1f}s reason=stalled_local_context")
+        turn = self.updated_game_state.get_turn_info() or {}
+        bot_logger.log_info(
+            "STALL_WATCHDOG_TRIGGERED: age={:.1f}s reason=stalled_local_context "
+            "mySeat={} decisionPlayer={} priorityPlayer={} phase={} step={} prompt={}".format(
+                age, self.__system_seat_id, turn.get("decisionPlayer"),
+                turn.get("priorityPlayer"), turn.get("phase"), turn.get("step"),
+                trigger_signature[0] if trigger_signature else None,
+            )
+        )
         self.__cancel_pending_decisions_for_concede()
         self.__run_claimed_concede_sequence("STALL_CONCEDE", trigger_signature, expected_match_id)
 
@@ -9700,6 +9811,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if not self.__is_live_match(expected_match_id):
                 return
             if focus_mtga_window(): time.sleep(0.3)
+            if not self.__is_live_match(expected_match_id):
+                return
+            incident = getattr(self, "_Controller__active_concede_incident", None)
+            if incident is not None:
+                incident.capture(self._vision, self._arena_region_provider)
             if not self.__is_live_match(expected_match_id):
                 return
             self.input.tap_escape(); time.sleep(0.8)
@@ -9727,6 +9843,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         attempt = 0
         completed = False
         cancelled = False
+        incident = ConcedeIncident.create(label, expected_match_id)
+        self.__active_concede_incident = incident
         try:
             while (
                 attempt < self._STALL_CONCEDE_MAX_ATTEMPTS
@@ -9739,6 +9857,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     break
                 attempt += 1
                 bot_logger.log_info(f"{label}: concede sequence attempt {attempt}")
+                if incident is not None:
+                    incident.start_attempt(attempt)
                 self.__perform_concede(f"{label}_{attempt}", expected_match_id)
                 if self.__concede_completed_event.wait(timeout=4.0):
                     terminal_results = getattr(
@@ -9768,6 +9888,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     "resuming normal play until game progress."
                 )
         finally:
+            self.__active_concede_incident = None
+            if incident is not None:
+                outcome = ("match_completion_observed" if completed else
+                           "stop_requested" if self._stop_requested else
+                           "attempts_exhausted" if self.__concede_outcome == "attempt_limit" else
+                           "cancelled")
+                incident.finish(outcome)
             # Keep exclusivity through the final confirm/result transition, then
             # hand input back before the delayed post-match dismissal runs.
             release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
@@ -10133,6 +10260,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__clear_cast_ack_attempts("reset_for_new_game")
         self.__group_prompt_seq += 1
         self.__group_prompt_match_id = None
+        self._clear_group_prompt()
         self.__has_mulled_keep = False
         self.__system_seat_id = None
         self.__last_match_won = None
@@ -10202,6 +10330,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__clear_cast_ack_attempts("state_reset")
         self.__group_prompt_seq += 1
         self.__group_prompt_match_id = None
+        self._clear_group_prompt()
         self.__has_mulled_keep = False
         self.__concession_claimed = False
         self.__concession_claim_reason = None
@@ -10232,6 +10361,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         self.__select_n_in_progress_since = 0.0
         self.__select_n_token_counter += 1
         self.__pending_pay_costs_ts = 0.0
+        self.__pending_pay_costs_submit_state_id = None
         # gameStateId restarts low every game; carrying the old one over would
         # make a fresh match look like it had already advanced.
         self.__latest_gre_state_id = None
@@ -10491,6 +10621,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         elif pattern == self.patterns["pay_costs"]:
             runtime_status.set_mode("in_game", bot_state=str(current_state))
             self.__pending_pay_costs_ts = time.time()
+            self.__pending_pay_costs_submit_state_id = None
             bot_logger.log_info("PayCostsReq detected: attempting auto-pay.")
             self.__handle_pay_costs_req(line_containing_pattern)
         elif pattern == self.patterns["casting_time_options"]:
@@ -11152,6 +11283,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if self._account_switch_in_progress:
                 bot_logger.log_info("Queue spam stopping: account switch in progress.")
                 return
+            # A transient startup/login failure retains this account's reroll.
+            # Resolve it before the switch branch can leave the account, even
+            # when its farming target is already met.
+            if ((self._quest_reroll_pending or self._quest_reroll_dialog_open)
+                    and self._get_state_from_log() not in (BotState.IN_GAME, BotState.FIND_MATCH)):
+                ready = self.reroll_quest_on_landing()
+                if (not ready or self._quest_reroll_pending
+                        or self._quest_reroll_dialog_open):
+                    time.sleep(3.0)
+                    continue
             # `pending` (not just `due`) so a switch DEFERRED because a match was
             # running is actually carried out. The queue loop only ticks between
             # matches, and this branch is what keeps it from queueing while a
@@ -12271,63 +12412,18 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 self.__group_prompt_match_id = self.__live_match_id or self.__last_seen_match_id
                 prompt_seq = self.__group_prompt_seq
                 prompt_match_id = self.__group_prompt_match_id
-                # A running decision/cast hand-scan moves the mouse and would
-                # race the Done click. Signal scans to abort and pause new
-                # decisions until the scry resolves.
-                self.__group_req_active_until = now + 6.0
-                bot_logger.log_info(f"GROUP_REQ ({context}): clicking Done (no reordering).")
+                # Keep the modal pending until visual completion, not a timeout.
+                self.__group_req_active_until = 0.0
+                self._group_prompt = {
+                    "seq": prompt_seq, "match_id": prompt_match_id, "context": str(context),
+                    "clicks": 0, "checks": 0, "seen": False, "absent_samples": 0,
+                    "watchdog_used": False,
+                    "next_check": time.monotonic() + 0.8,
+                }
+                bot_logger.log_info(f"GROUP_REQ ({context}): awaiting verified Done completion.")
                 self.__record_decision("group", "done", {"context": context})
-
-                def _click_done() -> None:
-                    try:
-                        if self._suppress_selections or self._stop_requested:
-                            return
-                        if (
-                            self.__group_prompt_seq != prompt_seq
-                            or self.__group_prompt_match_id != prompt_match_id
-                        ):
-                            return
-                        # Locate the orange "Done" button by template first. The
-                        # button is visually identical in scry and surveil but can
-                        # sit at slightly different heights, so a single fixed pixel
-                        # missed on scry (bot stalled with the prompt still open).
-                        # Template matching over a generous bottom-centre band works
-                        # for both overlays regardless of the exact position.
-                        # Scry's Done button sits ~49px higher than surveil's
-                        # (game-frame y~876 vs ~925); the band spans both. Template
-                        # confirmed to match the real scry overlay at conf ~0.86, so
-                        # 0.78 leaves headroom for the button's pulsing glow.
-                        done_tpl = os.path.join(self._buttons_dir(), "scry_done.png")
-                        if os.path.exists(done_tpl) and self._click_image_in_scaled_arena_region(
-                            done_tpl, "SCRY_DONE", rel_region=(700, 820, 520, 240),
-                            confidence=0.78, timeout=1.5,
-                        ):
-                            bot_logger.log_info("GROUP_REQ Done click: matched scry_done.png template.")
-                            return
-                        # Fallback fixed coordinate (base 1920x1080), measured from
-                        # real captures: scry's Done button centres at (960, 878),
-                        # surveil's ~47px lower at (960, 925). Pick by context so a
-                        # template miss still lands on the right overlay's button.
-                        base_point = (960, 878) if "scry" in str(context or "").lower() else (960, 925)
-                        target, src = self._map_abs_point_to_arena(base_point, label="SCRY_DONE")
-                        bot_logger.log_info(
-                            f"GROUP_REQ Done click (fallback fixed, context={context}): base={base_point} target={target} src={src}"
-                        )
-                        # _click_abs does a proper left_down/hold/left_up press,
-                        # which Unity registers reliably (a bare left_click can be
-                        # dropped).
-                        self._click_abs(int(target[0]), int(target[1]), "SCRY_DONE")
-                    except Exception as e:
-                        bot_logger.log_error(f"GroupReq Done click failed: {e}")
-
-                # Let the scry overlay finish animating in before clicking.
-                threading.Timer(0.8, _click_done).start()
-                # Re-drive the decision once the prompt window clears. MTGA often
-                # does not emit a fresh GameStateMessage after the scry resolves
-                # (the priority window is unchanged), so the decision that
-                # __update_game_state cancelled while the gate was up would never
-                # be re-armed and the bot would idle until the inactivity rope.
-                self.__schedule_group_resume((self.__group_req_active_until - now) + 0.6)
+                self.__update_stall_watchdog()
+                self.__schedule_group_resume(0.8)
                 return
         except Exception as e:
             bot_logger.log_error(f"Failed to handle GroupReq: {e}")
@@ -12456,16 +12552,19 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         case is a no-op: it only acts when it is unambiguously our clean priority
         with no decision already in flight."""
         try:
-            self.__group_resume_timer = None
             if (
                 self.__group_prompt_seq != prompt_seq
                 or self.__group_prompt_match_id != match_id
+                or (self.__live_match_id or self.__last_seen_match_id) != match_id
             ):
                 return
+            self.__group_resume_timer = None
             if self._stop_requested or self._suppress_selections:
                 return
+            if self._group_prompt is not None and not self._recover_group_prompt():
+                return
             # Still inside the scry/group window (or a new one arrived): wait it out.
-            if time.time() < self.__group_req_active_until:
+            if self._group_prompt_blocks_gameplay():
                 self.__schedule_group_resume(0.6, attempts, prompt_seq, match_id)
                 return
             # A normal GameStateMessage already re-armed a decision: nothing to do.
@@ -12730,10 +12829,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception as e:
             bot_logger.log_error(f"Card prompt answer failed: {e}")
 
-    def __click_card_prompt_submit(self) -> None:
+    def __click_card_prompt_submit(self, *, still_active=None) -> None:
         """Press the window's Submit button: template first (it moves with the
         selection count, e.g. "Submit 1"), then the measured position."""
         submit_img = os.path.join(self._buttons_dir(), "submit_btn.png")
+        if still_active is not None:
+            if not still_active():
+                return
+            point = self._locate_image_center_in_scaled_arena_region(
+                submit_img, "CARD_PROMPT_SUBMIT_IMG",
+                rel_region=(1500, 820, 420, 200), confidence=0.80, timeout=1.5,
+            ) if os.path.exists(submit_img) else None
+            if point is None:
+                point, _ = self._map_abs_point_to_arena(
+                    self._CARD_PROMPT_SUBMIT_POINT, label="CARD_PROMPT_SUBMIT"
+                )
+            if still_active():
+                self._click_abs(point[0], point[1], "CARD_PROMPT_SUBMIT")
+            return
         if os.path.exists(submit_img) and self._click_image_in_scaled_arena_region(
             submit_img, "CARD_PROMPT_SUBMIT_IMG",
             rel_region=(1500, 820, 420, 200), confidence=0.80, timeout=1.5,
@@ -12818,6 +12931,149 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return False
         return True
 
+    def __own_graveyard_ids(self) -> set[int]:
+        # get_zone() can return the sole zone even when its owner differs.
+        # Require explicit ownership before routing a choice to our graveyard.
+        return {
+            cid
+            for zone in self.updated_game_state.get_full_state().get("zones", [])
+            if zone.get("type") == "ZoneType_Graveyard"
+            and zone.get("ownerSeatId") == self.__system_seat_id
+            for cid in zone.get("objectInstanceIds", []) or []
+        }
+
+    def __single_graveyard_choice(self, req) -> int | None:
+        contexts = [req.get(key) for key in (
+            "context", "optionContext", "selectionType", "selectionContext", "promptType"
+        )]
+        if (req.get("context") != "SelectionContext_Resolution"
+                and req.get("optionContext") != "OptionContext_Resolution"):
+            return None
+        if any(isinstance(value, str) and any(word in value.lower()
+               for word in ("discard", "sacrif")) for value in contexts):
+            return None
+        if req.get("idType") == "IdType_PromptParameterIndex":
+            return None
+        # Possible future extensions: multi-card choices need selection-count
+        # tracking and acknowledgement; opponent-graveyard choices need explicit
+        # ownership routing and effect-specific ranking. Keep this path scoped
+        # to exactly one card from our own graveyard until those are implemented.
+        if req.get("minSel") != 1 or req.get("maxSel") != 1:
+            return None
+        ids = list(req.get("ids") or [])
+        if not ids or not set(ids).issubset(self.__own_graveyard_ids()):
+            return None
+        # Adapt the legal choices to the shared chooser ranking rather than
+        # introducing card-specific policy or a second ranking implementation.
+        picked = self.__pick_chooser_target({"targets": [{"targets": [
+            {"targetInstanceId": cid, "legalAction": "SelectAction_Select"}
+            for cid in ids
+        ]}]})
+        return picked[0] if picked and not picked[1] else None
+
+    def __graveyard_choice_advanced(self, pending) -> bool:
+        state = self.updated_game_state.get_full_state()
+        if int(state.get("gameStateId") or 0) <= pending["state_id"]:
+            return False
+        if not any(zone.get("type") == "ZoneType_Graveyard"
+                   and zone.get("ownerSeatId") == self.__system_seat_id
+                   for zone in state.get("zones", [])):
+            return False  # A missing zone is not proof that the card moved.
+        if pending["target_id"] not in self.__own_graveyard_ids():
+            return True
+        stack_ids = set(cid for zone in state.get("zones", [])
+                        if zone.get("type") == "ZoneType_Stack"
+                        for cid in zone.get("objectInstanceIds", []) or [])
+        return bool(pending["stack_ids"]
+                    and any(zone.get("type") == "ZoneType_Stack" for zone in state.get("zones", []))
+                    and not stack_ids.intersection(pending["stack_ids"]))
+
+    def __start_graveyard_choice(self, req, target_id) -> None:
+        key = (req.get("sourceId"), tuple(req["ids"]))
+        existing = self.__pending_select_n or {}
+        if existing.get("mode") == "graveyard" and existing.get("choice_key") == key:
+            return  # Repeated requests must not toggle an already clicked card.
+        state = self.updated_game_state.get_full_state()
+        self.__select_n_token_counter += 1
+        pending = {
+            "mode": "graveyard", "choice_key": key, "ids": list(req["ids"]),
+            "token": self.__select_n_token_counter, "target_id": target_id,
+            "ts": time.time(), "state_id": int(state.get("gameStateId") or 0),
+            "stack_ids": list(cid for zone in state.get("zones", [])
+                              if zone.get("type") == "ZoneType_Stack"
+                              for cid in zone.get("objectInstanceIds", []) or []),
+            "clicked": False, "submit_attempts": 0, "exhausted": False,
+        }
+        self.__pending_select_n = pending
+        self.__select_n_in_progress = True
+        self.__select_n_in_progress_since = pending["ts"]
+        match_id = self.__live_match_id
+        self.__record_decision("select_n", "graveyard_chooser", {
+            "ids": pending["ids"], "target": target_id, "min_sel": 1,
+        })
+        bot_logger.log_info(f"GRAVEYARD_CHOICE: selecting one card id={target_id}")
+
+        def active():
+            return (self.__pending_select_n is pending
+                    and self.can_execute_game_action(match_id))
+
+        def fail(reason):
+            if not active() or pending["exhausted"]:
+                return
+            pending["exhausted"] = True
+            bot_logger.log_error(f"GRAVEYARD_CHOICE_UNCONFIRMED: {reason}; keeping prompt active.")
+            self.__write_target_debug_bundle("graveyard_choice_unconfirmed")
+
+        def later(callback):
+            timer = threading.Timer(0.6, callback)
+            timer.daemon = True
+            timer.start()
+
+        def verify():
+            if not active():
+                return
+            if self.__graveyard_choice_advanced(pending):
+                self.__clear_pending_select_n_state("GRAVEYARD_CHOICE_ACKNOWLEDGED: prompt advanced.")
+                return
+            if time.time() - pending["ts"] >= 20.0:
+                fail("no game-state advancement")
+                return
+            # Submit can need a second press after animation. Never re-click the
+            # card once dispatched: that could toggle the selection off.
+            if pending["submit_attempts"] < 2 and (
+                    time.time() - pending.get("submitted_at", 0.0) >= 2.0):
+                pending["submit_attempts"] += 1
+                pending["submitted_at"] = time.time()
+                try:
+                    self.__click_card_prompt_submit(
+                        still_active=lambda: active() and not self.__graveyard_choice_advanced(pending)
+                    )
+                except Exception as exc:
+                    fail(f"submit failed: {exc}")
+                    return
+            later(verify)
+
+        def select(attempt=0):
+            if not active():
+                return
+            if self.__graveyard_choice_advanced(pending):
+                self.__clear_pending_select_n_state("GRAVEYARD_CHOICE_ACKNOWLEDGED: prompt advanced.")
+                return
+            try:
+                if self.select_chooser_card(target_id, clicks=1):
+                    if not active():
+                        return
+                    pending["clicked"] = True
+                    later(verify)
+                elif attempt < 1 and time.time() - pending["ts"] < 12.0:
+                    later(lambda: select(attempt + 1))
+                else:
+                    fail("card hover not found")
+            except Exception as exc:
+                fail(f"selection failed: {exc}")
+
+        later(select)
+
     def __handle_select_n_req(self, line: str) -> None:
         try:
             if self._suppress_selections or self._stop_requested:
@@ -12845,6 +13101,11 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 ids = list(req.get("ids", []) or [])
                 if not ids:
                     continue
+                if not message.get("informationalUseOnly"):
+                    graveyard_choice = self.__single_graveyard_choice(req)
+                    if graveyard_choice is not None:
+                        self.__start_graveyard_choice(req, graveyard_choice)
+                        return
                 # Modal "Choose One" from an ability resolution (e.g. Perforating
                 # Artist: "loses 3 life unless sacrifice/discard"). Options are
                 # prompt-parameter indices, not game objects, so the object-based
@@ -13404,10 +13665,17 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             bot_logger.log_error(f"Failed to handle SelectNReq: {e}")
 
     def __handle_pay_costs_req(self, line: str) -> None:
+        payment_ts = self.__pending_pay_costs_ts
+        payment_match_id = self.__live_match_id
         try:
             start = line.find("{")
             if start == -1:
-                threading.Timer(0.6, lambda: self.submit_selection(reason="pay_costs_no_payload", force=True)).start()
+                threading.Timer(0.6, lambda: self.submit_selection(
+                    reason="pay_costs_no_payload", force=True,
+                    expected_match_id=payment_match_id,
+                    expected_pay_costs_ts=payment_ts,
+                    allow_okay_fallback=False,
+                )).start()
                 return
             payload = json.loads(line[start:])
             messages = payload.get("greToClientEvent", {}).get("greToClientMessages", [])
@@ -13428,6 +13696,13 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 max_sel = int(cost_sel.get("maxSel", 0) or 0)
 
                 if not ids or min_sel <= 0:
+                    if pay_req.get("manaCost"):
+                        bot_logger.log_info("PayCostsReq mana payment: attempting Submit then Auto Pay.")
+                    else:
+                        bot_logger.log_info(
+                            "PAY_COSTS_UNRESOLVED: request has no recognized selectable-card cost; "
+                            "waiting for a confirmed game-state transition."
+                        )
                     continue
 
                 handled_selection = True
@@ -13523,7 +13798,15 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                                 )
                             time.sleep(0.25)
                         time.sleep(0.2)
-                        self.submit_selection(reason="pay_costs_selection_submit", force=True)
+                        submitted = self.submit_selection(
+                            reason="pay_costs_selection_submit", force=True,
+                            allow_okay_fallback=False,
+                        )
+                        if not submitted:
+                            bot_logger.log_error(
+                                "PAY_COSTS_UNRESOLVED: selected cost could not be submitted; "
+                                "keeping the decision blocked."
+                            )
                     except Exception as e:
                         bot_logger.log_error(f"PayCostsReq selection execution failed: {e}")
 
@@ -13538,10 +13821,20 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 # the options overlay covering the board and the bot clicking
                 # blindly behind it. A real cancel needs the on-screen Cancel
                 # button (no template for it yet).
-                threading.Timer(0.6, lambda: self.submit_selection(reason="pay_costs_auto_submit", force=True)).start()
+                threading.Timer(
+                    0.6,
+                    lambda: self.submit_selection(
+                        reason="pay_costs_auto_submit", force=True,
+                        allow_okay_fallback=False,
+                        expected_match_id=payment_match_id,
+                        expected_pay_costs_ts=payment_ts,
+                    ),
+                ).start()
         except Exception as e:
             bot_logger.log_error(f"Failed to handle PayCostsReq: {e}")
-            threading.Timer(0.6, lambda: self.submit_selection(reason="pay_costs_error_fallback", force=True)).start()
+            bot_logger.log_error(
+                "PAY_COSTS_UNRESOLVED: handler failed; keeping the decision blocked."
+            )
 
     def __start_decision_heartbeat(self) -> None:
         try:
@@ -13601,7 +13894,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if self.__decision_exec_lock.locked():
             return False
         # Legitimate waits -- all of these clear by themselves.
-        if time.time() < self.__group_req_active_until:
+        if self._group_prompt_blocks_gameplay():
             return False
         if (
             self.__should_pause_for_targets()
@@ -13935,7 +14228,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     continue
                 req = message.get("selectTargetsReq", {}) or {}
                 source_id = req.get("sourceId")
-                self.__update_pending_target_select(source_id)
+                self.__remember_target_request(req, message.get("allowCancel"))
+                if self.__try_handle_fiery_equipment():
+                    continue
+                if self.__pending_target_ready_to_submit():
+                    self.__schedule_ready_target_submit()
+                    continue
                 # Two-target pump-fight spells (e.g. Felling Blow) need both a
                 # friendly and an enemy creature picked -- handle before the
                 # single-target paths.
@@ -14326,6 +14624,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
     def __pending_target_ready_to_submit(self) -> bool:
         pending = self.__pending_target_select or {}
+        if "groups" in pending:
+            groups = pending["groups"]
+            return bool(groups) and all(
+                g["min"] is not None and g["selected"] is not None and g["max"] is not None
+                and g["min"] <= g["selected"] <= g["max"] for g in groups
+            )
         selected = pending.get("selected")
         min_t = pending.get("min", 1)
         try:
@@ -14337,6 +14641,273 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         except Exception:
             min_req = 1
         return selected_count >= min_req
+
+    def __remember_target_request(self, req, allow_cancel=None) -> None:
+        """Keep every GRE target group; omitted protobuf counts mean zero.
+
+        Selection updates belong to the same stage. A changed group/prompt or
+        candidate set invalidates callbacks even when the source is unchanged.
+        """
+        def count(group, key):
+            value = group.get(key, 0)
+            return value if type(value) is int and value >= 0 else None
+
+        groups = []
+        for group in req.get("targets", []) or []:
+            groups.append({
+                "idx": group.get("targetIdx"),
+                "prompt": group.get("prompt", {}).get("promptId"),
+                "min": count(group, "minTargets"),
+                "max": count(group, "maxTargets"),
+                "selected": count(group, "selectedTargets"),
+                "targets": [dict(t) for t in group.get("targets", []) or []],
+            })
+        stage = tuple((g["idx"], g["prompt"], g["min"], g["max"],
+                       tuple(sorted(t.get("targetInstanceId") for t in g["targets"]
+                                    if type(t.get("targetInstanceId")) is int)))
+                      for g in groups)
+        pending = self.__pending_target_select or {}
+        changed = pending.get("stage") != stage
+        if changed and pending.get("source_id") == req.get("sourceId", -1):
+            self.__pending_target_select = None
+        self.__update_pending_target_select(req.get("sourceId"), allow_cancel=allow_cancel)
+        pending = self.__pending_target_select
+        pending.update(groups=groups, stage=stage)
+        if groups:
+            pending.update(min=groups[0]["min"], max=groups[0]["max"],
+                           selected=groups[0]["selected"])
+            pending["selected_update_seq"] = pending.get("selected_update_seq", 0) + 1
+        if changed:
+            self.__last_target_select_source_id = None
+
+    def __zero_target_submit_eligible(self) -> bool:
+        groups = (self.__pending_target_select or {}).get("groups", [])
+        return self.__pending_target_ready_to_submit() and any(
+            g["min"] == 0 and g["selected"] == 0 for g in groups
+        )
+
+    def __target_submit_lock_wait_expired(self, pending, flow, *, waiting=False) -> bool:
+        """Bound lock contention across callbacks, without releasing another owner's lock."""
+        key = f"{flow}_lock_wait_started"
+        exhausted = f"{flow}_lock_wait_exhausted"
+        if pending.get(exhausted):
+            return True
+        if waiting and key not in pending:
+            pending[key] = time.monotonic()
+        if key not in pending or time.monotonic() - pending[key] < self._TARGET_SUBMIT_LOCK_WAIT_SEC:
+            return False
+        pending[exhausted] = True
+        bot_logger.log_error(
+            f"TARGET_SUBMIT_LOCK_WAIT_EXHAUSTED: flow={flow} source={pending.get('source_id')} "
+            f"wait_limit={self._TARGET_SUBMIT_LOCK_WAIT_SEC:.1f}s; leaving prompt for existing recovery"
+        )
+        self.__write_target_debug_bundle("target_submit_lock_wait_timeout")
+        return True
+
+    def __target_recovery_exhausted(self, reason: str) -> bool:
+        """Final target recovery, called by retry owners, never by the watchdog."""
+        pending = self.__pending_target_select or {}
+        if (not self.__zero_target_submit_eligible()
+                or pending.get("zero_recovery_attempted")
+                or pending.get("equipment_flow_active")
+                or pending.get("zero_recovery_queued")):
+            return False
+        match_id = getattr(self, "_Controller__live_match_id", None)
+        if not self.can_execute_game_action(match_id):
+            return False
+        token = pending.get("token")
+        pending["zero_recovery_queued"] = True
+        bot_logger.log_info(f"TARGET_RECOVERY_EXHAUSTED: reason={reason} "
+                            f"source={pending.get('source_id')} groups={pending.get('groups')}")
+
+        def recover():
+            current = self.__pending_target_select or {}
+            if (current.get("token") != token
+                    or not self.can_execute_game_action(match_id)
+                    or not self.__zero_target_submit_eligible()):
+                if current.get("token") == token:
+                    current.pop("zero_recovery_queued", None)
+                return
+            if self.__target_submit_lock_wait_expired(current, "zero_recovery"):
+                current.pop("zero_recovery_queued", None)
+                current["zero_recovery_attempted"] = True
+                return
+            # A submit operation may still be unwinding its finally block.
+            if not self.__submit_selection_lock.acquire(blocking=False):
+                self.__target_submit_lock_wait_expired(current, "zero_recovery", waiting=True)
+                threading.Timer(0.2, recover).start()
+                return
+            try:
+                current.pop("zero_recovery_queued", None)
+                current["zero_recovery_attempted"] = True
+                image_path = os.path.join(self._buttons_dir(), "submit_zero_btn.png")
+                point = self._locate_image_center_in_scaled_arena_region(
+                    image_path, "SUBMIT_ZERO", rel_region=(1320, 720, 600, 320),
+                    confidence=0.85, timeout=1.0, use_direct=False,
+                )
+                current = self.__pending_target_select or {}
+                turn = self.updated_game_state.get_turn_info() or {}
+                local = getattr(self, "_Controller__system_seat_id", None)
+                if (current.get("token") != token
+                        or not self.can_execute_game_action(match_id)
+                        or turn.get("decisionPlayer") != local
+                        or not self.__zero_target_submit_eligible()):
+                    return
+                if point is None:
+                    bot_logger.log_info(f"SUBMIT_ZERO_FAILED: button absent reason={reason}")
+                    self.__write_target_debug_bundle("submit_zero_not_found")
+                    if current.get("cancel_after_zero_failure"):
+                        self.input.tap_escape()
+                    return
+                self._click_abs(*point, "SUBMIT_ZERO")
+                self.__last_submit_selection_ts = time.time()
+                bot_logger.log_info(f"SUBMIT_ZERO_ATTEMPT: source={current.get('source_id')} reason={reason}")
+            finally:
+                self.__submit_selection_lock.release()
+
+            def check_result():
+                current = self.__pending_target_select or {}
+                if not self.can_execute_game_action(match_id):
+                    bot_logger.log_info(f"SUBMIT_ZERO_CANCELLED: match ended or input stopped reason={reason}")
+                elif current.get("token") != token:
+                    bot_logger.log_info(f"SUBMIT_ZERO_ACKNOWLEDGED: reason={reason}")
+                else:
+                    bot_logger.log_error(f"SUBMIT_ZERO_UNCONFIRMED: reason={reason}")
+                    self.__write_target_debug_bundle("submit_zero_unconfirmed")
+                    if current.get("cancel_after_zero_failure"):
+                        self.input.tap_escape()
+            threading.Timer(3.0, check_result).start()
+
+        threading.Timer(0.0, recover).start()
+        return True
+
+    def __watch_target_submission(self, token, clicked: bool, reason: str) -> None:
+        pending = self.__pending_target_select or {}
+        if pending.get("token") != token or not pending.get("groups"):
+            return
+        def check():
+            current = self.__pending_target_select or {}
+            if current.get("token") == token:
+                self.__target_recovery_exhausted(f"submit_{'unconfirmed' if clicked else 'failed'}:{reason}")
+        threading.Timer(3.0 if clicked else 0.0, check).start()
+
+    def __schedule_ready_target_submit(self) -> None:
+        pending = self.__pending_target_select or {}
+        if (pending.get("ready_submit_started") or pending.get("ready_submit_lock_wait_exhausted")
+                or pending.get("ready_submit_attempts", 0) >= self._READY_TARGET_SUBMIT_MAX_ATTEMPTS):
+            return
+        pending["ready_submit_started"] = True
+        token = pending.get("token")
+        match_id = self.__live_match_id
+        def submit():
+            current = self.__pending_target_select or {}
+            if (current.get("token") == token
+                    and self.can_execute_game_action(match_id)
+                    and self.__pending_target_ready_to_submit()):
+                busy = self.__submit_selection_lock.locked()
+                if self.__target_submit_lock_wait_expired(current, "ready_submit", waiting=busy):
+                    return
+                if busy:
+                    threading.Timer(0.2, submit).start()
+                    return
+                current["ready_submit_attempts"] = current.get("ready_submit_attempts", 0) + 1
+                if self.submit_selection(reason="target_selection_ready", expected_match_id=match_id):
+                    return
+                current = self.__pending_target_select or {}
+                if current.get("token") != token or not self.can_execute_game_action(match_id):
+                    return
+                if self.__zero_target_submit_eligible():
+                    self.__target_recovery_exhausted("ready_submit_failed")
+                    return
+                # A failed search sent no Submit click. Retry required-target
+                # prompts without waiting for another GRE request, which may
+                # never arrive while Arena is waiting for confirmation.
+                if current["ready_submit_attempts"] < self._READY_TARGET_SUBMIT_MAX_ATTEMPTS:
+                    threading.Timer(1.0, submit).start()
+                else:
+                    bot_logger.log_error("TARGET_READY_SUBMIT_EXHAUSTED: required-target submit failed after bounded retries.")
+            elif current.get("token") == token:
+                # Selection changed before the callback ran. A later ready
+                # update may start another flow using the remaining attempts.
+                current.pop("ready_submit_started", None)
+        threading.Timer(0.2, submit).start()
+
+    def __try_handle_fiery_equipment(self) -> bool:
+        pending = self.__pending_target_select or {}
+        groups = pending.get("groups", [])
+        if len(groups) != 2 or not self.__pending_target_ready_to_submit():
+            return False
+        source_id = pending.get("source_id")
+        objects = self.updated_game_state.get_game_objects() or []
+        source = next((o for o in objects if o.get("instanceId") == source_id), {})
+        grp_id = source.get("grpId")
+        info = CardInfo.get_card_info_local(grp_id) if grp_id != 93799 else None
+        if grp_id != 93799 and (info or {}).get("name") != "Fiery Annihilation":
+            return False
+        if groups[0]["min"] != 1 or groups[1]["min"] != 0:
+            return False
+        if pending.get("equipment_flow_active"):
+            return True
+        if groups[1]["selected"] != 0:
+            return False
+        if pending.get("equipment_flow_started"):
+            return True
+        pending["equipment_flow_started"] = True
+        pending["equipment_flow_active"] = True
+        token = pending.get("token")
+        match_id = self.__live_match_id
+        obj_by_id = {o.get("instanceId"): o for o in objects}
+        candidates = [t["targetInstanceId"] for t in groups[1]["targets"]
+                      if t.get("legalAction") == "SelectAction_Select"
+                      and obj_by_id.get(t.get("targetInstanceId"), {}).get("controllerSeatId")
+                      not in (None, self.__system_seat_id)]
+        target_id = min(candidates) if candidates else None
+
+        def valid():
+            return ((self.__pending_target_select or {}).get("token") == token
+                    and self.can_execute_game_action(match_id))
+
+        def finish():
+            if not valid():
+                return
+            current = self.__pending_target_select
+            current["equipment_flow_active"] = False
+            if current["groups"][1]["selected"]:
+                self.submit_selection(reason="fiery_equipment_submit", expected_match_id=match_id,
+                                      allow_okay_fallback=False)
+            else:
+                self.__target_recovery_exhausted("fiery_equipment_not_selected")
+
+        def flow():
+            if not valid():
+                return
+            if target_id is None:
+                finish()
+                return
+            try:
+                found = self.select_opponent_battlefield_permanent(target_id, clicks=1, max_scan_sec=4.0)
+            except Exception as exc:
+                bot_logger.log_error(f"FIERY_EQUIPMENT_SCAN_FAILED: {exc}")
+                found = False
+            bot_logger.log_info(f"FIERY_EQUIPMENT_ATTEMPT: source={source_id} target={target_id} found={found}")
+            if not valid():
+                return
+            if not found:
+                finish()
+                return
+            deadline = time.monotonic() + 3.0
+            def wait_for_selection():
+                if not valid():
+                    return
+                current = self.__pending_target_select
+                if current["groups"][1]["selected"] or time.monotonic() >= deadline:
+                    finish()
+                else:
+                    threading.Timer(0.1, wait_for_selection).start()
+            self._dismiss_are_you_sure_if_present(context="FIERY_EQUIPMENT", expected_match_id=match_id)
+            wait_for_selection()
+        threading.Timer(0.8, flow).start()
+        return True
 
     def __get_target_click_offsets(self) -> list[tuple[int, int]]:
         # Small fan of offsets around the calibrated avatar position. Used for
@@ -14500,8 +15071,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                             own_creatures.append(int(tid))
                         else:
                             opp_creatures.append(int(tid))
-                    elif tid in player_seats and tid != self.__system_seat_id:
-                        face_legal = True
+                    elif tid in player_seats:
+                        if tid != self.__system_seat_id:
+                            face_legal = True
                     elif obj is None:
                         # Unknown target (player/planeswalker not in objects): do
                         # not force a creature click when a face click may be valid.
@@ -14797,7 +15369,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             pending = self.__pending_target_select or {}
             return (pending.get("source_id") == source_id
                     and pending.get("token") == selection_token
-                    and pending.get("creature_target_flow_target") == creature_id)
+                    and pending.get("creature_target_flow_target") == creature_id
+                    and not pending.get("zero_recovery_queued")
+                    and not pending.get("zero_recovery_attempted"))
 
         def _attempt_submit(attempt: int = 0, *, clicked: bool = False,
                             selected_update_seq: int = 0,
@@ -14812,10 +15386,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 )
                 if not submitted or not _valid():
                     return
-                # Ward and other client-side confirms are raised by the submit and
-                # emit nothing, so nothing else will ever tell us they are there.
-                # Until this hook existed the dialog just sat on screen until some
-                # later cast attempt tripped over it ~10s down the rope.
+                # Some client-side confirms appear after submit and emit no GRE
+                # message. Keep this post-submit probe for those cases too.
                 def _confirm_if_still_valid() -> None:
                     if not _valid():
                         return
@@ -14840,6 +15412,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     return
                 self.__write_target_debug_bundle("target_click_ack_timeout")
                 if pending.get("allow_cancel") == "AllowCancel_Abort":
+                    pending["cancel_after_zero_failure"] = True
+                    if self.__target_recovery_exhausted("creature_ack_timeout"):
+                        return
                     if _valid() and self.can_execute_game_action(expected_match_id):
                         try:
                             self.input.tap_escape()
@@ -14855,11 +15430,16 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     # Let a fresh SelectTargetsReq start another flow if Arena
                     # keeps the prompt open after all local attempts.
                     pending["creature_target_flow_active"] = False
+                    self.__target_recovery_exhausted("creature_retries_exhausted")
                 return
             if attempt < 2:
                 threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
             else:
                 self.__write_target_debug_bundle("target_click_ack_timeout")
+                pending = self.__pending_target_select or {}
+                pending["cancel_after_zero_failure"] = pending.get("allow_cancel") == "AllowCancel_Abort"
+                if self.__target_recovery_exhausted("creature_retries_exhausted"):
+                    return
                 if (self.__pending_target_select or {}).get("allow_cancel") == "AllowCancel_Abort":
                     if _valid() and self.can_execute_game_action(expected_match_id):
                         try:
@@ -14886,11 +15466,45 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             )
             selected_update_seq = (self.__pending_target_select or {}).get("selected_update_seq", 0)
             deadline = time.monotonic() + 3.0 if clicked else None
-            threading.Timer(0.5, lambda: _attempt_submit(
-                attempt, clicked=clicked,
-                selected_update_seq=selected_update_seq,
-                acknowledgement_deadline=deadline,
-            )).start()
+
+            def _after_target_click() -> None:
+                if not _valid():
+                    return
+                if clicked:
+                    ack = getattr(self, "_Controller__ward_payment_ack", None)
+                    pending = self.__pending_target_select or {}
+                    ward_ack_matches = bool(
+                        ack
+                        and ack.get("target") == creature_id
+                        and pending.get("last_target") == creature_id
+                        and time.time() - float(ack.get("ts", 0.0))
+                        <= self._WARD_ACK_MAX_AGE_SEC
+                    )
+                    dismissed = self._dismiss_are_you_sure_if_present(
+                        context=f"TARGET_CLICK id={creature_id}",
+                        expected_match_id=expected_match_id,
+                    )
+                    if dismissed:
+                        if not ward_ack_matches:
+                            # The dialog was answered No. Do not keep clicking a
+                            # target that the client just rejected.
+                            pending["creature_target_flow_active"] = False
+                            return
+                        # Yes was justified by the exact ward we priced. Wait for
+                        # the resulting game-state acknowledgement before submit.
+                        _attempt_submit(
+                            attempt, clicked=True,
+                            selected_update_seq=selected_update_seq,
+                            acknowledgement_deadline=time.monotonic() + 3.0,
+                        )
+                        return
+                _attempt_submit(
+                    attempt, clicked=clicked,
+                    selected_update_seq=selected_update_seq,
+                    acknowledgement_deadline=deadline,
+                )
+
+            threading.Timer(0.5, _after_target_click).start()
 
         delay_remaining = self.__get_delay_timer_remaining()
         start_delay = 0.8
@@ -15104,6 +15718,33 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         f"of {[tid for tid, _, _ in candidates]}"
                     )
                 return best_id, False
+            # Noncreature graveyard choices (for example Inspiration from
+            # Beyond) use mana value as a cheap, deterministic proxy for card
+            # quality. Read local card data only: chooser decisions must not
+            # wait on a network lookup while the game timer is running.
+            def _mana_value(candidate):
+                grp_id = candidate.get("grpId")
+                info = CardInfo.get_card_info_local(grp_id)
+                if not info:
+                    return -1
+                return CardInfo.calculate_cmc(info.get("manaCost", ""))
+
+            noncreature_candidates = [
+                (tid, obj) for tid, _, obj in candidates
+                if "CardType_Creature" not in (obj.get("cardTypes") or [])
+            ]
+            if noncreature_candidates:
+                ranked = [(_mana_value(obj), tid) for tid, obj in noncreature_candidates]
+                best_value = max(value for value, _ in ranked)
+                if best_value >= 0:
+                    best_id = next(tid for value, tid in ranked if value == best_value)
+                    if best_id != candidates[0][0]:
+                        bot_logger.log_info(
+                            f"CHOOSER_RANK: picking {best_id} (mana-value={best_value}) "
+                            f"over first-offered {candidates[0][0]} "
+                            f"of {[tid for tid, _, _ in candidates]}"
+                        )
+                    return best_id, False
             tid, is_stack, _ = candidates[0]
             return tid, is_stack
         except Exception as e:
@@ -15122,6 +15763,8 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             return
         self.__last_target_select_source_id = norm_source
         self.__last_target_select_ts = now
+        self.__update_pending_target_select(source_id, min_t=1)
+        selection_token = (self.__pending_target_select or {}).get("token")
         where = "stack" if is_stack_target else "overlay"
         bot_logger.log_info(f"{reason}: choosing card instanceId={target_id} from {where}")
         self.__record_decision(
@@ -15131,6 +15774,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
 
         def _do(attempt: int = 0) -> None:
             if self._suppress_selections or self._stop_requested:
+                return
+            pending = self.__pending_target_select or {}
+            if pending.get("token") != selection_token:
                 return
             found = False
             try:
@@ -15144,8 +15790,23 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 f"CHOOSER_TARGET click: id={target_id} where={where} found={found} attempt={attempt}"
             )
             if found:
-                time.sleep(0.5)
-                self.submit_selection(reason="chooser_target_submit", force=True)
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    if self.__pending_target_ready_to_submit():
+                        submitted = self.submit_selection(
+                            reason="chooser_target_submit", force=True,
+                            allow_okay_fallback=False,
+                        )
+                        if not submitted:
+                            self.__write_target_debug_bundle("chooser_target_submit_failed")
+                        return
+                    time.sleep(0.1)
+                bot_logger.log_error(
+                    f"CHOOSER_TARGET_UNCONFIRMED: selected-card count did not reach minimum "
+                    f"for id={target_id}; leaving chooser open."
+                )
+                self.__write_target_debug_bundle("chooser_target_selection_unconfirmed")
+                self.__target_recovery_exhausted("chooser_ack_timeout")
             elif attempt < 2 and not (self._suppress_selections or self._stop_requested):
                 threading.Timer(1.0, lambda: _do(attempt + 1)).start()
             else:
@@ -15153,6 +15814,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     f"CHOOSER_TARGET: giving up on id={target_id} after {attempt + 1} attempt(s); "
                     "not submitting an unresolved selection."
                 )
+                self.__target_recovery_exhausted("chooser_retries_exhausted")
 
         delay = self.__get_delay_timer_remaining()
         start_delay = 0.8 if delay <= 0.05 else delay + 0.4
@@ -15168,6 +15830,10 @@ class Controller(QuestRerollMixin, ControllerSecondary):
     ) -> None:
         now = time.time()
         if self._suppress_selections or self._stop_requested:
+            return
+        pending = self.__pending_target_select or {}
+        if (pending.get("equipment_flow_active") or pending.get("zero_recovery_queued")
+                or pending.get("zero_recovery_attempted")):
             return
         if source_id is None:
             source_id = -1
@@ -15287,26 +15953,61 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     source_id, own_target, reason, friendly=True
                 )
                 return
+        # GRE distinguishes our player from the opponent. Do not collapse an
+        # own-player-only prompt into the opponent fallback.
+        pending_groups = (self.__pending_target_select or {}).get("groups", [])
+        player_ids = {p.get("systemSeatNumber") for p in
+                      (self.updated_game_state.get_players() or [])} if pending_groups else set()
+        offered_players = {t.get("targetInstanceId") for g in pending_groups for t in g["targets"]
+                           if t.get("legalAction") == "SelectAction_Select"
+                           and t.get("targetInstanceId") in player_ids}
+        own_player = self.__system_seat_id in offered_players and not face_legal
+        if face_legal is False and not own_player:
+            bot_logger.log_info(f"{reason}: no legal player target; preserving the target prompt")
+            self.__target_recovery_exhausted("unsupported_target")
+            return
         self.__last_target_select_source_id = source_id
         self.__last_target_select_ts = now
         self.__update_pending_target_select(source_id)
         selection_token = (self.__pending_target_select or {}).get("token")
-        bot_logger.log_info(f"{reason}: targeting opponent avatar")
+        bot_logger.log_info(f"{reason}: targeting {'own' if own_player else 'opponent'} player avatar")
+        expected_match_id = self.__live_match_id
         self.__record_decision(
             "select_target", "target_face",
-            {"source": source_id, "reason": reason},
+            {"source": source_id, "reason": reason, "own_player": own_player},
         )
 
         def _target_selection_still_valid() -> bool:
-            if self._suppress_selections or self._stop_requested:
+            if not self.can_execute_game_action(expected_match_id):
                 return False
             pending = self.__pending_target_select or {}
-            return pending.get("source_id") == source_id and pending.get("token") == selection_token
+            return (pending.get("source_id") == source_id and pending.get("token") == selection_token
+                    and not pending.get("zero_recovery_queued")
+                    and not pending.get("zero_recovery_attempted"))
+
+        def _player_points():
+            if not own_player:
+                return self.__get_avatar_retry_points()
+            arena = self._arena_region
+            if arena is None:
+                return []
+            ax, ay, aw, ah = arena
+            return [(int(ax + aw * rx), int(ay + ah * ry), f"own_player({rx},{ry})")
+                    for rx, ry in [(0.50, 0.88), (0.46, 0.88), (0.54, 0.88),
+                                   (0.50, 0.82), (0.42, 0.46), (0.58, 0.46), (0.50, 0.52)]]
+
+        def _click_player(x, y, label, tag, *, fast=False):
+            if not _target_selection_still_valid():
+                return
+            if own_player:
+                self._click_abs(x, y, tag.replace("OPPONENT", "OWN"))
+            else:
+                self.__click_opponent_avatar_at_screen(x, y, label, tag, fast=fast)
 
         def _submit_if_still_valid() -> None:
             if not _target_selection_still_valid():
                 return
-            self.submit_selection(reason="target_selection_submit")
+            self.submit_selection(reason="target_selection_submit", expected_match_id=expected_match_id)
 
         def _attempt_submit():
             if not _target_selection_still_valid():
@@ -15334,6 +16035,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     )
                 )
                 self.__write_target_debug_bundle("spell_target_budget_elapsed")
+                self.__target_recovery_exhausted("avatar_budget_exhausted")
                 return
             # Note: do NOT gate on __get_delay_timer_remaining here — that value
             # comes from the last GameStateMessage snapshot and does not tick
@@ -15344,7 +16046,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                 return
             points = pending.get("retry_points")
             if not points:
-                points = self.__get_avatar_retry_points()
+                points = _player_points()
                 pending["retry_points"] = points
                 self.__pending_target_select = pending
             attempts = int(pending.get("attempts", 0))
@@ -15353,6 +16055,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     "Target retry abandoned: candidate points exhausted (attempts={})".format(attempts)
                 )
                 self.__write_target_debug_bundle("spell_target_points_exhausted")
+                self.__target_recovery_exhausted("avatar_points_exhausted")
                 return
             x, y, label = points[attempts]
             pending["attempts"] = attempts + 1
@@ -15362,7 +16065,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     attempts + 1, len(points), label
                 )
             )
-            self.__click_opponent_avatar_at_screen(
+            _click_player(
                 x, y, label, f"SELECT_OPPONENT_AVATAR_RETRY_{attempts + 1}", fast=True
             )
             threading.Timer(0.5, _attempt_submit).start()
@@ -15374,14 +16077,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             if _attempt_submit():
                 return
             pending = self.__pending_target_select or {}
-            points = self.__get_avatar_retry_points()
+            points = _player_points()
             pending["retry_points"] = points
             pending["attempts"] = 1
             self.__pending_target_select = pending
             if points:
                 x, y, label = points[0]
-                self.__click_opponent_avatar_at_screen(x, y, label, "SELECT_OPPONENT_AVATAR")
-            else:
+                _click_player(x, y, label, "SELECT_OPPONENT_AVATAR")
+            elif not own_player:
                 self.__click_opponent_avatar_with_offset((0, 0), "SELECT_OPPONENT_AVATAR")
             threading.Timer(0.7, _attempt_submit).start()
             threading.Timer(1.0, _retry_if_needed).start()
@@ -15489,6 +16192,14 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             self.__select_n_in_progress_since = 0.0
             self.__clear_target_wait_if_unblocked()
             return False
+        pending = self.__pending_select_n or {}
+        if pending.get("mode") == "graveyard":
+            if self.__graveyard_choice_advanced(pending):
+                self.__clear_pending_select_n_state("GRAVEYARD_CHOICE_ACKNOWLEDGED: prompt advanced.")
+                return False
+            # Exhausting retries does not dismiss Arena's chooser. Keep ordinary
+            # plays paused until real advancement or the existing stall watchdog.
+            return True
         pending_ids = set()
         stack_ids = set()
         pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
@@ -15599,10 +16310,24 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         return selecting
 
     def __should_pause_for_pay_costs(self) -> bool:
-        if not self.__pending_pay_costs_ts:
-            return False
-        # Treat PayCostsReq as blocking for a short window.
-        return (time.time() - self.__pending_pay_costs_ts) < 3.0
+        # PayCostsReq remains blocking until a later game event explicitly
+        # resolves it. A timestamp TTL allowed the normal decision loop to
+        # submit stale actions while the cost modal was still open.
+        return bool(self.__pending_pay_costs_ts)
+
+    def __maybe_clear_pending_pay_costs(self) -> None:
+        submitted_state_id = self.__pending_pay_costs_submit_state_id
+        if submitted_state_id is None:
+            return
+        current_state_id = self.__read_game_state_id()
+        if current_state_id is None or current_state_id == submitted_state_id:
+            return
+        self.__pending_pay_costs_ts = 0.0
+        self.__pending_pay_costs_submit_state_id = None
+        bot_logger.log_info(
+            f"PayCostsReq resolved: game state advanced after submit "
+            f"({submitted_state_id} -> {current_state_id})."
+        )
 
     def __note_gre_state_id(self, raw_dict: dict) -> None:
         """Remember the newest gameStateId carried by any GRE message on a line.
@@ -15744,6 +16469,9 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                     continue
                 req = message.get("selectTargetsReq", {}) or {}
                 targets = req.get("targets", []) or []
+                self.__remember_target_request(req, message.get("allowCancel"))
+                if self.__try_handle_fiery_equipment():
+                    return
                 if targets:
                     t0 = targets[0]
                     min_t = t0.get("minTargets")
@@ -15758,27 +16486,12 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         f"SelectTargetsReq details: sourceId={req.get('sourceId')}, min={min_t}, max={max_t}, "
                         f"selected={selected}, targetCount={len(t0.get('targets', []) or [])}, legalTargets=[{legal_desc}]"
                     )
-                    self.__update_pending_target_select(
-                        req.get("sourceId"),
-                        min_t=min_t,
-                        max_t=max_t,
-                        selected=selected,
-                        allow_cancel=message.get("allowCancel"),
-                    )
-                    pending_token = (self.__pending_target_select or {}).get("token")
                     if self.__pending_target_ready_to_submit():
                         # MTGA already has enough targets selected -- e.g. a spell
                         # with a single legal target (Essence Scatter vs the one
                         # creature spell on the stack) is auto-targeted. Just
                         # confirm; clicking again could toggle the target off.
-                        def _submit_if_pending_target_still_matches() -> None:
-                            pending = self.__pending_target_select or {}
-                            if (
-                                pending.get("source_id") == (req.get("sourceId") if req.get("sourceId") is not None else -1)
-                                and pending.get("token") == pending_token
-                            ):
-                                self.submit_selection(reason="target_selection_ready")
-                        threading.Timer(0.2, _submit_if_pending_target_still_matches).start()
+                        self.__schedule_ready_target_submit()
                         return
                 source_id = message.get("selectTargetsReq", {}).get("sourceId")
                 # Two-target pump-fight spells (e.g. Felling Blow): pick a friendly
@@ -16368,6 +17081,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
             # Clear the short blocking window to avoid stalling on combat submit.
             if self.__pending_pay_costs_ts:
                 self.__pending_pay_costs_ts = 0.0
+                self.__pending_pay_costs_submit_state_id = None
                 bot_logger.log_info("DeclareAttackersReq: cleared pending pay-costs pause")
             start = line.find("{")
             if start == -1:
@@ -16779,6 +17493,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         # Before the merge: a timer message advances this without touching the
         # merged state, and that is exactly the case the retry guard needs.
         self.__note_gre_state_id(raw_dict)
+        self.__maybe_clear_pending_pay_costs()
 
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict, fallback_seat_id=self.__system_seat_id or 1)
         self.updated_game_state.update(game_state)
@@ -16837,7 +17552,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
         if self.__arm_mulligan_if_needed(turn_info_dict, raw_dict):
             return
 
-        if time.time() < self.__group_req_active_until:
+        if self._group_prompt_blocks_gameplay():
             if self.__decision_execution_thread is not None:
                 self.__decision_execution_thread.cancel()
                 self.__decision_execution_thread = None
@@ -17078,7 +17793,7 @@ class Controller(QuestRerollMixin, ControllerSecondary):
                         # mouse movement raced the pending scry Done click --
                         # observed as the hand-card hover-scan failing outright
                         # ("No hover update before bounds") right after a scry.
-                        if time.time() < self.__group_req_active_until:
+                        if self._group_prompt_blocks_gameplay():
                             bot_logger.log_info(
                                 "Deferring decision; scry/group prompt still active"
                             )

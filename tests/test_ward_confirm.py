@@ -250,5 +250,54 @@ class WardDialogAnswerTest(WardConfirmTestBase):
         )
 
 
+class WardTargetClickConfirmTest(WardConfirmTestBase):
+    def test_ward_dialog_after_target_click_is_answered_before_ack_wait(self):
+        spell = {"instanceId": 161, "grpId": MORTIFY, "cardTypes": ["CardType_Instant"]}
+        self.seed([creature(301, TOLARIAN_TERROR)], mana_sources=2, stack=[spell])
+        controller = self.controller
+        controller._Controller__live_match_id = "match-1"
+        controller._Controller__pending_target_select = {
+            "source_id": 161, "token": 7, "last_target": 301,
+        }
+        controller._Controller__update_pending_target_select = lambda _source: None
+        controller._Controller__get_delay_timer_remaining = lambda: 0.0
+        controller.select_opponent_battlefield_permanent = lambda *_args, **_kwargs: True
+        controller.can_execute_game_action = lambda *_args, **_kwargs: True
+        controller._Controller__note_ward_payment_ack(161, 301)
+
+        ready = {"value": False}
+        controller._Controller__pending_target_ready_to_submit = lambda: ready["value"]
+        controller.submit_selection = mock.Mock(return_value=True)
+        contexts = []
+
+        def dismiss(*, context, expected_match_id=None):
+            contexts.append(context)
+            if context.startswith("TARGET_CLICK"):
+                ready["value"] = True
+                return True
+            return False
+
+        controller._dismiss_are_you_sure_if_present = dismiss
+
+        class ImmediateTimer:
+            def __init__(self, _interval, callback, *args, **kwargs):
+                self.callback = callback
+                self.args = args
+                self.kwargs = kwargs
+
+            def start(self):
+                self.callback(*self.args, **self.kwargs)
+
+        with mock.patch(
+            "Controller.MTGAController.Controller.threading.Timer", ImmediateTimer
+        ):
+            controller._Controller__schedule_creature_target_selection(
+                161, 301, "TEST_TARGET"
+            )
+
+        self.assertTrue(contexts[0].startswith("TARGET_CLICK"))
+        controller.submit_selection.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

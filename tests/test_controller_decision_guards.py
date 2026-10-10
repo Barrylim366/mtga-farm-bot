@@ -294,8 +294,20 @@ class SafeToRedriveDecisionTest(unittest.TestCase):
 
     def test_blocks_while_pay_costs_prompt_open(self):
         c = self._base_controller()
-        c._Controller__pending_pay_costs_ts = time.time()
+        c._Controller__pending_pay_costs_ts = time.time() - 30.0
         self.assertFalse(c._Controller__safe_to_redrive_decision())
+
+    def test_pay_costs_pause_clears_only_after_post_submit_state_advance(self):
+        c = self._base_controller()
+        c._Controller__pending_pay_costs_ts = time.time() - 30.0
+        c._Controller__pending_pay_costs_submit_state_id = 100
+        c._Controller__latest_gre_state_id = 100
+        c._Controller__maybe_clear_pending_pay_costs()
+        self.assertFalse(c._Controller__safe_to_redrive_decision())
+
+        c._Controller__latest_gre_state_id = 101
+        c._Controller__maybe_clear_pending_pay_costs()
+        self.assertTrue(c._Controller__safe_to_redrive_decision())
 
     def test_blocks_while_select_n_in_progress(self):
         c = self._base_controller()

@@ -95,6 +95,9 @@ class EatenAliveCostGuardTest(unittest.TestCase):
         self.assertEqual(CardPolicy.sacrifice_or_alternate_total_mana(93885), 4)
         self.assertIsNone(CardPolicy.sacrifice_or_alternate_total_mana(0))
 
+    def test_inspiration_from_beyond_is_allowed_for_supported_chooser(self):
+        self.assertFalse(CardPolicy.is_unsupported_to_cast(93756))
+
 
 if __name__ == "__main__":
     unittest.main()

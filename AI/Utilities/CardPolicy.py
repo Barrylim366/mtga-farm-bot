@@ -19,7 +19,12 @@ import AI.Utilities.CardInfo as CardInfo
 
 # Exact grpIds we never cast for now (manual override / guaranteed catch).
 UNSUPPORTED_GRP_IDS: set[int] = {
-    93756,  # Inspiration from Beyond -- return an instant/sorcery from graveyard
+}
+
+# These cards have a chooser the controller can already resolve. Keep this
+# allowlist ahead of the conservative oracle-text pattern below.
+SUPPORTED_CHOOSER_GRP_IDS: set[int] = {
+    93756,  # Inspiration from Beyond -- choose an instant/sorcery in graveyard
 }
 
 # Cards we deliberately never cast: reactive-only tricks with no reliable
@@ -79,6 +84,8 @@ def is_unsupported_to_cast(grp_id) -> bool:
         return False
     if grp_id in UNSUPPORTED_GRP_IDS or grp_id in STRATEGIC_SKIP_GRP_IDS:
         return True
+    if grp_id in SUPPORTED_CHOOSER_GRP_IDS:
+        return False
     if grp_id in _unsupported_memo:
         return _unsupported_memo[grp_id]
     try:

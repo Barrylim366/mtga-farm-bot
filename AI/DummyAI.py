@@ -10,6 +10,7 @@ import AI.Utilities.LegendRule as LegendRule
 import traceback
 from datetime import datetime
 from typing import Optional, Tuple
+import json
 
 
 class DummyAI(AIKernel):
@@ -18,6 +19,9 @@ class DummyAI(AIKernel):
         self.__current_turn_num = 0
         self.__has_land_been_played_this_turn = False
         self.__known_battlefield_zones = set()
+        self.__unknown_mana_diagnostics = set()
+        self._unknown_mana_sources = {}
+        self.__unsupported_cast_logged = set()
         # AI debug lines go into the shared bot.log; without this assignment
         # _debug silently dropped every message (open() raised AttributeError).
         try:
@@ -32,6 +36,9 @@ class DummyAI(AIKernel):
         self.__current_turn_num = 0
         self.__has_land_been_played_this_turn = False
         self.__known_battlefield_zones = set()
+        self.__unknown_mana_diagnostics.clear()
+        self._unknown_mana_sources.clear()
+        self.__unsupported_cast_logged.clear()
         self._debug("AI state reset complete")
 
     def _debug(self, message):
@@ -43,7 +50,7 @@ class DummyAI(AIKernel):
         except Exception:
             pass
 
-    def _get_available_mana_colors(self, action_list, inst_id_grp_id_dict):
+    def _get_available_mana_colors(self, action_list, inst_id_grp_id_dict, game_objects=None):
         """Get available mana colors and total sources from ActionType_Activate_Mana actions.
 
         Returns:
@@ -51,10 +58,18 @@ class DummyAI(AIKernel):
             - total_sources: number of unique mana sources (for CMC check)
             - sources: list of sets of colors per mana source
 
-        Note: For dual lands, we count them as providing BOTH colors but only 1 source.
-        Uses Scryfall to get the produced mana colors for all lands."""
+        Note: For dual lands and Treasure tokens, we count all offered colors
+        but only one mana source. Unknown sources can pay generic costs only."""
         mana_colors = set()
         mana_sources = {}  # instanceId -> set of colors
+        # Preserve uncertainty separately from the conservative payment estimate.
+        # This is rebuilt for each board read so resolved/removed sources disappear.
+        self._unknown_mana_sources = {}
+        mana_actions = {}
+        object_by_id = {
+            obj.get("instanceId"): obj for obj in (game_objects or [])
+            if isinstance(obj, dict) and obj.get("instanceId") is not None
+        }
 
         for action_wrapper in action_list:
             action = action_wrapper.get('action', {})
@@ -64,6 +79,19 @@ class DummyAI(AIKernel):
                 if instance_id:
                     if instance_id not in mana_sources:
                         mana_sources[instance_id] = set()
+                    mana_actions.setdefault(instance_id, []).append(action)
+
+                    # Treasure is a token, so Scryfall's card-by-Arena-ID lookup
+                    # cannot identify it. Its available mana action produces one
+                    # mana of any color; count the token once as a five-color
+                    # source rather than treating it as a generic-only land.
+                    game_object = object_by_id.get(instance_id) or {}
+                    if (game_object.get("type") == "GameObjectType_Token"
+                            and "SubType_Treasure" in (game_object.get("subtypes") or [])):
+                        treasure_colors = {"white", "blue", "black", "red", "green"}
+                        mana_sources[instance_id].update(treasure_colors)
+                        mana_colors.update(treasure_colors)
+                        continue
 
                     # 1) Offline and exact: the action's own mana-ability id
                     # (duals expose one Activate_Mana action per color).
@@ -81,26 +109,52 @@ class DummyAI(AIKernel):
                             mana_sources[instance_id].update(produced_colors)
                             mana_colors.update(produced_colors)
                             self._debug(f"Scryfall: instId={instance_id}, grpId={grp_id} produces {produced_colors}")
-                        else:
-                            self._debug(f"No Scryfall data for land: instId={instance_id}, grpId={grp_id}")
                     else:
                         self._debug(f"No grpId for mana source: instId={instance_id}")
 
-        # 3) Wildcard fallback: MTGA only offers ActionType_Activate_Mana for
-        # real mana sources. A source whose colors we cannot resolve (unknown
-        # ability id like 1039, Scryfall miss) must still count as usable
-        # mana of any color — treating it as nothing made the AI pass every
-        # turn with dual/utility lands in play.
-        wildcard = {"white", "blue", "black", "red", "green"}
+        # 3) Unknown sources remain available for generic costs, but never
+        # claim they can pay colored costs when their color cannot be resolved.
+        # MTGA exposes actual mana abilities; an unresolved ability ID or
+        # Scryfall metadata miss is treated as generic-only.
         for instance_id, colors in mana_sources.items():
             if not colors:
-                mana_sources[instance_id] = set(wildcard)
-                mana_colors.update(wildcard)
-                self._debug(f"Unknown mana colors for instId={instance_id}; counting as wildcard source")
+                actions = mana_actions.get(instance_id, [])
+                grp_id = inst_id_grp_id_dict.get(instance_id) or next(
+                    (a.get("grpId") for a in actions if a.get("grpId")), None)
+                ability_ids = tuple(sorted({a.get("abilityGrpId") for a in actions
+                                            if isinstance(a.get("abilityGrpId"), int)}))
+                self._unknown_mana_sources[instance_id] = {
+                    "status": "unknown", "grpId": grp_id, "abilityGrpIds": ability_ids,
+                }
+                diagnostic_key = (grp_id if grp_id is not None else instance_id, ability_ids)
+                if diagnostic_key not in self.__unknown_mana_diagnostics:
+                    self.__unknown_mana_diagnostics.add(diagnostic_key)
+                    game_object = object_by_id.get(instance_id)
+                    object_fields = (
+                        "instanceId", "grpId", "titleId", "name", "type", "types",
+                        "cardTypes", "subtype", "subtypes", "zoneId", "controllerSeatId",
+                    )
+                    object_details = (
+                        {key: game_object[key] for key in object_fields if key in game_object}
+                        if game_object else None
+                    )
+                    self._debug(
+                        "UNRESOLVED_MANA_DIAGNOSTIC " + json.dumps({
+                            "instanceId": instance_id,
+                            "grpId": grp_id,
+                            "manaAction": actions[-1] if actions else None,
+                            "manaActions": actions,
+                            "gameObject": object_details,
+                            "status": "unknown",
+                            "reason": "mana ability and card metadata did not resolve colors",
+                            "fallback": "generic-only",
+                        }, sort_keys=True, default=str)
+                    )
 
         total_sources = len(mana_sources)
         sources = [set(colors) for colors in mana_sources.values() if colors]
-        self._debug(f"Mana sources: {total_sources}, colors available: {mana_colors}")
+        self._debug(f"Mana sources: {total_sources}, colors available: {mana_colors}, "
+                    f"unknown color sources: {len(self._unknown_mana_sources)}")
         return mana_colors, total_sources, sources
 
     def _can_cast_with_mana_cost(self, action_mana_cost, available_colors, total_mana, sources):
@@ -639,7 +693,13 @@ class DummyAI(AIKernel):
                 )
 
             # Get available mana colors and total sources
-            available_colors, total_mana, sources = self._get_available_mana_colors(action_list, inst_id_grp_id_dict)
+            try:
+                game_objects_for_mana = game_state.get_game_objects() or []
+            except Exception:
+                game_objects_for_mana = []
+            available_colors, total_mana, sources = self._get_available_mana_colors(
+                action_list, inst_id_grp_id_dict, game_objects_for_mana
+            )
             self._debug(f"Actions available: {len(action_list)}")
 
             active_player = turn_info.get('activePlayer', 0)
@@ -820,9 +880,12 @@ class DummyAI(AIKernel):
                         # (e.g. return-from-graveyard) is not implemented yet;
                         # the bot cannot click it and would stall the game.
                         if CardPolicy.is_unsupported_to_cast(grp_id):
-                            self._debug(
-                                f"Skipping {card_name}: in-resolution chooser not implemented yet."
-                            )
+                            if grp_id not in self.__unsupported_cast_logged:
+                                self.__unsupported_cast_logged.add(grp_id)
+                                self._debug(
+                                    f"UNSUPPORTED_CAST: skipping {card_name} (grpId={grp_id}); "
+                                    "in-resolution chooser is not implemented."
+                                )
                             continue
                         # A second copy of a legend we already control is legal,
                         # so MTGA offers it -- and then blocks the cast behind a

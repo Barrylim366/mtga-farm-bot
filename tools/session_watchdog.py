@@ -62,9 +62,11 @@ from tools.incident_tracking import (
 # cooldown throttles alerts.log writes only -- per-match counting still counts
 # every occurrence.
 ALERT_SIGNATURES: tuple[tuple[str, tuple[str, ...], float], ...] = (
-    ("combat_force", ("COMBAT_RECOVERY_ATTEMPT",), 20.0),
-    ("submit_img_fail", ("SUBMIT_SELECTION_IMG: image not found",), 20.0),
-    ("unsupported_cast", ("not implemented yet", "chooser not implemented"), 30.0),
+    ("combat_recovery_failed", ("Combat recovery exhausted attempts.", "COMBAT_RECOVERY_DEFER:"), 20.0),
+    ("submit_failed", ("SUBMIT_SELECTION_FAILED:",), 20.0),
+    ("pay_costs_unresolved", ("PAY_COSTS_UNRESOLVED:",), 20.0),
+    ("chooser_unconfirmed", ("CHOOSER_TARGET_UNCONFIRMED:",), 20.0),
+    ("unsupported_cast", ("UNSUPPORTED_CAST:",), 30.0),
     # Game.py's stuck-move breaker (_STUCK_MOVE_RETRY_LIMIT): the same active
     # move (cast/attack/select_target/...) was returned unchanged 3x in a row
     # with no game-state progress and got force-replaced with resolve(). The
@@ -121,6 +123,8 @@ def _has_local_priority(status: dict) -> bool:
         priority_player = int(turn_info.get("priorityPlayer") or 0)
     except Exception:
         priority_player = 0
+    if priority_player > 0 and priority_player != local_seat:
+        return False
     return decision_player == local_seat or priority_player == local_seat
 
 
@@ -355,10 +359,15 @@ def _write_match_record(state: dict, session_id: str, match: dict, status: dict)
         "id": str(status.get("active_quest_id") or ""),
         "colors": str(status.get("active_quest_colors") or ""),
     }
+    account = str(status.get("current_account") or "").strip()
+    aliases = status.get("account_aliases")
+    if account and isinstance(aliases, dict):
+        account = str(aliases.get(account) or account).strip()
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "session_id": session_id,
         "match_index": index,
+        "account": account or None,
         "ended_at": _timestamp(),
         "ended_at_epoch": time.time(),
         "result": str(match.get("result") or "unknown"),

@@ -367,6 +367,7 @@ class QueueLoopSwitchTimingTests(unittest.TestCase):
 
     def _loop_once(self, c, state) -> list:
         """Run a single iteration of _queue_spam_loop with the state stubbed."""
+        c._quest_reroll_pending = False
         spawned: list = []
         c._get_state_from_log = lambda: state
         c._account_switch_pending = True
@@ -400,6 +401,7 @@ class QueueLoopSwitchTimingTests(unittest.TestCase):
 
     def test_switch_runs_once_the_match_is_over(self):
         c = make_controller()
+        c._quest_reroll_pending = False
         spawned: list = []
         c._get_state_from_log = lambda: BotState.HOME
         c._account_switch_pending = True

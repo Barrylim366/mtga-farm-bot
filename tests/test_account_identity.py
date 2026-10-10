@@ -135,6 +135,17 @@ class AccountIdentityTest(unittest.TestCase):
             "Barrylim#08112",
         )
 
+    def test_spaced_display_name_keeps_full_identity_and_gold_key(self):
+        name = "Lass E#94890"
+        self.assertEqual(self.c._find_latest_login_screenname(login_line(name)), name)
+        self.append(handshake_line(ACCOUNT_A))
+        self.begin_switch()
+        self.c._latch_identity_from_switch_target({"name": name, "screen_name": name})
+        self.append(login_line(name))
+        self.c._latch_account_screen_name_from(login_line(name))
+        self.assertEqual(self.c._current_account_screen_name, name)
+        self.assertNotIn("Lass", self.c._gold_farmed_by_account)
+
     def test_the_later_of_the_two_forms_wins(self):
         """Neither form outranks the other; recency decides."""
         self.assertEqual(
@@ -150,7 +161,7 @@ class AccountIdentityTest(unittest.TestCase):
             ACCOUNT_A,
         )
 
-    def test_the_display_name_is_one_token_not_the_rest_of_the_line(self):
+    def test_the_display_name_stops_before_appended_metadata(self):
         """`[^\\r\\n]+` would fold anything the client appends after the name into
         the identity -- which is then the key for gold attribution, round tracking
         and the deck folder lookup."""
