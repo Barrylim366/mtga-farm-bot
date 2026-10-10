@@ -658,6 +658,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         # tail, which holds other accounts' balances. See _read_latest_inventory_gold.
         # None means "not armed yet" -- 0 is a legitimate floor (empty log).
         self._gold_valid_from_offset = None
+        # Where _check_foreign_event_entry has read Player.log up to. Armed in
+        # begin_session(); None means "not armed" (the guard is then idle).
+        self._event_entry_scan_offset = None
+        # Screen name the unconfigured-account warning last fired for, so it
+        # is logged once per account rather than on every queue tick.
+        self._unconfigured_account_warned_for = None
         # {account key: balance already reported as below its baseline}, so the
         # warning fires on a change rather than on every poll.
         self._last_gold_below_baseline: dict[str, int] = {}
@@ -2493,7 +2499,15 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             bot_logger.log_error(f"Failed to read player.log tail: {e}")
             return ""
 
-    def _get_last_scene_name(self) -> str | None:
+    def _get_last_scene_change(self) -> tuple[str, str] | None:
+        """(toSceneName, context) of the newest Client.SceneChange, or None.
+
+        For an EventLanding scene the context is the event's internal name --
+        e.g. ``{"toSceneName":"EventLanding","context":"DualColorPrecons"}`` for
+        Starter Deck Duel -- which is the one place the log says WHICH event page
+        is on screen. Every event's Play button is the same widget, so this is
+        what tells Starter Deck Duel's page apart from a Draft's.
+        """
         if not self._log_path:
             return None
         log_tail = self._read_log_tail(self._log_path, max_bytes=250000)
@@ -2512,7 +2526,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         match = re.search(r'"toSceneName":"([^"]+)"', line)
         if not match:
             return None
-        return match.group(1)
+        context = re.search(r'"context":"([^"]*)"', line)
+        return match.group(1), (context.group(1) if context else "")
+
+    def _get_last_scene_name(self) -> str | None:
+        change = self._get_last_scene_change()
+        return change[0] if change else None
 
     def _last_scene_is_store(self) -> bool:
         return self._get_last_scene_name() == "Store"
@@ -4294,6 +4313,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self._swap_starter_deck_for_quest(target_colors)
         if not self._starter_navigation_may_act():
             return False
+        # Re-prove the page: the swap navigated in between, and this pill is
+        # every event's Play button.
+        if not self._starter_event_page_confirmed("STARTER_EVENT_PLAY_GATE"):
+            return False
         runtime_status.set_startup_phase("Pressing Play")
         if self._click_image_in_scaled_arena_region(
             event_play, "STARTER_EVENT_PLAY", rel_region=self._EVENT_PLAY_ROI,
@@ -4617,6 +4640,78 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         except Exception:
             return False
 
+    # --- Which event's Play button is this? ---------------------------------
+    #
+    # Reported 2026-10 (Discord): with a Draft as the last thing played on the
+    # account, the Starter bot entered that Draft. Every Play press here is found
+    # by template, and the orange Play pill is the SAME widget on Home and on
+    # every event's page: measured on 53 captures, play_btn.png and
+    # event_play.png both score 0.92-0.99 at (1595, 974) on Home and on the
+    # Starter Deck Duel page alike. So a pill match says "a Play button", never
+    # "Starter Deck Duel's Play button" -- each press needs its own proof of
+    # which screen it is on.
+
+    # Starter Deck Duel's internal event name, as Player.log spells it in both
+    # the EventLanding SceneChange context and EventEnterPairing's EventName.
+    _STARTER_EVENT_NAME = "DualColorPrecons"
+    # Confidence for home_anchor.png on Home. 0.998 on Home over the full client;
+    # the Home tab is not active on any event page, so it does not match there.
+    _HOME_ANCHOR_CONFIDENCE = 0.80
+
+    def _foreign_event_landing_name(self) -> str | None:
+        """The internal name of the event page MTGA last opened, if that page is
+        NOT Starter Deck Duel's and is still the current scene; else None."""
+        try:
+            change = self._get_last_scene_change()
+        except Exception:
+            return None
+        if not change:
+            return None
+        scene, context = change
+        if scene != "EventLanding" or not context:
+            return None
+        if context == self._STARTER_EVENT_NAME:
+            return None
+        return context
+
+    def _home_screen_confirmed(self, label: str) -> bool:
+        """True only if Home's own nav anchor (Home tab active) is on screen.
+
+        Gate for the Home Play click: the bottom-right pill there is identical
+        on every event page, so the pill itself proves nothing."""
+        if not self._starter_navigation_may_act():
+            return False
+        home_tpl = self._app_path("assets", "assert", "home_anchor.png")
+        if not os.path.exists(home_tpl):
+            return False
+        point = self._locate_image_center_in_scaled_arena_region(
+            home_tpl, label, rel_region=nav_rois.HOME_ANCHOR_ROI,
+            confidence=self._HOME_ANCHOR_CONFIDENCE, timeout=1.0,
+        )
+        return point is not None and self._starter_navigation_may_act()
+
+    def _starter_event_page_confirmed(self, label: str) -> bool:
+        """True only if the page on screen is Starter Deck Duel's own.
+
+        Required before ANY press of an event Play/Start pill. Two checks:
+        Player.log must not name a different event as the open EventLanding
+        page, and the "Starter Deck Duel" header must be visible (>=0.97 on the
+        event's pages, <=0.42 elsewhere -- see _detect_starter_screen)."""
+        foreign = self._foreign_event_landing_name()
+        if foreign:
+            bot_logger.log_error(
+                f"{label}: the open event page is '{foreign}', not Starter Deck Duel "
+                f"({self._STARTER_EVENT_NAME}); refusing to press its Play button."
+            )
+            return False
+        if self._starter_template_visible("event_title.png", f"{label}_TITLE", self._STARTER_TITLE_ROI):
+            return True
+        bot_logger.log_error(
+            f"{label}: the Starter Deck Duel header is not on screen; refusing to "
+            "press a Play button that may belong to another event."
+        )
+        return False
+
     def _navigate_starter_deck(self) -> bool:
         """Navigate Home -> Play -> Events -> In Progress -> Starter Deck Duel.
 
@@ -4680,14 +4775,31 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
 
         bot_logger.log_info("Starter: navigating Play > Events > In Progress > Starter Deck Duel.")
 
-        # 1) Open the Play blade from Home. Best-effort: if we are already in the
-        #    blade the home Play button is not found and we just continue.
+        # 0) Parked on ANOTHER event's page (a Draft left in progress, say)? Its
+        #    Play pill sits exactly where Home's does, so step 1 would press it
+        #    and enter that event. Leave via the Home tab and retry next tick.
+        foreign = self._foreign_event_landing_name()
+        if foreign:
+            bot_logger.log_error(
+                f"Starter: MTGA is on the '{foreign}' event page, not Starter Deck Duel; "
+                "returning Home instead of pressing anything there."
+            )
+            self._navigate_to_home()
+            return False
+
+        # 1) Open the Play blade from Home. Only when Home is PROVEN: the pill
+        #    template alone matches any event's Play button (see
+        #    _starter_event_page_confirmed). If we are already in the blade the
+        #    home Play button is not found and we just continue.
         runtime_status.set_startup_phase("Opening the Play menu")
-        if self._click_image_in_scaled_arena_region(
-            play_btn, "STARTER_PLAY", rel_region=home_play_roi, confidence=0.80,
-            timeout=1.5, action_guard=self._starter_navigation_may_act,
-        ):
-            time.sleep(1.0)
+        if self._home_screen_confirmed("STARTER_HOME_VERIFY"):
+            if self._click_image_in_scaled_arena_region(
+                play_btn, "STARTER_PLAY", rel_region=home_play_roi, confidence=0.80,
+                timeout=1.5, action_guard=self._starter_navigation_may_act,
+            ):
+                time.sleep(1.0)
+        else:
+            bot_logger.log_info("Starter: Home not confirmed; not clicking the Home Play button.")
         if not self._starter_navigation_may_act():
             return False
 
@@ -4818,6 +4930,13 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         #    the button on this page; play_btn.png is the Home blade's Play and only
         #    ever matched here by luck. Still best-effort: clicking the "Resume"
         #    banner can launch the match outright, so a miss is not a failure.
+        #    The banner match is only 0.72 and the In Progress list also shows a
+        #    Draft left unfinished, so prove this is Starter Deck Duel's page
+        #    before pressing anything: its Play pill is every event's Play pill.
+        if not self._starter_event_page_confirmed("STARTER_PLAY_GATE"):
+            if not self._starter_navigation_may_act():
+                return True  # the banner's Resume launched the match itself
+            return False
         if not self._press_starter_event_play() and not self._click_image_in_scaled_arena_region(
             play_btn, "STARTER_PLAY_CONFIRM", rel_region=play_confirm_roi, confidence=0.80,
             timeout=1.5, action_guard=self._starter_navigation_may_act,
@@ -5303,6 +5422,8 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     def _press_starter_event_play(self) -> bool:
         """Press the event page's own Play button to enter the queue."""
         runtime_status.set_startup_phase("Pressing Play")
+        if not self._starter_event_page_confirmed("STARTER_EVENT_PLAY_GATE"):
+            return False
         if self._click_starter_button("event_play.png", "STARTER_EVENT_PLAY"):
             bot_logger.log_info("Starter: queued from the event page via Play.")
             time.sleep(1.0)
@@ -6197,6 +6318,17 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         if not self._ensure_historic_selection():
             bot_logger.log_info("Historic: deck/format selection not verified; skipping this queue attempt.")
             return
+        foreign = self._foreign_event_landing_name()
+        if foreign:
+            # The queue click below is a bare press on the Home Play point,
+            # which on an event page is THAT event's Play button.
+            bot_logger.log_error(
+                f"Historic: MTGA is on the '{foreign}' event page; not clicking Play. "
+                "Re-selecting Historic from Home."
+            )
+            self._historic_selection_key = None
+            self._navigate_to_home()
+            return
         current_state = self._get_state_from_log()
         bot_logger.log_info(f"Queue pre-check state={current_state}")
         if current_state == BotState.STORE:
@@ -6328,6 +6460,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         # baseline the account from its first post-match reward instead.
         if self._gold_valid_from_offset is None:
             self._gold_valid_from_offset = self._get_log_size(self._log_path)
+        # Same first-call-wins rule: anything joined before Start is the user's
+        # own doing, not something the bot entered.
+        if self._event_entry_scan_offset is None:
+            self._event_entry_scan_offset = self._get_log_size(self._log_path)
 
     def start_game(self) -> None:
         self.begin_session()
@@ -11278,11 +11414,95 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             # A recovery probe must never be the thing that kills the queue loop.
             bot_logger.log_error(f"QUEUE_STALL_PROBE failed: {exc}")
 
+    # Player.log request lines that commit the account to an event:
+    #   ==> EventEnterPairing {"id":"...","request":"{\"EventName\":\"DualColorPrecons\",...}"}
+    # The request payload is a JSON string inside JSON, hence the optional
+    # backslashes around the quotes.
+    _EVENT_ENTRY_RE = re.compile(
+        r'==> (EventEnterPairing|EventJoin)\b[^\n]*?EventName\\?"\s*:\s*\\?"([^"\\]+)'
+    )
+    # Events the Historic mode must never enter. It queues constructed play,
+    # whose internal names are not pinned here, so this is a deny list of the
+    # paid limited formats rather than an allow list.
+    _HISTORIC_FORBIDDEN_EVENT_RE = re.compile(r"(?i)draft|sealed|cube")
+
+    def _event_entry_forbidden(self, event_name: str) -> bool:
+        if self._game_mode == "starter":
+            return event_name != self._STARTER_EVENT_NAME
+        return bool(self._HISTORIC_FORBIDDEN_EVENT_RE.search(event_name))
+
+    def _check_foreign_event_entry(self) -> bool:
+        """Stop the bot if MTGA was told to join or queue an event it must not.
+
+        Last line of defence behind the screen gates (_starter_event_page_confirmed):
+        it cannot undo an entry, but it keeps the bot from playing on in a Draft
+        it ended up in -- the reported failure was the bot entering and playing
+        whatever event was last open on the account. Reads only what Player.log
+        gained since the previous call. True if it stopped the bot."""
+        offset = self._event_entry_scan_offset
+        if offset is None or not self._log_path:
+            return False
+        try:
+            with open(self._log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if size < offset:
+                    offset = 0  # MTGA restarted and rotated the log
+                f.seek(offset)
+                data = f.read(max(0, min(size - offset, 4_000_000)))
+        except Exception:
+            return False
+        # Only consume whole lines, so a request MTGA is mid-way through writing
+        # is read complete on the next call instead of being skipped.
+        end = data.rfind(b"\n")
+        if end == -1:
+            return False
+        self._event_entry_scan_offset = offset + end + 1
+        text = data[: end + 1].decode("utf-8", errors="ignore")
+        for match in self._EVENT_ENTRY_RE.finditer(text):
+            request, event_name = match.group(1), match.group(2)
+            if not self._event_entry_forbidden(event_name):
+                continue
+            bot_logger.log_error(
+                f"FOREIGN_EVENT_ENTRY: MTGA sent {request} for '{event_name}', which the "
+                f"{self._game_mode} mode must never enter. Stopping the bot -- check MTGA "
+                "and leave that event by hand."
+            )
+            self._request_stop_bot(f"entered foreign event {event_name}")
+            return True
+        return False
+
+    def _warn_if_unconfigured_account(self) -> None:
+        """Log once when the logged-in account is not one of the configured ones.
+
+        Warning only: rows saved before screen_name became a field can resolve
+        to None for a legitimately configured account, so refusing to queue here
+        would strand those users. The event gates are what keep an unexpected
+        account out of Drafts."""
+        screen = self._current_account_screen_name
+        if not screen or screen == self._unconfigured_account_warned_for:
+            return
+        try:
+            accounts = self._load_accounts_from_dirs() or []
+        except Exception:
+            return
+        if not accounts or self._current_account_config() is not None:
+            return
+        self._unconfigured_account_warned_for = screen
+        bot_logger.log_error(
+            f"UNCONFIGURED_ACCOUNT: logged in as '{screen}', which matches none of the "
+            f"{len(accounts)} configured account(s). The bot keeps playing, but quest, "
+            "gold and switch tracking may be wrong -- add it in Manage Accounts."
+        )
+
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
             if self._account_switch_in_progress:
                 bot_logger.log_info("Queue spam stopping: account switch in progress.")
                 return
+            if self._check_foreign_event_entry():
+                return
+            self._warn_if_unconfigured_account()
             # A transient startup/login failure retains this account's reroll.
             # Resolve it before the switch branch can leave the account, even
             # when its farming target is already met.

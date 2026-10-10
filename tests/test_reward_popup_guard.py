@@ -60,6 +60,9 @@ class DeckSwapRestoredTests(unittest.TestCase):
             lambda image_path, label, **kw: CLAIM_POINT
         )
         self.c._on_starter_event_landing_page = lambda label: True
+        # ...and it is Starter Deck Duel's page (the pre-press gate is covered in
+        # test_foreign_event_guard.py).
+        self.c._starter_event_page_confirmed = lambda label: True
         # Neither the Home Play button nor the Events tab is present here, so
         # navigation must fall through to the event-landing re-queue.
         self.clicked_templates: list[str] = []
@@ -207,6 +210,9 @@ class StarterDeckNavigationFilterFallbackTests(unittest.TestCase):
         self.c.refresh_quests_cache = lambda: None
         self.c._resolve_starter_target_colors = lambda: ""
         self.c._swap_starter_deck_for_quest = lambda colors: None
+        # The banner led to Starter Deck Duel's page; the gate itself is covered
+        # in test_foreign_event_guard.py.
+        self.c._starter_event_page_confirmed = lambda label: True
 
         self.clicked_tags: list[str] = []
         self.c._click_abs = lambda x, y, tag, **kw: self.clicked_tags.append(tag)

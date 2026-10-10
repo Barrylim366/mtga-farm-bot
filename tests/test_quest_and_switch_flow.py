@@ -220,6 +220,7 @@ class QuestTargetSelectionTests(_QuestLogTestBase):
 
         swapped_with = []
         self.controller._on_starter_event_landing_page = lambda label: True
+        self.controller._starter_event_page_confirmed = lambda label: True
         self.controller._click_image_in_scaled_arena_region = (
             lambda *a, **k: True
         )
