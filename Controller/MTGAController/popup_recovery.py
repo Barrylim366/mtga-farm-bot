@@ -21,6 +21,15 @@ class PopupRecoveryMixin:
         ("click_to_continue_text.png", "POPUP_CONTINUE", (520, 940, 880, 140), 0.70),
     )
     _POPUP_SCALES = tuple(round(0.45 + 0.05 * i, 2) for i in range(32))
+    # Home's login notifications (season rewards, "New Season Placement", ...)
+    # are bracketed in Player.log. A BEGIN with no END after it means one is
+    # still on screen. Each one has its button in the same bottom-right spot
+    # (Claim, Continue, a set promo's "Get Started!"), and the "[Click to
+    # Continue]" pages accept a click there too. Backdrops and promo texts vary
+    # too much for templates, so click the spot itself.
+    _NOTIFICATION_FLOW_BEGIN = "BEGIN home page notification flow"
+    _NOTIFICATION_FLOW_END = "END home page notification flow"
+    _NOTIFICATION_CONTINUE_POINT = (1735, 1005)
 
     def _init_popup_recovery(self):
         self._popup_recovery_lock = threading.Lock()
@@ -114,7 +123,26 @@ class PopupRecoveryMixin:
                 point = (region[0] + round(match.x * region[2] / roi[2]),
                          region[1] + round(match.y * region[3] / roi[3]))
                 return label, point, tuple(arena)
+        if not disconnected and self._home_notification_flow_open():
+            nx, ny = self._NOTIFICATION_CONTINUE_POINT
+            return ("POPUP_NOTIFICATION_CONTINUE",
+                    (arena[0] + round(nx * arena[2] / 1920), arena[1] + round(ny * arena[3] / 1080)),
+                    tuple(arena))
         return None
+
+    def _home_notification_flow_open(self):
+        """True while Player.log's last Home notification flow has not ended."""
+        if not self._log_path:
+            return False
+        tail = self._read_log_tail(self._log_path, max_bytes=250000)
+        begin = tail.rfind(self._NOTIFICATION_FLOW_BEGIN)
+        if begin == -1:
+            return False
+        after = tail[begin:]
+        # Leaving Home (or logging out) also closes the flow without an END.
+        return not any(marker in after for marker in (
+            self._NOTIFICATION_FLOW_END, "Client.SceneChange", "LoadWrapperScene",
+        ))
 
     def _popup_may_act(self):
         return (getattr(self, "_popup_recovery_active", False) and not self._stop_requested

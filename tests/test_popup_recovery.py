@@ -478,6 +478,44 @@ class PopupRecoveryTests(unittest.TestCase):
         paste("claim_rewards_text.png", 1620, 990)
         self.assertEqual(Controller._find_blocking_popup(self.c)[0], "POPUP_CLAIM_REWARDS")
 
+    def write_player_log(self, *lines):
+        with open(self.c._log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def test_notification_flow_open_only_between_begin_and_end(self):
+        begin, end = "BEGIN home page notification flow", "END home page notification flow"
+        scene = '[UnityCrossThreadLogger]Client.SceneChange {"fromSceneName":"Home","toSceneName":"EventLanding"}'
+        cases = (
+            ((), False),
+            ((begin,), True),
+            ((begin, end), False),
+            ((begin, end, begin), True),
+            ((begin, scene), False),
+            ((begin, "10.10.2026 11:11:00 LoadWrapperScene"), False),
+        )
+        for lines, expected in cases:
+            with self.subTest(lines=lines):
+                self.write_player_log("MainNav load in 1240ms", *lines)
+                self.assertEqual(Controller._home_notification_flow_open(self.c), expected)
+
+    @unittest.skipIf(cv2 is None, "OpenCV unavailable")
+    def test_open_notification_flow_clicks_button_spot_without_text_match(self):
+        # Reported "New Season Placement": "[Click to Continue]" on a dark
+        # backdrop scored 0.64 against the text template and the bot sat there.
+        import numpy as np
+        self.c._ensure_arena_region = Mock(return_value=None)
+        self.c._arena_region_provider._last_detection_result = ArenaDetectionResult(
+            False, (1493, 118, 1920, 1080), "anchor_not_found", "season placement",
+        )
+        self.c._popup_vision.capture = Mock(return_value=np.zeros((1080, 1920, 3), dtype=np.uint8))
+        self.write_player_log("MainNav load in 1240ms")
+        self.assertIsNone(Controller._find_blocking_popup(self.c))
+        self.write_player_log("MainNav load in 1240ms", "BEGIN home page notification flow")
+        self.assertEqual(
+            Controller._find_blocking_popup(self.c),
+            ("POPUP_NOTIFICATION_CONTINUE", (3228, 1123), (1493, 118, 1920, 1080)),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
