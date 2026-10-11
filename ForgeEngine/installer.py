@@ -25,8 +25,8 @@ RELEASE_TAG = f"forge-engine-v{paths.PACKAGE_VERSION}"
 ASSET_NAME = f"forge-engine-v{paths.PACKAGE_VERSION}-windows-x64.zip"
 PACKAGE_URL = f"https://github.com/Barrylim366/mtga-farm-bot/releases/download/{RELEASE_TAG}/{ASSET_NAME}"
 # Filled in by tools/build_forge_package.py --pin after the asset is built.
-PACKAGE_SHA256 = ""
-PACKAGE_SIZE_MB = 0
+PACKAGE_SHA256 = "c5c311d7c1b7db21ae668f67cd8a64b9d805d2925c18536e9c789d18fe08646f"
+PACKAGE_SIZE_MB = 84
 
 _KEEP = ("run", "cache")
 
