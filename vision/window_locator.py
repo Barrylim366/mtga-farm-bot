@@ -768,52 +768,66 @@ class ArenaRegionProvider:
         if refresh_capture:
             self._vision.begin_tick()
         for spec in _ANCHOR_SPECS:
-            template_path = os.path.join(self._assets_dir, str(spec["name"]))
-            if not os.path.exists(template_path):
-                checks.append(
-                    {
-                        "anchor": spec["name"],
-                        "status": "missing_file",
-                        "threshold": float(spec["threshold"]),
-                    }
-                )
-                continue
-
-            roi = _scaled_abs_region(region, tuple(spec["roi"]), self._expected_size)
-            image = self._vision.capture(roi)
-            if image is None or getattr(image, "size", 0) == 0:
-                checks.append(
-                    {
-                        "anchor": spec["name"],
-                        "status": "capture_failed",
-                        "roi": list(roi),
-                        "threshold": float(spec["threshold"]),
-                    }
-                )
-                continue
-
-            desired_w = max(1, int(spec["roi"][2]))
-            desired_h = max(1, int(spec["roi"][3]))
-            if cv2 is not None:
-                ih, iw = image.shape[:2]
-                if iw > 0 and ih > 0 and (iw != desired_w or ih != desired_h):
-                    image = cv2.resize(image, (desired_w, desired_h), interpolation=cv2.INTER_LINEAR)
-
-            match = self._vision.find_template(image, template_path, threshold=0.0)
-            score = float(match.score) if match is not None else 0.0
-            passed = bool(match is not None and score >= float(spec["threshold"]))
-            checks.append(
-                {
-                    "anchor": spec["name"],
-                    "status": "matched" if passed else "not_matched",
-                    "roi": list(roi),
-                    "threshold": float(spec["threshold"]),
-                    "score": score,
-                }
-            )
-            if passed:
+            check = self._check_anchor(region, spec)
+            checks.append(check)
+            if check["status"] == "matched":
                 return str(spec["name"]), checks
         return None, checks
+
+    def anchor_visible(self, region: tuple[int, int, int, int], name: str) -> bool:
+        """True if the ONE named anchor matches inside `region`.
+
+        `detect()` reports only the first anchor in `_ANCHOR_SPECS` that
+        matches, so an anchor further down the list is invisible to it whenever
+        an earlier one also passes. That is the Options case: the overlay sits on
+        top of the nav bar, whose "Profile" icon (global_anchor.png, checked
+        first) can still pass behind it, and `detect()` then reports "global"
+        while Options is open. Ask for the anchor you care about instead.
+        """
+        spec = next((s for s in _ANCHOR_SPECS if s["name"] == name), None)
+        if spec is None:
+            return False
+        # A fresh capture on purpose: the caller's detect() tick may predate an
+        # ESC that has just opened or closed the overlay.
+        self._vision.begin_tick()
+        return self._check_anchor(region, spec)["status"] == "matched"
+
+    def _check_anchor(self, region: tuple[int, int, int, int], spec: dict[str, Any]) -> dict[str, Any]:
+        template_path = os.path.join(self._assets_dir, str(spec["name"]))
+        if not os.path.exists(template_path):
+            return {
+                "anchor": spec["name"],
+                "status": "missing_file",
+                "threshold": float(spec["threshold"]),
+            }
+
+        roi = _scaled_abs_region(region, tuple(spec["roi"]), self._expected_size)
+        image = self._vision.capture(roi)
+        if image is None or getattr(image, "size", 0) == 0:
+            return {
+                "anchor": spec["name"],
+                "status": "capture_failed",
+                "roi": list(roi),
+                "threshold": float(spec["threshold"]),
+            }
+
+        desired_w = max(1, int(spec["roi"][2]))
+        desired_h = max(1, int(spec["roi"][3]))
+        if cv2 is not None:
+            ih, iw = image.shape[:2]
+            if iw > 0 and ih > 0 and (iw != desired_w or ih != desired_h):
+                image = cv2.resize(image, (desired_w, desired_h), interpolation=cv2.INTER_LINEAR)
+
+        match = self._vision.find_template(image, template_path, threshold=0.0)
+        score = float(match.score) if match is not None else 0.0
+        passed = bool(match is not None and score >= float(spec["threshold"]))
+        return {
+            "anchor": spec["name"],
+            "status": "matched" if passed else "not_matched",
+            "roi": list(roi),
+            "threshold": float(spec["threshold"]),
+            "score": score,
+        }
 
     def _acquire_from_global_anchor(self) -> tuple[int, int, int, int] | None:
         anchor_path = os.path.join(self._assets_dir, self._global_anchor_name)

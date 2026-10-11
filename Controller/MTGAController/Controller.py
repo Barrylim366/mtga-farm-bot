@@ -846,6 +846,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self._quest_refresh_every_n_matches = 1
         self._match_end_dismissed = False
         self._unknown_screen_strikes = 0
+        # Starter queue passes that ended on the event page without getting
+        # anywhere (see _note_starter_dead_end). Only touched under
+        # _home_navigation_lock: both callers of _navigate_starter_deck are
+        # @serialized_home_navigation.
+        self._starter_dead_ends = 0
+        self._starter_dead_end_bundle_ts = 0.0
         self._post_match_ready_ts = None
         self._post_match_delay_sec = 30
         self._stop_requested = False
@@ -1884,15 +1890,8 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     def _ensure_options_overlay_closed(self, *, context: str, max_attempts: int = 2) -> bool:
         if focus_mtga_window():
             time.sleep(0.2)
-        last_anchor = None
         for attempt in range(1, max_attempts + 1):
-            detection = self._arena_region_provider.detect(write_debug_on_fail=False)
-            last_anchor = detection.matched_anchor
-            if detection.ok and detection.region is not None:
-                self._arena_region = detection.region
-                self._last_good_arena_region = detection.region
-                self._last_good_arena_region_ts = time.time()
-            if last_anchor != "options_anchor.png":
+            if not self._options_overlay_visible():
                 return True
             bot_logger.log_error(
                 f"{context}: options overlay detected before interaction; sending ESC (attempt {attempt}/{max_attempts})."
@@ -1900,17 +1899,11 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             self.input.tap_escape()
             time.sleep(0.9)
 
-        detection = self._arena_region_provider.detect(write_debug_on_fail=False)
-        last_anchor = detection.matched_anchor
-        if detection.ok and detection.region is not None:
-            self._arena_region = detection.region
-            self._last_good_arena_region = detection.region
-            self._last_good_arena_region_ts = time.time()
-        if last_anchor == "options_anchor.png":
+        if self._options_overlay_visible():
             bot_logger.log_error(f"{context}: options overlay still visible after ESC retries.")
             self._write_hand_overlay_debug_bundle(
                 reason="options_overlay_blocking_hand_scan",
-                matched_anchor=last_anchor,
+                matched_anchor="options_anchor.png",
             )
             return False
         return True
@@ -4841,6 +4834,21 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             # Home. This is the right place to clear one -- every navigation
             # anchor has already been ruled out, so a dismissal here cannot steal
             # a click from a legitimate screen.
+            # Except when the event's own header is visible: then we are on the
+            # event page with just its pill unread, nothing full-screen covers
+            # it, and ESC would only open Options over the page. That is how the
+            # queue loop ended up clicking into Options for 47 minutes
+            # (2026-10-11). A promo that hides Home hides this header too.
+            if self._starter_template_visible(
+                "event_title.png", "STARTER_NAV_HEADER", self._STARTER_TITLE_ROI
+            ):
+                bot_logger.log_info(
+                    "STARTER_NAV: event header visible but no known pill; not pressing ESC."
+                )
+                self._note_starter_dead_end("event header visible but no known pill")
+                return False
+            if not self._starter_navigation_may_act():
+                return False
             if self._dismiss_blocking_announcement("STARTER_NAV"):
                 return False
             bot_logger.log_info("Starter: Events tab not found (not in Play blade yet); will retry.")
@@ -5211,6 +5219,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             if not self._starter_navigation_may_act():
                 return False
             if screen == self._STARTER_SCREEN_CHOOSER:
+                self._starter_dead_ends = 0
                 if step:
                     bot_logger.log_info(f"Starter: deck chooser reached after {step} step(s).")
                 else:
@@ -5274,7 +5283,45 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             f"Starter: could not reach the deck chooser in {self._STARTER_CHOOSER_MAX_STEPS} steps; "
             "keeping the current deck."
         )
+        self._note_starter_dead_end("deck chooser unreachable")
         return False
+
+    # Consecutive dead ends on the event page before leaving it via Home.
+    _STARTER_DEAD_END_LIMIT = 2
+    _STARTER_DEAD_END_BUNDLE_INTERVAL_SEC = 600.0
+
+    def _note_starter_dead_end(self, reason: str) -> None:
+        """Count a starter queue pass that stayed stuck on the event page, and
+        leave the page once it repeats.
+
+        On 2026-10-11 the event page took ~100 clicks over 47 minutes without
+        MTGA registering one (no scene change, no join in Player.log), and the
+        loop retried the same page forever without once going Home. The full
+        Home > Play > Events > banner path is what recovered every other time,
+        so after a couple of dead ends take it: save what is on screen (the
+        stall had no screenshot at all), close Options if it is open, go Home.
+        """
+        self._starter_dead_ends += 1
+        if self._starter_dead_ends < self._STARTER_DEAD_END_LIMIT:
+            return
+        bot_logger.log_error(
+            f"STARTER_DEAD_END: {reason} ({self._starter_dead_ends} passes in a row); "
+            "leaving the event page via Home."
+        )
+        now = time.time()
+        if now - self._starter_dead_end_bundle_ts >= self._STARTER_DEAD_END_BUNDLE_INTERVAL_SEC:
+            self._starter_dead_end_bundle_ts = now
+            self._write_nav_debug_bundle(f"starter_dead_end: {reason}")
+        if not self._starter_navigation_may_act():
+            return
+        if self._options_overlay_visible():
+            bot_logger.log_info("STARTER_DEAD_END: Options overlay is open; closing it.")
+            self.input.tap_escape()
+            time.sleep(0.9)
+            if not self._starter_navigation_may_act():
+                return
+        if self._navigate_to_home():
+            self._starter_dead_ends = 0
 
     def _click_starter_button(self, template: str, label: str) -> bool:
         """Click one of the event's bottom-right pill buttons by template."""
@@ -5405,7 +5452,16 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         return True
 
     def _options_overlay_visible(self) -> bool:
-        """True if the Options overlay is the anchor currently on screen."""
+        """True if the Options overlay is on screen.
+
+        detect() names only the FIRST anchor that matches, and options_anchor
+        sits behind global_anchor (the nav bar's Profile icon) in that order. On
+        a menu screen the nav bar can still pass behind the overlay, so
+        detect() said "global" while Options was open and this check stayed
+        blind -- the starter queue loop then clicked into Options for 47 minutes
+        (2026-10-11, and the same on a 1600x900 install). So probe the Options
+        anchor on its own whenever detect() did not already report it.
+        """
         try:
             detection = self._arena_region_provider.detect(write_debug_on_fail=False)
         except Exception:
@@ -5414,7 +5470,15 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             self._arena_region = detection.region
             self._last_good_arena_region = detection.region
             self._last_good_arena_region_ts = time.time()
-        return detection.matched_anchor == "options_anchor.png"
+        if detection.matched_anchor == "options_anchor.png":
+            return True
+        region = detection.region or self._last_good_arena_region
+        if region is None:
+            return False
+        try:
+            return bool(self._arena_region_provider.anchor_visible(region, "options_anchor.png"))
+        except Exception:
+            return False
 
     def _press_starter_event_play(self) -> bool:
         """Press the event page's own Play button to enter the queue."""
@@ -10390,6 +10454,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     def reset_for_new_game(self):
         """Reset controller state for a new game - complete fresh start"""
         bot_logger.log_info("Resetting controller state for new game")
+        self._starter_dead_ends = 0
         self.__clear_cast_ack_attempts("reset_for_new_game")
         self.__group_prompt_seq += 1
         self.__group_prompt_match_id = None

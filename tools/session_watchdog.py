@@ -79,6 +79,10 @@ ALERT_SIGNATURES: tuple[tuple[str, tuple[str, ...], float], ...] = (
     # completely invisible before, and a tear is what silently froze the bot
     # on 2026-08-23 (see LogReader.__follow).
     ("log_line_torn", ("LOG_LINE_UNTERMINATED", "LOG_LINE_TAIL_DISCARDED"), 30.0),
+    # The starter queue loop stuck on the event page: clicks that never reach
+    # the deck chooser. On 2026-10-11 this ran 47 minutes between matches and
+    # alerts.log stayed silent, since nothing in the loop was an alert signal.
+    ("starter_dead_end", ("STARTER_DEAD_END:", "Starter: could not reach the deck chooser"), 120.0),
     ("no_scryfall_land", ("No Scryfall data for land",), 60.0),
     ("no_card_info", ("No card info for grpId",), 60.0),
     ("timer_critical", ("MY_TIMER_CRITICAL", "TimerType_Inactivity remaining=0"), 20.0),

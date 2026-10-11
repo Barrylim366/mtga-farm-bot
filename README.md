@@ -356,6 +356,14 @@ Finding the **Starter Deck Duel** banner no longer depends on it being near the 
 > - parked on another event's page, the bot clicks the Home tab instead of anything on that page (Historic mode too);
 > - as a last line of defence, if Player.log shows Arena being told to join or queue a forbidden event (`EventJoin` / `EventEnterPairing` — anything but `DualColorPrecons` in Starter mode, any Draft/Sealed/Cube event in Historic mode), the bot logs `FOREIGN_EVENT_ENTRY` and stops. It cannot undo an entry, but it does not play on in it.
 
+> **Stuck on the event page between matches** (fixed, seen on two installs): after a match the bot could sit on the Starter Deck Duel page for good — 47 minutes in one session, about 100 clicks, and Player.log shows no page change and no queue join for any of them. Three faults stacked:
+>
+> - When the page's header was visible but its pill (Play/Start/Choose Your Deck) was not read, navigation treated that as "nothing recognizable" and pressed **ESC** to clear a possible popup. On an uncovered screen ESC opens the **Options** menu instead.
+> - The check that closes Options again asked the window locator, which names only the *first* screen anchor that matches. Options is checked after the nav bar's Profile icon, which can still match behind the overlay, so Options went unseen and stayed open.
+> - Nothing ever left the page: every pass retried the same deck-box and Play clicks.
+>
+> Now ESC is not pressed while the Starter Deck Duel header is visible (a popup that hides Home hides the header too), and Options is probed on its own anchor rather than through the first-match order. After two passes in a row that end stuck on the event page, the bot saves a screenshot bundle (`runtime/debug/`, at most one per 10 minutes), closes Options if it is open, and goes Home, so the next pass takes the full Home → Play → Events path. Both stuck cases log `STARTER_DEAD_END` / `could not reach the deck chooser`, which the session watchdog now records as an alert (`starter_dead_end`); the stall used to leave `alerts.log` silent.
+
 > Note on scrolling: MTGA's event list ignores the mouse wheel entirely, so the bot drags the scrollbar. The step is deliberately small — the bar is about a quarter of its track, so the list moves roughly four times as far as the bar, and a step wider than one banner can jump straight over the one being looked for.
 
 > Fixed in this version: the reward-popup handler mistook the event page's orange **Play** button for a **Claim** button (same corner, same shape). It pressed Play, which started the next match immediately and skipped the deck check — so the bot kept replaying its first deck even after the active quest changed colors. The handler now verifies it is not on the event page before clicking.
