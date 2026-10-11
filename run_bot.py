@@ -1,6 +1,7 @@
 from Controller.MTGAController.Controller import Controller
 from AI.DummyAI import DummyAI
 from Game import Game
+import ForgeEngine
 import json
 import time
 import os
@@ -90,6 +91,17 @@ def _load_runtime_bot_config(cfg_path: pathlib.Path) -> tuple[dict, bool]:
     return click_targets, auto_concede_stalled_matches
 
 
+def _forge_engine_enabled(cfg_path: pathlib.Path | None) -> bool:
+    """The "Enable Forge Engine" setting the UI saved; off when unreadable."""
+    if cfg_path is None:
+        return False
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return json.load(f).get("forge_engine_enabled") is True
+    except Exception:
+        return False
+
+
 def main():
     print("Starting MTG AI Bot...")
 
@@ -110,6 +122,7 @@ def main():
     # so run_bot.py works out of the box on a fresh checkout.
     click_targets: dict = {}
     auto_concede_stalled_matches = True
+    cfg_path = None
     try:
         from runtime_paths import runtime_file  # type: ignore
         cfg_path = runtime_file("config", "calibration_config.json")
@@ -153,8 +166,11 @@ def main():
         )
         
         print("Initializing AI...")
-        ai = DummyAI()
-        
+        forge_enabled = _forge_engine_enabled(cfg_path)
+        ai = ForgeEngine.make_ai(DummyAI(), lambda: forge_enabled)
+        if ForgeEngine.apply(controller, forge_enabled, log_path=log_path):
+            print("Forge engine enabled: starting the advisor in the background.")
+
         print("Initializing Game...")
         game = Game(controller, ai)
         

@@ -77,6 +77,10 @@ _MY_TIMER_TYPES = {
 
 class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, ControllerSecondary):
 
+    # Forge engine hooks (see __init__); a class default so a controller built
+    # without __init__ (the unit tests do) runs the bot's own code.
+    decision_hooks = None
+
     # MTGA holds up to 3 daily quests; completed ones drop out of the list. Used
     # to derive absolute completions (slots - remaining) for the switch decision.
     _DAILY_QUEST_SLOTS = 3
@@ -570,6 +574,9 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self.__combat_recovery_deadline_ts = 0.0
         self.__combat_recovery_timer = None
         self.__last_attack_submit_ts = 0.0
+        # Forge engine (opt-in, Bot Behavior menu): ForgeEngine.hooks.ForgeHooks
+        # while it is enabled, None otherwise. None = only the bot's own code runs.
+        self.decision_hooks = None
         self.__my_timer_state = {}
         self.__emergency_concede_in_progress = False
         self.__emergency_concede_threshold_sec = 20.0
@@ -8203,6 +8210,13 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             bot_logger.set_hover_logging(False)
 
     def all_attack(self) -> bool:
+        hooks = self.decision_hooks
+        if hooks is not None:
+            # Forge picks which creatures attack; it falls back to _all_attack_own.
+            return hooks.all_attack(self, self._all_attack_own)
+        return self._all_attack_own()
+
+    def _all_attack_own(self) -> bool:
         target, source = self._map_abs_point_to_arena(
             self.main_br_button_coordinates,
             label="ATTACK_ALL",
@@ -8656,6 +8670,18 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self.__combat_recovery_timer.start()
 
     def activate_ability(self, card_id: int, ability_id: int) -> None:
+        hooks = self.decision_hooks
+        if hooks is not None:
+            # A permanent's ability Forge chose is clicked there; anything
+            # else (the graveyard cases) comes back to _activate_ability_own.
+            hooks.activate_ability(
+                self, card_id, ability_id,
+                lambda: self._activate_ability_own(card_id, ability_id),
+            )
+            return
+        self._activate_ability_own(card_id, ability_id)
+
+    def _activate_ability_own(self, card_id: int, ability_id: int) -> None:
         bot_logger.log_info(f"Activating ability: card_id={card_id}, ability_id={ability_id}")
         # Most optional triggers are confirmed via the bottom-right prompt button.
         time.sleep(0.2)
@@ -9269,6 +9295,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     continue
                 if not self.can_execute_game_action(expected_match_id):
                     return False
+                if int(clicks) <= 0:
+                    # Locate only: leave the cursor resting on the card.
+                    bot_logger.log_move(x, y, f"LOCATED_{label} (id={card_id})")
+                    return True
                 bot_logger.log_click(x, y, f"SELECT_{label} (id={card_id})")
                 for _ in range(max(1, int(clicks))):
                     if not self.can_execute_game_action(expected_match_id):
@@ -12639,6 +12669,14 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             bot_logger.log_error(f"Failed to handle modal choice: {e}")
 
     def __handle_group_req(self, line: str) -> None:
+        hooks = self.decision_hooks
+        if hooks is not None:
+            # Forge drags away what it wants gone first, then this runs.
+            hooks.handle_group_req(self, line, self.__handle_group_req_own)
+            return
+        self.__handle_group_req_own(line)
+
+    def __handle_group_req_own(self, line: str) -> None:
         """Scry / surveil / other ordered-grouping prompts. No reordering logic
         for now -- just click Done so the bot does not stall. Leaving the cards
         untouched keeps them in their default order (i.e. on top for scry)."""
@@ -16086,6 +16124,26 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         face_legal: bool | None = None,
         own_creature_ids: list[int] | None = None,
     ) -> None:
+        hooks = self.decision_hooks
+        if hooks is not None:
+            # Forge's target for a move Forge chose; otherwise the bot's own.
+            hooks.schedule_target(
+                self, self.__schedule_target_selection_own, source_id, reason,
+                legal_creature_ids, face_legal, own_creature_ids,
+            )
+            return
+        self.__schedule_target_selection_own(
+            source_id, reason, legal_creature_ids, face_legal, own_creature_ids
+        )
+
+    def __schedule_target_selection_own(
+        self,
+        source_id: int | None,
+        reason: str,
+        legal_creature_ids: list[int] | None = None,
+        face_legal: bool | None = None,
+        own_creature_ids: list[int] | None = None,
+    ) -> None:
         now = time.time()
         if self._suppress_selections or self._stop_requested:
             return
@@ -17292,6 +17350,41 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             self.__last_declare_blockers_ts = now
             shadow = self.__shadow_block_decision(legal_blockers, attacking_ids)
 
+            hooks = self.decision_hooks
+            if hooks is not None and time.time() < self.__declaring_blocks_until:
+                # Arena re-sends the request after every assigned block. The
+                # assignment already running submits when done; a second one
+                # beside it clicked into a submitted step (seen 2026-10-11).
+                bot_logger.log_info(
+                    "DeclareBlockersReq: a block assignment is already running; it submits."
+                )
+                return
+            if hooks is not None:
+                # Forge's request can take seconds and this runs on the log
+                # reader's thread, so it is asked on its own thread. resolve()
+                # is muted meanwhile, exactly as during a block assignment.
+                self.__begin_declare_blocks_pause()
+
+                def _review_then_declare() -> None:
+                    reviewed = shadow
+                    try:
+                        reviewed = hooks.review_blocks(legal_blockers, attacking_ids, shadow)
+                    except Exception as e:
+                        bot_logger.log_error(f"Forge block review failed: {e}")
+                    self.__declare_blocks_from_decision(reviewed, end_pause_on_no_blocks=True)
+
+                threading.Thread(
+                    target=_review_then_declare, name="forge-blocks", daemon=True
+                ).start()
+                return
+            self.__declare_blocks_from_decision(shadow)
+        except Exception as e:
+            bot_logger.log_error(f"Failed to handle DeclareBlockersReq: {e}")
+
+    def __declare_blocks_from_decision(
+        self, shadow: dict | None, *, end_pause_on_no_blocks: bool = False
+    ) -> None:
+        try:
             assignments: list[tuple[int, int]] = []
             if shadow and self.__combat_blocks_enabled():
                 try:
@@ -17329,9 +17422,48 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 "blockers", "no_blocks", None,
                 extra={"combat_shadow": shadow} if shadow else None,
             )
+            if end_pause_on_no_blocks:
+                self.__end_declare_blocks_pause()
             threading.Timer(0.8, self.__click_combat_submit_button, args=("NO_BLOCKS",)).start()
         except Exception as e:
+            if end_pause_on_no_blocks:
+                self.__end_declare_blocks_pause()
             bot_logger.log_error(f"Failed to handle DeclareBlockersReq: {e}")
+
+    # --- Forge engine helpers (ForgeEngine.hooks) --------------------------------
+    # Public doors to steps the hooks reuse; the steps themselves are unchanged.
+
+    def press_combat_button_verified(self, target, label, *, declared_markers, submitted_markers) -> bool:
+        return self.__press_combat_button_verified(
+            target, label,
+            declared_markers=declared_markers,
+            submitted_markers=submitted_markers,
+        )
+
+    def note_attack_submitted(self) -> None:
+        self.__last_attack_submit_ts = time.time()
+
+    def attack_target_required(self) -> bool:
+        """True while a planeswalker means the attack needs its recipient flow."""
+        return bool(self.__attack_target_required)
+
+    def schedule_creature_target_selection(self, source_id, creature_id, reason, *, friendly=False) -> None:
+        self.__schedule_creature_target_selection(source_id, creature_id, reason, friendly=friendly)
+
+    def locate_object_in_region(self, card_id, p1, p2, *, step, label, max_scan_sec=None) -> bool:
+        """Hover-scan for a card and leave the cursor on it, without clicking."""
+        bot_logger.set_hover_logging(True)
+        try:
+            return self.__select_object_in_region(
+                card_id=card_id, p1=p1, p2=p2, step=step, clicks=0,
+                label=label, max_scan_sec=max_scan_sec,
+            )
+        finally:
+            bot_logger.set_hover_logging(False)
+
+    def hold_group_prompt(self, seconds: float) -> None:
+        """Keep gameplay off the board while a scry/surveil overlay is worked on."""
+        self.__group_req_active_until = (time.time() + seconds) if seconds > 0 else 0.0
 
     def __handle_declare_attackers_req(self, line: str) -> None:
         try:

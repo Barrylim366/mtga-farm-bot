@@ -22,6 +22,29 @@ from vision.window_locator import ArenaDetectionResult, run_arena_setup_check, s
 from Controller.MTGAController.Controller import Controller
 from AI.DummyAI import DummyAI
 from Game import Game
+import ForgeEngine
+
+
+def _apply_forge_engine(controller, config_manager) -> bool:
+    """Forge hooks on/off for one controller per the saved setting.
+
+    Never lets the engine break a bot start: any problem leaves the bot's own
+    decisions in place.
+    """
+    getter = getattr(config_manager, "get_forge_engine_enabled", None)
+    enabled = bool(getter()) if callable(getter) else False
+    try:
+        return ForgeEngine.apply(
+            controller,
+            enabled,
+            log_path=getattr(config_manager, "get_log_path", lambda: "")() or None,
+            data_dir_hint=getattr(config_manager, "get_mtga_data_dir", lambda: "")() or None,
+        )
+    except Exception as exc:
+        import bot_logger
+
+        bot_logger.log_error(f"Forge engine could not be applied: {exc}")
+        return False
 
 
 def _default_player_log_path() -> str:
@@ -1549,6 +1572,9 @@ class ConfigManager:
             # Recovery policy. Enabled by default: it concedes only when Arena
             # has left a locally-owned decision context unchanged for 30 seconds.
             "auto_concede_stalled_matches": True,
+            # Opt-in: Forge's rules engine and AI choose the plays (ForgeEngine/).
+            # Off by default -- it needs a ~100 MB download and 2 GB of RAM.
+            "forge_engine_enabled": False,
             # Estimated gold credited per match won in the "Current Session"
             # per-account gold list (the real reward is not in the log). 0 = only
             # count completed-quest gold, no per-win estimate.
@@ -1795,6 +1821,13 @@ class ConfigManager:
 
     def set_auto_concede_stalled_matches(self, enabled: bool) -> None:
         self.config["auto_concede_stalled_matches"] = bool(enabled)
+        self._save_config()
+
+    def get_forge_engine_enabled(self) -> bool:
+        return self.config.get("forge_engine_enabled") is True
+
+    def set_forge_engine_enabled(self, enabled: bool) -> None:
+        self.config["forge_engine_enabled"] = bool(enabled)
         self._save_config()
 
     def get_gold_per_win(self) -> int:
@@ -4557,7 +4590,9 @@ class MTGBotUI(tk.Tk):
                     controller.set_current_account_manual(manual_cur, seeded=True)
                 except Exception:
                     pass
-            ai = DummyAI()
+            # Forge is asked first while "Enable Forge Engine" is ticked; with
+            # it unticked this is the bot's own DummyAI, unchanged.
+            ai = ForgeEngine.make_ai(DummyAI(), self.config_manager.get_forge_engine_enabled)
             self.game = Game(controller, ai, data_dir_prompt=self._resolve_mtga_data_dir)
             bot_logger.log_info("UI start: game.start() begin")
             self.game.start()
@@ -4779,6 +4814,17 @@ class MTGBotUI(tk.Tk):
             self._controller = controller
             enabled = self.config_manager.get_auto_concede_stalled_matches()
             controller.set_auto_concede_stalled_matches(enabled)
+            _apply_forge_engine(controller, self.config_manager)
+
+    def _set_forge_engine_enabled(self, enabled: bool) -> bool:
+        """Persist and apply "Enable Forge Engine" as one operation."""
+        with self._controller_lock:
+            self.config_manager.set_forge_engine_enabled(enabled)
+            persisted = bool(self.config_manager.get_forge_engine_enabled())
+            controller = self._controller
+            if controller is not None or not persisted:
+                _apply_forge_engine(controller, self.config_manager)
+            return persisted
 
     def _set_auto_concede_stalled_matches(self, enabled: bool) -> bool:
         """Persist and apply the live recovery setting as one operation."""
@@ -6070,6 +6116,20 @@ class BotBehaviorWindow(tk.Toplevel):
     the current match, whether or not account switching is configured.
     """
 
+    # Same look as Manage Accounts: the fire background, translucent boxes with
+    # an orange rim, drawn checkboxes and the red button skin. Fixed layout in
+    # canvas pixels, as there.
+    _WIDTH = 460
+    _HEIGHT = 420
+    _THEME = {
+        "bg": "#0F1115",
+        "text": "#E7EAF0",
+        "text_muted": "#C9B8A8",
+        "status": "#FFC266",
+        "entry_bg": "#3D130E",
+        "widget_border": "#3A4A63",
+    }
+
     def __init__(self, parent: SettingsWindow, config_manager: ConfigManager,
                  spawn_xy: tuple[int, int] | None = None, on_close=None):
         super().__init__(parent)
@@ -6077,8 +6137,9 @@ class BotBehaviorWindow(tk.Toplevel):
         self._config_manager = config_manager
         self._on_close_callback = on_close
         self._ui_scale = _get_ui_scale_from_widget(parent)
+        self._theme = dict(self._THEME)
         self.title("Bot Behavior")
-        width, height = self._s(520), self._s(400)
+        width, height = self._WIDTH, self._HEIGHT
         parent.update_idletasks()
         if spawn_xy is not None:
             x, y = int(spawn_xy[0]), int(spawn_xy[1])
@@ -6088,37 +6149,198 @@ class BotBehaviorWindow(tk.Toplevel):
         y = min(max(0, y), max(0, self.winfo_screenheight() - height))
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
-        self.configure(bg="#0F1115")
+        self.configure(bg=self._theme["bg"])
         _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
 
         self._enabled = tk.BooleanVar(
             value=bool(self._config_manager.get_auto_concede_stalled_matches())
         )
-        panel = tk.Frame(self, bg="#121923", highlightbackground="#4B628A", highlightthickness=1)
-        panel.pack(fill=tk.BOTH, expand=True, padx=self._s(22), pady=self._s(22))
-        tk.Label(
-            panel, text="Match recovery", bg="#121923", fg="#E7EAF0",
-            font=("Segoe UI", max(11, self._s(13)), "bold"), anchor="w",
-        ).pack(fill=tk.X, padx=self._s(18), pady=(self._s(18), self._s(8)))
-        toggle = tk.Checkbutton(
-            panel, text="Auto-concede stalled matches", variable=self._enabled,
-            command=self._apply_auto_concede_setting, bg="#121923", fg="#E7EAF0",
-            activebackground="#121923", activeforeground="#E7EAF0",
-            selectcolor="#3D130E", font=("Segoe UI", max(9, self._s(10)), "bold"),
-            anchor="w", padx=0, justify=tk.LEFT, wraplength=self._s(400),
+        self._forge_enabled = tk.BooleanVar(
+            value=bool(self._config_manager.get_forge_engine_enabled())
         )
-        toggle.pack(fill=tk.X, padx=self._s(18), pady=(0, self._s(4)))
-        tk.Label(
-            panel,
-            text="Concede when Arena waits 30 seconds for bot input without game progress. Changes apply immediately.",
-            justify=tk.LEFT, wraplength=self._s(390), bg="#121923", fg="#9AA3B2",
-            font=("Segoe UI", max(8, self._s(9))), anchor="w",
-        ).pack(fill=tk.X, padx=self._s(42), pady=(0, self._s(14)))
-        tk.Button(
-            panel, text="Back", command=self.destroy, bg="#1B2230", fg="#F2F6FF",
-            activebackground="#253041", activeforeground="#FFFFFF", relief=tk.FLAT,
-            font=("Segoe UI", max(9, self._s(10)), "bold"), cursor="hand2",
-        ).pack(anchor="e", padx=self._s(18), pady=(0, self._s(16)))
+        self._forge_busy = False
+        self._bg_source_image = None
+        self._bg_photo = None
+        self._bg_canvas_item = None
+        self._panel_photos = {}
+        self._button_skins = {}
+        self._toggles = {}
+
+        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._canvas.bind("<Configure>", lambda _e: self._refresh_background())
+        self._build_ui()
+        self._load_background_image()
+        for delay in (40, 160, 420):
+            self.after(delay, self._refresh_background)
+
+    # -- look ---------------------------------------------------------------
+
+    def _load_background_image(self) -> None:
+        for bg_path in (_image_path("background"), _image_path("background.png")):
+            if not os.path.exists(bg_path):
+                continue
+            try:
+                with Image.open(bg_path) as image:
+                    self._bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _refresh_background(self) -> None:
+        if self._bg_source_image is None:
+            return
+        try:
+            width = max(2, self._canvas.winfo_width())
+            height = max(2, self._canvas.winfo_height())
+            fitted = ImageOps.fit(
+                self._bg_source_image, (width, height),
+                method=Image.Resampling.LANCZOS, centering=(0.5, 0.5),
+            )
+            self._bg_photo = ImageTk.PhotoImage(fitted)
+            if self._bg_canvas_item is None:
+                self._bg_canvas_item = self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+            else:
+                self._canvas.itemconfigure(self._bg_canvas_item, image=self._bg_photo)
+            self._canvas.tag_lower(self._bg_canvas_item)
+        except Exception:
+            pass
+
+    def _create_panel(self, x: int, y: int, width: int, height: int) -> None:
+        key = (int(width), int(height))
+        photo = self._panel_photos.get(key)
+        if photo is None:
+            panel = Image.new("RGBA", key, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(panel)
+            draw.rectangle((0, 0, key[0] - 1, key[1] - 1), fill=(50, 10, 2, 210),
+                           outline=(255, 147, 24, 255), width=3)
+            photo = ImageTk.PhotoImage(panel)
+            self._panel_photos[key] = photo
+        self._canvas.create_image(x, y, anchor="nw", image=photo)
+
+    def _create_toggle(self, name: str, y: int, label: str, variable, command) -> None:
+        """A drawn checkbox like the shutdown opt-in in Manage Accounts."""
+        c = self._theme
+        cv = self._canvas
+        box = 14
+        box_item = cv.create_rectangle(30, y, 30 + box, y + box, fill=c["entry_bg"],
+                                       outline=c["widget_border"], width=1)
+        tick_item = cv.create_text(30 + box // 2, y + box // 2 - 1, text="X", fill=c["text"],
+                                   font=("Segoe UI", 10, "bold"), anchor="center")
+        label_item = cv.create_text(54, y - 2, text=label, fill=c["text"],
+                                    font=("Segoe UI", 10, "bold"), anchor="nw")
+        self._toggles[name] = {"var": variable, "tick": tick_item}
+        for item in (box_item, tick_item, label_item):
+            cv.tag_bind(item, "<Button-1>", lambda _e: command())
+            cv.tag_bind(item, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
+            cv.tag_bind(item, "<Leave>", lambda _e: cv.configure(cursor=""))
+        self._refresh_toggle(name)
+
+    def _refresh_toggle(self, name: str) -> None:
+        toggle = getattr(self, "_toggles", {}).get(name)
+        if not toggle:
+            return
+        try:
+            self._canvas.itemconfigure(toggle["tick"], state="normal" if toggle["var"].get() else "hidden")
+        except tk.TclError:
+            pass
+
+    def _create_button(self, name: str, text: str, x: int, y: int, w: int, h: int, command) -> None:
+        cv = self._canvas
+        app = getattr(self._parent, "master", None)
+        render_skin = getattr(app, "_render_button_skin", None)
+        if not callable(render_skin):
+            # No skin renderer: a plain button still works.
+            cv.create_window(x, y, anchor="nw", window=tk.Button(
+                self, text=text, command=command, bg="#6E2A2A", fg="#F2F6FF",
+                activebackground="#873333", relief=tk.FLAT, font=("Segoe UI", 10, "bold"),
+            ))
+            return
+        spec = {
+            "normal": ("#6E2A2A", "#4B1D1D", "#6F3333", "#5E2626"),
+            "hover": ("#873333", "#5A2323", "#884040", "#733030"),
+            "pressed": ("#572121", "#3E1717", "#5A2A2A", "#4A1E1E"),
+        }
+        radius = max(10, int(h * 0.28))
+        skins = {state: render_skin(w, h, radius, *colors) for state, colors in spec.items()}
+        self._button_skins[name] = skins
+        tag = f"bb_btn_{name}"
+        bg_item = cv.create_image(x, y, anchor="nw", image=skins["normal"], tags=(tag,))
+        cv.create_text(x + skins["normal"].width() // 2, y + skins["normal"].height() // 2 - 2,
+                       text=text, fill="#F2F6FF", font=("Segoe UI", 11, "bold"), anchor="center", tags=(tag,))
+        state = {"hover": False, "pressed": False}
+
+        def show():
+            key = "pressed" if state["pressed"] else "hover" if state["hover"] else "normal"
+            cv.itemconfigure(bg_item, image=skins[key])
+
+        def enter(_e):
+            state["hover"] = True
+            cv.configure(cursor="hand2")
+            show()
+
+        def leave(_e):
+            state["hover"] = state["pressed"] = False
+            cv.configure(cursor="")
+            show()
+
+        def press(_e):
+            state["pressed"] = True
+            show()
+
+        def release(_e):
+            fire = state["pressed"] and state["hover"]
+            state["pressed"] = False
+            show()
+            if fire:
+                command()
+
+        cv.tag_bind(tag, "<Enter>", enter)
+        cv.tag_bind(tag, "<Leave>", leave)
+        cv.tag_bind(tag, "<ButtonPress-1>", press)
+        cv.tag_bind(tag, "<ButtonRelease-1>", release)
+
+    def _build_ui(self) -> None:
+        c = self._theme
+        cv = self._canvas
+        text_width = 380
+
+        self._create_panel(16, 20, 428, 128)
+        cv.create_text(28, 30, text="Match recovery", fill=c["text"],
+                       font=("Segoe UI", 13, "bold"), anchor="nw")
+        self._create_toggle("concede", 66, "Auto-concede stalled matches", self._enabled,
+                            self._toggle_auto_concede)
+        cv.create_text(54, 88, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+                       text="Concede when Arena waits 30 seconds for bot input without game "
+                            "progress. Changes apply immediately.")
+
+        self._create_panel(16, 162, 428, 178)
+        cv.create_text(28, 172, text="Decision engine", fill=c["text"],
+                       font=("Segoe UI", 13, "bold"), anchor="nw")
+        self._create_toggle("forge", 208, "Enable Forge Engine (experimental)", self._forge_enabled,
+                            self._toggle_forge)
+        cv.create_text(54, 230, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+                       text="Forge's rules engine and AI choose lands, spells, abilities, attacks, "
+                            "blocks, targets and scry. Where Forge has no answer the bot decides as "
+                            "before. Needs a one-time download (Windows) and about 2 GB of RAM.")
+        self._forge_status_item = cv.create_text(
+            54, 304, width=text_width, fill=c["status"], font=("Segoe UI", 9, "bold"), anchor="nw",
+            text=self._forge_status_text(),
+        )
+
+        self._create_button("back", "Back", 324, 358, 120, 40, self.destroy)
+
+    def _toggle_auto_concede(self) -> None:
+        self._enabled.set(not self._enabled.get())
+        self._apply_auto_concede_setting()
+        self._refresh_toggle("concede")
+
+    def _toggle_forge(self) -> None:
+        if self._forge_busy:
+            return
+        self._forge_enabled.set(not self._forge_enabled.get())
+        self._apply_forge_setting()
+        self._refresh_toggle("forge")
 
     def _s(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
@@ -6134,6 +6356,91 @@ class BotBehaviorWindow(tk.Toplevel):
             enabled = bool(self._config_manager.get_auto_concede_stalled_matches())
         # Read back before presenting the state as applied in case saving failed.
         self._enabled.set(enabled)
+
+    @staticmethod
+    def _forge_status_text() -> str:
+        from ForgeEngine import paths
+
+        if paths.installed():
+            ready, starting = ForgeEngine.bridge_progress()
+            if ready:
+                return "Engine installed and running."
+            if starting:
+                return "Engine installed, starting (about 10 seconds)..."
+            return "Engine installed."
+        return "Engine not installed yet; ticking the box downloads it."
+
+    def _set_forge_status(self, text: str) -> None:
+        try:
+            self._canvas.itemconfigure(self._forge_status_item, text=text)
+        except tk.TclError:
+            pass
+
+    def _store_forge_setting(self, enabled: bool) -> bool:
+        app = getattr(self._parent, "master", None)
+        setter = getattr(app, "_set_forge_engine_enabled", None)
+        if callable(setter):
+            return bool(setter(enabled))
+        self._config_manager.set_forge_engine_enabled(enabled)
+        return bool(self._config_manager.get_forge_engine_enabled())
+
+    def _apply_forge_setting(self) -> None:
+        from ForgeEngine import installer, paths
+
+        if self._forge_busy:
+            return
+        wanted = bool(self._forge_enabled.get())
+        if not wanted or paths.installed():
+            self._forge_enabled.set(self._store_forge_setting(wanted))
+            self._set_forge_status(self._forge_status_text())
+            return
+        # Ticked, but nothing to run yet: offer the download first.
+        self._forge_enabled.set(False)
+        if not installer.supported_platform():
+            messagebox.showinfo(
+                "Forge Engine",
+                "The Forge engine package is only built for Windows so far.",
+                parent=self,
+            )
+            return
+        size = f"about {installer.PACKAGE_SIZE_MB} MB" if installer.PACKAGE_SIZE_MB else "a large file"
+        if not messagebox.askyesno(
+            "Forge Engine",
+            "The Forge engine is not installed yet.\n\n"
+            f"Download it now ({size}: a Java runtime, the Forge rules engine and its card "
+            "scripts)? It is stored in the bot's runtime folder and kept across updates.\n\n"
+            "Forge is open source (GPL-3.0): github.com/Card-Forge/forge",
+            parent=self,
+        ):
+            return
+        self._forge_busy = True
+
+        def progress(text: str, _fraction: float) -> None:
+            self.after(0, lambda: self._set_forge_status(text))
+
+        def work() -> None:
+            error = None
+            try:
+                installer.install(progress)
+            except Exception as exc:
+                error = str(exc)
+            self.after(0, lambda: self._forge_install_done(error))
+
+        threading.Thread(target=work, name="forge-install", daemon=True).start()
+
+    def _forge_install_done(self, error: str | None) -> None:
+        self._forge_busy = False
+        if not self.winfo_exists():
+            return
+        if error:
+            self._forge_enabled.set(False)
+            self._refresh_toggle("forge")
+            self._set_forge_status(f"Download failed: {error}")
+            messagebox.showerror("Forge Engine", f"The Forge engine could not be installed:\n{error}", parent=self)
+            return
+        self._forge_enabled.set(self._store_forge_setting(True))
+        self._refresh_toggle("forge")
+        self._set_forge_status(self._forge_status_text())
 
     def destroy(self):
         callback = self._on_close_callback
@@ -8065,7 +8372,11 @@ class RecordsWindow(tk.Toplevel):
 
 def main():
     app = MTGBotUI()
-    app.mainloop()
+    try:
+        app.mainloop()
+    finally:
+        # The advisor would also exit on its own once its stdin closes.
+        ForgeEngine.shutdown()
 
 
 if __name__ == "__main__":

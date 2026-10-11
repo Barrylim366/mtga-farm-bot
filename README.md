@@ -112,7 +112,13 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.6.3`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.7.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+
+### Version 1.7.0
+
+- New, opt-in: **Forge Engine (experimental)** under Settings → Bot Behavior. With it ticked, the open-source Forge rules engine and AI choose lands, spells, abilities, attacks, blocks, targets and scry, and the bot carries them out; where Forge has no answer the bot decides as before. A one-time download of about 85 MB (Windows). See *Forge Engine (experimental)* under Configuration.
+- The Bot Behavior window now has the same look as Manage Accounts.
+- The bot is now licensed under the GPL-3.0 (see *License*).
 
 ### Version 1.6.3
 
@@ -432,6 +438,69 @@ Both decisions are also written to `runtime/logs/bot.log` as `COMBAT_SHADOW` lin
 
 Scroll **Mouse Wheel down** at any time to stop the bot immediately.
 
+### Forge Engine (experimental)
+
+**Settings → Bot Behavior → "Enable Forge Engine (experimental)"** hands the
+choice of plays to [Forge](https://github.com/Card-Forge/forge), the open-source
+MTG rules engine and AI. Off by default.
+
+At each decision, the current Arena position is rebuilt inside Forge and Forge's
+AI is asked what it would do. The bot then carries that out with its own clicks.
+Forge decides:
+
+- **Main phase:** which land to play, which spell to cast, which ability of a
+  permanent to use. Forge can only choose from the actions Arena is offering.
+  A card is cast only if the bot's own rules agree that it can pay for it and
+  click through its prompts.
+- **Instant speed:** instants, flash cards and abilities in the opponent's turn
+  and in combat, while the stack is empty.
+- **Attacks:** which creatures attack. Forge's pick, "everything" and "nobody"
+  are each played through the opponent's next turn, and the best result wins.
+- **Blocks:** Forge's blocks, plus damage control. If an attack would take
+  more than 35% of our life, cheap creatures are put in front of it.
+- **Targets:** for the abilities and the artifact or enchantment spells Forge
+  chose.
+- **Scry and surveil:** which cards stay on top. The others are dragged away
+  before Done.
+
+The mulligan, and everything Forge has no answer for, stays with the bot exactly
+as before. That includes the time while the engine is still starting (about 10
+to 20 seconds), a timeout (4 s per decision), a crash, or a choice the bot
+cannot carry out. With the box unticked, none of this code runs.
+
+Ticking the box the first time downloads the engine, about 85 MB, Windows only,
+into `runtime/forge/`. The package holds a trimmed Java 17 runtime, Forge's
+jars and card scripts, and the compiled advisor. The download is checked
+against a pinned SHA-256 and survives bot updates. The engine needs about 2 GB
+of RAM.
+
+Every decision is logged in `bot.log` as a `FORGE …` line and in full in
+`runtime/forge/run/decisions.jsonl`. The Java side's own log is
+`runtime/forge/run/advisor.log`.
+
+Finer switches for testing, as environment variables (the first value is the
+default):
+
+| Variable | Values |
+| --- | --- |
+| `MTGA_FORGE` | `on`, `shadow` (log Forge's choice, play the bot's), `off` |
+| `MTGA_FORGE_ATTACK` | `select`, `shadow` (always attack with everything) |
+| `MTGA_FORGE_BLOCKS` / `_INSTANTS` / `_ABILITIES` / `_LANDS` | `on`, `off` |
+| `MTGA_FORGE_MITIGATE` | `35` (percent of life), `off` |
+| `MTGA_FORGE_TARGETS` | `abilities`, `all`, `off` |
+| `MTGA_FORGE_SCRY` | `on`, `advise` (log only), `off` |
+| `MTGA_FORGE_TIMEOUT` | `4` (seconds per decision) |
+| `MTGA_FORGE_HOME` | another engine folder (a local build) |
+
+**Building the package** (maintainers): `python tools/build_forge_package.py
+--jdk <JDK 17> --maven <Maven 3.9> --pin`. It builds Forge from source at a
+pinned commit, compiles `forge_advisor/`, cuts a runtime with jlink, zips it,
+and writes the checksum into `ForgeEngine/installer.py`. The zip is published as
+the GitHub release asset `forge-engine-v<N>`.
+
+The advisor (`forge_advisor/`) is adapted from
+[mtga-play-bot](https://github.com/Funny-Bones/mtga-play-bot).
+
 ## Architecture
 
 The codebase is split into clearly separated layers:
@@ -446,6 +515,9 @@ ui.py / run_bot.py          ← Entry points (UI or CLI)
    ┌────┴────┐
    ▼         ▼
 Controller   DummyAI        ← AI decides what to play (generate_move / generate_keep)
+   │         (ForgeAI)      ← optional: asks Forge first (ForgeEngine/, a Java
+   │                          process over stdin/stdout); controller.decision_hooks
+   │                          lets it choose attackers, blocks, targets, scry
    │
    ├── LogReader            ← Reads Player.log continuously, parses GRE messages
    ├── state_machine        ← Tracks bot state: HOME / IN_GAME / PLAY_MENU / ...
@@ -643,6 +715,11 @@ Account switches and bot restarts clear carried selections. Repeat audits retain
 previously established deck evidence after log rotation when the game is unchanged.
 Use `--matches-csv <path>` for another destination; `--no-csv` disables both CSVs.
 Invalid saved Gold values are skipped so they do not prevent the audit report.
+
+## License
+
+GNU General Public License v3.0, see [LICENSE](LICENSE). Forge and the advisor
+built on it are GPL-3.0 too.
 
 ## See also on
 
