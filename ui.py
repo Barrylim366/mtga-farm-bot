@@ -10,6 +10,7 @@ import time
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
 import json
 import threading
+import overlay
 import runtime_status
 import shutdown_scheduler
 import update_checker
@@ -1575,6 +1576,8 @@ class ConfigManager:
             # Opt-in: Forge's rules engine and AI choose the plays (ForgeEngine/).
             # Off by default -- it needs a ~100 MB download and 2 GB of RAM.
             "forge_engine_enabled": False,
+            # How much of the game shows through the game overlay's background, in %.
+            "game_overlay_bg_transparency": 25,
             # Estimated gold credited per match won in the "Current Session"
             # per-account gold list (the real reward is not in the log). 0 = only
             # count completed-quest gold, no per-win estimate.
@@ -1821,6 +1824,24 @@ class ConfigManager:
 
     def set_auto_concede_stalled_matches(self, enabled: bool) -> None:
         self.config["auto_concede_stalled_matches"] = bool(enabled)
+        self._save_config()
+
+    def get_game_overlay_bg_transparency(self) -> int:
+        """Percent (0-100) of the game that shows through the overlay's background."""
+        try:
+            return max(0, min(100, int(self.config.get("game_overlay_bg_transparency", 25))))
+        except (TypeError, ValueError):
+            return 25
+
+    def set_game_overlay_bg_transparency(self, percent: int) -> None:
+        try:
+            value = int(percent)
+        except (TypeError, ValueError):
+            return
+        value = max(0, min(100, value))
+        if self.config.get("game_overlay_bg_transparency") == value:
+            return
+        self.config["game_overlay_bg_transparency"] = value
         self._save_config()
 
     def get_forge_engine_enabled(self) -> bool:
@@ -2227,6 +2248,11 @@ class MTGBotUI(tk.Tk):
         self.ui_settings_window = None
         self.current_session_window = None
         self._controller = None
+        self._game_overlay = None
+        # Settings -> Game Overlay is open: show the panel even while stopped.
+        self._overlay_preview_open = False
+        # (read_at, current, next) for the overlay's account lines.
+        self._overlay_accounts: tuple[float, str, str] | None = None
         self._switch_eta_text = self._get_configured_switch_eta_text()
 
         self.ui_theme = self._build_ui_theme()
@@ -2241,6 +2267,7 @@ class MTGBotUI(tk.Tk):
         self._setup_ui()
         self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
         self._setup_stop_hotkey()
+        self._setup_game_overlay()
         self.after(1500, self._start_update_check)
 
     def _start_update_check(self) -> None:
@@ -2463,8 +2490,6 @@ class MTGBotUI(tk.Tk):
         x = int(self.winfo_x())
         y = int(self.winfo_y())
         self._ui_scale = self._compute_ui_scale()
-        # Scale-dependent cached font must not survive a scale change.
-        self._fit_quest_font = None
         width, height = self._main_window_size()
         self.geometry(f"{width}x{height}+{x}+{y}")
 
@@ -2601,13 +2626,15 @@ class MTGBotUI(tk.Tk):
             int(c1[2] + (c2[2] - c1[2]) * t),
         )
 
-    def _render_title_image(self, text: str):
+    def _render_title_image(self, text: str, font_px: int | None = None):
         """Render the main title as a single image with a warm 'molten gold'
         vertical gradient, a warm emboss shadow and a soft ember glow
         (design proposal #4). Returns an ImageTk.PhotoImage, or None on failure
-        (callers fall back to plain canvas text)."""
+        (callers fall back to plain canvas text). font_px renders the same look
+        at another size (the "Daily Quests" heading, the startup-phase line)."""
         try:
-            font_px = max(28, self._scale_value(41))
+            if font_px is None:
+                font_px = max(28, self._scale_value(41))
             font = None
             # Prefer a native bold sans-serif on each supported platform. Bare
             # font names are included as a final option for systems where
@@ -2649,6 +2676,32 @@ class MTGBotUI(tk.Tk):
             # Glyph mask.
             mask = Image.new("L", size, 0)
             ImageDraw.Draw(mask).text((ox, oy), text, font=font, fill=255)
+            return self._gold_photo_from_mask(mask, pad, th, font_px)
+        except Exception:
+            return None
+
+    def _render_gold_symbol(self, shape: str, size_px: int):
+        """A play triangle ("play") or a square ("stop") in the title's
+        molten-gold look. None on failure (callers then show no symbol)."""
+        try:
+            pad = max(6, int(size_px * 0.42))
+            side = int(size_px)
+            mask = Image.new("L", (side + pad * 2, side + pad * 2), 0)
+            draw = ImageDraw.Draw(mask)
+            if shape == "play":
+                draw.polygon([(pad, pad), (pad + side, pad + side // 2), (pad, pad + side)], fill=255)
+            else:
+                inset = max(1, side // 8)
+                draw.rectangle((pad + inset, pad + inset, pad + side - inset, pad + side - inset), fill=255)
+            return self._gold_photo_from_mask(mask, pad, side, size_px)
+        except Exception:
+            return None
+
+    def _gold_photo_from_mask(self, mask, pad: int, th: int, font_px: int):
+        """Molten-gold gradient, warm emboss shadow and ember glow over a mask
+        (white = ink). th is the ink height the gradient spans."""
+        try:
+            size = mask.size
 
             # Vertical molten-gold gradient (light champagne -> copper), matching
             # proposal #4: #fff4d3 -> #ffd889 -> #f4a83c -> #c9761d.
@@ -2692,12 +2745,60 @@ class MTGBotUI(tk.Tk):
             out = Image.alpha_composite(out, glow)
             out = Image.alpha_composite(out, shadow)
             out = Image.alpha_composite(out, grad)
-            bbox = out.getbbox()
-            if bbox:
-                out = out.crop(bbox)
-            return ImageTk.PhotoImage(out)
+            bbox = out.getbbox() or (0, 0, size[0], size[1])
+            out = out.crop(bbox)
+            photo = ImageTk.PhotoImage(out)
+            ink = mask.getbbox() or bbox
+            # Ink extent in the cropped image's coordinates.
+            photo.ink_box = (ink[0] - bbox[0], ink[1] - bbox[1], ink[2] - bbox[0], ink[3] - bbox[1])
+            return photo
         except Exception:
             return None
+
+    def _gold_text_photo(self, text: str, font_px: int):
+        """Title-look image for a short line, cached: the startup-phase line is
+        relabelled up to four times a second with the same handful of texts."""
+        cache = self.__dict__.setdefault("_gold_text_cache", {})
+        key = (text, int(font_px))
+        if key not in cache:
+            if len(cache) > 48:
+                cache.clear()
+            cache[key] = self._render_title_image(text, font_px=font_px)
+        return cache[key]
+
+    def _create_gold_text(self, text: str, font_px: int, fallback_font) -> int:
+        """Canvas item showing text in the title's molten-gold look, or plain
+        accent-colored text where that cannot be rendered."""
+        photo = self._gold_text_photo(text, font_px)
+        if photo is not None:
+            item = self._card_canvas.create_image(0, 0, image=photo, anchor="n")
+            self.__dict__.setdefault("_gold_text_heights", {})[item] = photo.height()
+            # The item's own reference: the cache may evict the photo, and Tk
+            # blanks an image whose last Python reference is gone.
+            self.__dict__.setdefault("_gold_text_photos", {})[item] = photo
+            return item
+        return self._card_canvas.create_text(
+            0, 0, text=text, fill="#ffb841", font=fallback_font, anchor="n",
+        )
+
+    def _set_gold_text(self, item: int, text: str, font_px: int) -> None:
+        if self._card_canvas.type(item) == "image":
+            photo = self._gold_text_photo(text, font_px)
+            if photo is not None:
+                self._card_canvas.itemconfigure(item, image=photo)
+                self.__dict__.setdefault("_gold_text_photos", {})[item] = photo
+                heights = self.__dict__.setdefault("_gold_text_heights", {})
+                changed = heights.get(item) != photo.height()
+                heights[item] = photo.height()
+                if changed:
+                    # Glyphs with descenders make a taller image; re-space the
+                    # bar below it rather than let the two overlap.
+                    self._refresh_card_layout()
+            return
+        self._card_canvas.itemconfigure(item, text=text)
+
+    def _gold_text_height(self, item: int, fallback_h: int) -> int:
+        return int(getattr(self, "_gold_text_heights", {}).get(item, fallback_h))
 
     def _render_button_skin(
         self,
@@ -2790,7 +2891,7 @@ class MTGBotUI(tk.Tk):
     def _render_panel_skin(self, width: int, height: int, radius: int) -> ImageTk.PhotoImage:
         """Same material as the menu buttons (dark #3D130E body + sheen + soft
         drop shadow) but WITHOUT the colored rim/glow. Used as the container
-        field behind the status / queue / account-switch lines. Cached by size."""
+        field behind the status line and its symbol. Cached by size."""
         width = max(1, int(width))
         height = max(1, int(height))
         radius = max(2, int(radius))
@@ -2998,6 +3099,11 @@ class MTGBotUI(tk.Tk):
 
         self._card_canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
         self._card_canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _set_canvas_menu_button_text(self, name: str, text: str) -> None:
+        btn = self._menu_buttons.get(name)
+        if btn:
+            self._card_canvas.itemconfigure(btn["text_item"], text=text)
 
     def _set_canvas_menu_button_enabled(self, name: str, enabled: bool) -> None:
         btn = self._menu_buttons.get(name)
@@ -3225,17 +3331,12 @@ class MTGBotUI(tk.Tk):
         self._create_canvas_menu_button("account_switch", "Account Switch", "Secondary.TButton", self._toggle_account_switch, enabled=True)
         self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
-        self._loading_text_item = self._card_canvas.create_text(
-            0,
-            0,
-            # Placeholder only: _set_startup_loading relabels this per phase.
-            text="Loading card data",
-            # Same accent as the "Daily Quests" heading: this line explains what the
-            # bot is doing right now, so it should read as active status, not as the
-            # muted grey used for secondary text.
-            fill="#ffb841",
-            font=self.ui_theme["font"]["body"],
-            anchor="n",
+        # Says what the bot is doing right now, in the title's molten-gold look
+        # (like the "Daily Quests" heading). Placeholder text only:
+        # _set_startup_loading relabels it per phase.
+        self._loading_text_px = max(14, self._scale_value(18))
+        self._loading_text_item = self._create_gold_text(
+            "Loading card data", self._loading_text_px, self.ui_theme["font"]["body"],
         )
         self.loading_bar = ttk.Progressbar(
             self._card_canvas,
@@ -3245,89 +3346,45 @@ class MTGBotUI(tk.Tk):
         self._loading_bar_window = self._card_canvas.create_window(0, 0, anchor="n", window=self.loading_bar)
         self._loading_visible = False
 
-        # Container field behind the three gold lines (status / queue / account
-        # switch). Uses the same body material as the menu buttons but without a
-        # colored rim, so the warm text reads clearly on the fiery background.
-        # Sized/placed in _refresh_card_layout via _render_panel_skin.
+        self._info_font = ("Segoe UI", max(9, self._scale_value(11)))
+        self._info_font_sm = ("Segoe UI", max(8, self._scale_value(10)))
+
+        # Container field behind the status line and its symbol: the same body
+        # material as the menu buttons without a colored rim, so the gold reads
+        # clearly on the fiery background. Sized/placed in _refresh_card_layout.
         self._status_field_item = self._card_canvas.create_image(
             0, 0, anchor="nw", state="hidden",
         )
         self._status_field_skin_cache = None
 
-        # All status-panel lines are info-only, left-aligned (anchor "nw") and
-        # non-bold. Hierarchy comes from the UPPERCASE label + normal value, not
-        # weight. _info_font is the shared size for the main lines.
-        self._info_font = ("Segoe UI", max(9, self._scale_value(11)))
-        self._info_font_sm = ("Segoe UI", max(8, self._scale_value(10)))
-        self._status_text_item = self._card_canvas.create_text(
-            0,
-            0,
-            text="Status: not running",
-            fill=c["status_stopped_text"],
-            font=self._info_font,
-            anchor="nw",
+        # Bot status below the buttons. Daily quests, queue, account switch and
+        # Current/Next account live on the overlay over the Arena window
+        # (overlay.py); the two toggles show their state in their button labels.
+        # In the title's molten-gold look, with a play triangle (running) or a
+        # square (stopped) below it.
+        self._status_text_px = max(24, self._scale_value(33))
+        self._status_text_current = "Status: not running"
+        self._status_text_item = self._create_gold_text(
+            self._status_text_current, self._status_text_px, self._info_font,
         )
+        self._status_symbol_px = max(24, self._scale_value(39))
+        self._status_symbol_current = "stop"
+        self._status_symbol_photos = {
+            shape: self._render_gold_symbol(shape, self._status_symbol_px) for shape in ("play", "stop")
+        }
+        self._status_symbol_item = self._card_canvas.create_image(0, 0, anchor="n")
+
+        # The toggles live in the "Change Queue" / "Account Switch" buttons above,
+        # which carry the current value in their label.
         self._queue_mode_var = tk.StringVar(value=self.config_manager.get_game_mode())
-        # Info-only label (the toggle lives in the "Change Queue" button above).
-        self._queue_mode_item = self._card_canvas.create_text(
-            0,
-            0,
-            text="",
-            fill="#ffb841",
-            font=self._info_font,
-            anchor="nw",
-        )
         self._refresh_queue_mode_label()
-
-        # Account quests (up to 3), shown below the queue switch. The one being
-        # pursued (whose colors we play) is highlighted. Data comes from the bot
-        # via runtime_status; see Controller.refresh_quests_cache.
-        # Section title: yellow (shared accent), slightly larger + bold so it reads
-        # as a heading and separates clearly from the quest rows below it.
-        self._quest_title_font = ("Segoe UI", max(10, self._scale_value(12)), "bold")
-        self._quest_title_item = self._card_canvas.create_text(
-            0, 0, text="", fill="#ffb841",
-            font=self._quest_title_font, anchor="n",
-        )
-        self._quest_items = []
-        for _ in range(3):
-            item = self._card_canvas.create_text(
-                0, 0, text="", fill=c["text_muted"],
-                font=self._info_font_sm, anchor="nw",
-            )
-            self._quest_items.append(item)
-        self._quests_poll_signature = None
-        self.after(1500, self._poll_quests_display)
-
-        # Account-switch master on/off. The toggle lives in the "Account Switch"
-        # button above; this is an info-only label (Enabled/Disabled), matching the
-        # Queue line. Independent of the account data and the time/quest thresholds.
         self._account_switch_var = tk.BooleanVar(value=bool(self.config_manager.get_account_switch_enabled()))
-        self._account_switch_info_item = self._card_canvas.create_text(
-            0, 0, text="", fill="#ffb841",
-            font=self._info_font, anchor="nw",
-        )
         self._refresh_account_switch_state()
-
-        # Current / Next account lines, shown just under the Account Switch toggle
-        # while switching is enabled. Text is filled from runtime_status (current
-        # account playing + the account we'll switch into) by _render_quests_from_status.
-        self._current_acc_item = self._card_canvas.create_text(
-            0, 0, text="", fill="#ffb841",
-            font=self._info_font_sm, anchor="nw", state="hidden",
-        )
-        # Click "Current Acc:" to manually declare which account is logged in now
+        # Right-click "Account Switch" to declare which account is logged in now
         # (the log-based auto-detect can't follow manual MTGA account changes).
-        for _evt, _cb in (
-            ("<Button-1>", self._choose_current_account),
-            ("<Enter>", lambda _e: self._card_canvas.configure(cursor="hand2")),
-            ("<Leave>", lambda _e: self._card_canvas.configure(cursor="")),
-        ):
-            self._card_canvas.tag_bind(self._current_acc_item, _evt, _cb)
-        self._next_acc_item = self._card_canvas.create_text(
-            0, 0, text="", fill="#ffb841",
-            font=self._info_font_sm, anchor="nw", state="hidden",
-        )
+        # Aqua Tk reports the right button as Button-2 (Button-3 is the middle one).
+        right_click = "<Button-2>" if sys.platform == "darwin" else "<Button-3>"
+        self._card_canvas.tag_bind("main_btn_account_switch", right_click, self._choose_current_account)
 
         self._main_topmost_var = tk.BooleanVar(value=bool(self.config_manager.get_ui_windows_topmost()))
         self._main_topmost_panel_item = self._card_canvas.create_rectangle(
@@ -3411,24 +3468,17 @@ class MTGBotUI(tk.Tk):
 
         total_h = logo_h + 6 + title_h + sp["lg"]
         total_h += (btn_h * len(menu_buttons)) + (button_gap * max(0, len(menu_buttons) - 1))
+        loading_text_h = self._gold_text_height(self._loading_text_item, body_h)
         if self._loading_visible:
-            total_h += body_h + sp["xs"] + loading_bar_h + sp["md"]
-        total_h += sp["lg"] + body_h
-        total_h += sp["xs"] + body_h
-        quest_font = tkfont.Font(font=getattr(self, "_info_font_sm", ("Segoe UI", max(8, self._scale_value(10)))))
-        quest_h = quest_font.metrics("linespace")
-        # NB: distinct name -- do NOT reuse title_h (that's the main "Burning Lotus"
-        # title's height, used to space the button stack below it).
-        quest_title_font = tkfont.Font(font=getattr(self, "_quest_title_font", quest_font))
-        quest_title_h = quest_title_font.metrics("linespace")
-        # "Daily Quests" heading row (larger/bold) + one row per quest.
-        total_h += (quest_title_h + sp["xs"]) + (quest_h + sp["xs"]) * len(getattr(self, "_quest_items", []))
-        # Reserve space for the Account Switch info line (Enabled/Disabled).
-        if hasattr(self, "_account_switch_info_item"):
-            total_h += body_h + sp["xs"]
-        # Reserve the two Current/Next account lines when switching is enabled.
-        if self._account_lines_visible():
-            total_h += (body_h + sp["xs"]) * 2
+            total_h += loading_text_h + sp["xs"] + loading_bar_h + sp["md"]
+        status_h = self._gold_text_height(self._status_text_item, body_h)
+        symbol_offset, symbol_h = self._status_symbol_placement()
+        # The field hugs the visible letters and symbol, not their glow, so the
+        # space above the text and below the symbol is the same.
+        field_pad = max(8, self._scale_value(16))
+        ink_top, ink_bottom = self._status_ink_extent(status_h, symbol_offset, symbol_h)
+        field_h = (ink_bottom - ink_top) + field_pad * 2
+        total_h += field_h
         max_content_y = (canvas_h - footer_h) - footer_gap - total_h
         # Pull the whole main stack slightly upward (~1 cm) to reduce top logo whitespace.
         top_offset = int(self.winfo_fpixels("10m"))
@@ -3465,118 +3515,44 @@ class MTGBotUI(tk.Tk):
             self._card_canvas.itemconfigure(self._loading_text_item, state="normal")
             self._card_canvas.itemconfigure(self._loading_bar_window, state="normal")
             self._card_canvas.coords(self._loading_text_item, center_x, y)
-            y += body_h + sp["xs"]
+            y += loading_text_h + sp["xs"]
             self._card_canvas.coords(self._loading_bar_window, center_x, y)
             y += loading_bar_h + sp["md"]
         else:
             self._card_canvas.itemconfigure(self._loading_text_item, state="hidden")
             self._card_canvas.itemconfigure(self._loading_bar_window, state="hidden")
 
-        # Left edge for the info labels: inside the status-field panel (body_w=336,
-        # centered on center_x) with a small left padding, so every line starts at
-        # the same x for a clean left-aligned "KEY: value" list.
-        label_x = center_x - (self._scale_value(336) // 2) + self._scale_value(14)
+        # Bot status, centered below the buttons, with its state symbol under it,
+        # both inside the dark field.
+        field_top = y
+        status_y = field_top + field_pad - ink_top
+        self._card_canvas.coords(self._status_text_item, center_x, status_y)
+        self._card_canvas.tag_raise(self._status_text_item)
+        if symbol_h:
+            self._card_canvas.coords(self._status_symbol_item, center_x, status_y + symbol_offset)
+            self._card_canvas.tag_raise(self._status_symbol_item)
+        block_bottom = field_top + field_h
+        glow_pad = 6
+        body_w = self._scale_value(336)
+        photo = self._render_panel_skin(body_w, field_h, self._scale_value(14))
+        self._card_canvas.coords(self._status_field_item, center_x - (body_w // 2) - glow_pad, field_top - glow_pad)
+        self._card_canvas.itemconfigure(self._status_field_item, image=photo, state="normal")
+        # Above the background, below the text and symbol it wraps.
+        self._card_canvas.tag_lower(self._status_field_item, self._status_text_item)
 
-        # Top of the container field that wraps the info lines.
-        status_field_top = y
-        self._card_canvas.coords(self._status_text_item, label_x, y)
-        y += body_h + sp["xs"]
-        self._card_canvas.coords(self._queue_mode_item, label_x, y)
-        self._card_canvas.tag_raise(self._queue_mode_item)
-        y += body_h + sp["xs"]
-        # Account-switch Enabled/Disabled info line, directly below the Queue line.
-        if hasattr(self, "_account_switch_info_item"):
-            self._card_canvas.coords(self._account_switch_info_item, label_x, y)
-            self._card_canvas.tag_raise(self._account_switch_info_item)
-            y += body_h + sp["xs"]
-
-        # Current / Next account lines, inside the panel right under the toggle.
-        # Only take space (and render) while account switching is enabled.
-        if hasattr(self, "_current_acc_item"):
-            if self._account_lines_visible():
-                self._card_canvas.coords(self._current_acc_item, label_x, y)
-                self._card_canvas.itemconfigure(self._current_acc_item, state="normal")
-                self._card_canvas.tag_raise(self._current_acc_item)
-                y += body_h + sp["xs"]
-                self._card_canvas.coords(self._next_acc_item, label_x, y)
-                self._card_canvas.itemconfigure(self._next_acc_item, state="normal")
-                self._card_canvas.tag_raise(self._next_acc_item)
-                y += body_h + sp["xs"]
-            else:
-                self._card_canvas.itemconfigure(self._current_acc_item, state="hidden")
-                self._card_canvas.itemconfigure(self._next_acc_item, state="hidden")
-
-        # Draw the container field behind the three gold lines (status / queue /
-        # account switch). Same body as the buttons, no colored rim; aligned to
-        # the button width so it lines up with the stack above.
-        field_bottom_px = y - sp["xs"]
-        if getattr(self, "_status_field_item", None) is not None:
-            glow_pad = 6
-            pad_t = self._scale_value(9)
-            pad_b = self._scale_value(9)
-            body_w = self._scale_value(336)
-            radius = self._scale_value(14)
-            field_top_px = status_field_top - pad_t
-            field_bottom_px = (y - sp["xs"]) + pad_b  # y is past the last row
-            # Distinct name: `body_h` is the body FONT's line height and is still
-            # needed above; reusing it here for the panel height shadowed it.
-            field_h = max(1, field_bottom_px - field_top_px)
-            photo = self._render_panel_skin(body_w, field_h, radius)
-            img_x = center_x - (body_w // 2) - glow_pad
-            img_y = field_top_px - glow_pad
-            self._card_canvas.coords(self._status_field_item, img_x, img_y)
-            self._card_canvas.itemconfigure(self._status_field_item, image=photo, state="normal")
-            # Above the background, below the gold text/controls it wraps.
-            self._card_canvas.tag_lower(self._status_field_item, self._status_text_item)
-
-        # Height of the "Daily Quests" heading + the quest rows, WITHOUT a trailing
-        # gap after the last row -- that gap is spacing between rows, not part of
-        # the block, and counting it would push the block visually off-centre.
-        quest_rows = getattr(self, "_quest_items", [])
-        quest_block_h = quest_title_h + sp["xs"] + (quest_h + sp["xs"]) * len(quest_rows)
-        quest_block_h = max(0, quest_block_h - sp["xs"])
-
-        # Vertically center the whole block below the Settings button (status field
-        # + quest rows) in the gap between the button stack and the footer. The
-        # quest rows are placed afterwards, in final coordinates, so they are NOT
-        # moved here -- only the status field and everything above it.
-        block_top = status_field_top - self._scale_value(9)  # field's padded top
-        block_bottom = y + quest_block_h                      # where the rows will end
+        # Vertically center the field in the gap between the Settings button
+        # and the footer.
+        block_top = field_top
         settings_bottom = menu_end_y - sp["lg"]
         footer_top = canvas_h - footer_h
         center_offset = ((footer_top + settings_bottom) - (block_bottom + block_top)) // 2
         if center_offset > 0:
             movers = [
                 self._loading_text_item, self._loading_bar_window,
-                self._status_field_item, self._status_text_item, self._queue_mode_item,
+                self._status_field_item, self._status_text_item, self._status_symbol_item,
             ]
-            for attr in ("_account_switch_info_item", "_current_acc_item", "_next_acc_item"):
-                movers.append(getattr(self, attr, None))
             for it in movers:
-                if it is not None:
-                    self._card_canvas.move(it, 0, center_offset)
-            field_bottom_px += center_offset
-
-        # Center the quest block in the gap between the two dark panels: the status
-        # field above and the footer bar below. Placed against the field's real
-        # BOTTOM EDGE (which includes its bottom padding, and so sits below the last
-        # text row) -- deriving it from the text row instead is what let the panel's
-        # padding run over the "Daily Quests" heading.
-        quest_gap_top = field_bottom_px
-        quest_gap_h = footer_top - quest_gap_top
-        # Never let the heading touch either panel, even if the window is too short
-        # to centre anything: the minimum breathing room wins over centring.
-        min_gap = sp["sm"]
-        quest_y = quest_gap_top + max(min_gap, (quest_gap_h - quest_block_h) // 2)
-        if hasattr(self, "_quest_title_item"):
-            # Centered heading (the only centered line); quest rows stay left-aligned.
-            self._card_canvas.coords(self._quest_title_item, center_x, quest_y)
-            self._card_canvas.tag_raise(self._quest_title_item)
-            quest_y += quest_title_h + sp["xs"]
-        for item in quest_rows:
-            self._card_canvas.coords(item, label_x, quest_y)
-            self._card_canvas.tag_raise(item)
-            quest_y += quest_h + sp["xs"]
+                self._card_canvas.move(it, 0, center_offset)
 
         footer_y1 = canvas_h - footer_h
         self._card_canvas.coords(self._main_topmost_panel_item, 0, footer_y1, canvas_w, canvas_h)
@@ -3600,29 +3576,61 @@ class MTGBotUI(tk.Tk):
         self._card_canvas.tag_raise(self._main_topmost_tick_item)
         self._card_canvas.tag_raise(self._main_topmost_label_item)
 
+    def _status_ink_extent(self, status_h: int, symbol_offset: int, symbol_h: int) -> tuple[int, int]:
+        """Top of the status text's letters and bottom of the symbol, relative
+        to the top of the status text item. Falls back to the image bounds."""
+        top, bottom = 0, max(status_h, symbol_offset + symbol_h)
+        text = self._gold_text_photo(self._status_text_current, self._status_text_px)
+        if text is not None and getattr(text, "ink_box", None):
+            top = text.ink_box[1]
+            bottom = text.ink_box[3]
+        symbol = self._status_symbol_photos.get(self._status_symbol_current)
+        if symbol is not None and getattr(symbol, "ink_box", None) and symbol_h:
+            bottom = max(bottom, symbol_offset + symbol.ink_box[3])
+        return top, bottom
+
+    def _status_symbol_placement(self) -> tuple[int, int]:
+        """(top of the symbol relative to the top of the status text, symbol
+        height). Spaced by the visible letters, not by the glow around them:
+        the symbol's top sits 0.35 x the text size below the text's lowest ink
+        (the descenders of "Stopped"/"Running"), which puts it ~25 % closer to
+        the text than the first version did."""
+        symbol = self._status_symbol_photos.get(self._status_symbol_current)
+        if symbol is None:
+            return 0, 0
+        text = self._gold_text_photo(self._status_text_current, self._status_text_px)
+        text_ink_bottom = text.ink_box[3] if text is not None else 0
+        ink_gap = int(round(self._status_text_px * 0.35))
+        return text_ink_bottom + ink_gap - symbol.ink_box[1], symbol.height()
+
+    def _set_status(self, text: str, *, running: bool) -> None:
+        """Status line text plus its symbol: play while running, square otherwise."""
+        try:
+            self._status_text_current = text
+            self._status_symbol_current = "play" if running else "stop"
+            self._set_gold_text(self._status_text_item, text, self._status_text_px)
+            photo = self._status_symbol_photos.get(self._status_symbol_current)
+            self._card_canvas.itemconfigure(
+                self._status_symbol_item, image=photo if photo is not None else "",
+            )
+            # The symbol is placed from the text's and symbol's ink.
+            self._refresh_card_layout()
+        except Exception:
+            pass
+
     def _set_running_state(self, running: bool):
-        c = self.ui_theme["colors"]
         if running:
             self._set_canvas_menu_button_enabled("start", False)
             self._set_canvas_menu_button_enabled("stop", True)
             # Queue can't change mid-run (would desync navigation).
             self._set_canvas_menu_button_enabled("change_queue", False)
-            self._card_canvas.itemconfigure(
-                self._status_text_item,
-                text="Status: Running",
-                fill=c["pill_running_text"],
-            )
+            self._set_status("Status: Running", running=True)
             return
 
         self._set_canvas_menu_button_enabled("start", True)
         self._set_canvas_menu_button_enabled("stop", False)
         self._set_canvas_menu_button_enabled("change_queue", True)
-        status_text = "Status: Stopped"
-        self._card_canvas.itemconfigure(
-            self._status_text_item,
-            text=status_text,
-            fill=c["status_stopped_text"],
-        )
+        self._set_status("Status: Stopped", running=False)
         self._switch_eta_text = self._get_configured_switch_eta_text()
 
     def _configured_switch_disabled(self) -> bool:
@@ -3721,7 +3729,7 @@ class MTGBotUI(tk.Tk):
             return
         if text is not None:
             try:
-                self._card_canvas.itemconfigure(self._loading_text_item, text=text)
+                self._set_gold_text(self._loading_text_item, text, self._loading_text_px)
             except Exception:
                 pass
         if loading:
@@ -3742,14 +3750,15 @@ class MTGBotUI(tk.Tk):
     # runtime_status.set_startup_phase); these are the UI-side ones.
     _STARTUP_TEXT_SETUP = "Checking Arena setup"
     _STARTUP_TEXT_CARDS = "Loading card data"
-    _STARTUP_TEXT_ARENA = "Preparing Arena"
 
     # Modes that mean the bot is past startup and actually working, i.e. the bar
     # has nothing left to report. "queueing" is deliberately NOT in here: the
     # controller sets it the moment the queue thread spawns, before any of the
-    # slow navigation has happened.
+    # slow navigation has happened. Neither is "ready": that is what the
+    # Controller constructor sets as it finishes -- the very start of startup,
+    # and exactly when the poll begins -- so it hid the bar instantly.
     _STARTUP_DONE_MODES = frozenset(
-        {"in_game", "ready", "post_match", "match_end", "account_switch", "stopped"}
+        {"in_game", "post_match", "match_end", "account_switch", "stopped"}
     )
 
     # Click tags that mean "the bot just pressed Play", i.e. the queue has been
@@ -3775,7 +3784,9 @@ class MTGBotUI(tk.Tk):
     # unrecognised screens), but if we are still not in a match after this long
     # something is wrong and a spinner would only misinform -- the status field
     # and bot.log are the honest sources then.
-    _STARTUP_PHASE_TIMEOUT_SEC = 180.0
+    # Counted from just after the Controller is built, so it also covers the
+    # card refresh and the quest read (up to 30 s) that run before navigation.
+    _STARTUP_PHASE_TIMEOUT_SEC = 240.0
 
     def _start_poll_startup_phase(self) -> None:
         """Drive the bar's label from status.json until the bot is really up."""
@@ -3812,7 +3823,7 @@ class MTGBotUI(tk.Tk):
         phase = str(status.get("startup_phase") or "").strip()
         if phase:
             try:
-                self._card_canvas.itemconfigure(self._loading_text_item, text=phase)
+                self._set_gold_text(self._loading_text_item, phase, self._loading_text_px)
             except Exception:
                 pass
         # Primary signal: the bot has pressed Play, i.e. the whole startup
@@ -3845,41 +3856,15 @@ class MTGBotUI(tk.Tk):
             return
         self._startup_phase_job = self.after(250, self._poll_startup_phase)
 
-    def _refresh_queue_mode_label(self) -> None:
+    def _queue_mode_label(self) -> str:
         mode = str(self._queue_mode_var.get() or "historic").lower()
-        label = "Starter Deck" if mode == "starter" else "Historic"
+        return "Starter Deck" if mode == "starter" else "Historic"
+
+    def _refresh_queue_mode_label(self) -> None:
         try:
-            self._card_canvas.itemconfigure(
-                self._queue_mode_item,
-                text=f"Queue: {label}",
-            )
+            self._set_canvas_menu_button_text("change_queue", f"Queue: {self._queue_mode_label()}")
         except Exception:
             pass
-
-    def _fit_quest_text(self, text: str) -> str:
-        """Truncate a left-aligned quest row with an ellipsis so it never spills
-        past the window's right edge (quest names can be longer than the panel)."""
-        try:
-            canvas_w = self._card_canvas.winfo_width()
-            if canvas_w <= 1:
-                return text
-            label_x = (canvas_w // 2) - (self._scale_value(336) // 2) + self._scale_value(14)
-            max_px = max(40, canvas_w - label_x - self._scale_value(10))
-            # Cached: this runs per quest row on every redraw, and building a
-            # tkfont.Font each time is a round trip into Tk for no gain. Dropped
-            # whenever the UI scale changes (see apply_ui_scale_live).
-            font = getattr(self, "_fit_quest_font", None)
-            if font is None:
-                font = tkfont.Font(font=getattr(self, "_info_font_sm", ("Segoe UI", 10)))
-                self._fit_quest_font = font
-            if font.measure(text) <= max_px:
-                return text
-            ell = "…"
-            while text and font.measure(text + ell) > max_px:
-                text = text[:-1]
-            return (text + ell) if text else ell
-        except Exception:
-            return text
 
     def _account_lines_visible(self) -> bool:
         """Whether the Current/Next account lines should occupy space + render.
@@ -4023,9 +4008,9 @@ class MTGBotUI(tk.Tk):
                     value = ""
                 self._current_acc_log_cache = (time.time(), value)
                 self._current_acc_scan_busy = False
-                # A newly resolved name must reach the canvas without waiting for
-                # the value to change again (the poll dedupes on its signature).
-                self._quests_poll_signature = None
+                # A newly resolved name must reach the overlay without waiting
+                # for its account cache to expire.
+                self._overlay_accounts = None
             try:
                 self.after(0, _apply)
             except Exception:
@@ -4104,104 +4089,102 @@ class MTGBotUI(tk.Tk):
         # Unknown or ambiguous -> display the log's value without guessing.
         return screen
 
-    def _poll_quests_display(self) -> None:
-        try:
-            self._render_quests_from_status()
-        except Exception:
-            pass
-        try:
-            self.after(3000, self._poll_quests_display)
-        except Exception:
-            pass
-
-    def _render_quests_from_status(self) -> None:
-        """Update the card's quest rows from runtime_status (status.json). The
-        active quest (the one whose colors the bot is playing) is highlighted."""
-        if not hasattr(self, "_quest_items"):
-            return
-        c = self.ui_theme["colors"]
-        try:
-            status = runtime_status.read_status() or {}
-        except Exception:
-            status = {}
-        quests = status.get("quests") or []
-        if not isinstance(quests, list):
-            quests = []
-        active_id = str(status.get("active_quest_id") or "")
+    def _current_and_next_account(self, status: dict) -> tuple[str, str]:
+        """Current (playing now) and next (switch target) account labels."""
         current_acc = str(status.get("current_account") or "")
         next_acc = str(status.get("next_account") or "")
-        show_acc = self._account_lines_visible()
         # Current: prefer the live status.json value. The controller keeps it
         # updated as it ROTATES (so it stays correct after switches and after the
         # bot stops on a later account), and a manual pick writes it too (see
         # _set_current_account). Fall back to the config pin / log only when it's
         # empty (e.g. the very first run before anything is known).
-        if show_acc:
-            if current_acc:
-                current_acc = self._resolve_screenname_to_alias(current_acc)
-            else:
-                current_acc = (
-                    self.config_manager.get_manual_current_account()
-                    or self._fallback_current_account()
-                )
-            # Next: use the controller's published value while running; otherwise
-            # recompute it from the (resolved) current account.
-            if not (self.bot_running and next_acc):
-                next_acc = self._fallback_next_account(current_acc)
+        if current_acc:
+            current_acc = self._resolve_screenname_to_alias(current_acc)
+        else:
+            current_acc = (
+                self.config_manager.get_manual_current_account()
+                or self._fallback_current_account()
+            )
+        # Next: use the controller's published value while running; otherwise
+        # recompute it from the (resolved) current account.
+        if not (self.bot_running and next_acc):
+            next_acc = self._fallback_next_account(current_acc)
+        return current_acc, next_acc
 
-        # Only redraw when something actually changed (avoid canvas churn).
-        sig = json.dumps(
-            [quests, active_id, current_acc, next_acc, show_acc],
-            sort_keys=True, default=str,
-        )
-        if sig == getattr(self, "_quests_poll_signature", None):
+    # The overlay re-reads status.json every tick; the account labels read
+    # config and the accounts folder, so they are refreshed less often.
+    _OVERLAY_POLL_MS = 1000
+    _OVERLAY_ACCOUNT_REFRESH_SEC = 3.0
+
+    def _setup_game_overlay(self) -> None:
+        """Create the info panel over the Arena window (see overlay.py). On
+        platforms where it cannot be made invisible to the bot it stays off."""
+        c = self.ui_theme["colors"]
+        try:
+            self._game_overlay = overlay.GameOverlay(
+                self,
+                colors={
+                    "bg": "#1c0703",
+                    "accent": "#ffb841",
+                    "active": c.get("pill_running_text", "#7CFF7C"),
+                    "muted": c.get("text_muted", "#9aa0a6"),
+                },
+                font_family="Segoe UI",
+                scale=self._scale_value,
+                title_photo=self._gold_text_photo("Session Info", max(16, self._scale_value(24))),
+                quest_title_photo=self._gold_text_photo("Daily Quests", max(14, self._scale_value(20))),
+                bg_transparency=self.config_manager.get_game_overlay_bg_transparency(),
+            )
+        except Exception as exc:
+            self._game_overlay = None
+            try:
+                import bot_logger
+
+                bot_logger.log_info(f"Overlay not shown: {exc}")
+            except Exception:
+                pass
             return
-        self._quests_poll_signature = sig
+        if not self._game_overlay.available:
+            return
+        self.after(self._OVERLAY_POLL_MS, self._poll_game_overlay)
 
-        muted = c.get("text_muted", "#9aa0a6")
-        active_color = c.get("pill_running_text", "#7CFF7C")
-        self._card_canvas.itemconfigure(
-            self._quest_title_item,
-            text=("Daily Quests" if quests else ""),
-            fill="#ffb841",
-        )
-        for i, item in enumerate(self._quest_items):
-            if i < len(quests) and isinstance(quests[i], dict):
-                q = quests[i]
-                parts = [str(q.get("name") or "Quest")]
-                colors = str(q.get("colors") or "")
-                if colors:
-                    parts.append(f"({colors})")
-                goal = q.get("goal")
-                if isinstance(goal, int) and goal > 0:
-                    parts.append(f"{q.get('progress')}/{goal}")
-                is_active = bool(active_id) and str(q.get("id") or "") == active_id
-                text = ("▶ " if is_active else "") + "  ".join(parts)
-                text = self._fit_quest_text(text)
-                self._card_canvas.itemconfigure(
-                    item, text=text, fill=(active_color if is_active else muted)
-                )
-            else:
-                self._card_canvas.itemconfigure(item, text="", fill=muted)
-        if hasattr(self, "_current_acc_item"):
-            # Through _fit_quest_text like the quest rows: these sit at the same
-            # left-aligned x with the same font, and the account label is free text
-            # the user types, so an unbounded one would run past the window edge.
-            self._card_canvas.itemconfigure(
-                self._current_acc_item,
-                text=(
-                    self._fit_quest_text(f"Current ACC: {current_acc or '…'}  ✎")
-                    if show_acc else ""
-                ),
+    def _poll_game_overlay(self) -> None:
+        panel = getattr(self, "_game_overlay", None)
+        if panel is None or not panel.available:
+            return
+        try:
+            status = runtime_status.read_status() or {}
+        except Exception:
+            status = {}
+        try:
+            show_acc = self._account_lines_visible()
+            current_acc, next_acc = "", ""
+            if show_acc:
+                now = time.time()
+                cached = self._overlay_accounts
+                if cached is None or (now - cached[0]) >= self._OVERLAY_ACCOUNT_REFRESH_SEC:
+                    cached = (now, *self._current_and_next_account(status))
+                    self._overlay_accounts = cached
+                current_acc, next_acc = cached[1], cached[2]
+            lines = overlay.build_lines(
+                status,
+                queue_label=self._queue_mode_label(),
+                switch_text=self._switch_eta_text,
+                show_accounts=show_acc,
+                current_account=current_acc,
+                next_account=next_acc,
+                games=self.session_games,
+                wins=self.session_wins,
             )
-            self._card_canvas.itemconfigure(
-                self._next_acc_item,
-                text=(
-                    self._fit_quest_text(f"Next ACC: {next_acc or '…'}")
-                    if show_acc else ""
-                ),
-            )
-        self._refresh_card_layout()
+            # Up while the bot runs (also with this window minimized), and
+            # while Settings -> Game Overlay is open, to preview the look.
+            panel.update(lines, wanted=bool(self.bot_running or self._overlay_preview_open))
+        except Exception:
+            pass
+        try:
+            self.after(self._OVERLAY_POLL_MS, self._poll_game_overlay)
+        except Exception:
+            pass
 
     def _toggle_queue_mode(self, _event=None) -> None:
         if self.bot_running:
@@ -4253,12 +4236,8 @@ class MTGBotUI(tk.Tk):
                 runtime_status.update_status(current_account=label, next_account="")
             except Exception:
                 pass
-        # Reflect immediately (bump the poll signature so the labels redraw).
-        self._quests_poll_signature = None
-        try:
-            self._render_quests_from_status()
-        except Exception:
-            pass
+        # Reflect on the overlay at its next tick (drop its account cache).
+        self._overlay_accounts = None
 
     def _toggle_main_topmost(self, _event=None) -> None:
         enabled = not bool(self._main_topmost_var.get())
@@ -4285,11 +4264,8 @@ class MTGBotUI(tk.Tk):
             except Exception:
                 pass
         self._refresh_account_switch_state()
-        # Show/hide the Current/Next account lines right away (don't wait for the poll).
-        try:
-            self._render_quests_from_status()
-        except Exception:
-            pass
+        # Recompute the overlay's Current/Next account lines at its next tick.
+        self._overlay_accounts = None
         # Reflect immediately in the Current Session switch line.
         self._switch_eta_text = self._get_configured_switch_eta_text()
         self._update_current_session_window()
@@ -4298,9 +4274,8 @@ class MTGBotUI(tk.Tk):
     def _refresh_account_switch_state(self) -> None:
         is_enabled = bool(self._account_switch_var.get())
         try:
-            self._card_canvas.itemconfigure(
-                self._account_switch_info_item,
-                text=f"Account switch: {'Enabled' if is_enabled else 'Disabled'}",
+            self._set_canvas_menu_button_text(
+                "account_switch", f"Account Switch: {'On' if is_enabled else 'Off'}",
             )
         except Exception:
             pass
@@ -4436,14 +4411,7 @@ class MTGBotUI(tk.Tk):
         return False
 
     def _handle_arena_setup_success(self, result: ArenaDetectionResult, *, show_success: bool) -> None:
-        try:
-            self._card_canvas.itemconfigure(
-                self._status_text_item,
-                text="Status: Arena Ready",
-                fill=self.ui_theme["colors"]["status_stopped_text"],
-            )
-        except Exception:
-            pass
+        self._set_status("Status: Arena Ready", running=bool(self.bot_running))
         if not show_success:
             return
 
@@ -4458,14 +4426,7 @@ class MTGBotUI(tk.Tk):
         )
 
     def _handle_arena_setup_failure(self, result: ArenaDetectionResult) -> None:
-        try:
-            self._card_canvas.itemconfigure(
-                self._status_text_item,
-                text="Status: Arena Setup Failed",
-                fill=self.ui_theme["colors"]["status_stopped_text"],
-            )
-        except Exception:
-            pass
+        self._set_status("Status: Arena Setup Failed", running=bool(self.bot_running))
 
         lines = [result.message]
         lines.append(
@@ -4579,6 +4540,13 @@ class MTGBotUI(tk.Tk):
                                    account_switch_enabled=account_switch_enabled,
                                    auto_concede_stalled_matches=auto_concede_stalled_matches)
             self._publish_controller(controller)
+            # Follow the controller's startup phases from here on. game.start()
+            # below already reads the quests (clicking Home) and checks the
+            # reroll, which takes ~40 s; polling only after it returned left the
+            # bar on "Loading card data" for all of that. Not earlier: the
+            # Controller constructor is what resets status.json, and before that
+            # the poll would read the previous session's phase and IN_GAME state.
+            self.after(0, self._start_poll_startup_phase)
             # Seed the manually-pinned current account (if the user set one), so
             # rotation starts from the right place even when the log-based detect
             # would get it wrong.
@@ -4597,12 +4565,9 @@ class MTGBotUI(tk.Tk):
             bot_logger.log_info("UI start: game.start() begin")
             self.game.start()
             bot_logger.log_info("UI start: game.start() completed")
-            # game.start() only ARMS the controller (it returns in ~0.2s); the
-            # queue thread then spends ~15-20s navigating Arena before the first
-            # match. Keep the bar up for that, relabelled from status.json, and
-            # let the poll hide it once the bot is really playing.
-            self.after(0, lambda: self._set_startup_loading(True, self._STARTUP_TEXT_ARENA))
-            self.after(0, self._start_poll_startup_phase)
+            # The queue thread now navigates Arena for ~15-20 s before the first
+            # match. The bar stays up for that, relabelled from status.json by the
+            # poll started above, which also hides it once the bot is playing.
 
             # Wrap match end callback so we can update session stats and still
             # restart games. Game.on_match_end owns the duplicate suppression and
@@ -5368,18 +5333,7 @@ class SettingsWindow(tk.Toplevel):
         self.configure(bg="#0F1115")
         _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
         self._config_manager = config_manager
-        self._recording = False
-        self._record_ignore_first = False
-        self._mouse_listener = None
-        self._keyboard_listener = None
-        self._playback_thread = None
-        self._playback_keyboard_listener = None
-        self._playback_stop_event = threading.Event()
-        self._current_record_events = []
-        self._records_path = str(runtime_file("records", "recorded_actions_records.json"))
         self._switch_save_job = None
-        self.record_btn = None
-        self.show_records_btn = None
         self._theme = {
             "bg": "#0F1115",
             "text": "#E7EAF0",
@@ -5518,9 +5472,9 @@ class SettingsWindow(tk.Toplevel):
             style_name="Secondary.TButton",
         )
         self._create_settings_canvas_button(
-            "record",
-            "Record Action",
-            self._open_record_actions_window,
+            "overlay",
+            "Game Overlay",
+            self._open_game_overlay_window,
             style_name="Secondary.TButton",
         )
         self._create_settings_canvas_button(
@@ -5760,285 +5714,6 @@ class SettingsWindow(tk.Toplevel):
             )
         )
 
-    def _record_actions_prompt(self):
-        if self._recording:
-            self._stop_recording()
-            return
-        prompt = tk.Toplevel(self)
-        prompt.title("Record")
-        prompt.geometry(f"{self._s(280)}x{self._s(80)}")
-        prompt.resizable(False, False)
-        prompt.configure(bg="#2b2b2b")
-        label = tk.Label(
-            prompt,
-            text="record action press enter",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10),
-        )
-        label.pack(expand=True)
-
-        def _start_and_close(_event=None):
-            try:
-                prompt.destroy()
-            finally:
-                self._start_recording()
-
-        prompt.bind("<Return>", _start_and_close)
-        prompt.focus_force()
-        _apply_submenu_theme(prompt)
-
-    def _start_recording(self):
-        if self._recording:
-            return
-        try:
-            from pynput import mouse, keyboard
-        except Exception as e:
-            messagebox.showerror("Record", f"pynput not available: {e}")
-            return
-        self._recording = True
-        self._record_ignore_first = True
-        if self.record_btn:
-            self.record_btn.config(text="Stop")
-        if self.show_records_btn:
-            self.show_records_btn.config(state=tk.DISABLED)
-        self._current_record_events = []
-
-        def _append_event(event: dict) -> None:
-            self._current_record_events.append(event)
-
-        def _on_click(x, y, button, pressed):
-            if not pressed or not self._recording:
-                return
-            if self._record_ignore_first:
-                self._record_ignore_first = False
-                return
-            _append_event({
-                "type": "click",
-                "ts": datetime.now(),
-                "x": int(x),
-                "y": int(y),
-                "button": str(button).split(".")[-1],
-            })
-
-        def _on_key_press(key):
-            if not self._recording:
-                return False
-            if key == keyboard.Key.f8:
-                self.after(0, self._stop_recording)
-                return False
-            try:
-                key_name = key.char
-            except AttributeError:
-                key_name = key.name if hasattr(key, "name") else str(key)
-            _append_event({
-                "type": "key",
-                "ts": datetime.now(),
-                "key": key_name,
-            })
-
-        self._mouse_listener = mouse.Listener(on_click=_on_click)
-        self._mouse_listener.daemon = True
-        self._mouse_listener.start()
-        self._keyboard_listener = keyboard.Listener(on_press=_on_key_press)
-        self._keyboard_listener.daemon = True
-        self._keyboard_listener.start()
-
-    def _stop_recording(self):
-        if not self._recording:
-            return
-        self._recording = False
-        if self.record_btn:
-            self.record_btn.config(text="Record")
-        if self.show_records_btn:
-            self.show_records_btn.config(state=tk.NORMAL)
-        if self._mouse_listener:
-            try:
-                self._mouse_listener.stop()
-            except Exception:
-                pass
-        self._mouse_listener = None
-        if self._keyboard_listener:
-            try:
-                self._keyboard_listener.stop()
-            except Exception:
-                pass
-        self._keyboard_listener = None
-        self._prompt_record_name_and_save()
-
-    def _show_records(self):
-        RecordsWindow(self, self._records_path, self._play_record_actions)
-
-    def _play_record_actions(self, actions: list[dict]) -> None:
-        if self._recording:
-            return
-        if self._playback_thread and self._playback_thread.is_alive():
-            return
-        if not actions:
-            messagebox.showinfo("Test Action", "No actions to play.")
-            return
-
-        try:
-            from pynput import mouse, keyboard
-        except Exception as e:
-            messagebox.showerror("Test Action", f"pynput not available: {e}")
-            return
-
-        self.show_records_btn.config(state=tk.DISABLED)
-        self._playback_stop_event.clear()
-
-        def _on_playback_key(key):
-            if key == keyboard.Key.f8:
-                self._playback_stop_event.set()
-                return False
-            return True
-
-        self._playback_keyboard_listener = keyboard.Listener(on_press=_on_playback_key)
-        self._playback_keyboard_listener.daemon = True
-        self._playback_keyboard_listener.start()
-
-        def _run():
-            m = mouse.Controller()
-            k = keyboard.Controller()
-            prev_delay = 0.0
-            for ev in actions:
-                if self._playback_stop_event.is_set():
-                    break
-                delay = float(ev.get("delay", 0.0))
-                if delay > 0:
-                    end_time = time.time() + delay
-                    while time.time() < end_time:
-                        if self._playback_stop_event.is_set():
-                            break
-                        time.sleep(0.05)
-                    if self._playback_stop_event.is_set():
-                        break
-                if ev.get("type") == "click":
-                    try:
-                        x = int(float(ev.get("x", 0)))
-                        y = int(float(ev.get("y", 0)))
-                    except Exception:
-                        x, y = 0, 0
-                    btn_raw = (ev.get("button") or "").split(".")[-1]
-                    btn = mouse.Button.left
-                    if btn_raw == "right":
-                        btn = mouse.Button.right
-                    elif btn_raw == "middle":
-                        btn = mouse.Button.middle
-                    m.position = (x, y)
-                    time.sleep(0.05)
-                    m.press(btn)
-                    time.sleep(0.05)
-                    m.release(btn)
-                elif ev.get("type") == "key":
-                    key_name = ev.get("key", "")
-                    key_obj = None
-                    if len(key_name) == 1:
-                        key_obj = key_name
-                    else:
-                        if hasattr(keyboard.Key, key_name):
-                            key_obj = getattr(keyboard.Key, key_name)
-                    if key_obj is not None:
-                        k.press(key_obj)
-                        k.release(key_obj)
-                prev_delay = delay
-            self.after(0, self._finish_playback)
-
-        self._playback_thread = threading.Thread(target=_run, daemon=True)
-        self._playback_thread.start()
-
-    def _prompt_record_name_and_save(self):
-        prompt = tk.Toplevel(self)
-        prompt.title("Save Record")
-        prompt.geometry(f"{self._s(300)}x{self._s(120)}")
-        prompt.resizable(False, False)
-        prompt.configure(bg="#2b2b2b")
-
-        label = tk.Label(
-            prompt,
-            text="Record name",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 10),
-        )
-        label.pack(pady=(10, 4))
-
-        name_var = tk.StringVar(value="Account Switch")
-        entry = tk.Entry(
-            prompt,
-            textvariable=name_var,
-            bg="#1e1e1e",
-            fg="white",
-            insertbackground="white",
-            relief=tk.FLAT,
-        )
-        entry.pack(padx=10, fill=tk.X)
-        entry.focus_set()
-
-        def _save_and_close(_event=None):
-            name = (name_var.get() or "Account Switch").strip() or "Account Switch"
-            prompt.destroy()
-            self._save_record_snapshot(name)
-
-        ok_btn = ttk.Button(
-            prompt,
-            text="Save",
-            command=_save_and_close,
-        )
-        ok_btn.pack(pady=10)
-        prompt.bind("<Return>", _save_and_close)
-        _apply_submenu_theme(prompt)
-
-    def _save_record_snapshot(self, name: str):
-        events = list(self._current_record_events)
-        if not events:
-            return
-        events.sort(key=lambda e: e["ts"])
-        actions = []
-        prev_ts = events[0]["ts"]
-        for ev in events:
-            delay = (ev["ts"] - prev_ts).total_seconds()
-            item = {"type": ev["type"], "delay": delay, "ts": ev["ts"].isoformat()}
-            if ev["type"] == "click":
-                item["x"] = ev.get("x", 0)
-                item["y"] = ev.get("y", 0)
-                item["button"] = ev.get("button", "left")
-            elif ev["type"] == "key":
-                item["key"] = ev.get("key", "")
-            actions.append(item)
-            prev_ts = ev["ts"]
-
-        record = {
-            "name": name,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "actions": actions,
-        }
-
-        data = {"records": []}
-        try:
-            if os.path.exists(self._records_path):
-                with open(self._records_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-        except Exception:
-            data = {"records": []}
-
-        data.setdefault("records", []).append(record)
-        try:
-            with open(self._records_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass
-
-    def _finish_playback(self):
-        if self._playback_keyboard_listener:
-            try:
-                self._playback_keyboard_listener.stop()
-            except Exception:
-                pass
-        self._playback_keyboard_listener = None
-        if hasattr(self, "test_action_btn") and self.test_action_btn:
-            self.test_action_btn.config(state=tk.NORMAL)
-
     def _open_switch_account_window(self):
         self._open_replacement_subwindow(
             lambda xy: SwitchAccountWindow(
@@ -6049,10 +5724,11 @@ class SettingsWindow(tk.Toplevel):
             )
         )
 
-    def _open_record_actions_window(self):
+    def _open_game_overlay_window(self):
         self._open_replacement_subwindow(
-            lambda xy: RecordActionsWindow(
+            lambda xy: GameOverlayWindow(
                 self,
+                self._config_manager,
                 spawn_xy=xy,
                 on_close=self._restore_after_subwindow_close,
             )
@@ -6102,23 +5778,16 @@ class SettingsWindow(tk.Toplevel):
                 parent_ui._last_settings_xy = (int(self.winfo_x()), int(self.winfo_y()))
         except Exception:
             pass
-        try:
-            if self._recording:
-                self._stop_recording()
-        finally:
-            super().destroy()
+        super().destroy()
 
 
-class BotBehaviorWindow(tk.Toplevel):
-    """Small home for live gameplay/recovery policies.
+class _FireSubWindow(tk.Toplevel):
+    """Settings subwindow with the Manage Accounts look: the fire background,
+    translucent boxes with an orange rim, drawn checkboxes and the red button
+    skin. Fixed layout in canvas pixels, as there. Subclasses set _TITLE and
+    the size, prepare their state in _init_state and draw in _build_ui."""
 
-    This is deliberately separate from account rotation: the setting applies to
-    the current match, whether or not account switching is configured.
-    """
-
-    # Same look as Manage Accounts: the fire background, translucent boxes with
-    # an orange rim, drawn checkboxes and the red button skin. Fixed layout in
-    # canvas pixels, as there.
+    _TITLE = ""
     _WIDTH = 460
     _HEIGHT = 420
     _THEME = {
@@ -6138,7 +5807,7 @@ class BotBehaviorWindow(tk.Toplevel):
         self._on_close_callback = on_close
         self._ui_scale = _get_ui_scale_from_widget(parent)
         self._theme = dict(self._THEME)
-        self.title("Bot Behavior")
+        self.title(self._TITLE)
         width, height = self._WIDTH, self._HEIGHT
         parent.update_idletasks()
         if spawn_xy is not None:
@@ -6152,13 +5821,7 @@ class BotBehaviorWindow(tk.Toplevel):
         self.configure(bg=self._theme["bg"])
         _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
 
-        self._enabled = tk.BooleanVar(
-            value=bool(self._config_manager.get_auto_concede_stalled_matches())
-        )
-        self._forge_enabled = tk.BooleanVar(
-            value=bool(self._config_manager.get_forge_engine_enabled())
-        )
-        self._forge_busy = False
+        self._init_state()
         self._bg_source_image = None
         self._bg_photo = None
         self._bg_canvas_item = None
@@ -6173,6 +5836,23 @@ class BotBehaviorWindow(tk.Toplevel):
         self._load_background_image()
         for delay in (40, 160, 420):
             self.after(delay, self._refresh_background)
+
+    def _init_state(self) -> None:
+        pass
+
+    def _build_ui(self) -> None:
+        raise NotImplementedError
+
+    def _s(self, value: int | float) -> int:
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def destroy(self):
+        callback = self._on_close_callback
+        try:
+            super().destroy()
+        finally:
+            if callable(callback):
+                callback()
 
     # -- look ---------------------------------------------------------------
 
@@ -6300,6 +5980,25 @@ class BotBehaviorWindow(tk.Toplevel):
         cv.tag_bind(tag, "<ButtonPress-1>", press)
         cv.tag_bind(tag, "<ButtonRelease-1>", release)
 
+
+class BotBehaviorWindow(_FireSubWindow):
+    """Small home for live gameplay/recovery policies.
+
+    This is deliberately separate from account rotation: the setting applies to
+    the current match, whether or not account switching is configured.
+    """
+
+    _TITLE = "Bot Behavior"
+
+    def _init_state(self) -> None:
+        self._enabled = tk.BooleanVar(
+            value=bool(self._config_manager.get_auto_concede_stalled_matches())
+        )
+        self._forge_enabled = tk.BooleanVar(
+            value=bool(self._config_manager.get_forge_engine_enabled())
+        )
+        self._forge_busy = False
+
     def _build_ui(self) -> None:
         c = self._theme
         cv = self._canvas
@@ -6341,9 +6040,6 @@ class BotBehaviorWindow(tk.Toplevel):
         self._forge_enabled.set(not self._forge_enabled.get())
         self._apply_forge_setting()
         self._refresh_toggle("forge")
-
-    def _s(self, value: int | float) -> int:
-        return max(1, int(round(float(value) * float(self._ui_scale))))
 
     def _apply_auto_concede_setting(self) -> None:
         enabled = bool(self._enabled.get())
@@ -6442,13 +6138,68 @@ class BotBehaviorWindow(tk.Toplevel):
         self._refresh_toggle("forge")
         self._set_forge_status(self._forge_status_text())
 
+
+class GameOverlayWindow(_FireSubWindow):
+    """Settings for the info panel over the Arena window (overlay.py)."""
+
+    _TITLE = "Game Overlay"
+    _HEIGHT = 260
+
+    def _init_state(self) -> None:
+        self._transparency = tk.IntVar(
+            value=int(self._config_manager.get_game_overlay_bg_transparency())
+        )
+
+    def _set_preview(self, on: bool) -> None:
+        app = getattr(self._parent, "master", None)
+        if app is not None and hasattr(app, "_overlay_preview_open"):
+            app._overlay_preview_open = bool(on)
+
     def destroy(self):
-        callback = self._on_close_callback
+        self._set_preview(False)
+        super().destroy()
+
+    def _build_ui(self) -> None:
+        c = self._theme
+        cv = self._canvas
+
+        self._create_panel(16, 20, 428, 172)
+        cv.create_text(28, 30, text="Game Overlay", fill=c["text"],
+                       font=("Segoe UI", 13, "bold"), anchor="nw")
+        cv.create_text(30, 62, text="Background transparency", fill=c["text"],
+                       font=("Segoe UI", 10, "bold"), anchor="nw")
+        self._value_item = cv.create_text(430, 62, text=f"{self._transparency.get()} %", fill=c["status"],
+                                          font=("Segoe UI", 10, "bold"), anchor="ne")
+        scale = tk.Scale(
+            self, from_=0, to=100, orient=tk.HORIZONTAL, variable=self._transparency,
+            showvalue=False, resolution=5, length=400, sliderlength=22, width=14,
+            bg="#3D130E", fg=c["text"], troughcolor="#1c0703", activebackground="#ff9318",
+            highlightthickness=0, bd=0, relief=tk.FLAT, command=self._on_change,
+        )
+        cv.create_window(30, 90, anchor="nw", window=scale)
+        cv.create_text(30, 120, width=400, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+                       text="How much of the game shows through the panel's background. The text "
+                            "stays fully readable. Applies immediately; with Arena open the panel "
+                            "is shown while this window is open, so you can see the change.")
+
+        self._create_button("back", "Back", 324, 204, 120, 40, self.destroy)
+        # Last: a window that failed to build must not leave the preview on.
+        self._set_preview(True)
+
+    def _on_change(self, _value=None) -> None:
+        percent = int(self._transparency.get())
         try:
-            super().destroy()
-        finally:
-            if callable(callback):
-                callback()
+            self._canvas.itemconfigure(self._value_item, text=f"{percent} %")
+        except tk.TclError:
+            pass
+        self._config_manager.set_game_overlay_bg_transparency(percent)
+        app = getattr(self._parent, "master", None)
+        panel = getattr(app, "_game_overlay", None)
+        if panel is not None:
+            try:
+                panel.set_background_transparency(percent)
+            except Exception:
+                pass
 
 
 class UISettingsWindow(tk.Toplevel):
@@ -7830,270 +7581,6 @@ class SwitchAccountWindow(tk.Toplevel):
                     callback()
                 except Exception:
                     pass
-class _RecordActionsButtonProxy:
-    def __init__(self, window, name: str):
-        self._window = window
-        self._name = name
-
-    def config(self, **kwargs):
-        self.configure(**kwargs)
-
-    def configure(self, **kwargs):
-        if "text" in kwargs:
-            self._window._set_canvas_button_text(self._name, str(kwargs["text"]))
-        if "state" in kwargs:
-            state = str(kwargs["state"]).lower()
-            enabled = state not in (str(tk.DISABLED).lower(), "disabled")
-            self._window._set_canvas_button_enabled(self._name, enabled)
-
-
-class RecordActionsWindow(tk.Toplevel):
-    def __init__(self, parent: SettingsWindow, spawn_xy: tuple[int, int] | None = None, on_close=None):
-        super().__init__(parent)
-        self._ui_scale = _get_ui_scale_from_widget(parent)
-        self._parent = parent
-        self._on_close_callback = on_close
-        self.title("Record Actions")
-        width, height = self._s(460), self._s(430)
-        parent.update_idletasks()
-        if spawn_xy is not None:
-            x, y = int(spawn_xy[0]), int(spawn_xy[1])
-        else:
-            gap_px = int(parent.winfo_fpixels("4m"))  # ~0.4 cm
-            x = parent.winfo_x() + parent.winfo_width() + gap_px
-            y = parent.winfo_y()
-        max_x = max(0, self.winfo_screenwidth() - width)
-        max_y = max(0, self.winfo_screenheight() - height)
-        x = min(max(0, x), max_x)
-        y = min(max(0, y), max_y)
-        self.geometry(f"{width}x{height}+{x}+{y}")
-        self.resizable(False, False)
-        self.configure(bg="#0F1115")
-        _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
-        self._theme = {
-            "bg": "#0F1115",
-            "text": "#E7EAF0",
-        }
-        self._bg_source_image = None
-        self._bg_photo = None
-        self._bg_canvas_item = None
-        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
-        self._canvas.pack(fill=tk.BOTH, expand=True)
-        self._canvas.bind("<Configure>", self._on_canvas_resize_background)
-        self._title_item = None
-
-        self._buttons = {}
-        self._button_order = []
-        self._create_canvas_button("record", "Record", self._parent._record_actions_prompt, "Secondary.TButton")
-        self._create_canvas_button("show_records", "Show Records", self._parent._show_records, "Secondary.TButton")
-        self._create_canvas_button("back", "Back", self.destroy, "Secondary.TButton")
-
-        self._record_btn_proxy = _RecordActionsButtonProxy(self, "record")
-        self._show_btn_proxy = _RecordActionsButtonProxy(self, "show_records")
-        self._parent.record_btn = self._record_btn_proxy
-        self._parent.show_records_btn = self._show_btn_proxy
-
-        self._load_background_image()
-        self.bind("<Configure>", self._on_resize_background)
-        self.after(30, self._refresh_scene)
-        self.after(120, self._refresh_scene)
-
-    def _s(self, value: int | float) -> int:
-        return max(1, int(round(float(value) * float(self._ui_scale))))
-
-    def _create_canvas_button(self, name: str, text: str, command, style_name: str = "Secondary.TButton"):
-        parent_ui = getattr(self._parent, "master", None)
-        skins = None
-        if parent_ui is not None:
-            skins_all = getattr(parent_ui, "_button_skins", {})
-            skins = skins_all.get(style_name)
-            if skins is None and skins_all:
-                skins = next(iter(skins_all.values()))
-        if not skins:
-            return
-
-        tag = f"record_actions_btn_{name}"
-        bg_item = self._canvas.create_image(0, 0, anchor="n", image=skins["normal"], tags=(tag,))
-        text_item = self._canvas.create_text(
-            0,
-            0,
-            text=text,
-            fill="#F2F6FF",
-            font=("Segoe UI", 11, "bold"),
-            anchor="center",
-            tags=(tag,),
-        )
-        self._buttons[name] = {
-            "command": command,
-            "enabled": True,
-            "hover": False,
-            "pressed": False,
-            "skins": skins,
-            "bg_item": bg_item,
-            "text_item": text_item,
-            "width": int(skins["normal"].width()),
-            "height": int(skins["normal"].height()),
-        }
-        self._button_order.append(name)
-
-        self._canvas.tag_bind(tag, "<Enter>", lambda _e, n=name: self._on_button_enter(n))
-        self._canvas.tag_bind(tag, "<Leave>", lambda _e, n=name: self._on_button_leave(n))
-        self._canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, n=name: self._on_button_press(n))
-        self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, n=name: self._on_button_release(n))
-        self._refresh_canvas_button_state(name)
-
-    def _set_canvas_button_text(self, name: str, text: str):
-        btn = self._buttons.get(name)
-        if not btn:
-            return
-        self._canvas.itemconfigure(btn["text_item"], text=text)
-
-    def _set_canvas_button_enabled(self, name: str, enabled: bool):
-        btn = self._buttons.get(name)
-        if not btn:
-            return
-        btn["enabled"] = bool(enabled)
-        if not btn["enabled"]:
-            btn["hover"] = False
-            btn["pressed"] = False
-        self._refresh_canvas_button_state(name)
-
-    def _refresh_canvas_button_state(self, name: str):
-        btn = self._buttons.get(name)
-        if not btn:
-            return
-        if not btn["enabled"]:
-            state_key = "disabled"
-            text_color = "#A5AFBF"
-        elif btn["pressed"]:
-            state_key = "pressed"
-            text_color = "#FFFFFF"
-        elif btn["hover"]:
-            state_key = "hover"
-            text_color = "#FFFFFF"
-        else:
-            state_key = "normal"
-            text_color = "#F2F6FF"
-        self._canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
-        self._canvas.itemconfigure(btn["text_item"], fill=text_color)
-
-    def _on_button_enter(self, name: str):
-        btn = self._buttons.get(name)
-        if not btn or not btn["enabled"]:
-            return
-        self._canvas.configure(cursor="hand2")
-        btn["hover"] = True
-        self._refresh_canvas_button_state(name)
-
-    def _on_button_leave(self, name: str):
-        btn = self._buttons.get(name)
-        if not btn:
-            return
-        self._canvas.configure(cursor="")
-        btn["hover"] = False
-        btn["pressed"] = False
-        self._refresh_canvas_button_state(name)
-
-    def _on_button_press(self, name: str):
-        btn = self._buttons.get(name)
-        if not btn or not btn["enabled"]:
-            return
-        btn["pressed"] = True
-        self._refresh_canvas_button_state(name)
-
-    def _on_button_release(self, name: str):
-        btn = self._buttons.get(name)
-        if not btn:
-            return
-        should_fire = bool(btn["enabled"] and btn["pressed"] and btn["hover"])
-        btn["pressed"] = False
-        self._refresh_canvas_button_state(name)
-        if should_fire:
-            try:
-                btn["command"]()
-            except Exception:
-                pass
-
-    def _load_background_image(self):
-        self._bg_source_image = None
-        for path in (_image_path("background"), _image_path("background.png")):
-            if not os.path.exists(path):
-                continue
-            try:
-                with Image.open(path) as image:
-                    self._bg_source_image = image.convert("RGB")
-                    return
-            except Exception:
-                continue
-
-    def _on_resize_background(self, event=None):
-        if event is not None and event.widget is not self:
-            return
-        self._refresh_scene()
-
-    def _on_canvas_resize_background(self, event=None):
-        if event is not None and event.widget is not self._canvas:
-            return
-        self._refresh_scene()
-
-    def _refresh_scene(self):
-        self._refresh_background()
-        self._layout_scene()
-
-    def _layout_scene(self):
-        if not self._canvas or not self._canvas.winfo_exists():
-            return
-        s = self._s
-        cw = max(2, self._canvas.winfo_width())
-        x = cw // 2
-        y_start = s(64)
-        y_step = s(78)
-        for idx, name in enumerate(self._button_order):
-            btn = self._buttons.get(name)
-            if not btn:
-                continue
-            y = y_start + idx * y_step
-            self._canvas.coords(btn["bg_item"], x, y)
-            self._canvas.coords(btn["text_item"], x, y + btn["height"] // 2 - 2)
-
-    def _refresh_background(self):
-        if self._bg_source_image is None:
-            return
-        width = max(2, self._canvas.winfo_width())
-        height = max(2, self._canvas.winfo_height())
-        try:
-            fitted = ImageOps.fit(
-                self._bg_source_image,
-                (width, height),
-                method=Image.Resampling.LANCZOS,
-                centering=(0.5, 0.5),
-            )
-            self._bg_photo = ImageTk.PhotoImage(fitted)
-            if self._bg_canvas_item is None:
-                self._bg_canvas_item = self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
-            else:
-                self._canvas.coords(self._bg_canvas_item, 0, 0)
-                self._canvas.itemconfigure(self._bg_canvas_item, image=self._bg_photo)
-            self._canvas.tag_lower(self._bg_canvas_item)
-        except Exception:
-            pass
-
-    def destroy(self):
-        if getattr(self._parent, "record_btn", None) is self._record_btn_proxy:
-            self._parent.record_btn = None
-        if getattr(self._parent, "show_records_btn", None) is self._show_btn_proxy:
-            self._parent.show_records_btn = None
-        callback = getattr(self, "_on_close_callback", None)
-        try:
-            super().destroy()
-        finally:
-            if callable(callback):
-                try:
-                    callback()
-                except Exception:
-                    pass
-
-
 class LogWindow(tk.Toplevel):
     def __init__(self, parent, log_path: str):
         super().__init__(parent)
@@ -8157,218 +7644,6 @@ class LogWindow(tk.Toplevel):
         self._stopped = True
         super().destroy()
 
-
-class RecordsWindow(tk.Toplevel):
-    def __init__(self, parent, records_path: str, play_callback):
-        super().__init__(parent)
-        self._ui_scale = _get_ui_scale_from_widget(parent)
-        self.title("Show Records")
-        self.geometry(f"{self._s(760)}x{self._s(560)}")
-        self.minsize(self._s(700), self._s(500))
-        self.resizable(True, True)
-        self.configure(bg="#2b2b2b")
-        _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
-        self._records_path = records_path
-        self._play_callback = play_callback
-        self._setup_ui()
-        _apply_submenu_theme(self)
-
-    def _s(self, value: int | float) -> int:
-        return max(1, int(round(float(value) * float(self._ui_scale))))
-
-    def _setup_ui(self):
-        main_frame = tk.Frame(self, bg="#2b2b2b", padx=16, pady=16)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        title = tk.Label(
-            main_frame,
-            text="Recorded Actions",
-            bg="#2b2b2b",
-            fg="white",
-            font=("Segoe UI", 12, "bold"),
-        )
-        title.pack(pady=(0, 10))
-
-        list_frame = tk.Frame(main_frame, bg="#3b3b3b")
-        list_frame.pack(fill=tk.BOTH, expand=True)
-
-        canvas = tk.Canvas(list_frame, bg="#3b3b3b", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg="#3b3b3b")
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        records = self._load_records()
-        if not records:
-            if self._migrate_from_text():
-                records = self._load_records()
-
-        if not records:
-            no_data = tk.Label(
-                scrollable_frame,
-                text="No records saved yet",
-                bg="#3b3b3b",
-                fg="#aaaaaa",
-                font=("Segoe UI", 10),
-            )
-            no_data.pack(pady=20)
-        else:
-            for idx, rec in enumerate(records):
-                item = tk.Frame(scrollable_frame, bg="#3b3b3b", padx=10, pady=8)
-                item.pack(fill=tk.X)
-
-                name = rec.get("name", "Unnamed")
-                created = rec.get("created_at", "")
-                name_label = tk.Label(
-                    item,
-                    text=name,
-                    bg="#3b3b3b",
-                    fg="white",
-                    font=("Segoe UI", 10, "bold"),
-                    anchor="w",
-                    width=18,
-                )
-                name_label.pack(side=tk.LEFT)
-
-                ts_label = tk.Label(
-                    item,
-                    text=created,
-                    bg="#3b3b3b",
-                    fg="#aaaaaa",
-                    font=("Consolas", 9),
-                    anchor="w",
-                )
-                ts_label.pack(side=tk.LEFT, padx=(6, 0))
-
-                test_btn = ttk.Button(
-                    item,
-                    text="Test Action",
-                    command=lambda a=rec.get("actions", []): self._play_callback(a),
-                )
-                test_btn.pack(side=tk.RIGHT)
-
-                del_btn = ttk.Button(
-                    item,
-                    text="Delete",
-                    command=lambda i=idx: self._delete_record(i),
-                )
-                del_btn.pack(side=tk.RIGHT, padx=(0, 8))
-
-                sep = tk.Frame(scrollable_frame, bg="#4a4a4a", height=1)
-                sep.pack(fill=tk.X, padx=5)
-
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-    def _load_records(self) -> list[dict]:
-        try:
-            if os.path.exists(self._records_path):
-                with open(self._records_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return data.get("records", [])
-        except Exception:
-            return []
-        return []
-
-    def _migrate_from_text(self) -> bool:
-        record_path = _app_path("recorded_actions.txt")
-        if not os.path.exists(record_path):
-            return False
-        try:
-            with open(record_path, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f.readlines() if line.strip()]
-        except Exception:
-            return False
-
-        if not lines:
-            return False
-
-        events = []
-        for line in lines:
-            if not line.startswith("[") or "]" not in line:
-                continue
-            ts_raw = line[1: line.index("]")]
-            try:
-                ts = datetime.fromisoformat(ts_raw)
-            except Exception:
-                continue
-            rest = line[line.index("]") + 1 :].strip()
-            if rest.startswith("click"):
-                data = {"type": "click", "ts": ts}
-                for part in rest.split():
-                    if part.startswith("x="):
-                        data["x"] = part.split("=", 1)[1]
-                    elif part.startswith("y="):
-                        data["y"] = part.split("=", 1)[1]
-                    elif part.startswith("button="):
-                        data["button"] = part.split("=", 1)[1]
-                events.append(data)
-            elif rest.startswith("key="):
-                key = None
-                for part in rest.split():
-                    if part.startswith("key="):
-                        key = part.split("=", 1)[1]
-                        break
-                events.append({"type": "key", "key": key, "ts": ts})
-
-        if not events:
-            return False
-
-        events.sort(key=lambda e: e["ts"])
-        actions = []
-        prev_ts = events[0]["ts"]
-        for ev in events:
-            delay = (ev["ts"] - prev_ts).total_seconds()
-            item = {"type": ev["type"], "delay": delay}
-            if ev["type"] == "click":
-                item["x"] = ev.get("x", 0)
-                item["y"] = ev.get("y", 0)
-                item["button"] = ev.get("button", "left")
-            elif ev["type"] == "key":
-                item["key"] = ev.get("key", "")
-            actions.append(item)
-            prev_ts = ev["ts"]
-
-        record = {
-            "name": "Account Switch",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "actions": actions,
-        }
-
-        data = {"records": []}
-        try:
-            if os.path.exists(self._records_path):
-                with open(self._records_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-        except Exception:
-            data = {"records": []}
-        data.setdefault("records", []).append(record)
-        try:
-            with open(self._records_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            return False
-        return True
-
-    def _delete_record(self, index: int) -> None:
-        records = self._load_records()
-        if index < 0 or index >= len(records):
-            return
-        records.pop(index)
-        try:
-            with open(self._records_path, "w", encoding="utf-8") as f:
-                json.dump({"records": records}, f, indent=2)
-        except Exception:
-            pass
-        for widget in self.winfo_children():
-            widget.destroy()
-        self._setup_ui()
 
 def main():
     app = MTGBotUI()

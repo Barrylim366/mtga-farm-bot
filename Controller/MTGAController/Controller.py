@@ -435,7 +435,6 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 self.log_out_ok_btn_coors = (click_targets["log_out_ok_btn"]["x"], click_targets["log_out_ok_btn"]["y"])
             elif "logout_ok_btn" in click_targets:
                 self.log_out_ok_btn_coors = (click_targets["logout_ok_btn"]["x"], click_targets["logout_ok_btn"]["y"])
-        self._seed_logout_points_from_record_once()
         self._normalize_loaded_click_targets_to_1920()
         self._legacy_origin_hint = self._infer_legacy_origin_from_loaded_targets()
         if self._legacy_origin_hint is not None:
@@ -3730,6 +3729,13 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     # which can lag behind the Home click by several seconds -- and after a manual
     # quest re-roll / account change by the user it can take longer still.
     _QUESTS_PRIME_TIMEOUT = 30.0
+    # How long the prime waits after its Home click before concluding the click
+    # did not make Arena re-enter Home (the usual case: the client already sat
+    # on Home, and clicking the active tab logs nothing) and doing the
+    # Profile -> Home re-entry instead. Leaving another screen for Home logs the
+    # block within about 1-2 s, so this only costs a little when the click
+    # really did change screens.
+    _QUESTS_PRIME_REENTRY_AFTER = 4.0
 
     def _reset_quest_cache_for_new_session(self) -> None:
         """Forget every cached quest and publish the empty state to the UI.
@@ -3810,19 +3816,20 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             # its own (it also logs one right after login / on returning Home).
             self._navigate_to_home()
             deadline = time.time() + self._QUESTS_PRIME_TIMEOUT
-            # MTGA only writes the quests block when Home is (re)entered. If the
-            # first click did not move us -- or we were already on Home, where the
-            # block was logged before our floor -- a single retry halfway through
-            # the wait is what actually unblocks the read.
+            # MTGA only writes the quests block when Home is (re)entered. Clicking
+            # the Home tab while Home is already the active screen -- the normal
+            # state when the bot is started -- logs nothing, and a second Home
+            # click does not either (measured: both sat out the full 30 s). So
+            # when no block arrives shortly after the click, leave Home and come
+            # back (Profile -> Home), which makes Arena re-fetch the list. Only if
+            # that cannot be done does the old halfway Home retry remain.
+            reentry_at = time.time() + self._QUESTS_PRIME_REENTRY_AFTER
+            reentered = False
             retry_at = time.time() + (self._QUESTS_PRIME_TIMEOUT / 2.0)
             retried = False
             while time.time() < deadline and not self._stop_requested:
-                if not retried and time.time() >= retry_at:
-                    retried = True
-                    bot_logger.log_info("Quest prime: no block yet; clicking Home once more.")
-                    # Distinct label: the wait is now visibly a retry, not a stall.
-                    runtime_status.set_startup_phase("Reading daily quests (retrying)")
-                    self._navigate_to_home()
+                # Read first: a block the last click produced must win over
+                # another round of navigation.
                 self.refresh_quests_cache()
                 if self._quests_last_valid_read_ts > 0.0:
                     bot_logger.log_info(
@@ -3831,6 +3838,25 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                         )
                     )
                     return True
+                if not reentered and time.time() >= reentry_at:
+                    reentered = True
+                    runtime_status.set_startup_phase("Reading daily quests (re-entering Home)")
+                    if self._reenter_home_for_quests():
+                        # The re-entry is the stronger form of the retry.
+                        retried = True
+                    else:
+                        # Not done, or Home not verified after it (Arena may be
+                        # left on Profile): do the plain Home retry right away
+                        # rather than at the halfway mark.
+                        retry_at = time.time()
+                    continue
+                if not retried and time.time() >= retry_at:
+                    retried = True
+                    bot_logger.log_info("Quest prime: no block yet; clicking Home once more.")
+                    # Distinct label: the wait is now visibly a retry, not a stall.
+                    runtime_status.set_startup_phase("Reading daily quests (retrying)")
+                    self._navigate_to_home()
+                    continue
                 time.sleep(1.0)
             bot_logger.log_info(
                 "Quest prime: no fresh quests block within {:.0f}s; falling back to the "
@@ -3842,6 +3868,38 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             self._quests_session_floor_offset = 0
         self.refresh_quests_cache()
         return False
+
+    def _reenter_home_for_quests(self) -> bool:
+        """Profile -> Home, so Arena logs a fresh quests block.
+
+        The same bounded re-entry the quest reroll uses (see
+        QuestRerollMixin._freshen_quest_reroll_snapshot): Profile is found by
+        its template with the brightness guard (never a blind coordinate, so a
+        loading screen or an overlay is not clicked), then Home is clicked and
+        verified up to three times while Profile loads. Returns True when Home
+        was verified afterwards. Never raises."""
+        try:
+            # _reroll_can_act: not stopped and no match running or being found
+            # (the user may queue by hand while this runs).
+            if not self._reroll_can_act() or not self._quest_reroll_templates_ready():
+                return False
+            profile = self._reroll_match("profile", (155, 0, 140, 150))
+            if profile is None or not self._reroll_can_act():
+                bot_logger.log_info("Quest prime: Profile tab not recognized; no Home re-entry.")
+                return False
+            bot_logger.log_info("Quest prime: no block after the Home click; re-entering Home via Profile.")
+            self._click_abs(*profile, "QUEST_PRIME_PROFILE")
+            for _ in range(3):
+                time.sleep(1.0)
+                if not self._reroll_can_act():
+                    return False
+                if self._navigate_to_home():
+                    return True
+            bot_logger.log_info("Quest prime: Home not verified after the Profile re-entry.")
+            return False
+        except Exception as exc:
+            bot_logger.log_info(f"Quest prime: Home re-entry failed ({exc}).")
+            return False
 
     # The Home tab sits at a fixed spot in the top-left nav bar (1920x1080 frame).
     # A TEMPLATE match only works when Home is the ACTIVE tab, so from the event
@@ -6301,14 +6359,24 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             and not self._account_switch_in_progress
             and not self._stop_requested
         ):
-            try:
-                self._refresh_quests_from_home()
-            except Exception as e:
-                bot_logger.log_error(f"Startup/home quest check error: {e}")
-            # Only retire the one-shot once we actually have a valid quest read (or
-            # we have exhausted the bounded retries). A single transient Home-nav
-            # failure otherwise leaves the switch decision permanently blind.
-            self._home_quest_check_attempts += 1
+            if self._quest_count_confirmed_fresh:
+                # This account's quests were already read from a block logged
+                # past the session/switch boundary (normally by the startup
+                # prime moments ago), which is exactly what this check exists
+                # to obtain. Another Home dip would only cost ~10 s and read
+                # the same list again.
+                bot_logger.log_info(
+                    "Startup/home quest check: quests already read fresh for this account; no Home dip."
+                )
+            else:
+                try:
+                    self._refresh_quests_from_home()
+                except Exception as e:
+                    bot_logger.log_error(f"Startup/home quest check error: {e}")
+                # Only retire the one-shot once we actually have a valid quest read
+                # (or we have exhausted the bounded retries). A single transient
+                # Home-nav failure otherwise leaves the switch decision blind.
+                self._home_quest_check_attempts += 1
             # A count read out of a leftover tail block does not retire the
             # one-shot either: it is exactly the read that must not be acted on,
             # so keep dipping to Home until MTGA logs a real one (or the bounded
@@ -11052,213 +11120,6 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         except (TypeError, ValueError):
             self._account_cycle_index = 0
 
-    def _replay_recorded_logout(self) -> bool:
-        return self._replay_named_record("Account Switch", tag_prefix="LOGOUT", allow_keys={"esc"})
-
-    def _load_logout_click_points_from_record(
-        self,
-    ) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]] | None:
-        path = str(runtime_file("records", "recorded_actions_records.json"))
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            return None
-        records = data.get("records", [])
-        if not records:
-            return None
-        record = None
-        for rec in reversed(records):
-            if rec.get("name") in {"Logout", "logout", "Account Switch"}:
-                record = rec
-                break
-        if record is None:
-            return None
-        actions = record.get("actions", [])
-        clicks: list[tuple[int, int]] = []
-        for ev in actions:
-            if ev.get("type") != "click":
-                continue
-            try:
-                x = int(float(ev.get("x", 0)))
-                y = int(float(ev.get("y", 0)))
-            except Exception:
-                continue
-            if x > 0 and y > 0:
-                clicks.append((x, y))
-        if len(clicks) < 3:
-            return None
-        # Recorded logout flows are typically:
-        # [focus, focus, esc, LOG_OUT_BTN, LOG_OUT_OK_BTN].
-        return clicks[0], clicks[-2], clicks[-1]
-
-    def _seed_logout_points_from_record_once(self) -> None:
-        points = self._load_logout_click_points_from_record()
-        if points is None:
-            return
-        focus_pt_raw, log_out_pt_raw, log_out_ok_pt_raw = points
-        focus_pt = self._convert_record_click_to_1920_relative(focus_pt_raw)
-        log_out_pt = self._convert_record_click_to_1920_relative(log_out_pt_raw)
-        log_out_ok_pt = self._convert_record_click_to_1920_relative(log_out_ok_pt_raw)
-        self.log_out_focus_coors = focus_pt
-        self.log_out_btn_coors = log_out_pt
-        self.log_out_ok_btn_coors = log_out_ok_pt
-        self._loaded_click_targets["log_out_focus"] = {"x": int(focus_pt[0]), "y": int(focus_pt[1])}
-        self._loaded_click_targets["log_out_btn"] = {"x": int(log_out_pt[0]), "y": int(log_out_pt[1])}
-        self._loaded_click_targets["log_out_ok_btn"] = {"x": int(log_out_ok_pt[0]), "y": int(log_out_ok_pt[1])}
-        self._persist_logout_points_to_calibration_config(focus_pt, log_out_pt, log_out_ok_pt)
-        bot_logger.log_info(
-            "Seeded logout baseline points from record: "
-            f"focus_raw={focus_pt_raw} focus={focus_pt}, "
-            f"log_out_raw={log_out_pt_raw} log_out={log_out_pt}, "
-            f"log_out_ok_raw={log_out_ok_pt_raw} log_out_ok={log_out_ok_pt}"
-        )
-
-    def _convert_record_click_to_1920_relative(self, point: tuple[int, int]) -> tuple[int, int]:
-        """
-        Convert a recorded absolute desktop click into 1920-relative window space when possible.
-        If conversion cannot be safely inferred, keep the original point.
-        """
-        try:
-            px = int(point[0])
-            py = int(point[1])
-        except Exception:
-            return point
-
-        ct = self._loaded_click_targets or {}
-        queue_cfg = ct.get("queue_button")
-        qrel = self._default_points_1920.get("home_play_button_coors")
-        if isinstance(queue_cfg, dict) and qrel is not None:
-            try:
-                qx = int(queue_cfg.get("x"))
-                qy = int(queue_cfg.get("y"))
-                # Legacy absolute calibration profile: reconstruct old window origin.
-                if qx > 1920 or qy > 1080:
-                    ox = int(qx - int(qrel[0]))
-                    oy = int(qy - int(qrel[1]))
-                    rx = int(px - ox)
-                    ry = int(py - oy)
-                    if 0 <= rx <= 1920 and 0 <= ry <= 1080:
-                        return (rx, ry)
-            except Exception:
-                pass
-
-        # Already normalized.
-        if 0 <= px <= 1920 and 0 <= py <= 1080:
-            return (px, py)
-        return (px, py)
-
-    def _persist_logout_points_to_calibration_config(
-        self,
-        focus_pt: tuple[int, int],
-        log_out_pt: tuple[int, int],
-        log_out_ok_pt: tuple[int, int],
-    ) -> None:
-        config_path = str(runtime_file("config", "calibration_config.json"))
-        if not os.path.exists(config_path):
-            return
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception:
-            return
-        click_targets = cfg.get("click_targets", {})
-        if not isinstance(click_targets, dict):
-            click_targets = {}
-        current_focus = click_targets.get("log_out_focus")
-        current_a = click_targets.get("log_out_btn")
-        current_b = click_targets.get("log_out_ok_btn")
-        desired_focus = {"x": int(focus_pt[0]), "y": int(focus_pt[1])}
-        desired_a = {"x": int(log_out_pt[0]), "y": int(log_out_pt[1])}
-        desired_b = {"x": int(log_out_ok_pt[0]), "y": int(log_out_ok_pt[1])}
-        if current_focus == desired_focus and current_a == desired_a and current_b == desired_b:
-            return
-        click_targets["log_out_focus"] = desired_focus
-        click_targets["log_out_btn"] = desired_a
-        click_targets["log_out_ok_btn"] = desired_b
-        cfg["click_targets"] = click_targets
-        try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
-        except Exception:
-            pass
-
-    def _replay_named_record(self, name: str, tag_prefix: str = "REPLAY", allow_keys: set[str] | None = None) -> bool:
-        path = str(runtime_file("records", "recorded_actions_records.json"))
-        if not os.path.exists(path):
-            return False
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            return False
-
-        records = data.get("records", [])
-        if not records:
-            return False
-
-        record = None
-        for rec in reversed(records):
-            if rec.get("name") == name:
-                record = rec
-                break
-        if record is None:
-            return False
-
-        actions = record.get("actions", [])
-        if not actions:
-            return False
-
-        bot_logger.log_info(f"Replaying record '{name}' (pynput playback).")
-        try:
-            from pynput import mouse, keyboard
-        except Exception as e:
-            bot_logger.log_error(f"{tag_prefix}_REPLAY_FAILED: pynput not available: {e}")
-            return False
-
-        m = mouse.Controller()
-        k = keyboard.Controller()
-        for ev in actions:
-            if self._stop_requested:
-                bot_logger.log_info(f"{tag_prefix}_REPLAY_ABORTED: stop requested.")
-                return False
-            delay = float(ev.get("delay", 0.0))
-            if delay > 0:
-                time.sleep(delay)
-            if ev.get("type") == "key":
-                key_name = ev.get("key", "")
-                if allow_keys is not None and key_name not in allow_keys:
-                    continue
-                if key_name == "esc":
-                    k.press(keyboard.Key.esc)
-                    k.release(keyboard.Key.esc)
-                elif len(key_name) == 1:
-                    k.press(key_name)
-                    k.release(key_name)
-                else:
-                    if hasattr(keyboard.Key, key_name):
-                        key_obj = getattr(keyboard.Key, key_name)
-                        k.press(key_obj)
-                        k.release(key_obj)
-            elif ev.get("type") == "click":
-                try:
-                    x = int(float(ev.get("x", 0)))
-                    y = int(float(ev.get("y", 0)))
-                except Exception:
-                    x, y = 0, 0
-                if x and y:
-                    bot_logger.log_click(x, y, f"{tag_prefix}_REPLAY_CLICK")
-                    m.position = (x, y)
-                    time.sleep(0.05)
-                    m.press(mouse.Button.left)
-                    time.sleep(0.05)
-                    m.release(mouse.Button.left)
-        return True
-
-
-
     def _handle_queue_ready(self) -> None:
         if not self._queue_ready:
             self._queue_ready = True
@@ -12038,27 +11899,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             self._pending_switch_alias = account_name or None
             self._post_login_action_done = False
             logout_log_offset = self._get_log_size(self._log_path)
-            logout_ok = False
-            if self._replay_recorded_logout():
-                bot_logger.log_info("Recorded logout replay started; waiting for login-screen transition.")
-                runtime_status.set_intentional_wait(max(40.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
-                logout_ok = self._wait_for_logout_to_reach_login_screen(
-                    start_offset=logout_log_offset,
-                    timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
-                )
-                if not logout_ok:
-                    bot_logger.log_error("Recorded logout replay did not reach the login screen; falling back to built-in logout clicks.")
-            else:
-                bot_logger.log_info("Recorded logout replay unavailable; falling back to built-in macOS-style logout clicks.")
-
-            if not logout_ok:
-                logout_log_offset = self._get_log_size(self._log_path)
-                self._run_mapped_logout_sequence()
-                runtime_status.set_intentional_wait(max(40.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
-                logout_ok = self._wait_for_logout_to_reach_login_screen(
-                    start_offset=logout_log_offset,
-                    timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
-                )
+            self._run_mapped_logout_sequence()
+            runtime_status.set_intentional_wait(max(40.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
+            logout_ok = self._wait_for_logout_to_reach_login_screen(
+                start_offset=logout_log_offset,
+                timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
+            )
             if not logout_ok:
                 # The switch did not happen: we are still signed in on the current
                 # account. Count it so a persistently broken logout eventually stops

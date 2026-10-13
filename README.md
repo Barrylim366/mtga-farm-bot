@@ -22,7 +22,7 @@ Python dependencies are installed automatically by the launcher scripts:
 | Package | Purpose |
 |---|---|
 | `pyautogui` | Mouse/keyboard input (default backend) |
-| `pynput` | Global input listener (hotkeys, macro recording) |
+| `pynput` | Global input listener (hotkeys, calibration) |
 | `mss` | Fast screen capture |
 | `opencv-python` | Template matching |
 | `Pillow` | UI rendering |
@@ -112,7 +112,16 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.7.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.8.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+
+### Version 1.8.0
+
+- New: a **Session Info** panel over the top-left corner of the Arena window shows what the bot is doing: turn, phase and last move during a match, queue, account switch, current and next account, games and wins, gold farmed, and the daily quests. The bot never sees or clicks it (see *Overlay over the Arena window*). It stays up while the bot runs, also with the bot's window minimized, and goes away when the bot stops.
+- New: **Settings → Game Overlay** sets how see-through the panel's background is; the text always stays readable. It replaces **Record Action**, which is gone together with its recording/replay (account switching now always uses the built-in logout).
+- The main window is tidier: below the buttons only the bot's status, in the title's gold lettering, with a play or stop symbol. **Queue** and **Account Switch** show their setting in the button; right-click **Account Switch** to tell the bot which account is open in Arena.
+- New: everything the bot writes to `bot.log` also scrolls by live in the terminal window it was started from, including what the Forge engine decided.
+- Faster start: reading the daily quests at Start took about 50 seconds of Home clicks and waiting when Arena was already on Home; it now takes a few seconds (see *Faster start: reading the quests*).
+- Fixed: the progress bar at Start kept saying *Loading card data* while the bot was already reading quests and clicking through Arena; it now names each step.
 
 ### Version 1.7.0
 
@@ -218,13 +227,31 @@ Each account has exactly one name: its **Arena Name**, the one Arena shows top-l
 
 #### Current / Next account
 
-While account switching is enabled, the main window shows **Current ACC** (playing now) and **Next ACC** (the account the next switch will log into). Click **Current ACC** to tell the bot which account is open in Arena right now. Use it when you changed account by hand: Arena writes the login only once, so after a while the bot can no longer read it from the log, and a manual pick sets rotation straight again. The pin is dropped automatically on the next switch the bot performs itself, and when the pinned account is renamed or deleted.
+While account switching is enabled, the [overlay over the Arena window](#overlay-over-the-arena-window) shows **Current ACC** (playing now) and **Next ACC** (the account the next switch will log into). **Right-click Account Switch** in the main window to tell the bot which account is open in Arena right now. Use it when you changed account by hand: Arena writes the login only once, so after a while the bot can no longer read it from the log, and a manual pick sets rotation straight again. The pin is dropped automatically on the next switch the bot performs itself, and when the pinned account is renamed or deleted.
 
 Arena records a login in two ways — the match-server handshake and an `[Accounts - Login] Logged in successfully. Display Name: …` line — and the bot reads both, taking whichever is later in the log. Only the handshake used to count, and a re-login (the path taken after a rejected password) can be written without one at all, which left the bot naming the account it had just left. That name decides which account folder the Historic deck thumbnails come from, so it was not a cosmetic slip.
 
 A pin is also dropped when Arena logs a login for a *different* account after the pin was set — you changed account by hand again, so the log is newer than your pick. This only happens when that login can be matched to one of your configured accounts by its Arena Name; an unrecognised login never overrides your choice. A pin restored from the previous session additionally yields to a login that is *older* than it, since a restored pin says nothing about who is logged in now — so give every account its Arena Name if you want the bot to correct a stale pin on its own.
 
-**Change Queue** and **Account Switch** in the main menu replace the older click-on-text toggles. Queue mode is locked while the bot runs (changing it mid-run would desync navigation).
+The queue and account-switch toggles are main-menu buttons that carry their current value in the label (**Queue: Historic** / **Queue: Starter Deck**, **Account Switch: On** / **Off**). Queue mode is locked while the bot runs (changing it mid-run would desync navigation).
+
+#### Overlay over the Arena window
+
+Below its buttons the main window shows only the bot's **Status**, in the title's molten-gold lettering, with a play triangle under it while the bot runs and a square while it is stopped. Everything else sits in a small **Session Info** panel over the top-left corner of the Arena window: queue, account switch and the time or thresholds until the next switch, Current/Next account, the session's games and wins, the gold farmed, during a match the turn, phase, whose turn it is and the bot's last move, and the **Daily Quests** (heading in the same gold lettering, the active quest marked). It is up for as long as the bot runs and Arena's window is open and not minimized — also with the bot's own window minimized or while you work in another app (it is topmost, so it then lies over that app too) — and goes away when the bot is stopped or closed. While stopped it is shown only while **Settings → Game Overlay** is open, as a preview.
+
+While the bot starts, a progress bar above the status names the step in progress: *Checking Arena setup*, *Loading card data*, then what the bot itself reports (*Reading daily quests*, *Rerolling 500-gold daily quest*, *Refreshing quests*, *Opening the Play menu*, ... *Pressing Play*). Fixed in this version: the bar only started following the bot's own steps once the first ~40 seconds of startup were over, so it said *Loading card data* while the bot was already reading quests and clicking through Arena's menus.
+
+The bot must never notice that panel, so it is only put on the screen once Windows confirms all three of:
+
+- **Clicks pass through it** (`WS_EX_LAYERED | WS_EX_TRANSPARENT`): a click aimed at Home under the panel lands on Arena.
+- **It never takes the focus** (`WS_EX_NOACTIVATE`): Arena answers hovers only while it is the foreground window.
+- **Screen captures do not contain it** (`WDA_EXCLUDEFROMCAPTURE`): template matching and the debug captures see the game behind it. Screenshots and screen recordings taken on this PC do not show it either (a camera pointed at the monitor does, of course).
+
+Keeping a window out of captures needs Windows 10 version 2004 or newer. Where it cannot be confirmed — and on macOS/Linux — the panel stays off and `bot.log` says `Overlay not shown` with the reason. Its title never contains "MTGA" or "Arena", so the window locator cannot take it for the game. Code: `overlay.py`.
+
+**Settings → Game Overlay** sets how see-through the panel's background is (0-100 %, default 25 %); the text always stays fully opaque. The change applies immediately. The panel is two windows on top of each other for this — the background with that transparency, and the text above it on a fully transparent color-keyed background — and both are dressed and checked as above.
+
+The old **Record Action** button and its recording/replay are gone. Account switching only used a recording named *Account Switch* as an optional logout replay, falling back to the built-in logout sequence when there was none; it now always uses the built-in sequence. An existing `runtime/records/recorded_actions_records.json` is simply ignored.
 
 Account switching can be toggled on/off live from the main window without restarting the bot, and runs in one of two modes:
 - **Time**: switch every N minutes (configurable).
@@ -276,6 +303,8 @@ Before its first match at **Start**, and after each account login, the bot autom
 The bot verifies Home, the daily-quest tile, and Arena's **Confirm Swap** dialog using captured UI templates, then uses the dialog's fixed, scaled button positions for **OK** and **Cancel**. If clicking an already-active Home tab produces no new quest response, it makes one bounded **Profile → Home** refresh. The same re-entry can obtain the post-swap response, which Arena does not always log immediately. Missing/stale data or an unrecognized dialog skip the attempt. If a 500-gold tile cannot be recognized, the bot skips the reroll only after it confirms Home is still visible; an uncertain or overlaid screen remains blocked for a later safe retry. After submission it waits up to 10 seconds for verification and never repeats an uncertain confirmation; an unresolved dialog prevents the queue loop from starting. A reroll that cannot run for a recoverable reason still lets the post-login routine pick this account's deck — only an unresolved swap dialog, a stop, or a running match/account switch skips deck selection. No error from the check can escape into the queue loop. Quest replacement is not counted as quest completion or gold earned. Outcomes are recorded as `Quest reroll:` in `bot.log`.
 
 If Home navigation succeeds but the reroll's stricter Home recognition fails twice, startup and post-login checks try a verified **Profile → Home** re-entry to redraw the screen. Recovery makes at most three return attempts, with an 8-second cooldown between re-entries. It requires a visible, enabled Profile tab and pauses for a match, swap dialog, stop request, or another thread's account switch. Home must still pass recognition before reroll or deck selection proceeds. Recovery is logged as `QUEST_HOME_REENTRY`.
+
+**Faster start: reading the quests.** At Start the bot reads the account's daily quests from scratch, and Arena only logs them when Home is *entered*. Clicking the Home tab while Arena already shows Home — the normal state when you press Start — logs nothing, and the bot used to wait out its whole 30-second window for a list that never came (a second Home click halfway through did not help either), then fell back to the list already in the log. It now waits about 4 seconds after the Home click and, if nothing arrived, leaves Home for Profile and comes back (the same verified re-entry as above: Profile is found by its template, never a blind click), which makes Arena send the list at once. When that read succeeds, the quest reroll check needs no Home trip of its own, and in quests switch mode the check before the first queue (*Refreshing quests*, another Home trip plus up to 8 seconds of waiting) is skipped too — it existed only to obtain such a fresh read. If the read still fails, both behave as before. In one `bot.log` from before the change, about 50 of the 55 seconds between Start and the first *Play* went to these three Home trips. `bot.log` says `Quest prime: no block after the Home click; re-entering Home via Profile.` and `Startup/home quest check: quests already read fresh for this account; no Home dip.`
 
 A landing that keeps the reroll for later without clicking anything (no fresh quest response, Home not verified, 500-gold tile not recognized, a screen-check error) counts as one attempt; after three, the reroll is dropped for this login (`Quest reroll: skipped (… giving up after 3 attempts)`) and the bot queues normally. Each login re-arms it. Before 1.6.3 there was no limit, and a check that could never succeed kept the queue loop waiting on it forever. The brightness check that rejects dimmed controls also tolerates a crop up to 4 px past the frame edge: Home's anchor sits flush against the top edge, and through a 1600×900 client the matched point rounded to one pixel above it, which rejected every Home check there.
 
@@ -569,6 +598,10 @@ PR and issue text is screened for prompt injection aimed at AI agents (`.github/
 - **Linux/Proton**: `~/.local/share/Steam/steamapps/compatdata/2141910/pfx/drive_c/users/steamuser/AppData/LocalLow/Wizards Of The Coast/MTGA/Player.log`
 
 If auto-detection fails, the UI prompts for a manual file selection on startup.
+
+### Live log in the terminal
+
+Everything written to `bot.log` also scrolls by in the terminal window the bot was started from (`start_windows.bat` keeps it open, minimized, in the taskbar) — including the `FORGE ...` lines that say what the Forge engine decided. Lines longer than 400 characters are shortened there (the raw Player.log dumps); `bot.log` keeps them whole. The console is written from its own thread, so a slow or paused console window (selecting text in it pauses output) never holds up the bot; if it falls far behind, it skips lines and says how many. Started without a console (e.g. `pythonw`), nothing is shown. Turn it off with `MTGA_CONSOLE_LOG=0`.
 
 ### Is it still working? (`tools/health_check.py`)
 

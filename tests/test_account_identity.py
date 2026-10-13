@@ -392,7 +392,6 @@ class SwitchFlowIdentityTest(unittest.TestCase):
         # Screen, clicks and waits: none of them exist in a test process.
         self.c.input = _StubInput()
         self.c._get_state_from_log = lambda: None
-        self.c._replay_recorded_logout = lambda: False
         self.c._run_mapped_logout_sequence = lambda: None
         self.c._wait_for_logout_to_reach_login_screen = lambda **kw: True
         self.c._run_post_login_routine = lambda account, all_accounts: True

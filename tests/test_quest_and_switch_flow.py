@@ -19,7 +19,9 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -703,12 +705,150 @@ class SessionStartTests(_QuestLogTestBase):
         self.assertEqual(c._last_valid_quest_active_incomplete, 0)
         self.assertFalse(c._quest_count_confirmed_fresh)
 
+    def _prime_off_screen(self):
+        c = self.controller
+        c._ensure_arena_region = lambda *a, **k: (0, 0, 1920, 1080)
+        c._dismiss_reward_popup = lambda *a, **k: False
+        c._get_state_from_log = lambda: BotState.HOME
+        c._QUESTS_PRIME_REENTRY_AFTER = 0.0
+        c._QUESTS_PRIME_TIMEOUT = 5.0
+        self.reentries = []
+        return c
+
+    def test_prime_re_enters_home_when_the_home_click_logs_nothing(self):
+        """Started on Home: the Home click is a no-op for Arena, so the prime
+        must leave Home and come back instead of waiting out the timeout."""
+        c = self._prime_off_screen()
+        self.append(match_auth_block("venturaa"))
+        self.append(quests_block(SIMIC))
+        c._navigate_to_home = lambda: True  # "reached Home", but nothing logged
+
+        def reenter() -> bool:
+            self.reentries.append(1)
+            self.append(quests_block(GOLGARI, quest_id="q-2"))
+            return True
+
+        c._reenter_home_for_quests = reenter
+        self.assertTrue(c.prime_quests_for_new_session())
+        self.assertEqual(self.reentries, [1])
+        self.assertEqual(c._cached_active_colors, "BG")
+        self.assertTrue(c._quest_count_confirmed_fresh)
+
+    def test_prime_does_not_re_enter_when_the_home_click_already_logged(self):
+        c = self._prime_off_screen()
+        self.append(match_auth_block("venturaa"))
+
+        def home() -> bool:
+            self.append(quests_block(GOLGARI, quest_id="q-2"))
+            return True
+
+        c._navigate_to_home = home
+        c._reenter_home_for_quests = lambda: self.reentries.append(1) or True
+        self.assertTrue(c.prime_quests_for_new_session())
+        self.assertEqual(self.reentries, [])
+
+    def test_prime_re_enters_at_most_once(self):
+        c = self._prime_off_screen()
+        c._QUESTS_PRIME_TIMEOUT = 0.3
+        self.append(match_auth_block("venturaa"))
+        self.append(quests_block(SIMIC))
+        c._navigate_to_home = lambda: True
+        c._reenter_home_for_quests = lambda: self.reentries.append(1) or True
+        self.assertFalse(c.prime_quests_for_new_session(), "no fresh block ever came")
+        self.assertEqual(self.reentries, [1])
+
+    def _re_entry_off_screen(self, home_results):
+        c = self.controller
+        self.clicks, self.home_calls = [], []
+        c._quest_reroll_templates_ready = lambda: True
+        c._reroll_match = lambda *a, **k: (180, 40)
+        c._click_abs = lambda *a, **k: self.clicks.append(a)
+        results = list(home_results)
+        c._navigate_to_home = lambda: self.home_calls.append(1) or results.pop(0)
+        c._get_state_from_log = lambda: BotState.HOME
+        return c
+
+    def test_re_entry_clicks_profile_then_verifies_home(self):
+        c = self._re_entry_off_screen([False, True])
+        with mock.patch("time.sleep"):
+            self.assertTrue(c._reenter_home_for_quests())
+        self.assertEqual(self.clicks, [(180, 40, "QUEST_PRIME_PROFILE")])
+        self.assertEqual(len(self.home_calls), 2)
+
+    def test_re_entry_stops_clicking_once_a_match_starts(self):
+        c = self._re_entry_off_screen([False, False, False])
+        states = iter([BotState.HOME, BotState.HOME, BotState.FIND_MATCH])
+        c._get_state_from_log = lambda: next(states, BotState.FIND_MATCH)
+        with mock.patch("time.sleep"):
+            self.assertFalse(c._reenter_home_for_quests())
+        self.assertEqual(self.home_calls, [], "no Home click once the user queued")
+
+    def test_a_failed_re_entry_retries_home_at_once(self):
+        c = self._prime_off_screen()
+        c._QUESTS_PRIME_TIMEOUT = 3.0
+        self.append(match_auth_block("venturaa"))
+        homes = []
+
+        def home() -> bool:
+            homes.append(1)
+            if len(homes) == 2:  # the immediate retry after the failed re-entry
+                self.append(quests_block(GOLGARI, quest_id="q-2"))
+            return True
+
+        c._navigate_to_home = home
+        c._reenter_home_for_quests = lambda: self.reentries.append(1) and False
+        started = time.monotonic()
+        self.assertTrue(c.prime_quests_for_new_session())
+        self.assertEqual((len(homes), self.reentries), (2, [1]))
+        self.assertLess(time.monotonic() - started, 2.5, "the retry must not wait for the halfway mark")
+
+    def test_re_entry_never_clicks_without_the_profile_template(self):
+        c = self.controller
+        clicks = []
+        c._quest_reroll_templates_ready = lambda: True
+        c._reroll_match = lambda *a, **k: None
+        c._click_abs = lambda *a, **k: clicks.append(a)
+        self.assertFalse(c._reenter_home_for_quests())
+        self.assertEqual(clicks, [])
+
     def test_priming_does_not_resurrect_a_stopped_session(self):
         """Priming polls and clicks; if it cleared the flag itself, a Stop that
         arrived during startup would be swallowed by a quest helper."""
         self.controller._stop_requested = True
         self.controller.prime_quests_for_new_session()
         self.assertTrue(self.controller._stop_requested)
+
+
+class LandingQuestCheckTests(_QuestLogTestBase):
+    """The quests-mode check before the first queue of an account."""
+
+    def setUp(self):
+        super().setUp()
+        c = self.controller
+        c._account_switch_enabled = True
+        c._account_switch_mode = "quests"
+        c._dismiss_reward_popup = lambda *a, **k: False
+        c.reroll_quest_on_landing = lambda: True
+        # Stop right after the check: the queue path is not under test here.
+        c._account_switch_due = lambda: True
+        self.dips = []
+        c._refresh_quests_from_home = lambda: self.dips.append(1) or True
+
+    def test_a_fresh_startup_read_skips_the_home_dip(self):
+        c = self.controller
+        c._quest_count_confirmed_fresh = True
+        c.start_game_from_home_screen()
+        self.assertEqual(self.dips, [])
+        self.assertTrue(c._home_quest_check_done)
+        self.assertEqual(c._home_quest_check_attempts, 0)
+
+    def test_without_a_fresh_read_it_still_dips_to_home(self):
+        c = self.controller
+        c._quest_count_confirmed_fresh = False
+        c.start_game_from_home_screen()
+        self.assertEqual(self.dips, [1])
+        self.assertEqual(c._home_quest_check_attempts, 1)
+        self.assertFalse(c._home_quest_check_done, "one stale attempt must not retire the check")
 
 
 if __name__ == "__main__":

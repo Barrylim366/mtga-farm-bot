@@ -239,13 +239,28 @@ def _write_payload(payload: dict[str, Any], *, already_locked: bool = False) -> 
     return payload
 
 
+_REPLACE_ATTEMPTS = 4
+_REPLACE_RETRY_SEC = 0.005
+
+
 def _write_payload_unlocked(payload: dict[str, Any]) -> None:
     path = Path(get_status_path())
     temp = path.with_suffix(".tmp")
     try:
         with temp.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
-        temp.replace(path)
+        # On Windows a reader's open() (no FILE_SHARE_DELETE) makes the replace
+        # fail for the few milliseconds it holds the file. The UI reads this
+        # file every second (overlay), so retry briefly instead of dropping
+        # the update.
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                temp.replace(path)
+                break
+            except PermissionError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_RETRY_SEC)
     except Exception:
         try:
             if temp.exists():

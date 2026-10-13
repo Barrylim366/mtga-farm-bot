@@ -100,8 +100,85 @@ def ensure_debug_dir(subdir: str | None = None) -> str:
     return str(base)
 
 
+# Console mirror: every bot.log line is also shown in the terminal the bot was
+# started from (start_windows.bat keeps it open, minimized). Written by its own
+# thread from a bounded queue, never under _log_lock: a console write can block
+# (a selected region in the window pauses output), and that must never stall
+# the bot. When the queue is full, lines are dropped from the console only --
+# bot.log keeps everything. MTGA_CONSOLE_LOG=0 turns it off.
+_CONSOLE_LINE_MAX = 400
+_CONSOLE_QUEUE_MAX = 5000
+_console_lock = threading.Lock()
+_console_queue = None
+_console_state = {"checked": False, "enabled": False, "dropped": 0}
+
+
+def _console_enabled() -> bool:
+    if _console_state["checked"]:
+        return _console_state["enabled"]
+    enabled = False
+    try:
+        import sys
+        from runtime_paths import _running_under_test_runner
+
+        stream = sys.stdout
+        enabled = (
+            os.environ.get("MTGA_CONSOLE_LOG", "1").strip().lower() not in ("0", "off", "false", "no")
+            and stream is not None
+            and stream.isatty()
+            and not _running_under_test_runner()
+        )
+    except Exception:
+        enabled = False
+    _console_state["enabled"] = enabled
+    _console_state["checked"] = True
+    return enabled
+
+
+def _console_writer(q) -> None:
+    import sys
+
+    stream = sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    while True:
+        lines = q.get()
+        try:
+            dropped = _console_state["dropped"]
+            if dropped:
+                _console_state["dropped"] = 0
+                lines = [f"[console] {dropped} log line(s) skipped here (still in bot.log)\n"] + list(lines)
+            for line in lines:
+                text = line if len(line) <= _CONSOLE_LINE_MAX else line[:_CONSOLE_LINE_MAX].rstrip() + " ...\n"
+                # The Windows console codepage cannot show every name (Cyrillic,
+                # CJK); replace what it can't encode instead of raising.
+                stream.write(text.encode(encoding, "replace").decode(encoding, "replace"))
+            stream.flush()
+        except Exception:
+            pass
+
+
+def _mirror_to_console(lines: list[str]) -> None:
+    global _console_queue
+    if not _console_enabled():
+        return
+    try:
+        import queue
+
+        with _console_lock:
+            if _console_queue is None:
+                _console_queue = queue.Queue(maxsize=_CONSOLE_QUEUE_MAX)
+                threading.Thread(
+                    target=_console_writer, args=(_console_queue,), name="console-log", daemon=True,
+                ).start()
+        _console_queue.put_nowait(list(lines))
+    except Exception:
+        # queue.Full (or anything else): the console misses these, bot.log does not.
+        _console_state["dropped"] += len(lines)
+
+
 def _write_lines(mode: str, lines: list[str]) -> None:
     global _fallback_warning_printed
+    _mirror_to_console(lines)
     target = _resolve_bot_log_path()
     try:
         with open(target, mode, encoding="utf-8") as f:
