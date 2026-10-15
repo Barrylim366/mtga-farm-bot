@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -995,7 +996,23 @@ def run_arena_setup_check(
     assets_dir: str,
     expected_size: tuple[int, int] = (1920, 1080),
     write_debug_on_fail: bool = True,
+    focus: bool = True,
+    settle_sec: float = 0.3,
 ) -> ArenaDetectionResult:
+    """Detect and verify the Arena window, raising it first.
+
+    The detector reads the *screen* at the window's rectangle, not the window,
+    so an Arena lying behind a browser fails every anchor with a capture of the
+    browser -- measured 2026-10-15: four Start presses on the Home screen, all
+    `anchor_not_found` at 0.58, while PrintWindow of the same window matched the
+    Home anchor at 0.98. The Controller raises the window before every cast for
+    the same reason; the setup check now does the same. `settle_sec` gives the
+    window manager time to repaint before the capture.
+    """
+    if focus:
+        focus_mtga_window(expected_size)
+        if settle_sec > 0:
+            time.sleep(settle_sec)
     provider = ArenaRegionProvider(
         vision=VisionEngine(),
         assets_dir=assets_dir,

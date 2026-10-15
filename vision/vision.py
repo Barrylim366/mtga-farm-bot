@@ -246,7 +246,7 @@ class VisionEngine:
                     self._mss_instance = mss_factory()
                 monitor = self._mss_instance.monitors[0]
                 raw = self._mss_instance.grab(monitor)
-                arr = np.array(raw, dtype=np.uint8)
+                arr = self._cut_at_primary_origin(np.array(raw, dtype=np.uint8), monitor)
                 if arr.ndim == 3 and arr.shape[2] == 4:
                     frame = self._normalize_frame_to_logical_size(arr[:, :, :3].copy())
                     if not self._is_invalid_linux_wayland_capture_frame(frame):
@@ -277,6 +277,46 @@ class VisionEngine:
                 if not self._pyautogui_warned:
                     self._pyautogui_warned = True
         return None
+
+    @staticmethod
+    def _cut_at_primary_origin(arr: np.ndarray, monitor: dict) -> np.ndarray:
+        """Drop the part of a virtual-screen grab left of or above screen (0, 0).
+
+        `mss.monitors[0]` is the whole virtual screen and its first column is
+        the leftmost monitor. On a desk with a display left of (or above) the
+        primary that column is a *negative* screen coordinate, while every
+        consumer of these frames -- capture(), pixel_check(), the full-frame
+        readers in the Controller and the window locator -- indexes them as
+        screen (x, y) from the primary monitor's origin. Measured 2026-10-15:
+        with a monitor at x=-1920 every Arena capture showed that monitor
+        instead, and the setup check failed on a plain Home screen. Cutting the
+        grab here keeps all of those readers correct; monitors right of and
+        below the primary are untouched.
+        """
+        try:
+            left = int(monitor.get("left", 0) or 0)
+            top = int(monitor.get("top", 0) or 0)
+            width = int(monitor.get("width", 0) or 0)
+            height = int(monitor.get("height", 0) or 0)
+        except Exception:
+            return arr
+        if arr.ndim < 2:
+            return arr
+        # mss describes the monitor in logical units but hands back physical
+        # pixels -- on a macOS Retina display the grab is twice the rectangle
+        # (which is what _normalize_frame_to_logical_size exists for) -- so the
+        # cut is scaled to the grab's own size. On Windows and X11 both match.
+        scale_x = float(arr.shape[1]) / float(width) if width > 0 else 1.0
+        scale_y = float(arr.shape[0]) / float(height) if height > 0 else 1.0
+        cut_x = int(round(max(0, -left) * scale_x))
+        cut_y = int(round(max(0, -top) * scale_y))
+        if not (cut_x or cut_y):
+            return arr
+        if cut_x >= arr.shape[1] or cut_y >= arr.shape[0]:
+            # A geometry that would leave nothing: hand out the grab untouched
+            # rather than an empty frame.
+            return arr
+        return arr[cut_y:, cut_x:]
 
     def _is_invalid_linux_wayland_capture_frame(self, frame: np.ndarray | None) -> bool:
         if frame is None or frame.size == 0:
