@@ -300,6 +300,14 @@ class Game:
             else:
                 duration_sec = 0.0
             bot_logger.log_match_end(result, self.last_logged_turn, duration_sec)
+            try:
+                from notifications import NotificationManager
+                NotificationManager.get_instance().notify_match_result(
+                    won=bool(won),
+                    duration_sec=duration_sec,
+                )
+            except Exception:
+                pass
         except Exception as e:
             self._debug(f"Match-end marker failed: {e}")
         if self._stop_requested:

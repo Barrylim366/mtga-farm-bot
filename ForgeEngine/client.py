@@ -46,7 +46,7 @@ def classpath() -> str:
 class AdvisorClient:
     """One advisor process. Thread-safe; requests are answered one at a time."""
 
-    def __init__(self, startup_timeout: float = 180.0, heap: str = "2g"):
+    def __init__(self, startup_timeout: float = 180.0, heap: str = "1g"):
         self.startup_timeout = startup_timeout
         self.heap = heap
         self._lock = threading.Lock()
@@ -104,6 +104,8 @@ class AdvisorClient:
         args_file = run / "java.args"
         args_file.write_text(
             f"-Xmx{self.heap}\n"
+            "-XX:+UseG1GC\n"
+            "-XX:+UseStringDeduplication\n"
             "-Dfile.encoding=UTF-8\n"
             "-Djava.awt.headless=true\n"
             f'-Dforge.assets="{_forward(paths.assets_dir())}/"\n'

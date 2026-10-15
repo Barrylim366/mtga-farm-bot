@@ -530,6 +530,15 @@ the GitHub release asset `forge-engine-v<N>`.
 The advisor (`forge_advisor/`) is adapted from
 [mtga-play-bot](https://github.com/Funny-Bones/mtga-play-bot).
 
+### Intelligent London Mulligan & Enhancements
+
+- **London Mulligan Engine (`AI/Utilities/MulliganLogic.py`)**: Evaluates opening hands based on land-to-spell ratios, early curve castability (Turns 1-3 plays), and automatically selects optimal cards (excess lands or high-CMC spells) to tuck under the London Mulligan rule.
+- **Anti-Detection Bezier Mouse (`Controller/Utilities/input_controller.py`)**: Generates natural, human-like cubic Bezier mouse curves with smooth acceleration, micro-jitter, and randomized pre-click pauses to prevent behavioral detection.
+- **Per-Monitor DPI v2 & Window Snapping (`vision/window_locator.py`)**: Enables Windows Per-Monitor DPI Awareness v2 to eliminate coordinate drift across scaled monitors, with 16:9 window snapping support.
+- **Discord & Telegram Notifications (`notifications.py`)**: Non-blocking background dispatcher delivering live alerts for match results (victory/defeat with duration), completed daily quests, and account switches. Configurable in **Settings → Enhancements**.
+- **Low-Power / Overnight Mode (`low_power.py`)**: Paces idle polling loops to reduce CPU/GPU temperatures and power consumption during overnight farming sessions.
+- **Starter Deck Duel Matcher (`AI/Utilities/StarterDeckMatcher.py`)**: Parses active daily quest color requirements and selects the optimal two-color Starter Deck to maximize quest progress.
+
 ## Architecture
 
 The codebase is split into clearly separated layers:

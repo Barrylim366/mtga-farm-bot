@@ -92,18 +92,32 @@ def _load_runtime_bot_config(cfg_path: pathlib.Path) -> tuple[dict, bool]:
 
 
 def _forge_engine_enabled(cfg_path: pathlib.Path | None) -> bool:
-    """The "Enable Forge Engine" setting the UI saved; off when unreadable."""
-    if cfg_path is None:
-        return False
+    """The "Enable Forge Engine" setting; default to True if installed."""
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            return json.load(f).get("forge_engine_enabled") is True
+        from ForgeEngine import paths
+        if not paths.installed():
+            return False
     except Exception:
         return False
+    if cfg_path is None or not cfg_path.is_file():
+        return True
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            val = json.load(f).get("forge_engine_enabled")
+            return True if val is None else bool(val)
+    except Exception:
+        return True
 
 
 def main():
     print("Starting MTG AI Bot...")
+
+    # Enable Per-Monitor DPI Awareness (v2) on Windows to prevent coordinate drift
+    try:
+        from vision.window_locator import enable_per_monitor_dpi_v2
+        enable_per_monitor_dpi_v2()
+    except Exception:
+        pass
 
     # User configuration
     log_path = os.environ.get("MTGA_BOT_LOG_PATH", "")

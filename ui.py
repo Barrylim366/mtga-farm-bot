@@ -25,6 +25,13 @@ from AI.DummyAI import DummyAI
 from Game import Game
 import ForgeEngine
 
+# === Windows Per-Monitor DPI Awareness v2 ===
+try:
+    from vision.window_locator import enable_per_monitor_dpi_v2
+    enable_per_monitor_dpi_v2()
+except Exception:
+    pass
+
 
 def _apply_forge_engine(controller, config_manager) -> bool:
     """Forge hooks on/off for one controller per the saved setting.
@@ -1573,9 +1580,9 @@ class ConfigManager:
             # Recovery policy. Enabled by default: it concedes only when Arena
             # has left a locally-owned decision context unchanged for 30 seconds.
             "auto_concede_stalled_matches": True,
-            # Opt-in: Forge's rules engine and AI choose the plays (ForgeEngine/).
-            # Off by default -- it needs a ~100 MB download and 2 GB of RAM.
-            "forge_engine_enabled": False,
+            # Forge's rules engine and AI choose the plays (ForgeEngine/).
+            # Default enabled when Forge is installed on disk.
+            "forge_engine_enabled": True,
             # How much of the game shows through the game overlay's background, in %.
             "game_overlay_bg_transparency": 25,
             # Estimated gold credited per match won in the "Current Session"
@@ -1845,6 +1852,12 @@ class ConfigManager:
         self._save_config()
 
     def get_forge_engine_enabled(self) -> bool:
+        if "forge_engine_enabled" not in self.config:
+            try:
+                from ForgeEngine import paths
+                return paths.installed()
+            except Exception:
+                return False
         return self.config.get("forge_engine_enabled") is True
 
     def set_forge_engine_enabled(self, enabled: bool) -> None:
@@ -5472,6 +5485,12 @@ class SettingsWindow(tk.Toplevel):
             style_name="Secondary.TButton",
         )
         self._create_settings_canvas_button(
+            "enhancements",
+            "Enhancements",
+            self._open_enhancements_window,
+            style_name="Secondary.TButton",
+        )
+        self._create_settings_canvas_button(
             "overlay",
             "Game Overlay",
             self._open_game_overlay_window,
@@ -5696,6 +5715,16 @@ class SettingsWindow(tk.Toplevel):
     def _open_bot_behavior_window(self):
         self._open_replacement_subwindow(
             lambda xy: BotBehaviorWindow(
+                self,
+                self._config_manager,
+                spawn_xy=xy,
+                on_close=self._restore_after_subwindow_close,
+            )
+        )
+
+    def _open_enhancements_window(self):
+        self._open_replacement_subwindow(
+            lambda xy: EnhancementsWindow(
                 self,
                 self._config_manager,
                 spawn_xy=xy,
@@ -6137,6 +6166,136 @@ class BotBehaviorWindow(_FireSubWindow):
         self._forge_enabled.set(self._store_forge_setting(True))
         self._refresh_toggle("forge")
         self._set_forge_status(self._forge_status_text())
+
+
+class EnhancementsWindow(_FireSubWindow):
+    """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, and Anti-Detection."""
+
+    _TITLE = "Enhancements & Alerts"
+    _HEIGHT = 560
+
+    def _init_state(self) -> None:
+        from notifications import NotificationManager
+        from low_power import LowPowerManager
+        nm = NotificationManager.get_instance()
+        lp = LowPowerManager.get_instance()
+        self._cfg = nm._config
+        self._discord_url = tk.StringVar(value=self._cfg.get("discord_webhook_url", ""))
+        self._telegram_token = tk.StringVar(value=self._cfg.get("telegram_bot_token", ""))
+        self._telegram_chat_id = tk.StringVar(value=self._cfg.get("telegram_chat_id", ""))
+        self._webhooks_enabled = tk.BooleanVar(value=bool(self._cfg.get("enabled", True)))
+        self._low_power_enabled = tk.BooleanVar(value=bool(lp.enabled))
+        self._human_mouse_enabled = tk.BooleanVar(value=bool(self._cfg.get("human_mouse", True)))
+
+    def _build_ui(self) -> None:
+        c = self._theme
+        cv = self._canvas
+        text_width = 380
+
+        # Panel 1: Discord & Telegram Notifications
+        self._create_panel(16, 20, 428, 250)
+        cv.create_text(28, 30, text="Discord & Telegram Alerts", fill=c["text"],
+                       font=("Segoe UI", 13, "bold"), anchor="nw")
+        self._create_toggle("webhooks", 62, "Enable Webhook Notifications", self._webhooks_enabled,
+                            self._toggle_webhooks)
+
+        cv.create_text(30, 92, text="Discord Webhook URL:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        self._discord_entry = tk.Entry(self, textvariable=self._discord_url, bg=c["entry_bg"], fg=c["text"],
+                                       insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
+        cv.create_window(30, 114, width=390, height=24, window=self._discord_entry, anchor="nw")
+
+        cv.create_text(30, 146, text="Telegram Bot Token:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        self._tg_token_entry = tk.Entry(self, textvariable=self._telegram_token, bg=c["entry_bg"], fg=c["text"],
+                                        insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
+        cv.create_window(30, 168, width=250, height=24, window=self._tg_token_entry, anchor="nw")
+
+        cv.create_text(290, 146, text="Chat ID:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        self._tg_chat_entry = tk.Entry(self, textvariable=self._telegram_chat_id, bg=c["entry_bg"], fg=c["text"],
+                                       insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
+        cv.create_window(290, 168, width=130, height=24, window=self._tg_chat_entry, anchor="nw")
+
+        self._create_button("save_test", "Save & Test Alert", 30, 210, 160, 36, self._save_and_test)
+        self._status_text_item = cv.create_text(205, 228, text="", fill=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
+
+        # Panel 2: Anti-Detection & Hardware
+        self._create_panel(16, 285, 428, 185)
+        cv.create_text(28, 295, text="Anti-Detection & Optimization", fill=c["text"],
+                       font=("Segoe UI", 13, "bold"), anchor="nw")
+        self._create_toggle("human_mouse", 330, "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
+                            self._toggle_human_mouse)
+        cv.create_text(54, 350, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+                       text="Generates natural curved paths with micro-jitter and smooth velocity.")
+
+        self._create_toggle("low_power", 385, "Low-Power / Overnight Mode", self._low_power_enabled,
+                            self._toggle_low_power)
+        cv.create_text(54, 405, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+                       text="Paces idle checks to reduce overnight CPU/GPU temperatures and fan noise.")
+
+        self._create_button("snap", "Snap MTGA 16:9", 30, 490, 160, 40, self._snap_window)
+        self._create_button("back", "Back", 324, 490, 120, 40, self.destroy)
+
+    def _toggle_webhooks(self):
+        self._webhooks_enabled.set(not self._webhooks_enabled.get())
+        self._refresh_toggle("webhooks")
+        self._save_config_now()
+
+    def _toggle_human_mouse(self):
+        self._human_mouse_enabled.set(not self._human_mouse_enabled.get())
+        self._refresh_toggle("human_mouse")
+        self._save_config_now()
+
+    def _toggle_low_power(self):
+        self._low_power_enabled.set(not self._low_power_enabled.get())
+        self._refresh_toggle("low_power")
+        from low_power import LowPowerManager
+        LowPowerManager.get_instance().set_enabled(self._low_power_enabled.get())
+        self._save_config_now()
+
+    def _save_config_now(self):
+        from notifications import NotificationManager
+        nm = NotificationManager.get_instance()
+        nm.save_config({
+            "discord_webhook_url": self._discord_url.get().strip(),
+            "telegram_bot_token": self._telegram_token.get().strip(),
+            "telegram_chat_id": self._telegram_chat_id.get().strip(),
+            "enabled": bool(self._webhooks_enabled.get()),
+            "human_mouse": bool(self._human_mouse_enabled.get()),
+            "low_power_mode": bool(self._low_power_enabled.get()),
+        })
+
+    def _save_and_test(self):
+        self._save_config_now()
+        from notifications import NotificationManager
+        nm = NotificationManager.get_instance()
+        nm.send("Burning Lotus Bot", "Webhook alerts configured and working successfully!", 0x2ECC71)
+        self._canvas.itemconfigure(self._status_text_item, text="Alert queued!")
+        self.after(3000, lambda: self._canvas.itemconfigure(self._status_text_item, text=""))
+
+    def _snap_window(self):
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW(None, "MTGA")
+            if not hwnd:
+                user32 = ctypes.windll.user32
+                def cb(h, _):
+                    length = user32.GetWindowTextLengthW(h)
+                    if length > 0:
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(h, buf, length + 1)
+                        if "magic" in buf.value.lower() or "mtga" in buf.value.lower():
+                            nonlocal hwnd
+                            hwnd = h
+                            return False
+                    return True
+                user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(cb), 0)
+            if hwnd:
+                from vision.window_locator import snap_arena_window_16x9
+                if snap_arena_window_16x9(hwnd):
+                    self._canvas.itemconfigure(self._status_text_item, text="Snapped 16:9!")
+                    return
+            self._canvas.itemconfigure(self._status_text_item, text="Window not found")
+        except Exception as e:
+            self._canvas.itemconfigure(self._status_text_item, text=f"Error: {e}")
 
 
 class GameOverlayWindow(_FireSubWindow):

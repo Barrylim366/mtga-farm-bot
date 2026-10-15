@@ -573,8 +573,14 @@ class DummyAI(AIKernel):
         return chosen, score
 
     def generate_keep(self, card_list) -> bool:
-        self._debug("generate_keep called - keeping hand")
-        return True
+        try:
+            from AI.Utilities.MulliganLogic import evaluate_opening_hand
+            keep, reason = evaluate_opening_hand(card_list)
+            self._debug(f"generate_keep: {reason} -> keep={keep}")
+            return bool(keep)
+        except Exception as e:
+            self._debug(f"generate_keep fallback: {e}")
+            return True
 
     def __new_turn_check(self, current_game_state: 'GameStateSecondary'):
         """Check if it's a new turn and reset land played flag"""

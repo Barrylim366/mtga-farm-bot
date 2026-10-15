@@ -1319,13 +1319,29 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return None
         return max(0.0, time.time() - ts)
 
+    def _human_move_abs(self, x: int, y: int) -> None:
+        try:
+            from Controller.Utilities.input_controller import NullInputController
+            delegate = getattr(self.input, "_delegate", self.input)
+            if not isinstance(delegate, NullInputController):
+                from Controller.Utilities.input_controller import generate_human_path
+                curr = self.input.position()
+                path = generate_human_path((curr.x, curr.y), (int(x), int(y)))
+                for pt in path:
+                    self.input.move_abs(pt[0], pt[1])
+                    time.sleep(0.004)
+                return
+        except Exception:
+            pass
+        self.input.move_abs(int(x), int(y))
+
     def _click_abs(self, x: int, y: int, tag: str, *, source: str | None = None) -> None:
         bot_logger.log_click(
             int(x), int(y), tag,
             source=source, region_age=self._region_age(), arena=self._arena_region,
         )
         runtime_status.touch_input(tag, (int(x), int(y)))
-        self.input.move_abs(int(x), int(y))
+        self._human_move_abs(int(x), int(y))
         time.sleep(0.1)
         self.input.left_down()
         time.sleep(0.06)
@@ -8618,7 +8634,17 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     and self.__mulligan_decision_callback
                 ):
                     runtime_status.clear_intentional_wait()
-                    self.__mulligan_decision_callback([])
+                    # === BurningBot Enhancement: Extract hand cards for intelligent mulligan ===
+                    hand_cards = []
+                    try:
+                        zone = self.updated_game_state.get_zone("ZoneType_Hand", owner_seat_id=my_seat)
+                        obj_ids = set(zone.get("objectInstanceIds", []) if zone else [])
+                        full_state = self.updated_game_state.get_full_state() or {}
+                        game_objects = full_state.get("gameObjects", []) or []
+                        hand_cards = [o for o in game_objects if o.get("instanceId") in obj_ids]
+                    except Exception:
+                        hand_cards = []
+                    self.__mulligan_decision_callback(hand_cards)
                 else:
                     runtime_status.clear_intentional_wait()
                     bot_logger.log_info(
@@ -12042,6 +12068,15 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     self.refresh_quests_cache()
                 except Exception:
                     pass
+                try:
+                    from notifications import NotificationManager
+                    acc_label = account.get("label") or account.get("screen_name") or account.get("email") or "Account"
+                    NotificationManager.get_instance().notify_account_switched(
+                        previous_account="",
+                        next_account=str(acc_label),
+                    )
+                except Exception:
+                    pass
                 # Quests were just read on Home here, so the incoming account starts
                 # its match-count fresh. Without this the counter carries over from
                 # the account we just left (>=1 when a switch fired after a match),
@@ -12331,7 +12366,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     def _click(self, pos: tuple[int, int], tag: str) -> None:
         x, y = pos
         bot_logger.log_click(x, y, tag)
-        self.input.move_abs(x, y)
+        self._human_move_abs(x, y)
         time.sleep(0.2)
         self.input.left_click(1)
 
@@ -16947,7 +16982,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             for blocker_id, attacker_id in assignments:
                 if self._suppress_selections or self._stop_requested:
                     break
-                if time.time() > deadline:
+                if time.time() >= deadline:
                     bot_logger.log_error(
                         "DECLARE_BLOCKS budget spent after {}/{} block(s); submitting what is assigned.".format(
                             declared, len(assignments)
