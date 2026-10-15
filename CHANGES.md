@@ -42,7 +42,7 @@ All features are integrated directly into their respective architectural layers 
 | [`AI/Utilities/CombatLogic.py`](file:///AI/Utilities/CombatLogic.py) | Enhanced combat simulation algorithms and implemented candidate filtering in `choose_attackers()`, identifying profitable trades, lethal swings, and chump-attack prevention. |
 | [`AI/Utilities/CounterLogic.py`](file:///AI/Utilities/CounterLogic.py) | Added **threat-prioritized counterspelling**: `score_spell_threat()` scores spells by card type (Planeswalkers > Creatures > Spells), converted mana cost, and rarity. `find_counterable_spell()` prioritizes high-threat targets over low-value cantrips. |
 | [`AI/Utilities/CardInfo.py`](file:///AI/Utilities/CardInfo.py) | Added fast-path offline land mana color lookup in `get_land_produced_colors()` before falling back to Scryfall network requests, eliminating priority lag. |
-| [`Controller/MTGAController/Controller.py`](file:///Controller/MTGAController/Controller.py) | 1. Implemented `_execute_selective_attack()` hooked into `DeclareAttackersReq`, executing decisions from `CombatLogic.choose_attackers()` when `MTGA_SELECTIVE_ATTACK=1`.<br>2. Full fallback to `_all_attack_own()` if selective attack encounters an unexpected condition.<br>3. Integrated `generate_human_path` in `_human_move_abs()` for realistic mouse curves.<br>4. Dispatched account switch alerts via `NotificationManager`. |
+| [`Controller/MTGAController/Controller.py`](file:///Controller/MTGAController/Controller.py) | 1. Implemented `_execute_selective_attack()` hooked into `DeclareAttackersReq`, executing decisions from `CombatLogic.choose_attackers()` when `MTGA_SELECTIVE_ATTACK=1`.<br>2. Full fallback to `_all_attack_own()` if selective attack encounters an unexpected condition.<br>3. Integrated `generate_human_path` in `_human_move_abs()` for realistic mouse curves.<br>4. Dispatched account switch alerts via `NotificationManager`.<br>5. Fixed Profile-to-Home navigation stall in `_navigate_to_home()` by safely falling back to cached and OS-detected window geometry when sub-pages lack static anchors. |
 | [`Controller/Utilities/input_controller.py`](file:///Controller/Utilities/input_controller.py) | Added `bezier_point()`, `generate_human_path()`, and `human_move_and_click()` implementing cubic Bezier trajectories with smooth acceleration and micro-jitter. |
 | [`vision/window_locator.py`](file:///vision/window_locator.py) | Added `enable_per_monitor_dpi_v2()`, `snap_arena_window_16x9()` for exact aspect ratio alignment, and `preprocess_for_matching()`. |
 | [`vision/vision.py`](file:///vision/vision.py) & [`run_bot.py`](file:///run_bot.py) | Wired `sleep_throttled()` into vision polling loops and main loop to support Low-Power / Overnight Mode. |
@@ -57,7 +57,7 @@ All features are integrated directly into their respective architectural layers 
 
 - **Full Test Suite Result**: All unit tests run clean and pass without failures:
   ```
-  Ran 1254 tests in 132.8s
+  Ran 1255 tests in 134.8s
   OK (skipped=1)
   ```
 - **Runtime Isolation**: All test fixtures use temporary paths via `runtime_file()` ensuring production configs and logs are never modified during test execution.

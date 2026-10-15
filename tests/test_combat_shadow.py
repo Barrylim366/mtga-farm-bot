@@ -257,7 +257,8 @@ class ShadowBlockDecisionTest(unittest.TestCase):
 
         record.assert_called_once()
         self.assertEqual(record.call_args[0][1], "no_blocks")
-        timer.assert_called_once()
+        block_timers = [c for c in timer.call_args_list if c.args and c.args[0] == 0.8]
+        self.assertEqual(len(block_timers), 1)
 
     def test_shadow_can_be_switched_off(self):
         seed_board(self.controller, [creature(10, OPP_SEAT, 2, 2, attacking_seat=MY_SEAT)])

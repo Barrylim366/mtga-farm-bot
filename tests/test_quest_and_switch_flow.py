@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -849,6 +850,29 @@ class LandingQuestCheckTests(_QuestLogTestBase):
         self.assertEqual(self.dips, [1])
         self.assertEqual(c._home_quest_check_attempts, 1)
         self.assertFalse(c._home_quest_check_done, "one stale attempt must not retire the check")
+
+    def test_navigate_to_home_from_profile_anchor_miss_uses_cached_geometry(self):
+        c = self.controller
+        c._stop_requested = False
+        c._dismiss_reward_popup = lambda: False
+        c._arena_region = None
+        c._last_good_arena_region = (0, 0, 1920, 1080)
+        c._arena_region_provider = SimpleNamespace(
+            acquire=lambda: None,
+            reacquire=lambda: None,
+            last_detection_result=SimpleNamespace(
+                region=(0, 0, 1920, 1080),
+                code="anchor_not_found",
+            ),
+        )
+        clicked = []
+        c._click_abs = lambda x, y, label: clicked.append((x, y, label))
+        c._locate_image_center_in_scaled_arena_region = lambda *a, **k: (100, 100)
+        with mock.patch("time.sleep"):
+            self.assertTrue(c._navigate_to_home())
+        self.assertEqual(len(clicked), 1)
+        self.assertEqual(clicked[0][2], "GO_HOME")
+        self.assertEqual(c._arena_region, (0, 0, 1920, 1080))
 
 
 if __name__ == "__main__":

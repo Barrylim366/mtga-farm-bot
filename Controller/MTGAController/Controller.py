@@ -3936,7 +3936,15 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             # Let the claimed/continued/reconnected screen settle before Home
             # navigation. The next probe must observe the resulting screen.
             return False
-        arena = self._ensure_arena_region(force_reacquire=True)
+        arena = self._ensure_arena_region(force_reacquire=False)
+        if arena is None:
+            arena = self._arena_region or self._last_good_arena_region
+        if arena is None:
+            arena = self._ensure_arena_region(force_reacquire=True)
+        if arena is None:
+            last_det = getattr(self._arena_region_provider, "last_detection_result", None)
+            if last_det and getattr(last_det, "region", None) and getattr(last_det, "code", None) == "anchor_not_found":
+                arena = last_det.region
         if arena is None:
             return False
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
@@ -3949,6 +3957,8 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             confidence=0.75, timeout=2.0,
         ) is not None
         if reached:
+            self._arena_region = arena
+            self._remember_arena_region(arena)
             bot_logger.log_info("Quest refresh: reached Home (fixed-coord click).")
         else:
             bot_logger.log_info("Quest refresh: Home click did not land on Home; will retry.")
