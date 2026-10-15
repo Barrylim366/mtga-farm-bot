@@ -129,6 +129,40 @@ def can_counter(profile: dict, stack_obj: dict) -> bool:
     return True
 
 
+def score_spell_threat(stack_obj: dict) -> int:
+    """Calculate threat score for an opponent spell on the stack.
+    Higher score indicates a higher priority target to counter."""
+    score = 10  # base score
+    types = stack_obj.get("cardTypes") or []
+
+    if "CardType_Planeswalker" in types:
+        score += 50
+    elif "CardType_Creature" in types:
+        score += 30
+        p = int((stack_obj.get("power") or {}).get("value", 0)) if isinstance(stack_obj.get("power"), dict) else int(stack_obj.get("power") or 0)
+        t = int((stack_obj.get("toughness") or {}).get("value", 0)) if isinstance(stack_obj.get("toughness"), dict) else int(stack_obj.get("toughness") or 0)
+        score += max(0, p * 5) + max(0, t * 2)
+    elif "CardType_Enchantment" in types or "CardType_Artifact" in types:
+        score += 25
+    elif "CardType_Sorcery" in types or "CardType_Instant" in types:
+        score += 20
+
+    # CMC and rarity weighting
+    grp_id = stack_obj.get("grpId")
+    if grp_id:
+        try:
+            info = CardInfo.get_card_info_local(grp_id) or {}
+            cmc = CardInfo.calculate_cmc(info.get("manaCost", "")) if info else 0
+            score += cmc * 10
+            rarity = str(info.get("rarity") or "").lower()
+            if rarity in ("mythic", "rare"):
+                score += 15
+        except Exception:
+            pass
+
+    return score
+
+
 def find_counterable_spell(
     profile: dict,
     game_objects: list[dict],
@@ -136,8 +170,8 @@ def find_counterable_spell(
     stack_ids: set[int],
     full_state: dict | None = None,
 ) -> int | None:
-    """Return the instanceId of the topmost opponent spell this counter can
-    counter, or None. Topmost = last to have entered the stack (resolves first)."""
+    """Return the instanceId of the highest-threat counterable opponent spell
+    on the stack, breaking ties by topmost (resolves first)."""
     spells = {
         obj["instanceId"]: obj
         for obj in opponent_spells_on_stack(game_objects, my_seat, stack_ids)
@@ -146,8 +180,13 @@ def find_counterable_spell(
         return None
     order = _stack_order(full_state or {}, stack_ids)
     ordered_ids = [iid for iid in order if iid in spells] or list(spells)
-    # Walk from the top of the stack down to the first counterable spell.
-    for iid in reversed(ordered_ids):
-        if can_counter(profile, spells[iid]):
-            return int(iid)
-    return None
+
+    candidates = [
+        iid for iid in reversed(ordered_ids)
+        if can_counter(profile, spells[iid])
+    ]
+    if not candidates:
+        return None
+
+    # Pick candidate with highest threat score; stable key maintains order on tie
+    return int(max(candidates, key=lambda iid: score_spell_threat(spells[iid])))

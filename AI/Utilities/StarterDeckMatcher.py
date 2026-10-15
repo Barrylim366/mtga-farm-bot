@@ -5,7 +5,10 @@ that maximizes quest progress per game.
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
+from runtime_paths import runtime_file
 
 # Standard MTGA Starter Deck Duel decks mapped to color pairs
 _STARTER_DECKS = {
@@ -28,6 +31,25 @@ _COLOR_KEYWORDS = {
     "red": "red",
     "green": "green",
 }
+
+
+def _load_starter_decks() -> dict[tuple[str, str], str]:
+    """Load starter decks from config/starter_decks.json if present, falling back to defaults."""
+    try:
+        path = runtime_file("config", "starter_decks.json")
+        if path.is_file():
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                custom = {}
+                for k, v in data.items():
+                    if isinstance(k, str) and "," in k:
+                        c1, c2 = [c.strip().lower() for c in k.split(",", 1)]
+                        custom[(c1, c2)] = str(v)
+                if custom:
+                    return custom
+    except Exception:
+        pass
+    return dict(_STARTER_DECKS)
 
 
 def parse_quest_colors(quest_text: str) -> set[str]:
@@ -58,10 +80,11 @@ def choose_best_starter_deck(quest_texts: list[str]) -> str | None:
     best_deck = None
     best_score = -1
 
-    for (c1, c2), deck_name in _STARTER_DECKS.items():
-        score = color_demand[c1] + color_demand[c2]
+    decks = _load_starter_decks()
+    for (c1, c2), deck_name in decks.items():
+        score = color_demand.get(c1, 0) + color_demand.get(c2, 0)
         # Bonus if both colors contribute to active quests
-        if color_demand[c1] > 0 and color_demand[c2] > 0:
+        if color_demand.get(c1, 0) > 0 and color_demand.get(c2, 0) > 0:
             score += 2
 
         if score > best_score:
@@ -71,6 +94,6 @@ def choose_best_starter_deck(quest_texts: list[str]) -> str | None:
     # If no color demand found (e.g. "Attack with 30 creatures", "Kill 15 creatures"),
     # recommend Savage Lands (RG aggro) or Legion of Knights (RW aggro)
     if best_score <= 0:
-        return "Savage Lands"
+        return decks.get(("red", "green"), "Savage Lands")
 
     return best_deck

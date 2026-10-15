@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ def _get_config_path() -> Path:
 
 class LowPowerManager:
     _instance: "LowPowerManager | None" = None
+    _lock = threading.Lock()
 
     def __init__(self) -> None:
         self.enabled = False
@@ -29,8 +31,15 @@ class LowPowerManager:
     @classmethod
     def get_instance(cls) -> "LowPowerManager":
         if cls._instance is None:
-            cls._instance = LowPowerManager()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = LowPowerManager()
         return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        with cls._lock:
+            cls._instance = None
 
     def _load_config(self) -> None:
         path = _get_config_path()

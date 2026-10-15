@@ -6172,7 +6172,7 @@ class EnhancementsWindow(_FireSubWindow):
     """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, and Anti-Detection."""
 
     _TITLE = "Enhancements & Alerts"
-    _HEIGHT = 560
+    _HEIGHT = 630
 
     def _init_state(self) -> None:
         from notifications import NotificationManager
@@ -6186,6 +6186,9 @@ class EnhancementsWindow(_FireSubWindow):
         self._webhooks_enabled = tk.BooleanVar(value=bool(self._cfg.get("enabled", True)))
         self._low_power_enabled = tk.BooleanVar(value=bool(lp.enabled))
         self._human_mouse_enabled = tk.BooleanVar(value=bool(self._cfg.get("human_mouse", True)))
+        self._selective_attack_enabled = tk.BooleanVar(
+            value=bool(self._cfg.get("selective_attack", False) or os.environ.get("MTGA_SELECTIVE_ATTACK") == "1")
+        )
 
     def _build_ui(self) -> None:
         c = self._theme
@@ -6217,8 +6220,8 @@ class EnhancementsWindow(_FireSubWindow):
         self._create_button("save_test", "Save & Test Alert", 30, 210, 160, 36, self._save_and_test)
         self._status_text_item = cv.create_text(205, 228, text="", fill=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
 
-        # Panel 2: Anti-Detection & Hardware
-        self._create_panel(16, 285, 428, 185)
+        # Panel 2: Anti-Detection & Combat Optimization
+        self._create_panel(16, 285, 428, 250)
         cv.create_text(28, 295, text="Anti-Detection & Optimization", fill=c["text"],
                        font=("Segoe UI", 13, "bold"), anchor="nw")
         self._create_toggle("human_mouse", 330, "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
@@ -6231,8 +6234,14 @@ class EnhancementsWindow(_FireSubWindow):
         cv.create_text(54, 405, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
                        text="Paces idle checks to reduce overnight CPU/GPU temperatures and fan noise.")
 
-        self._create_button("snap", "Snap MTGA 16:9", 30, 490, 160, 40, self._snap_window)
-        self._create_button("back", "Back", 324, 490, 120, 40, self.destroy)
+        self._create_toggle("selective_attack", 440, "Smart Selective Attacking (CombatLogic)", self._selective_attack_enabled,
+                            self._toggle_selective_attack)
+        cv.create_text(54, 460, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+                       text="Prevents suicidal swings into enemy blockers; calculates lethal and safety.")
+
+        self._create_button("snap", "Snap MTGA 16:9", 24, 555, 130, 40, self._snap_window)
+        self._create_button("session_stats", "Session Stats", 164, 555, 130, 40, self._open_session_stats)
+        self._create_button("back", "Back", 304, 555, 130, 40, self.destroy)
 
     def _toggle_webhooks(self):
         self._webhooks_enabled.set(not self._webhooks_enabled.get())
@@ -6251,6 +6260,18 @@ class EnhancementsWindow(_FireSubWindow):
         LowPowerManager.get_instance().set_enabled(self._low_power_enabled.get())
         self._save_config_now()
 
+    def _toggle_selective_attack(self):
+        self._selective_attack_enabled.set(not self._selective_attack_enabled.get())
+        self._refresh_toggle("selective_attack")
+        os.environ["MTGA_SELECTIVE_ATTACK"] = "1" if self._selective_attack_enabled.get() else "0"
+        self._save_config_now()
+
+    def _open_session_stats(self):
+        if hasattr(self.master, "_open_current_session"):
+            self.master._open_current_session()
+        else:
+            self._canvas.itemconfigure(self._status_text_item, text="Session stats active in main window")
+
     def _save_config_now(self):
         from notifications import NotificationManager
         nm = NotificationManager.get_instance()
@@ -6261,6 +6282,7 @@ class EnhancementsWindow(_FireSubWindow):
             "enabled": bool(self._webhooks_enabled.get()),
             "human_mouse": bool(self._human_mouse_enabled.get()),
             "low_power_mode": bool(self._low_power_enabled.get()),
+            "selective_attack": bool(self._selective_attack_enabled.get()),
         })
 
     def _save_and_test(self):

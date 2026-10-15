@@ -192,8 +192,9 @@ def main():
         game.start()
         
         # Keep the script running
+        from low_power import sleep_throttled
         while True:
-            time.sleep(1)
+            sleep_throttled(1)
 
     except Exception as e:
         print(f"An error occurred: {e}")

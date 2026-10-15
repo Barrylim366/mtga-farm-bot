@@ -11,6 +11,8 @@ import traceback
 from datetime import datetime
 from typing import Optional, Tuple
 import json
+import re
+import bot_logger
 
 
 class DummyAI(AIKernel):
@@ -43,12 +45,15 @@ class DummyAI(AIKernel):
 
     def _debug(self, message):
         """Debug log for AI decisions"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         try:
-            with open(self.__bot_log_file, 'a') as f:
-                f.write(f"[{timestamp}] [AI] {message}\n")
+            bot_logger.log_ai(message)
         except Exception:
-            pass
+            try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                with open(self.__bot_log_file, 'a') as f:
+                    f.write(f"[{timestamp}] [AI] {message}\n")
+            except Exception:
+                pass
 
     def _get_available_mana_colors(self, action_list, inst_id_grp_id_dict, game_objects=None):
         """Get available mana colors and total sources from ActionType_Activate_Mana actions.
@@ -781,8 +786,31 @@ class DummyAI(AIKernel):
                             sorcery_in_actions += 1
                             sorcery_names.append(card_info.get('name', f'Card#{instance_id}'))
 
-                    # First: try to play a land
+                    # Check if casting a creature first provides a landfall trigger
+                    # before dropping our land
+                    cast_first_for_landfall = False
                     if not self.__has_land_been_played_this_turn:
+                        for action_wrapper in action_list:
+                            action = action_wrapper.get('action', {})
+                            if action.get('actionType') != 'ActionType_Cast':
+                                continue
+                            inst_id = action.get('instanceId')
+                            grp_id = action.get('grpId') or inst_id_grp_id_dict.get(inst_id)
+                            text = CardInfo.get_oracle_text(grp_id) or ""
+                            if re.search(r"whenever a land enters the battlefield|landfall", text, re.I):
+                                action_mana_cost = action.get('manaCost', [])
+                                if self._can_cast_with_mana_costs(
+                                    action_mana_cost, available_colors, total_mana, sources
+                                ):
+                                    self._debug(
+                                        f"Sequencing: Prioritizing landfall creature (grpId={grp_id}) "
+                                        "before land drop to capture trigger."
+                                    )
+                                    cast_first_for_landfall = True
+                                    break
+
+                    # First: try to play a land (unless we should cast a landfall trigger first)
+                    if not self.__has_land_been_played_this_turn and not cast_first_for_landfall:
                         land_instance_id = self._choose_land_to_play(
                             action_list, inst_id_grp_id_dict, available_colors, total_mana, sources
                         )
@@ -1004,6 +1032,12 @@ class DummyAI(AIKernel):
                                         f"Removal {card_name} has no target; casting as creature/permanent for board presence."
                                     )
                                 else:
+                                    if _rm_target == -1:
+                                        self._debug(
+                                            f"LETHAL FACE BURN: Casting {card_name} (instanceId={instance_id}) "
+                                            f"directly for lethal damage against opponent at {removal_opp_life} life!"
+                                        )
+                                        return {'cast': [instance_id]}
                                     priority_removal = self._is_priority_removal_target(
                                         _rm_target, removal_game_objects
                                     )

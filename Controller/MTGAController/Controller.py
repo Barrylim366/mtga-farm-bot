@@ -8301,6 +8301,15 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         return self._all_attack_own()
 
     def _all_attack_own(self) -> bool:
+        if self.__combat_selective_attack_enabled() and self.__last_attack_decision:
+            decision = self.__last_attack_decision
+            hold_back = decision.get("hold_back", [])
+            if hold_back:
+                try:
+                    return self._execute_selective_attack(decision)
+                except Exception as e:
+                    bot_logger.log_error(f"Selective attack execution failed ({e}); falling back to all attack.")
+
         target, source = self._map_abs_point_to_arena(
             self.main_br_button_coordinates,
             label="ATTACK_ALL",
@@ -8326,6 +8335,50 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         if self.__attack_target_required and not self.__attack_target_flow_lock.locked():
             time.sleep(0.3)
             self.select_target(-1)
+        return True
+
+    def _execute_selective_attack(self, decision: dict) -> bool:
+        attackers = decision.get("attackers", [])
+        hold_back = decision.get("hold_back", [])
+        bot_logger.log_info(
+            f"SELECTIVE_ATTACK executing: attackers={attackers}, hold_back={hold_back}, reason={decision.get('reason')!r}"
+        )
+        if not attackers:
+            base = self.main_br_button_coordinates
+            point = (int(base[0]), int(base[1]) - 50)
+            target, source = self._map_abs_point_to_arena(
+                point, label="NO_ATTACKS", force_reacquire=True, apply_correction=False
+            )
+            if source == "absolute_no_arena":
+                return False
+            self.__press_combat_button_verified(
+                target,
+                "NO_ATTACKS",
+                declared_markers=["SubmitAttackersReq"],
+                submitted_markers=["SubmitAttackersReq"],
+            )
+            self.__last_attack_submit_ts = time.time()
+            return True
+
+        for iid in attackers:
+            self.select_battlefield_permanent(iid, 1)
+            time.sleep(0.1)
+
+        target, source = self._map_abs_point_to_arena(
+            self.main_br_button_coordinates,
+            label="ATTACK_SELECTED",
+            force_reacquire=True,
+            apply_correction=False,
+        )
+        if source == "absolute_no_arena":
+            return False
+        self.__press_combat_button_verified(
+            target,
+            "ATTACK_SELECTED",
+            declared_markers=["AttackState_Declared", '"canSubmitAttackers": true'],
+            submitted_markers=["SubmitAttackersReq", "AttackState_Attacking"],
+        )
+        self.__last_attack_submit_ts = time.time()
         return True
 
     def __attack_target_prompt_active(self) -> bool:
@@ -16791,6 +16844,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         value = str(os.environ.get("MTGA_COMBAT_BLOCKS", "1")).strip().lower()
         return value not in ("0", "false", "no", "off")
 
+    def __combat_selective_attack_enabled(self) -> bool:
+        value = str(os.environ.get("MTGA_SELECTIVE_ATTACK", "0")).strip().lower()
+        return value in ("1", "true", "yes", "on")
+
     def __combat_debug_capture_enabled(self) -> bool:
         value = str(os.environ.get("MTGA_COMBAT_BLOCK_CAPTURE", "1")).strip().lower()
         return value not in ("0", "false", "no", "off")
@@ -17431,6 +17488,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     "DeclareAttackersReq: preempted stale stack SelectN prompt."
                 )
                 shadow = self.__shadow_attack_decision(attackers)
+                self.__last_attack_decision = shadow
                 self.__record_decision(
                     "attackers", "declare_attackers_recovery",
                     {

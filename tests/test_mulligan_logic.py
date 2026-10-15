@@ -94,6 +94,62 @@ class LondonMulliganTests(unittest.TestCase):
             self.assertEqual(tucked, [7, 5])  # CMC 8 and CMC 4 tucked
 
 
+    def test_color_mismatch_triggers_mulligan(self):
+        # 3 Mountains, but only Blue and Black spells in hand -> color mismatch mulligan
+        cards = [
+            {"instanceId": 1, "name": "Mountain", "is_land": True, "cmc": 0, "produced_colors": {"red"}, "required_colors": set()},
+            {"instanceId": 2, "name": "Mountain", "is_land": True, "cmc": 0, "produced_colors": {"red"}, "required_colors": set()},
+            {"instanceId": 3, "name": "Mountain", "is_land": True, "cmc": 0, "produced_colors": {"red"}, "required_colors": set()},
+            {"instanceId": 4, "name": "Counterspell", "is_land": False, "cmc": 2, "produced_colors": set(), "required_colors": {"blue"}},
+            {"instanceId": 5, "name": "Dark Ritual", "is_land": False, "cmc": 1, "produced_colors": set(), "required_colors": {"black"}},
+            {"instanceId": 6, "name": "Murder", "is_land": False, "cmc": 3, "produced_colors": set(), "required_colors": {"black"}},
+            {"instanceId": 7, "name": "Cancel", "is_land": False, "cmc": 3, "produced_colors": set(), "required_colors": {"blue"}},
+        ]
+        with mock.patch("AI.Utilities.MulliganLogic._get_card_details", side_effect=lambda c: c):
+            keep, reason = evaluate_opening_hand(cards)
+            self.assertFalse(keep)
+            self.assertIn("Color mismatch", reason)
+
+    def test_matching_colors_keeps(self):
+        # 3 Mountains, and Red spells -> should keep
+        cards = [
+            {"instanceId": 1, "name": "Mountain", "is_land": True, "cmc": 0, "produced_colors": {"red"}, "required_colors": set()},
+            {"instanceId": 2, "name": "Mountain", "is_land": True, "cmc": 0, "produced_colors": {"red"}, "required_colors": set()},
+            {"instanceId": 3, "name": "Mountain", "is_land": True, "cmc": 0, "produced_colors": {"red"}, "required_colors": set()},
+            {"instanceId": 4, "name": "Shock", "is_land": False, "cmc": 1, "produced_colors": set(), "required_colors": {"red"}},
+            {"instanceId": 5, "name": "Lightning Strike", "is_land": False, "cmc": 2, "produced_colors": set(), "required_colors": {"red"}},
+            {"instanceId": 6, "name": "Dragon", "is_land": False, "cmc": 5, "produced_colors": set(), "required_colors": {"red"}},
+            {"instanceId": 7, "name": "Phoenix", "is_land": False, "cmc": 4, "produced_colors": set(), "required_colors": {"red"}},
+        ]
+        with mock.patch("AI.Utilities.MulliganLogic._get_card_details", side_effect=lambda c: c):
+            keep, reason = evaluate_opening_hand(cards)
+            self.assertTrue(keep)
+
+    def test_select_cards_to_tuck_fallback_grp_id(self):
+        # Cards with no instanceId fall back to grpId
+        cards = [
+            {"grpId": 101, "name": "Island", "is_land": True, "cmc": 0},
+            {"grpId": 102, "name": "Island", "is_land": True, "cmc": 0},
+            {"grpId": 103, "name": "Island", "is_land": True, "cmc": 0},
+            {"grpId": 104, "name": "Island", "is_land": True, "cmc": 0},
+            {"grpId": 201, "name": "Big Spell", "is_land": False, "cmc": 7},
+        ]
+        with mock.patch("AI.Utilities.MulliganLogic._get_card_details", side_effect=lambda c: c):
+            tucked = select_cards_to_tuck(cards, count_to_tuck=1)
+            self.assertEqual(len(tucked), 1)
+            self.assertEqual(tucked[0], 104)
+
+    def test_get_card_details_uses_local_card_lookup(self):
+        from AI.Utilities.MulliganLogic import _get_card_details
+        with mock.patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Plains", "types": ["Basic Land"], "manaCost": ""}) as mock_local:
+            with mock.patch("AI.Utilities.CardInfo.get_card_info") as mock_remote:
+                details = _get_card_details({"grpId": 12345})
+                self.assertEqual(details["name"], "Plains")
+                self.assertTrue(details["is_land"])
+                mock_local.assert_called_once_with(12345)
+                mock_remote.assert_not_called()
+
+
 class DummyAIIntegrationTests(unittest.TestCase):
     def test_dummy_ai_generate_keep_delegates(self):
         ai = DummyAI()

@@ -32,6 +32,7 @@ class NotificationManager:
         self._worker_thread: threading.Thread | None = None
         self._running = True
         self._config = self._load_config()
+        self._match_history: list[bool] = []
         self._start_worker()
 
     @classmethod
@@ -40,6 +41,13 @@ class NotificationManager:
             if cls._instance is None:
                 cls._instance = NotificationManager()
             return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        with cls._lock:
+            if cls._instance is not None:
+                cls._instance._running = False
+                cls._instance = None
 
     def _load_config(self) -> dict:
         path = _get_config_path()
@@ -128,7 +136,7 @@ class NotificationManager:
 
     def send(self, title: str, description: str, color: int = 0x3498DB) -> None:
         """Enqueue notification for background delivery."""
-        if not self._config.get("enabled", True):
+        if not self._config.get("enabled", False):
             return
         if not (self._config.get("discord_webhook_url") or self._config.get("telegram_bot_token")):
             return
@@ -143,9 +151,19 @@ class NotificationManager:
         color = 0x2ECC71 if won else 0xE74C3C
         dur_str = f"{int(duration_sec // 60)}m {int(duration_sec % 60)}s" if duration_sec else "Unknown"
         acc_str = f"Account: `{account_name}`\n" if account_name else ""
+        
+        self._match_history.append(won)
+        rolling_str = ""
+        recent = self._match_history[-10:]
+        if len(recent) >= 3:
+            w_count = sum(1 for w in recent if w)
+            l_count = len(recent) - w_count
+            pct = (w_count / len(recent)) * 100
+            rolling_str = f"\nRecent (last {len(recent)}): **{w_count}W - {l_count}L** ({pct:.0f}% win rate)"
+
         self.send(
             title=f"Match Complete: {status}",
-            description=f"{acc_str}Result: **{status}**\nDuration: {dur_str}",
+            description=f"{acc_str}Result: **{status}**\nDuration: {dur_str}{rolling_str}",
             color=color,
         )
 

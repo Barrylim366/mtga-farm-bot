@@ -21,3 +21,12 @@ class DeckMatcherTests(unittest.TestCase):
         quests = ["Attack with 45 creatures"]
         deck = choose_best_starter_deck(quests)
         self.assertIsNotNone(deck)
+
+    def test_custom_config_override(self):
+        from unittest import mock
+        from pathlib import Path
+        custom_data = '{"white,black": "Custom Orzhov Deck", "red,green": "Custom Gruul Deck"}'
+        with mock.patch("pathlib.Path.is_file", return_value=True):
+            with mock.patch("builtins.open", mock.mock_open(read_data=custom_data)):
+                deck = choose_best_starter_deck(["Cast 20 White or Black spells"])
+                self.assertEqual(deck, "Custom Orzhov Deck")
