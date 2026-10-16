@@ -18,8 +18,7 @@ import re
 import AI.Utilities.CardInfo as CardInfo
 
 # Exact grpIds we never cast for now (manual override / guaranteed catch).
-UNSUPPORTED_GRP_IDS: set[int] = {
-}
+UNSUPPORTED_GRP_IDS: set[int] = set()
 
 # These cards have a chooser the controller can already resolve. Keep this
 # allowlist ahead of the conservative oracle-text pattern below.

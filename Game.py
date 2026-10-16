@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 class Game:
 
     _match_started_ts: float | None = None
-    _timers: list = []
 
     # If the AI is handed the exact same decision context and returns the
     # exact same move this many times in a row, the executed click(s) are not
@@ -256,6 +255,8 @@ class Game:
                                     self.controller.concede_game("match_timeout_watchdog")
                 timer = threading.Timer(timeout_limit, _on_match_timeout)
                 timer.daemon = True
+                if not hasattr(self, "_timers") or self._timers is None:
+                    self._timers = []
                 self._timers.append(timer)
                 timer.start()
         except Exception:
@@ -328,7 +329,7 @@ class Game:
             try:
                 from notifications import NotificationManager
                 NotificationManager.get_instance().notify_match_result(
-                    won=bool(won),
+                    won=won,
                     duration_sec=duration_sec,
                 )
             except Exception:
@@ -344,6 +345,8 @@ class Game:
         if hasattr(self.controller, 'stop_inactivity_timer'):
             self.controller.stop_inactivity_timer()
         restart_timer = threading.Timer(10.0, self._restart_game)
+        if not hasattr(self, "_timers") or self._timers is None:
+            self._timers = []
         self._timers.append(restart_timer)
         restart_timer.start()
         return True
@@ -619,7 +622,7 @@ class Game:
             match_duration = time.time() - started_ts
             timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
             auto_concede = getattr(self.controller, "get_auto_concede_stalled_matches", lambda: True)()
-            if auto_concede and match_duration > timeout_limit:
+            if auto_concede and timeout_limit > 0 and match_duration > timeout_limit:
                 bot_logger.log_info(
                     f"[STALL_WATCHDOG] Match duration {match_duration:.1f}s exceeded limit of {timeout_limit:.1f}s. "
                     "Auto-conceding to prevent infinite stall."

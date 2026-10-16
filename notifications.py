@@ -145,14 +145,23 @@ class NotificationManager:
         except queue.Full:
             pass
 
-    def notify_match_result(self, won: bool, duration_sec: float | None = None,
+    def notify_match_result(self, won: bool | None, duration_sec: float | None = None,
                             account_name: str | None = None) -> None:
-        status = "VICTORY" if won else "DEFEAT"
-        color = 0x2ECC71 if won else 0xE74C3C
+        if won is True:
+            status = "VICTORY"
+            color = 0x2ECC71
+        elif won is False:
+            status = "DEFEAT"
+            color = 0xE74C3C
+        else:
+            status = "UNKNOWN / DRAW"
+            color = 0x95A5A6
+
         dur_str = f"{int(duration_sec // 60)}m {int(duration_sec % 60)}s" if duration_sec else "Unknown"
         acc_str = f"Account: `{account_name}`\n" if account_name else ""
         
-        self._match_history.append(won)
+        if won is not None:
+            self._match_history.append(won)
         rolling_str = ""
         recent = self._match_history[-10:]
         if len(recent) >= 3:
@@ -175,9 +184,14 @@ class NotificationManager:
         )
 
     def notify_account_switched(self, previous_account: str, next_account: str, reason: str = "Targets met") -> None:
+        lines = []
+        if previous_account:
+            lines.append(f"Completed: `{previous_account}`")
+        lines.append(f"Now Farming: `{next_account}`")
+        lines.append(f"Reason: {reason}")
         self.send(
             title="Account Switched",
-            description=f"Completed: `{previous_account}`\nNow Farming: `{next_account}`\nReason: {reason}",
+            description="\n".join(lines),
             color=0x9B59B6,
         )
 

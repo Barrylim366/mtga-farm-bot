@@ -442,6 +442,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
+        self.__last_attack_decision = None
         # {instanceId: epoch when it was proven unreachable}. A cast whose hand
         # scan exhausted every retry is not worth re-sweeping for: each attempt
         # costs ~6.6s of rope against a card the hand does not contain. Cleared
@@ -3963,7 +3964,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return False
         arena = self._ensure_arena_region(force_reacquire=False)
         if arena is None:
-            arena = self._arena_region or self._last_good_arena_region
+            last_det = getattr(self._arena_region_provider, "last_detection_result", None)
+            code = getattr(last_det, "code", None)
+            if code not in {"window_wrong_size", "window_off_screen"}:
+                arena = self._arena_region or self._last_good_arena_region
         if arena is None:
             arena = self._ensure_arena_region(force_reacquire=True)
         if arena is None:
@@ -8336,8 +8340,9 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         return self._all_attack_own()
 
     def _all_attack_own(self) -> bool:
-        if self.__combat_selective_attack_enabled() and self.__last_attack_decision:
-            decision = self.__last_attack_decision
+        decision = getattr(self, "_Controller__last_attack_decision", None)
+        self.__last_attack_decision = None
+        if self.__combat_selective_attack_enabled() and decision:
             hold_back = decision.get("hold_back", [])
             if hold_back:
                 try:
@@ -10202,9 +10207,8 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
 
     def concede(self, reason: str = "manual") -> bool:
         """Explicitly request a concession (e.g. from stall watchdog or match timeout)."""
-        with self.__concession_claim_lock:
-            if not self.__claim_concession(reason):
-                return False
+        if not self.__claim_concession(reason):
+            return False
         expected_match_id = getattr(self, "_Controller__live_match_id", None)
         self.__cancel_pending_decisions_for_concede()
         threading.Thread(

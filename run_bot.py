@@ -179,27 +179,18 @@ def main():
             auto_concede_stalled_matches=auto_concede_stalled_matches,
         )
         
-        print("Initializing AI...")
-        forge_enabled = _forge_engine_enabled(cfg_path)
-        ai = ForgeEngine.make_ai(DummyAI(), lambda: forge_enabled)
-        if ForgeEngine.apply(controller, forge_enabled, log_path=log_path):
-            print("Forge engine enabled: starting the advisor in the background.")
-
-        print("Initializing Game...")
-        game = Game(controller, ai)
-        
-        print("Starting Game loop...")
-        game.start()
-        
-        # Setup graceful shutdown handlers
+        # Setup graceful shutdown handlers early before starting background components
         import signal
+
+        game = None
 
         def _graceful_exit(signum=None, frame=None):
             print("\nShutting down MTG AI Bot cleanly...")
-            try:
-                game.stop()
-            except Exception:
-                pass
+            if game is not None:
+                try:
+                    game.stop()
+                except Exception:
+                    pass
             try:
                 controller._stop_requested = True
             except Exception:
@@ -215,6 +206,18 @@ def main():
             signal.signal(signal.SIGTERM, _graceful_exit)
         except Exception:
             pass
+
+        print("Initializing AI...")
+        forge_enabled = _forge_engine_enabled(cfg_path)
+        ai = ForgeEngine.make_ai(DummyAI(), lambda: forge_enabled)
+        if ForgeEngine.apply(controller, forge_enabled, log_path=log_path):
+            print("Forge engine enabled: starting the advisor in the background.")
+
+        print("Initializing Game...")
+        game = Game(controller, ai)
+        
+        print("Starting Game loop...")
+        game.start()
 
         # Keep the script running
         from low_power import sleep_throttled

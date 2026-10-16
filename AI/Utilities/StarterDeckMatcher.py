@@ -35,21 +35,19 @@ _COLOR_KEYWORDS = {
 
 def _load_starter_decks() -> dict[tuple[str, str], str]:
     """Load starter decks from config/starter_decks.json if present, falling back to defaults."""
+    decks = dict(_STARTER_DECKS)
     try:
         path = runtime_file("config", "starter_decks.json")
         if path.is_file():
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                custom = {}
                 for k, v in data.items():
                     if isinstance(k, str) and "," in k:
                         c1, c2 = [c.strip().lower() for c in k.split(",", 1)]
-                        custom[(c1, c2)] = str(v)
-                if custom:
-                    return custom
+                        decks[(c1, c2)] = str(v)
     except Exception:
         pass
-    return dict(_STARTER_DECKS)
+    return decks
 
 
 def parse_quest_colors(quest_text: str) -> set[str]:
@@ -101,6 +99,6 @@ def choose_best_starter_deck(quest_texts: list[str]) -> str | None:
     # If no color demand found (e.g. "Attack with 30 creatures", "Kill 15 creatures"),
     # recommend Savage Lands (RG aggro) or Legion of Knights (RW aggro)
     if best_score <= 0:
-        return decks.get(("red", "green"), "Savage Lands")
+        return decks.get(("red", "green")) or decks.get(("green", "red")) or "Savage Lands"
 
     return best_deck

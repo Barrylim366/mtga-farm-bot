@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from notifications import NotificationManager
 
@@ -9,6 +10,9 @@ from notifications import NotificationManager
 class WebhooksTests(unittest.TestCase):
     def setUp(self):
         NotificationManager.reset_instance()
+        self._worker_patcher = mock.patch.object(NotificationManager, "_start_worker")
+        self._worker_patcher.start()
+        self.addCleanup(self._worker_patcher.stop)
 
     def tearDown(self):
         NotificationManager.reset_instance()

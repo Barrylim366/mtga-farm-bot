@@ -39,6 +39,7 @@ def _get_card_details(card_entry: dict | int) -> dict:
         return {"name": "Unknown", "is_land": False, "cmc": 999, "produced_colors": set(), "required_colors": set()}
 
     card_info = CardInfo.get_card_info_local(grp_id) if grp_id else {}
+    is_unresolved = not bool(card_info)
     types = (card_info.get("types") or []) if card_info else []
     is_land = "Land" in types or "Basic Land" in types
     cmc = CardInfo.calculate_cmc(card_info.get("manaCost", "")) if card_info else 999
@@ -68,6 +69,7 @@ def _get_card_details(card_entry: dict | int) -> dict:
         "produced_colors": produced_colors,
         "required_colors": required_colors,
         "manaCost": mana_cost,
+        "is_unresolved": is_unresolved,
     }
 
 
@@ -96,6 +98,10 @@ def evaluate_opening_hand(hand_cards: list, mulligan_count: int = 0) -> tuple[bo
     # 4 or fewer cards: never mulligan further to preserve game presence
     if hand_size <= 4:
         return True, f"Hand size {hand_size} is at or below minimum threshold; keeping."
+
+    # If all cards are unresolved (e.g. offline cache not yet populated), safe default keep
+    if all(c.get("is_unresolved") for c in resolved):
+        return True, "Hand cards unresolved from local data; default keep."
 
     # 0 Lands is an auto-loss
     if land_count == 0:
@@ -229,11 +235,18 @@ def select_cards_to_tuck(hand_cards: list, count_to_tuck: int) -> list[int]:
             if len(tuck_candidates) == count_to_tuck:
                 return tuck_candidates
 
-    # If any card lacked instanceId, add synthetic index tokens
+    # If any card lacked instanceId, add synthetic index tokens only for unchosen indices
+    chosen_indices = set()
     for idx, c in enumerate(resolved):
+        tok = get_token(c)
+        if tok in tuck_candidates:
+            chosen_indices.add(idx)
+
+    for idx in range(len(resolved)):
         if len(tuck_candidates) == count_to_tuck:
             break
-        if idx not in tuck_candidates:
+        if idx not in chosen_indices:
+            chosen_indices.add(idx)
             tuck_candidates.append(idx)
 
     return tuck_candidates
