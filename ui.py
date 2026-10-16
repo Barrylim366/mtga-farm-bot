@@ -5854,6 +5854,7 @@ class _FireSubWindow(tk.Toplevel):
         "text": "#E7EAF0",
         "text_muted": "#C9B8A8",
         "status": "#FFC266",
+        "accent": "#FFC266",
         "entry_bg": "#3D130E",
         "widget_border": "#3A4A63",
     }
@@ -6209,7 +6210,7 @@ class EnhancementsWindow(_FireSubWindow):
         from low_power import LowPowerManager
         nm = NotificationManager.get_instance()
         lp = LowPowerManager.get_instance()
-        self._cfg = nm._config
+        self._cfg = nm.get_config() if hasattr(nm, "get_config") else getattr(nm, "_config", {})
         self._discord_url = tk.StringVar(value=self._cfg.get("discord_webhook_url", ""))
         self._telegram_token = tk.StringVar(value=self._cfg.get("telegram_bot_token", ""))
         self._telegram_chat_id = tk.StringVar(value=self._cfg.get("telegram_chat_id", ""))
@@ -6239,7 +6240,7 @@ class EnhancementsWindow(_FireSubWindow):
 
         cv.create_text(30, 146, text="Telegram Bot Token:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         self._tg_token_entry = tk.Entry(self, textvariable=self._telegram_token, bg=c["entry_bg"], fg=c["text"],
-                                        insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
+                                        show="*", insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
         cv.create_window(30, 168, width=250, height=24, window=self._tg_token_entry, anchor="nw")
 
         cv.create_text(290, 146, text="Chat ID:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
@@ -6325,6 +6326,10 @@ class EnhancementsWindow(_FireSubWindow):
 
     def _snap_window(self):
         try:
+            import sys
+            if sys.platform != "win32":
+                self._canvas.itemconfigure(self._status_text_item, text="Windows only")
+                return
             import ctypes
             hwnd = ctypes.windll.user32.FindWindowW(None, "MTGA")
             if not hwnd:

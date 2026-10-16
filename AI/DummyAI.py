@@ -830,6 +830,7 @@ class DummyAI(AIKernel):
                     # Check if casting a creature first provides a landfall trigger
                     # before dropping our land
                     cast_first_for_landfall = False
+                    landfall_instance_to_prioritize = None
                     if not self.__has_land_been_played_this_turn:
                         for action_wrapper in action_list:
                             action = action_wrapper.get('action', {})
@@ -847,6 +848,7 @@ class DummyAI(AIKernel):
                                         f"Sequencing: Prioritizing landfall creature (grpId={grp_id}) "
                                         "before land drop to capture trigger."
                                     )
+                                    landfall_instance_to_prioritize = inst_id
                                     cast_first_for_landfall = True
                                     break
 
@@ -935,6 +937,8 @@ class DummyAI(AIKernel):
                         if act.get('actionType') != 'ActionType_Cast':
                             return -1
                         iid = act.get('instanceId')
+                        if landfall_instance_to_prioritize is not None and iid == landfall_instance_to_prioritize:
+                            return 9999
                         gid = act.get('grpId') or inst_id_grp_id_dict.get(iid)
                         c_info = CardInfo.get_card_info(gid) if gid else None
                         return self._cast_priority_score(c_info, total_mana)

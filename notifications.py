@@ -64,6 +64,9 @@ class NotificationManager:
             "enabled": False,
         }
 
+    def get_config(self) -> dict:
+        return dict(self._config)
+
     def save_config(self, config: dict) -> None:
         self._config.update(config)
         path = _get_config_path()
@@ -124,6 +127,8 @@ class NotificationManager:
             bot_logger.log_error(f"Discord webhook failed: {e}")
 
     def _send_telegram(self, token: str, chat_id: str, message: str) -> None:
+        if len(message) > 4000:
+            message = message[:3990] + "\n...[truncated]"
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
         try:
