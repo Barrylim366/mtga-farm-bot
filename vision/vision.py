@@ -246,15 +246,20 @@ class VisionEngine:
                     self._mss_instance = mss_factory()
                 monitor = self._mss_instance.monitors[0]
                 raw = self._mss_instance.grab(monitor)
-                arr = self._cut_at_primary_origin(np.array(raw, dtype=np.uint8), monitor)
+                arr = np.array(raw, dtype=np.uint8)
+                # Pixels per logical unit of this grab, read off the grab itself
+                # (2.0 on a macOS Retina display, 1.0 elsewhere): it drives the
+                # cut below and the scaling back to logical size after it.
+                scale = self._mss_pixel_scale(arr, monitor)
+                arr = self._cut_at_primary_origin(arr, monitor)
                 if arr.ndim == 3 and arr.shape[2] == 4:
-                    frame = self._normalize_frame_to_logical_size(arr[:, :, :3].copy())
+                    frame = self._normalize_frame_to_logical_size(arr[:, :, :3].copy(), scale=scale)
                     if not self._is_invalid_linux_wayland_capture_frame(frame):
                         self._mss_consecutive_invalid = 0
                         return frame
                     self._record_invalid_mss_capture()
                 if arr.ndim == 3 and arr.shape[2] == 3:
-                    frame = self._normalize_frame_to_logical_size(cvt_rgb_to_bgr(arr))
+                    frame = self._normalize_frame_to_logical_size(cvt_rgb_to_bgr(arr), scale=scale)
                     if not self._is_invalid_linux_wayland_capture_frame(frame):
                         self._mss_consecutive_invalid = 0
                         return frame
@@ -296,18 +301,14 @@ class VisionEngine:
         try:
             left = int(monitor.get("left", 0) or 0)
             top = int(monitor.get("top", 0) or 0)
-            width = int(monitor.get("width", 0) or 0)
-            height = int(monitor.get("height", 0) or 0)
         except Exception:
             return arr
         if arr.ndim < 2:
             return arr
-        # mss describes the monitor in logical units but hands back physical
-        # pixels -- on a macOS Retina display the grab is twice the rectangle
-        # (which is what _normalize_frame_to_logical_size exists for) -- so the
-        # cut is scaled to the grab's own size. On Windows and X11 both match.
-        scale_x = float(arr.shape[1]) / float(width) if width > 0 else 1.0
-        scale_y = float(arr.shape[0]) / float(height) if height > 0 else 1.0
+        # The cut is in the grab's own pixels: mss describes the monitor in
+        # logical units but hands back physical pixels, twice the rectangle on
+        # a macOS Retina display (see _mss_pixel_scale).
+        scale_x, scale_y = VisionEngine._mss_pixel_scale(arr, monitor)
         cut_x = int(round(max(0, -left) * scale_x))
         cut_y = int(round(max(0, -top) * scale_y))
         if not (cut_x or cut_y):
@@ -317,6 +318,26 @@ class VisionEngine:
             # rather than an empty frame.
             return arr
         return arr[cut_y:, cut_x:]
+
+    @staticmethod
+    def _mss_pixel_scale(arr: np.ndarray, monitor: dict) -> tuple[float, float]:
+        """Pixels per logical unit of an mss grab, as (x, y).
+
+        mss reports the monitor rectangle in logical units (points on macOS)
+        but grabs physical pixels, so a Retina display comes back at twice the
+        rectangle. The ratio is read off the grab itself rather than asked of
+        pyautogui: pyautogui.size() is the primary monitor alone, the wrong
+        yardstick as soon as the frame holds more than one monitor. (1.0, 1.0)
+        wherever the two agree, as on Windows and X11.
+        """
+        try:
+            width = int(monitor.get("width", 0) or 0)
+            height = int(monitor.get("height", 0) or 0)
+        except Exception:
+            return (1.0, 1.0)
+        if arr is None or arr.ndim < 2 or width <= 0 or height <= 0:
+            return (1.0, 1.0)
+        return (float(arr.shape[1]) / float(width), float(arr.shape[0]) / float(height))
 
     def _is_invalid_linux_wayland_capture_frame(self, frame: np.ndarray | None) -> bool:
         if frame is None or frame.size == 0:
@@ -349,8 +370,26 @@ class VisionEngine:
             pass
         self._mss_instance = None
 
-    def _normalize_frame_to_logical_size(self, frame: np.ndarray) -> np.ndarray:
-        if frame is None or frame.size == 0 or cv2 is None or sys.platform != "darwin" or pyautogui is None:
+    def _normalize_frame_to_logical_size(
+        self, frame: np.ndarray, scale: tuple[float, float] | None = None
+    ) -> np.ndarray:
+        if frame is None or frame.size == 0 or cv2 is None:
+            return frame
+        if scale is not None:
+            # The mss path knows the grab's own pixel-per-logical-unit ratio
+            # (_mss_pixel_scale). Dividing by it brings a Retina grab back to
+            # logical size while keeping every monitor the frame still holds.
+            # The pyautogui.size() yardstick below is the primary monitor
+            # alone: it would squeeze a frame of several monitors into the
+            # primary's size whenever their proportions happen to match.
+            ratio_x, ratio_y = float(scale[0]), float(scale[1])
+            if ratio_x < 1.2 or ratio_y < 1.2 or abs(ratio_x - ratio_y) > 0.15:
+                return frame
+            actual_h, actual_w = frame.shape[:2]
+            target_w = max(1, int(round(actual_w / ratio_x)))
+            target_h = max(1, int(round(actual_h / ratio_y)))
+            return cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        if sys.platform != "darwin" or pyautogui is None:
             return frame
         logical = self._logical_screen_size
         if logical is None:

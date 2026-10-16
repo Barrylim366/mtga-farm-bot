@@ -87,10 +87,38 @@ class VirtualScreenOriginTest(unittest.TestCase):
         """mss reports the monitors in points but grabs in pixels on macOS, so
         a monitor 1920 points to the left is 3840 pixels of the grab."""
         fake = FakeMss(left=-1920, top=0, width=3840, height=1080, scale=2)
+        cut = VisionEngine._cut_at_primary_origin(fake.frame, fake.monitors[0])
+        self.assertEqual(cut.shape[:2], (2160, 3840))
+        self.assertEqual(int(cut[0, 0, 0]), 0)
+        self.assertEqual(int(cut[0, 3839, 0]), (1919 // 16) % 256)
+
+    def test_a_retina_grab_comes_back_at_logical_size(self):
+        """End to end: the frame handed out is in logical units again, so the
+        readers' screen coordinates index it, scaled by the grab's own ratio."""
+        fake = FakeMss(left=-1920, top=0, width=3840, height=1080, scale=2)
         frame = engine_with(fake)._grab_full_frame_uncached()
-        self.assertEqual(frame.shape[:2], (2160, 3840))
+        self.assertEqual(frame.shape[:2], (1080, 1920))
         self.assertEqual(int(frame[0, 0, 0]), 0)
-        self.assertEqual(int(frame[0, 3839, 0]), (1919 // 16) % 256)
+        self.assertEqual(int(frame[0, 1919, 0]), (1919 // 16) % 256)
+        self.assertEqual(int(frame[1079, 0, 1]), (1079 // 16) % 256)
+
+    def test_a_retina_frame_keeps_the_monitors_right_of_the_primary(self):
+        """Left, primary and right monitor (960x540 points each) at 2x: the
+        left one is cut, the right one stays, and the frame is 1920x540 logical.
+        Measured against the primary alone, as pyautogui.size() would, the
+        2x grab of two monitors has the primary's proportions and would have
+        been squeezed into 960x540."""
+        fake = FakeMss(left=-960, top=0, width=2880, height=540, scale=2)
+        frame = engine_with(fake)._grab_full_frame_uncached()
+        self.assertEqual(frame.shape[:2], (540, 1920))
+        self.assertEqual(int(frame[0, 0, 0]), 0)
+        self.assertEqual(int(frame[0, 959, 0]), (959 // 16) % 256)
+        self.assertEqual(int(frame[0, 1919, 0]), (1919 // 16) % 256)
+
+    def test_the_mss_scale_is_read_off_the_grab(self):
+        fake = FakeMss(left=0, top=0, width=640, height=360, scale=2)
+        self.assertEqual(VisionEngine._mss_pixel_scale(fake.frame, fake.monitors[0]), (2.0, 2.0))
+        self.assertEqual(VisionEngine._mss_pixel_scale(fake.frame, {"left": 0, "top": 0}), (1.0, 1.0))
 
     def test_a_geometry_that_would_cut_everything_is_left_alone(self):
         arr = np.zeros((10, 10, 4), dtype=np.uint8)
