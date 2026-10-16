@@ -25,13 +25,6 @@ from AI.DummyAI import DummyAI
 from Game import Game
 import ForgeEngine
 
-# === Windows Per-Monitor DPI Awareness v2 ===
-try:
-    from vision.window_locator import enable_per_monitor_dpi_v2
-    enable_per_monitor_dpi_v2()
-except Exception:
-    pass
-
 
 def _apply_forge_engine(controller, config_manager) -> bool:
     """Forge hooks on/off for one controller per the saved setting.
@@ -6200,23 +6193,19 @@ class BotBehaviorWindow(_FireSubWindow):
 
 
 class EnhancementsWindow(_FireSubWindow):
-    """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, and Anti-Detection."""
+    """BurningBot Enhancements: Discord/Telegram webhooks and Combat Optimization."""
 
     _TITLE = "Enhancements & Alerts"
-    _HEIGHT = 630
+    _HEIGHT = 490
 
     def _init_state(self) -> None:
         from notifications import NotificationManager
-        from low_power import LowPowerManager
         nm = NotificationManager.get_instance()
-        lp = LowPowerManager.get_instance()
         self._cfg = nm.get_config() if hasattr(nm, "get_config") else getattr(nm, "_config", {})
         self._discord_url = tk.StringVar(value=self._cfg.get("discord_webhook_url", ""))
         self._telegram_token = tk.StringVar(value=self._cfg.get("telegram_bot_token", ""))
         self._telegram_chat_id = tk.StringVar(value=self._cfg.get("telegram_chat_id", ""))
         self._webhooks_enabled = tk.BooleanVar(value=bool(self._cfg.get("enabled", True)))
-        self._low_power_enabled = tk.BooleanVar(value=bool(lp.enabled))
-        self._human_mouse_enabled = tk.BooleanVar(value=bool(self._cfg.get("human_mouse", True)))
         self._selective_attack_enabled = tk.BooleanVar(
             value=bool(self._cfg.get("selective_attack", True) and os.environ.get("MTGA_SELECTIVE_ATTACK") != "0")
         )
@@ -6235,7 +6224,7 @@ class EnhancementsWindow(_FireSubWindow):
 
         cv.create_text(30, 92, text="Discord Webhook URL:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         self._discord_entry = tk.Entry(self, textvariable=self._discord_url, bg=c["entry_bg"], fg=c["text"],
-                                       insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
+                                       show="*", insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
         cv.create_window(30, 114, width=390, height=24, window=self._discord_entry, anchor="nw")
 
         cv.create_text(30, 146, text="Telegram Bot Token:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
@@ -6249,61 +6238,34 @@ class EnhancementsWindow(_FireSubWindow):
         cv.create_window(290, 168, width=130, height=24, window=self._tg_chat_entry, anchor="nw")
 
         self._create_button("save_test", "Save & Test Alert", 30, 210, 160, 36, self._save_and_test)
-        self._status_text_item = cv.create_text(205, 228, text="", fill=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
+        self._status_text_item = cv.create_text(205, 228, text="", fill=c.get("accent", "#FFC266"), font=("Segoe UI", 9, "bold"), anchor="w")
 
-        # Panel 2: Anti-Detection & Combat Optimization
-        self._create_panel(16, 285, 428, 250)
-        cv.create_text(28, 295, text="Anti-Detection & Optimization", fill=c["text"],
+        # Panel 2: Combat Optimization
+        self._create_panel(16, 285, 428, 115)
+        cv.create_text(28, 295, text="Combat Optimization", fill=c["text"],
                        font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("human_mouse", 330, "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
-                            self._toggle_human_mouse)
-        cv.create_text(54, 350, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Generates natural curved paths with micro-jitter and smooth velocity.")
-
-        self._create_toggle("low_power", 385, "Low-Power / Overnight Mode", self._low_power_enabled,
-                            self._toggle_low_power)
-        cv.create_text(54, 405, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Paces idle checks to reduce overnight CPU/GPU temperatures and fan noise.")
-
-        self._create_toggle("selective_attack", 440, "Smart Selective Attacking (CombatLogic)", self._selective_attack_enabled,
+        self._create_toggle("selective_attack", 330, "Smart Selective Attacking (CombatLogic)", self._selective_attack_enabled,
                             self._toggle_selective_attack)
-        cv.create_text(54, 460, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+        cv.create_text(54, 350, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
                        text="Prevents suicidal swings into enemy blockers; calculates lethal and safety.")
 
-        self._create_button("snap", "Snap MTGA 16:9", 24, 555, 130, 40, self._snap_window)
-        self._create_button("session_stats", "Session Stats", 164, 555, 130, 40, self._open_session_stats)
-        self._create_button("back", "Back", 304, 555, 130, 40, self.destroy)
+        self._create_button("snap", "Snap MTGA 16:9", 35, 420, 180, 40, self._snap_window)
+        self._create_button("back", "Back", 245, 420, 180, 40, self.destroy)
 
     def _toggle_webhooks(self):
         self._webhooks_enabled.set(not self._webhooks_enabled.get())
         self._refresh_toggle("webhooks")
-        self._save_config_now()
-
-    def _toggle_human_mouse(self):
-        self._human_mouse_enabled.set(not self._human_mouse_enabled.get())
-        self._refresh_toggle("human_mouse")
-        self._save_config_now()
-
-    def _toggle_low_power(self):
-        self._low_power_enabled.set(not self._low_power_enabled.get())
-        self._refresh_toggle("low_power")
-        from low_power import LowPowerManager
-        LowPowerManager.get_instance().set_enabled(self._low_power_enabled.get())
-        self._save_config_now()
+        from notifications import NotificationManager
+        NotificationManager.get_instance().save_config({"enabled": bool(self._webhooks_enabled.get())})
 
     def _toggle_selective_attack(self):
         self._selective_attack_enabled.set(not self._selective_attack_enabled.get())
         self._refresh_toggle("selective_attack")
         os.environ["MTGA_SELECTIVE_ATTACK"] = "1" if self._selective_attack_enabled.get() else "0"
-        self._save_config_now()
+        from notifications import NotificationManager
+        NotificationManager.get_instance().save_config({"selective_attack": bool(self._selective_attack_enabled.get())})
 
-    def _open_session_stats(self):
-        if hasattr(self.master, "_open_current_session"):
-            self.master._open_current_session()
-        else:
-            self._canvas.itemconfigure(self._status_text_item, text="Session stats active in main window")
-
-    def _save_config_now(self):
+    def _save_and_test(self):
         from notifications import NotificationManager
         nm = NotificationManager.get_instance()
         nm.save_config({
@@ -6311,15 +6273,8 @@ class EnhancementsWindow(_FireSubWindow):
             "telegram_bot_token": self._telegram_token.get().strip(),
             "telegram_chat_id": self._telegram_chat_id.get().strip(),
             "enabled": bool(self._webhooks_enabled.get()),
-            "human_mouse": bool(self._human_mouse_enabled.get()),
-            "low_power_mode": bool(self._low_power_enabled.get()),
             "selective_attack": bool(self._selective_attack_enabled.get()),
         })
-
-    def _save_and_test(self):
-        self._save_config_now()
-        from notifications import NotificationManager
-        nm = NotificationManager.get_instance()
         nm.send("Burning Lotus Bot", "Webhook alerts configured and working successfully!", 0x2ECC71)
         self._canvas.itemconfigure(self._status_text_item, text="Alert queued!")
         self.after(3000, lambda: self._canvas.itemconfigure(self._status_text_item, text=""))

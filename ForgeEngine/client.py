@@ -46,7 +46,7 @@ def classpath() -> str:
 class AdvisorClient:
     """One advisor process. Thread-safe; requests are answered one at a time."""
 
-    def __init__(self, startup_timeout: float = 180.0, heap: str = "1g"):
+    def __init__(self, startup_timeout: float = 180.0, heap: str = "2g"):
         self.startup_timeout = startup_timeout
         self.heap = heap
         self._lock = threading.Lock()

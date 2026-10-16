@@ -112,13 +112,6 @@ def _forge_engine_enabled(cfg_path: pathlib.Path | None) -> bool:
 def main():
     print("Starting MTG AI Bot...")
 
-    # Enable Per-Monitor DPI Awareness (v2) on Windows to prevent coordinate drift
-    try:
-        from vision.window_locator import enable_per_monitor_dpi_v2
-        enable_per_monitor_dpi_v2()
-    except Exception:
-        pass
-
     # User configuration
     log_path = os.environ.get("MTGA_BOT_LOG_PATH", "")
     if not log_path:
@@ -220,9 +213,8 @@ def main():
         game.start()
 
         # Keep the script running
-        from low_power import sleep_throttled
         while True:
-            sleep_throttled(1)
+            time.sleep(1)
 
     except Exception as e:
         print(f"An error occurred: {e}")

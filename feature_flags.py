@@ -41,12 +41,6 @@ def combat_debug_capture_enabled() -> bool:
     return is_truthy(val, default=True)
 
 
-def low_power_enabled() -> bool:
-    """Whether low power throttled sleep mode is enabled."""
-    val = os.environ.get("MTGA_LOW_POWER")
-    return is_truthy(val, default=False)
-
-
 def human_mouse_enabled() -> bool:
     """Whether humanized Bezier mouse curves are enabled. Default True."""
     val = os.environ.get("MTGA_HUMAN_MOUSE")

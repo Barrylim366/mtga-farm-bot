@@ -1119,25 +1119,3 @@ def generate_human_path(start: Tuple[int, int], end: Tuple[int, int],
             path.append((end[0], end[1]))
 
     return path
-
-
-def human_move_and_click(input_controller, target_x: int, target_y: int,
-                         clicks: int = 1, delay_before_click: float | None = None) -> None:
-    """Move the mouse to (target_x, target_y) along a humanized path, then click."""
-    try:
-        curr_pos = input_controller.position()
-        start = (curr_pos.x, curr_pos.y)
-    except Exception:
-        start = (target_x, target_y)
-
-    path = generate_human_path(start, (target_x, target_y))
-    # Traverse path with realistic sleep interval
-    for point in path:
-        input_controller.move_abs(point[0], point[1])
-        time.sleep(random.uniform(0.003, 0.008))
-
-    # Randomized pre-click pause (100ms - 250ms)
-    pre_click = delay_before_click if delay_before_click is not None else random.uniform(0.08, 0.22)
-    time.sleep(pre_click)
-
-    input_controller.left_click(clicks)

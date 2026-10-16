@@ -11,6 +11,7 @@ import traceback
 from datetime import datetime
 from typing import Optional, Tuple
 import json
+import os
 import re
 import bot_logger
 
@@ -578,14 +579,19 @@ class DummyAI(AIKernel):
         return chosen, score
 
     def generate_keep(self, card_list) -> bool:
-        try:
-            from AI.Utilities.MulliganLogic import evaluate_opening_hand
-            keep, reason = evaluate_opening_hand(card_list)
-            self._debug(f"generate_keep: {reason} -> keep={keep}")
-            return bool(keep)
-        except Exception as e:
-            self._debug(f"generate_keep fallback: {e}")
-            return True
+        # Live bottom-card selection (London mulligan tuck) in MTGA GroupReq is pending UI clicking implementation.
+        # Until card tucking is wired into the UI controller, always keep by default to prevent stalls on disabled "Done".
+        # Enable MTGA_ACTIVE_MULLIGAN=1 to test live hand evaluation.
+        if os.environ.get("MTGA_ACTIVE_MULLIGAN") == "1":
+            try:
+                from AI.Utilities.MulliganLogic import evaluate_opening_hand
+                keep, reason = evaluate_opening_hand(card_list)
+                self._debug(f"generate_keep: {reason} -> keep={keep}")
+                return bool(keep)
+            except Exception as e:
+                self._debug(f"generate_keep fallback: {e}")
+                return True
+        return True
 
     def __new_turn_check(self, current_game_state: 'GameStateSecondary'):
         """Check if it's a new turn and reset land played flag"""

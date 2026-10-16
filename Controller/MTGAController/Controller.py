@@ -1322,6 +1322,9 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
 
     def _human_move_abs(self, x: int, y: int) -> None:
         try:
+            if os.environ.get("MTGA_HUMAN_MOUSE") == "0":
+                self.input.move_abs(int(x), int(y))
+                return
             from Controller.Utilities.input_controller import NullInputController
             delegate = getattr(self.input, "_delegate", self.input)
             if not isinstance(delegate, NullInputController):
@@ -1330,7 +1333,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 path = generate_human_path((curr.x, curr.y), (int(x), int(y)))
                 for pt in path:
                     self.input.move_abs(pt[0], pt[1])
-                    time.sleep(0.004)
+                    time.sleep(0.002)
                 return
         except Exception:
             pass
@@ -12186,13 +12189,13 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     pass
                 try:
                     from notifications import NotificationManager
-                    acc_label = account.get("label") or account.get("screen_name") or account.get("email") or "Account"
+                    acc_label = account.get("name") or account.get("screen_name") or "Account"
                     NotificationManager.get_instance().notify_account_switched(
-                        previous_account="",
+                        previous_account=str(outgoing_config_name or ""),
                         next_account=str(acc_label),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    bot_logger.log_error(f"Account-switch notification failed: {e}")
                 # Quests were just read on Home here, so the incoming account starts
                 # its match-count fresh. Without this the counter carries over from
                 # the account we just left (>=1 when a switch fired after a match),
