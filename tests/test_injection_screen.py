@@ -172,6 +172,19 @@ class RunGithubEventTest(unittest.TestCase):
         self.assertEqual(labelled, [("o/r", 12, "flagged", set())])
         self.assertNotIn("SECRET-PAYLOAD", out)
 
+    def test_coderabbit_comments_and_reviews_are_not_screened_or_labelled(self):
+        bot = {"login": "coderabbitai[bot]"}
+        cases = {
+            "issue_comment": {"issue": {"number": 12}, "comment": {"body": "x", "user": bot}},
+            "pull_request_review": {"pull_request": {"number": 7}, "review": {"body": "x", "user": bot}},
+            "pull_request_review_comment": {"pull_request": {"number": 7}, "comment": {"body": "x", "user": bot}},
+        }
+        for name, event in cases.items():
+            with self.subTest(event=name):
+                code, labelled, out = self._run(name, event, screen.Verdict(flagged=True, score=0.9))
+                self.assertEqual((code, labelled), (0, []))
+                self.assertIn("skipped", out)
+
     def test_clean_comment_passes_the_threads_current_labels(self):
         event = {"issue": {"number": 12, "labels": [{"name": "bug"}]}, "comment": {"body": "LGTM"}}
         _code, labelled, _out = self._run("issue_comment", event, screen.Verdict(flagged=False))
@@ -325,5 +338,18 @@ class RescreenTest(unittest.TestCase):
             "/repos/o/r/pulls/7/comments": [{"id": 3, "user": {"login": "b"}, "body": "l"}],
         }
         items, labels = screen.collect_thread_texts("o/r", 7, "T", get=lambda path, _t: responses[path])
-        self.assertEqual([text for _what, text in items], ["T\n\nB", "c", "r", "l"])
+        self.assertEqual([text for _what, text in items], ["T\n\nB", "c", "l"])
         self.assertEqual(labels, {"bug"})
+
+    def test_collect_skips_coderabbit_everywhere(self):
+        bot = {"login": "coderabbitai[bot]"}
+        responses = {
+            "/repos/o/r/issues/7": {"title": "T", "body": "B", "pull_request": {}},
+            "/repos/o/r/issues/7/comments": [{"id": 1, "user": bot, "body": "c"}],
+            "/repos/o/r/pulls/7/reviews": [{"id": 2, "user": bot, "body": "r"}],
+            "/repos/o/r/pulls/7/comments": [{"id": 3, "user": bot, "body": "l"},
+                                            {"id": 4, "user": {"login": "coderabbitai"}, "body": "h"}],
+        }
+        items, _labels = screen.collect_thread_texts("o/r", 7, "T", get=lambda path, _t: responses[path])
+        # Only the exact bot login is excluded, not a human account with a similar name.
+        self.assertEqual([text for _what, text in items], ["T\n\nB", "h"])

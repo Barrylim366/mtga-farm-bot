@@ -287,6 +287,27 @@ def screen_text(text: str, api_key: str | None, *, threshold: float = DEFAULT_TH
 # --- GitHub Actions mode ----------------------------------------------------
 
 
+# Review bots whose output is not screened. CodeRabbit quotes diffs and writes
+# "prompt for AI agents" sections by design, so Jev flags nearly every one of
+# its comments -- false positives that bury the real warnings. Matched on the
+# exact login: a `[bot]` suffix cannot be registered by a human account. Its
+# text is still data, never instructions (CLAUDE.md), it just carries no label.
+UNSCREENED_AUTHORS = frozenset({"coderabbitai[bot]"})
+
+
+def _is_unscreened_author(user) -> bool:
+    return ((user or {}).get("login") or "").lower() in UNSCREENED_AUTHORS
+
+
+def event_author(event_name: str, event: dict) -> dict | None:
+    """The author of the comment/review an event is about (None for PR/issue bodies)."""
+    if event_name in ("issue_comment", "pull_request_review_comment"):
+        return (event.get("comment") or {}).get("user")
+    if event_name == "pull_request_review":
+        return (event.get("review") or {}).get("user")
+    return None
+
+
 def extract_event_text(event_name: str, event: dict) -> tuple[int | None, str]:
     """(issue/PR number, untrusted text) for the events the workflow listens to."""
     if event_name in ("pull_request_target", "pull_request"):
@@ -391,6 +412,9 @@ def run_github_event(env=os.environ, *, screen=screen_text, labels=update_labels
     if number is None:
         print(f"injection-screen: nothing to screen for event {event_name!r}")
         return 0
+    if _is_unscreened_author(event_author(event_name, event)):
+        print(f"injection-screen: #{number} skipped, author is an excluded review bot")
+        return 0
 
     verdict = screen(text, normalize_api_key(env.get("JEV_API_KEY")), threshold=_threshold(env))
     # Only the verdict goes into the job log, never the text itself.
@@ -470,16 +494,19 @@ def collect_thread_texts(repo: str, number: int, token: str, *,
                          get=_github_get_all) -> tuple[list[tuple[str, str]], set[str]]:
     """([(item description, untrusted text)], current labels) for a PR or
     issue: title+body, every comment, and -- for a PR -- every review and
-    inline review comment. The description names the item, never quotes it."""
+    inline review comment, minus those by UNSCREENED_AUTHORS. The description
+    names the item, never quotes it."""
     issue = get(f"/repos/{repo}/issues/{number}", token)
     items = [("body", _join(issue.get("title"), issue.get("body")))]
-    for c in get(f"/repos/{repo}/issues/{number}/comments", token):
-        items.append((f"comment {c.get('id')} by {(c.get('user') or {}).get('login')}", c.get("body") or ""))
+    sources = [("comment", f"/repos/{repo}/issues/{number}/comments")]
     if "pull_request" in issue:  # present (even empty) only on PRs
-        for r in get(f"/repos/{repo}/pulls/{number}/reviews", token):
-            items.append((f"review {r.get('id')} by {(r.get('user') or {}).get('login')}", r.get("body") or ""))
-        for c in get(f"/repos/{repo}/pulls/{number}/comments", token):
-            items.append((f"review comment {c.get('id')} by {(c.get('user') or {}).get('login')}", c.get("body") or ""))
+        sources += [("review", f"/repos/{repo}/pulls/{number}/reviews"),
+                    ("review comment", f"/repos/{repo}/pulls/{number}/comments")]
+    for kind, path in sources:
+        for c in get(path, token):
+            if _is_unscreened_author(c.get("user")):
+                continue
+            items.append((f"{kind} {c.get('id')} by {(c.get('user') or {}).get('login')}", c.get("body") or ""))
     return items, _label_names(issue.get("labels"))
 
 

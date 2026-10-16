@@ -1,8 +1,9 @@
 name: Injection screen
 
-# Screens text that outside contributors (and review bots) write on PRs and
+# Screens text that outside contributors write on PRs and
 # issues for prompt injection aimed at AI agents, and labels the PR/issue when
-# Jev flags it. See tools/injection_screen.py.
+# Jev flags it. CodeRabbit is skipped (UNSCREENED_AUTHORS). See
+# tools/injection_screen.py.
 #
 # pull_request_target (not pull_request) so fork PRs get the JEV_API_KEY
 # secret. That is only safe because this workflow NEVER checks out or runs the

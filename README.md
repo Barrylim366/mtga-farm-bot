@@ -581,7 +581,7 @@ GitHub Actions runs the same Pyright check automatically for every push and pull
 
 ### Prompt-injection screen
 
-PR and issue text is screened for prompt injection aimed at AI agents (`.github/workflows/injection-screen.yml`, using the [Jev](https://docs.typesafe.ai/api) classification model). Flagged items get the label `possible-injection`; `injection-unscreened` means the screen could not run; `injection-screened` means everything screened so far came back clean. Setup and details: `tools/injection_screen.py` and `CLAUDE.md`; agent PR reviews start with `tools/screen_pr.py <nr>`, which rescreens the PR at review time.
+PR and issue text is screened for prompt injection aimed at AI agents (`.github/workflows/injection-screen.yml`, using the [Jev](https://docs.typesafe.ai/api) classification model). Flagged items get the label `possible-injection`; `injection-unscreened` means the screen could not run; `injection-screened` means everything screened so far came back clean. CodeRabbit's comments and reviews (`coderabbitai[bot]`) are not screened: they quote diffs and address AI agents by design, so they were flagged as false positives. Setup and details: `tools/injection_screen.py` and `CLAUDE.md`; agent PR reviews start with `tools/screen_pr.py <nr>`, which rescreens the PR at review time.
 
 ## Logs & Troubleshooting
 
