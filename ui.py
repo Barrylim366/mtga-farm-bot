@@ -2281,7 +2281,31 @@ class MTGBotUI(tk.Tk):
         self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
         self._setup_stop_hotkey()
         self._setup_game_overlay()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self.after(1500, self._start_update_check)
+
+    def _on_window_close(self) -> None:
+        """Handle window X button to cleanly stop bot, unregister hooks, and avoid taskbar/DWM freeze."""
+        try:
+            self._stop_bot()
+        except Exception:
+            pass
+        if hasattr(self, "_stop_mouse_listener") and self._stop_mouse_listener:
+            try:
+                self._stop_mouse_listener.stop()
+            except Exception:
+                pass
+            self._stop_mouse_listener = None
+        if hasattr(self, "_game_overlay") and self._game_overlay:
+            try:
+                self._game_overlay.destroy()
+            except Exception:
+                pass
+            self._game_overlay = None
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _start_update_check(self) -> None:
         threading.Thread(target=self._check_for_update_worker, daemon=True).start()
@@ -4781,6 +4805,12 @@ class MTGBotUI(tk.Tk):
             self.game = None
 
         self._stop_session_watchdog()
+        if hasattr(self, "_stop_mouse_listener") and self._stop_mouse_listener:
+            try:
+                self._stop_mouse_listener.stop()
+            except Exception:
+                pass
+            self._stop_mouse_listener = None
         self._set_running_state(False)
         self._set_startup_loading(False)
         with self._controller_lock:
@@ -6187,7 +6217,7 @@ class EnhancementsWindow(_FireSubWindow):
         self._low_power_enabled = tk.BooleanVar(value=bool(lp.enabled))
         self._human_mouse_enabled = tk.BooleanVar(value=bool(self._cfg.get("human_mouse", True)))
         self._selective_attack_enabled = tk.BooleanVar(
-            value=bool(self._cfg.get("selective_attack", False) or os.environ.get("MTGA_SELECTIVE_ATTACK") == "1")
+            value=bool(self._cfg.get("selective_attack", True) and os.environ.get("MTGA_SELECTIVE_ATTACK") != "0")
         )
 
     def _build_ui(self) -> None:

@@ -204,6 +204,23 @@ class ChooseTargetWithWardTest(unittest.TestCase):
         RemovalLogic.note_declined_target(94090, 302)
         self.assertIsNone(self._choose(ward_budget=9, source_grp_id=94090))
 
+    def test_power_threat_scoring_prioritizes_high_power(self):
+        # 5/1 high-power glass cannon vs 1/4 low-power wall
+        board = [
+            creature(310, 900001, power=5, toughness=1),
+            creature(311, 900002, power=1, toughness=4),
+        ]
+        # With threat scoring (power * 3 + toughness): 5*3 + 1 = 16 vs 1*3 + 4 = 7 -> picks 310
+        self.assertEqual(
+            RemovalLogic.choose_removal_target(DESTROY, board, MY_SEAT, prioritize_power_threat=True),
+            310,
+        )
+        # Without threat scoring (toughness first): picks 311 (toughness 4 > 1)
+        self.assertEqual(
+            RemovalLogic.choose_removal_target(DESTROY, board, MY_SEAT, prioritize_power_threat=False),
+            311,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -242,7 +242,8 @@ class VisionEngine:
         if mss is not None and time.time() >= self._mss_failed_until:
             try:
                 if self._mss_instance is None:
-                    self._mss_instance = mss.mss()
+                    mss_factory = getattr(mss, "MSS", None) or getattr(mss, "mss")
+                    self._mss_instance = mss_factory()
                 monitor = self._mss_instance.monitors[0]
                 raw = self._mss_instance.grab(monitor)
                 arr = np.array(raw, dtype=np.uint8)

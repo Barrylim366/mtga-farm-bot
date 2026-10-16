@@ -762,5 +762,30 @@ class PinReconciliationTests(unittest.TestCase):
         self.assertTrue(c._current_account_pinned)
 
 
+class AccountCredentialsValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.c = make_controller()
+
+    def test_valid_account_passes(self):
+        self.assertTrue(self.c.validate_account_credentials({"name": "User1", "email": "u1@x.com", "pw": "secret"}))
+
+    def test_missing_name_fails(self):
+        self.assertFalse(self.c.validate_account_credentials({"name": "", "email": "u1@x.com", "pw": "secret"}))
+
+    def test_empty_email_or_password_fails(self):
+        self.assertFalse(self.c.validate_account_credentials({"name": "User1", "email": "", "pw": "secret"}))
+        self.assertFalse(self.c.validate_account_credentials({"name": "User1", "email": "u1@x.com", "pw": "   "}))
+
+    def test_rotation_skips_invalid_credentials_target(self):
+        accs = [
+            {"name": "A", "email": "a@x.com", "pw": "pwA"},
+            {"name": "B_broken", "email": "b@x.com", "pw": ""},  # Invalid empty password
+            {"name": "C", "email": "c@x.com", "pw": "pwC"},
+        ]
+        # Switching from A should skip B_broken and pick C
+        idx, _, _ = self.c._select_next_switch_target(accs, "A")
+        self.assertEqual(accs[idx]["name"], "C")
+
+
 if __name__ == "__main__":
     unittest.main()

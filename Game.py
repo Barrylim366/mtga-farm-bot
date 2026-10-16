@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 
 class Game:
 
+    _match_started_ts: float | None = None
+    _timers: list = []
+
     # If the AI is handed the exact same decision context and returns the
     # exact same move this many times in a row, the executed click(s) are not
     # actually reaching the game (e.g. a cast whose confirmation never fires) --
@@ -235,6 +238,28 @@ class Game:
         """A new match is confirmed live: first mulligan, or an inferred live state
         when we attached mid-game."""
         self._match_started_ts = time.time()
+        try:
+            timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
+            if timeout_limit > 0:
+                def _on_match_timeout():
+                    if not self._stop_requested and self._match_started_ts:
+                        dur = time.time() - self._match_started_ts
+                        if dur >= timeout_limit - 1.0:
+                            auto_concede = getattr(self.controller, "get_auto_concede_stalled_matches", lambda: True)()
+                            if auto_concede:
+                                bot_logger.log_info(
+                                    f"[MATCH_TIMEOUT] Match exceeded {timeout_limit:.0f}s ({dur:.1f}s elapsed). Triggering concede."
+                                )
+                                if hasattr(self.controller, "concede"):
+                                    self.controller.concede("match_timeout_watchdog")
+                                elif hasattr(self.controller, "concede_game"):
+                                    self.controller.concede_game("match_timeout_watchdog")
+                timer = threading.Timer(timeout_limit, _on_match_timeout)
+                timer.daemon = True
+                self._timers.append(timer)
+                timer.start()
+        except Exception:
+            pass
 
     def _match_end_key(self) -> str:
         """Identity of the match that is ending, used to collapse duplicate
@@ -588,6 +613,24 @@ class Game:
             if not self._infer_game_started_from_live_state(current_game_state):
                 self._debug("decision_method called but game not started yet, ignoring")
                 return
+        # Check match duration limit / stall watchdog
+        started_ts = getattr(self, "_match_started_ts", None)
+        if started_ts:
+            match_duration = time.time() - started_ts
+            timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
+            auto_concede = getattr(self.controller, "get_auto_concede_stalled_matches", lambda: True)()
+            if auto_concede and match_duration > timeout_limit:
+                bot_logger.log_info(
+                    f"[STALL_WATCHDOG] Match duration {match_duration:.1f}s exceeded limit of {timeout_limit:.1f}s. "
+                    "Auto-conceding to prevent infinite stall."
+                )
+                self._debug("Match timeout exceeded; triggering concede.")
+                if hasattr(self.controller, "concede"):
+                    self.controller.concede("match_duration_timeout_exceeded")
+                elif hasattr(self.controller, "concede_game"):
+                    self.controller.concede_game("match_duration_timeout_exceeded")
+                return
+
         delay_wait_active = False
 
         # Reset inactivity timer since we're making a decision

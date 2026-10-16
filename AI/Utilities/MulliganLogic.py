@@ -198,9 +198,8 @@ def select_cards_to_tuck(hand_cards: list, count_to_tuck: int) -> list[int]:
         gid = card.get("grpId")
         if gid is not None:
             bot_logger.log_info(
-                f"[MULLIGAN_TUCK] Missing instanceId for card {card.get('name')}; falling back to grpId={gid}"
+                f"[MULLIGAN_TUCK] Missing instanceId for card {card.get('name')} (grpId={gid}); skipping grpId to avoid protocol mismatch, will use index fallback"
             )
-            return int(gid)
         return None
 
     # 1. If we have excess lands (> 3 lands), tuck excess lands first
@@ -230,7 +229,7 @@ def select_cards_to_tuck(hand_cards: list, count_to_tuck: int) -> list[int]:
             if len(tuck_candidates) == count_to_tuck:
                 return tuck_candidates
 
-    # If any card lacked both instanceId and grpId, add synthetic index tokens
+    # If any card lacked instanceId, add synthetic index tokens
     for idx, c in enumerate(resolved):
         if len(tuck_candidates) == count_to_tuck:
             break

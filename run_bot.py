@@ -191,6 +191,31 @@ def main():
         print("Starting Game loop...")
         game.start()
         
+        # Setup graceful shutdown handlers
+        import signal
+
+        def _graceful_exit(signum=None, frame=None):
+            print("\nShutting down MTG AI Bot cleanly...")
+            try:
+                game.stop()
+            except Exception:
+                pass
+            try:
+                controller._stop_requested = True
+            except Exception:
+                pass
+            try:
+                ForgeEngine.shutdown()
+            except Exception:
+                pass
+            sys.exit(0)
+
+        try:
+            signal.signal(signal.SIGINT, _graceful_exit)
+            signal.signal(signal.SIGTERM, _graceful_exit)
+        except Exception:
+            pass
+
         # Keep the script running
         from low_power import sleep_throttled
         while True:

@@ -125,8 +125,8 @@ class LondonMulliganTests(unittest.TestCase):
             keep, reason = evaluate_opening_hand(cards)
             self.assertTrue(keep)
 
-    def test_select_cards_to_tuck_fallback_grp_id(self):
-        # Cards with no instanceId fall back to grpId
+    def test_select_cards_to_tuck_fallback_index_when_missing_instance_id(self):
+        # Cards with no instanceId skip grpId (to prevent protocol errors) and fall back to index tokens
         cards = [
             {"grpId": 101, "name": "Island", "is_land": True, "cmc": 0},
             {"grpId": 102, "name": "Island", "is_land": True, "cmc": 0},
@@ -137,7 +137,7 @@ class LondonMulliganTests(unittest.TestCase):
         with mock.patch("AI.Utilities.MulliganLogic._get_card_details", side_effect=lambda c: c):
             tucked = select_cards_to_tuck(cards, count_to_tuck=1)
             self.assertEqual(len(tucked), 1)
-            self.assertEqual(tucked[0], 104)
+            self.assertEqual(tucked[0], 0)
 
     def test_get_card_details_uses_local_card_lookup(self):
         from AI.Utilities.MulliganLogic import _get_card_details

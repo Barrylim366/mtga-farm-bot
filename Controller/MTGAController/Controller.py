@@ -3287,6 +3287,22 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return None
         return self._resolved_alias_for_screen(scr)
 
+    def validate_account_credentials(self, account: dict) -> bool:
+        """Verify that an account dictionary has valid name and credentials before rotating.
+        Returns True if credentials are valid, False if incomplete or invalid.
+        """
+        if not isinstance(account, dict) or not account:
+            return False
+        name = str(account.get("name", "")).strip() or str(account.get("folder", "")).strip()
+        if not name:
+            return False
+        # If email or password is provided, neither may be empty
+        if "email" in account and not str(account.get("email", "")).strip():
+            return False
+        if "pw" in account and not str(account.get("pw", "")).strip():
+            return False
+        return True
+
     def _select_next_switch_target(self, accounts: list[dict], current_name: str | None):
         """Pick the next account to switch INTO. "Next" is anchored to the CURRENT
         account's slot in the play order (the account after it), so the sequence
@@ -3319,6 +3335,11 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 start = self._account_cycle_index if 0 <= self._account_cycle_index < order_len else 0
             for step in range(order_len):
                 p = (start + step) % order_len
+                cand = custom_order[p]
+                if not is_current(cand) and self.validate_account_credentials(accounts[cand]):
+                    return cand, p, order_len
+            for step in range(order_len):
+                p = (start + step) % order_len
                 if not is_current(custom_order[p]):
                     return custom_order[p], p, order_len
             # Every entry is the current account (single-account order) -> stay.
@@ -3329,6 +3350,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             start = (cur_idx + 1) % n
         else:
             start = self._account_cycle_index if 0 <= self._account_cycle_index < n else 0
+        for step in range(n):
+            idx = (start + step) % n
+            if not is_current(idx) and self.validate_account_credentials(accounts[idx]):
+                return idx, idx, n
         for step in range(n):
             idx = (start + step) % n
             if not is_current(idx):
@@ -10175,6 +10200,24 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self.__cancel_pending_decisions_for_concede()
         self.__run_claimed_concede_sequence("STALL_CONCEDE", trigger_signature, expected_match_id)
 
+    def concede(self, reason: str = "manual") -> bool:
+        """Explicitly request a concession (e.g. from stall watchdog or match timeout)."""
+        with self.__concession_claim_lock:
+            if not self.__claim_concession(reason):
+                return False
+        expected_match_id = getattr(self, "_Controller__live_match_id", None)
+        self.__cancel_pending_decisions_for_concede()
+        threading.Thread(
+            target=self.__run_claimed_concede_sequence,
+            args=("TIMEOUT_CONCEDE", None, expected_match_id),
+            daemon=True,
+            name="TimeoutConcedeThread",
+        ).start()
+        return True
+
+    def concede_game(self, reason: str = "manual") -> bool:
+        return self.concede(reason)
+
     def __cancel_pending_decisions_for_concede(self) -> None:
         self._suppress_selections = True
         self.__clear_cast_ack_attempts("concede")
@@ -11959,6 +12002,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 return
             account = accounts[next_index]
             account_name = str(account.get("name", "")).strip() or str(account.get("folder", "")).strip()
+
+            if not self.validate_account_credentials(account):
+                bot_logger.log_error(f"Account switch validation failed for '{account_name}': invalid credentials format.")
+                self._abort_switch_and_resume(f"account '{account_name}' has invalid credentials")
+                queued_after_login = True
+                return
 
             # Never log out just to log back into the SAME account: that wastes a
             # full logout/login cycle and re-marks an account we already finished.
@@ -16851,16 +16900,28 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     __combat_blocks_budget_sec = 12.0
 
     def __combat_blocks_enabled(self) -> bool:
-        value = str(os.environ.get("MTGA_COMBAT_BLOCKS", "1")).strip().lower()
-        return value not in ("0", "false", "no", "off")
+        try:
+            import feature_flags
+            return feature_flags.combat_blocks_enabled()
+        except Exception:
+            value = str(os.environ.get("MTGA_COMBAT_BLOCKS", "1")).strip().lower()
+            return value not in ("0", "false", "no", "off")
 
     def __combat_selective_attack_enabled(self) -> bool:
-        value = str(os.environ.get("MTGA_SELECTIVE_ATTACK", "0")).strip().lower()
-        return value in ("1", "true", "yes", "on")
+        try:
+            import feature_flags
+            return feature_flags.combat_selective_attack_enabled()
+        except Exception:
+            value = str(os.environ.get("MTGA_SELECTIVE_ATTACK", "1")).strip().lower()
+            return value not in ("0", "false", "no", "off")
 
     def __combat_debug_capture_enabled(self) -> bool:
-        value = str(os.environ.get("MTGA_COMBAT_BLOCK_CAPTURE", "1")).strip().lower()
-        return value not in ("0", "false", "no", "off")
+        try:
+            import feature_flags
+            return feature_flags.combat_debug_capture_enabled()
+        except Exception:
+            value = str(os.environ.get("MTGA_COMBAT_BLOCK_CAPTURE", "1")).strip().lower()
+            return value not in ("0", "false", "no", "off")
 
     def __combat_board_context(self) -> dict | None:
         """Board inputs shared by both shadow decisions, or None if unavailable."""

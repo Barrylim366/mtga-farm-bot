@@ -70,11 +70,14 @@ def choose_best_starter_deck(quest_texts: list[str]) -> str | None:
     if not quest_texts:
         return None
 
+    parsed_quests: list[set[str]] = []
     color_demand: dict[str, int] = {c: 0 for c in _COLOR_KEYWORDS}
     for q in quest_texts:
         q_colors = parse_quest_colors(q)
-        for c in q_colors:
-            color_demand[c] += 1
+        if q_colors:
+            parsed_quests.append(q_colors)
+            for c in q_colors:
+                color_demand[c] += 1
 
     # Score each starter deck
     best_deck = None
@@ -82,7 +85,11 @@ def choose_best_starter_deck(quest_texts: list[str]) -> str | None:
 
     decks = _load_starter_decks()
     for (c1, c2), deck_name in decks.items():
-        score = color_demand.get(c1, 0) + color_demand.get(c2, 0)
+        # Count how many distinct active quests this color pair advances
+        quests_satisfied = sum(1 for qc in parsed_quests if (c1 in qc or c2 in qc))
+        color_overlap = color_demand.get(c1, 0) + color_demand.get(c2, 0)
+        score = (quests_satisfied * 10) + color_overlap
+
         # Bonus if both colors contribute to active quests
         if color_demand.get(c1, 0) > 0 and color_demand.get(c2, 0) > 0:
             score += 2

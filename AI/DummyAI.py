@@ -617,6 +617,47 @@ class DummyAI(AIKernel):
             return 2
         return 1
 
+    @staticmethod
+    def _cast_priority_score(card_info: dict | None, total_mana: int = 0) -> int:
+        """Compute priority score for candidate spell to cast highest-impact spells first.
+        Weight: removal > lifegain payoff > on-curve creature > off-curve creature > cantrip.
+        """
+        if not card_info:
+            return 0
+        score = 0
+        types = card_info.get("types", []) or []
+        grp_id = card_info.get("grpId")
+        cmc = card_info.get("cmc")
+        if cmc is None:
+            cmc = CardInfo.calculate_cmc(card_info.get("manaCost", ""))
+
+        # 1. Targeted removal / burn
+        if grp_id and RemovalLogic.get_removal_profile(grp_id) is not None:
+            score += 100
+
+        # 2. Key synergy / engine payoffs
+        if grp_id and LifegainLogic.is_lifegain_payoff(grp_id):
+            score += 85
+
+        # 3. Creatures (spend mana efficiently on-curve)
+        if "Creature" in types:
+            if total_mana > 0 and (cmc == total_mana or cmc == total_mana - 1):
+                score += 70 + cmc * 2
+            else:
+                score += 50 + cmc * 2
+        elif "Planeswalker" in types:
+            score += 65 + cmc * 2
+        elif "Enchantment" in types or "Artifact" in types:
+            score += 45 + cmc * 2
+        elif "Instant" in types:
+            score += 35 + cmc
+        elif "Sorcery" in types:
+            score += 30 + cmc
+        else:
+            score += 10 + cmc
+
+        return score
+
     def _find_counter_cast(
         self,
         action_list,
@@ -889,7 +930,17 @@ class DummyAI(AIKernel):
                     sorcery_blocked_phase = 0
                     sorcery_blocked_mana = 0
 
-                    for action_wrapper in action_list:
+                    def _action_priority_sort_key(wrapper):
+                        act = (wrapper or {}).get('action', {}) or {}
+                        if act.get('actionType') != 'ActionType_Cast':
+                            return -1
+                        iid = act.get('instanceId')
+                        gid = act.get('grpId') or inst_id_grp_id_dict.get(iid)
+                        c_info = CardInfo.get_card_info(gid) if gid else None
+                        return self._cast_priority_score(c_info, total_mana)
+
+                    sorted_actions = sorted(action_list, key=_action_priority_sort_key, reverse=True)
+                    for action_wrapper in sorted_actions:
                         action = action_wrapper.get('action', {})
                         if action.get('actionType') != 'ActionType_Cast':
                             continue

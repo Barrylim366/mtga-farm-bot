@@ -78,6 +78,8 @@ def cleanup(controller: Controller) -> None:
         "_Controller__inactivity_timer",
         "_Controller__decision_execution_thread",
         "_Controller__decision_heartbeat_timer",
+        "_Controller__decision_recovery_timer",
+        "_Controller__combat_recovery_timer",
     ):
         timer = getattr(controller, attr, None)
         if timer is not None and hasattr(timer, "cancel"):

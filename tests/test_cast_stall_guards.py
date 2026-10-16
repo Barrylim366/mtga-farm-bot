@@ -130,6 +130,21 @@ class InstanceIdRemapTest(unittest.TestCase):
     def setUp(self):
         self.c = make_controller()
         mtga_in_foreground(self)
+        def _cleanup():
+            for attr in (
+                "_Controller__inactivity_timer",
+                "_Controller__decision_execution_thread",
+                "_Controller__decision_heartbeat_timer",
+                "_Controller__decision_recovery_timer",
+                "_Controller__combat_recovery_timer",
+            ):
+                timer = getattr(self.c, attr, None)
+                if timer is not None and hasattr(timer, "cancel"):
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+        self.addCleanup(_cleanup)
 
     def update(self, objects):
         call_private(self.c, "update_inst_id__grp_id_dict", objects)
@@ -176,6 +191,21 @@ class CastSuppressionTest(unittest.TestCase):
     def setUp(self):
         self.c = make_controller()
         mtga_in_foreground(self)
+        def _cleanup():
+            for attr in (
+                "_Controller__inactivity_timer",
+                "_Controller__decision_execution_thread",
+                "_Controller__decision_heartbeat_timer",
+                "_Controller__decision_recovery_timer",
+                "_Controller__combat_recovery_timer",
+            ):
+                timer = getattr(self.c, attr, None)
+                if timer is not None and hasattr(timer, "cancel"):
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+        self.addCleanup(_cleanup)
 
     def cast(self, card_id):
         with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=False), \

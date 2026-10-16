@@ -30,3 +30,11 @@ class DeckMatcherTests(unittest.TestCase):
             with mock.patch("builtins.open", mock.mock_open(read_data=custom_data)):
                 deck = choose_best_starter_deck(["Cast 20 White or Black spells"])
                 self.assertEqual(deck, "Custom Orzhov Deck")
+
+    def test_choose_best_starter_deck_multi_quest_overlap(self):
+        # Two quests sharing black: Quest 1 (White/Black), Quest 2 (Blue/Black)
+        # Grave Matters (White/Black) or Subtle Thoughts (Blue/Black) should beat Aerial Aggression (White/Blue)
+        quests = ["Cast 20 White or Black spells", "Cast 25 Blue or Black spells"]
+        deck = choose_best_starter_deck(quests)
+        self.assertIn(deck, ["Grave Matters", "Subtle Thoughts"])
+
