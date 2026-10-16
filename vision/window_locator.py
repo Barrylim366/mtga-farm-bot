@@ -1361,3 +1361,82 @@ def _get_client_rect_windows(hwnd: int) -> WindowRect | None:
         return WindowRect(x=x, y=y, w=w, h=h)
 
     return _with_physical_dpi(_query)
+
+
+def enable_per_monitor_dpi_v2() -> bool:
+    """Enable Per-Monitor DPI Awareness (v2) on Windows to eliminate scaling drift."""
+    if os.name != "nt":
+        return False
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+        res = ctypes.windll.user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        if res:
+            bot_logger.log_info("[VISION_STD] Per-Monitor DPI Awareness v2 successfully enabled.")
+            return True
+    except Exception as e:
+        bot_logger.log_info(f"[VISION_STD] Per-Monitor DPI Awareness v2 fallback: {e}")
+    return False
+
+
+def get_true_client_origin_and_size(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Get true physical client (playable canvas) coordinates (x, y, w, h).
+    
+    Eliminates Windows 10/11 invisible resize borders and drop shadows.
+    """
+    if os.name != "nt" or not hwnd:
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            return None
+        w = int(rect.right - rect.left)
+        h = int(rect.bottom - rect.top)
+
+        pt = wintypes.POINT(rect.left, rect.top)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(pt)):
+            return None
+        return (int(pt.x), int(pt.y), w, h)
+    except Exception as e:
+        bot_logger.log_error(f"[VISION_STD] Failed to resolve true client rect: {e}")
+        return None
+
+
+def snap_arena_window_16x9(hwnd: int, client_w: int = 1600, client_h: int = 900) -> bool:
+    """Snap the MTGA window to an exact 16:9 client resolution."""
+    if os.name != "nt" or not hwnd:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        style = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+        ex_style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+
+        rect = wintypes.RECT(0, 0, client_w, client_h)
+        user32.AdjustWindowRectEx(ctypes.byref(rect), style, False, ex_style)
+        outer_w = rect.right - rect.left
+        outer_h = rect.bottom - rect.top
+
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        ok = user32.SetWindowPos(hwnd, 0, 0, 0, outer_w, outer_h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
+        if ok:
+            bot_logger.log_info(f"[VISION_STD] Snapped MTGA window to exact 16:9 ({client_w}x{client_h})")
+            return True
+    except Exception as e:
+        bot_logger.log_error(f"[VISION_STD] Window snap failed: {e}")
+    return False
+
+
+def preprocess_for_matching(image, template):
+    """Convert image and template to normalized grayscale to resist HDR and color filters."""
+    if cv2 is None or image is None or template is None:
+        return image, template
+
+    try:
+        img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        tpl_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) if len(template.shape) == 3 else template
+        return img_gray, tpl_gray
+    except Exception:
+        return image, template

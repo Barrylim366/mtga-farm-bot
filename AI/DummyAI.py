@@ -11,6 +11,8 @@ import traceback
 from datetime import datetime
 from typing import Optional, Tuple
 import json
+import re
+import bot_logger
 
 
 class DummyAI(AIKernel):
@@ -43,12 +45,15 @@ class DummyAI(AIKernel):
 
     def _debug(self, message):
         """Debug log for AI decisions"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         try:
-            with open(self.__bot_log_file, 'a') as f:
-                f.write(f"[{timestamp}] [AI] {message}\n")
+            bot_logger.log_ai(message)
         except Exception:
-            pass
+            try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                with open(self.__bot_log_file, 'a') as f:
+                    f.write(f"[{timestamp}] [AI] {message}\n")
+            except Exception:
+                pass
 
     def _get_available_mana_colors(self, action_list, inst_id_grp_id_dict, game_objects=None):
         """Get available mana colors and total sources from ActionType_Activate_Mana actions.
@@ -573,8 +578,14 @@ class DummyAI(AIKernel):
         return chosen, score
 
     def generate_keep(self, card_list) -> bool:
-        self._debug("generate_keep called - keeping hand")
-        return True
+        try:
+            from AI.Utilities.MulliganLogic import evaluate_opening_hand
+            keep, reason = evaluate_opening_hand(card_list)
+            self._debug(f"generate_keep: {reason} -> keep={keep}")
+            return bool(keep)
+        except Exception as e:
+            self._debug(f"generate_keep fallback: {e}")
+            return True
 
     def __new_turn_check(self, current_game_state: 'GameStateSecondary'):
         """Check if it's a new turn and reset land played flag"""
@@ -605,6 +616,47 @@ class DummyAI(AIKernel):
         if 'Enchantment' in card_types:
             return 2
         return 1
+
+    @staticmethod
+    def _cast_priority_score(card_info: dict | None, total_mana: int = 0) -> int:
+        """Compute priority score for candidate spell to cast highest-impact spells first.
+        Weight: removal > lifegain payoff > on-curve creature > off-curve creature > cantrip.
+        """
+        if not card_info:
+            return 0
+        score = 0
+        types = card_info.get("types", []) or []
+        grp_id = card_info.get("grpId")
+        cmc = card_info.get("cmc")
+        if cmc is None:
+            cmc = CardInfo.calculate_cmc(card_info.get("manaCost", ""))
+
+        # 1. Targeted removal / burn
+        if grp_id and RemovalLogic.get_removal_profile(grp_id) is not None:
+            score += 100
+
+        # 2. Key synergy / engine payoffs
+        if grp_id and LifegainLogic.is_lifegain_payoff(grp_id):
+            score += 85
+
+        # 3. Creatures (spend mana efficiently on-curve)
+        if "Creature" in types:
+            if total_mana > 0 and (cmc == total_mana or cmc == total_mana - 1):
+                score += 70 + cmc * 2
+            else:
+                score += 50 + cmc * 2
+        elif "Planeswalker" in types:
+            score += 65 + cmc * 2
+        elif "Enchantment" in types or "Artifact" in types:
+            score += 45 + cmc * 2
+        elif "Instant" in types:
+            score += 35 + cmc
+        elif "Sorcery" in types:
+            score += 30 + cmc
+        else:
+            score += 10 + cmc
+
+        return score
 
     def _find_counter_cast(
         self,
@@ -775,8 +827,33 @@ class DummyAI(AIKernel):
                             sorcery_in_actions += 1
                             sorcery_names.append(card_info.get('name', f'Card#{instance_id}'))
 
-                    # First: try to play a land
+                    # Check if casting a creature first provides a landfall trigger
+                    # before dropping our land
+                    cast_first_for_landfall = False
+                    landfall_instance_to_prioritize = None
                     if not self.__has_land_been_played_this_turn:
+                        for action_wrapper in action_list:
+                            action = action_wrapper.get('action', {})
+                            if action.get('actionType') != 'ActionType_Cast':
+                                continue
+                            inst_id = action.get('instanceId')
+                            grp_id = action.get('grpId') or inst_id_grp_id_dict.get(inst_id)
+                            text = CardInfo.get_oracle_text(grp_id) or ""
+                            if re.search(r"whenever a land enters the battlefield|landfall", text, re.I):
+                                action_mana_cost = action.get('manaCost', [])
+                                if self._can_cast_with_mana_costs(
+                                    action_mana_cost, available_colors, total_mana, sources
+                                ):
+                                    self._debug(
+                                        f"Sequencing: Prioritizing landfall creature (grpId={grp_id}) "
+                                        "before land drop to capture trigger."
+                                    )
+                                    landfall_instance_to_prioritize = inst_id
+                                    cast_first_for_landfall = True
+                                    break
+
+                    # First: try to play a land (unless we should cast a landfall trigger first)
+                    if not self.__has_land_been_played_this_turn and not cast_first_for_landfall:
                         land_instance_id = self._choose_land_to_play(
                             action_list, inst_id_grp_id_dict, available_colors, total_mana, sources
                         )
@@ -855,7 +932,19 @@ class DummyAI(AIKernel):
                     sorcery_blocked_phase = 0
                     sorcery_blocked_mana = 0
 
-                    for action_wrapper in action_list:
+                    def _action_priority_sort_key(wrapper):
+                        act = (wrapper or {}).get('action', {}) or {}
+                        if act.get('actionType') != 'ActionType_Cast':
+                            return -1
+                        iid = act.get('instanceId')
+                        if landfall_instance_to_prioritize is not None and iid == landfall_instance_to_prioritize:
+                            return 9999
+                        gid = act.get('grpId') or inst_id_grp_id_dict.get(iid)
+                        c_info = CardInfo.get_card_info(gid) if gid else None
+                        return self._cast_priority_score(c_info, total_mana)
+
+                    sorted_actions = sorted(action_list, key=_action_priority_sort_key, reverse=True)
+                    for action_wrapper in sorted_actions:
                         action = action_wrapper.get('action', {})
                         if action.get('actionType') != 'ActionType_Cast':
                             continue
@@ -998,6 +1087,12 @@ class DummyAI(AIKernel):
                                         f"Removal {card_name} has no target; casting as creature/permanent for board presence."
                                     )
                                 else:
+                                    if _rm_target == -1:
+                                        self._debug(
+                                            f"LETHAL FACE BURN: Casting {card_name} (instanceId={instance_id}) "
+                                            f"directly for lethal damage against opponent at {removal_opp_life} life!"
+                                        )
+                                        return {'cast': [instance_id]}
                                     priority_removal = self._is_priority_removal_target(
                                         _rm_target, removal_game_objects
                                     )

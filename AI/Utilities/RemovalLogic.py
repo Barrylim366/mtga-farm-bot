@@ -635,6 +635,7 @@ def choose_removal_target(
     ward_budget: int | None = None,
     ward_sources: list[set[str]] | None = None,
     source_grp_id: int | None = None,
+    prioritize_power_threat: bool = True,
 ) -> int | None:
     """FACE_TARGET (-1) for lethal burn, a creature instanceId, or None.
 
@@ -646,6 +647,9 @@ def choose_removal_target(
 
     `source_grp_id` enables the decline list: a target we already backed out of
     with this spell is skipped, so a refused ward confirm cannot loop.
+
+    `prioritize_power_threat`: when True, sorts threats by power * 3 + toughness
+    so high-power lethal threats are prioritized over passive high-toughness walls.
     """
     if not profile:
         return None
@@ -683,12 +687,22 @@ def choose_removal_target(
     # 2/2 for free. Being unwarded is only a tiebreak between equal bodies, and
     # it is the tiebreak that matters when the budget is unknown, because then
     # the warded one may still cost us the whole spell.
-    best = max(
-        killable,
-        key=lambda c: (
-            effective_toughness(c),
-            _stat(c.get("power")),
-            creature_ward_cost(c) is None,
-        ),
-    )
+    if prioritize_power_threat:
+        best = max(
+            killable,
+            key=lambda c: (
+                _stat(c.get("power")) * 3 + effective_toughness(c),
+                effective_toughness(c),
+                creature_ward_cost(c) is None,
+            ),
+        )
+    else:
+        best = max(
+            killable,
+            key=lambda c: (
+                effective_toughness(c),
+                _stat(c.get("power")),
+                creature_ward_cost(c) is None,
+            ),
+        )
     return int(best["instanceId"])

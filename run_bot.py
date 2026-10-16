@@ -92,18 +92,32 @@ def _load_runtime_bot_config(cfg_path: pathlib.Path) -> tuple[dict, bool]:
 
 
 def _forge_engine_enabled(cfg_path: pathlib.Path | None) -> bool:
-    """The "Enable Forge Engine" setting the UI saved; off when unreadable."""
-    if cfg_path is None:
-        return False
+    """The "Enable Forge Engine" setting; default to True if installed."""
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            return json.load(f).get("forge_engine_enabled") is True
+        from ForgeEngine import paths
+        if not paths.installed():
+            return False
     except Exception:
         return False
+    if cfg_path is None or not cfg_path.is_file():
+        return True
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            val = json.load(f).get("forge_engine_enabled")
+            return True if val is None else bool(val)
+    except Exception:
+        return True
 
 
 def main():
     print("Starting MTG AI Bot...")
+
+    # Enable Per-Monitor DPI Awareness (v2) on Windows to prevent coordinate drift
+    try:
+        from vision.window_locator import enable_per_monitor_dpi_v2
+        enable_per_monitor_dpi_v2()
+    except Exception:
+        pass
 
     # User configuration
     log_path = os.environ.get("MTGA_BOT_LOG_PATH", "")
@@ -165,6 +179,34 @@ def main():
             auto_concede_stalled_matches=auto_concede_stalled_matches,
         )
         
+        # Setup graceful shutdown handlers early before starting background components
+        import signal
+
+        game = None
+
+        def _graceful_exit(signum=None, frame=None):
+            print("\nShutting down MTG AI Bot cleanly...")
+            if game is not None:
+                try:
+                    game.stop()
+                except Exception:
+                    pass
+            try:
+                controller._stop_requested = True
+            except Exception:
+                pass
+            try:
+                ForgeEngine.shutdown()
+            except Exception:
+                pass
+            sys.exit(0)
+
+        try:
+            signal.signal(signal.SIGINT, _graceful_exit)
+            signal.signal(signal.SIGTERM, _graceful_exit)
+        except Exception:
+            pass
+
         print("Initializing AI...")
         forge_enabled = _forge_engine_enabled(cfg_path)
         ai = ForgeEngine.make_ai(DummyAI(), lambda: forge_enabled)
@@ -176,10 +218,11 @@ def main():
         
         print("Starting Game loop...")
         game.start()
-        
+
         # Keep the script running
+        from low_power import sleep_throttled
         while True:
-            time.sleep(1)
+            sleep_throttled(1)
 
     except Exception as e:
         print(f"An error occurred: {e}")

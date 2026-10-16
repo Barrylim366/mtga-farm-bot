@@ -530,6 +530,18 @@ the GitHub release asset `forge-engine-v<N>`.
 The advisor (`forge_advisor/`) is adapted from
 [mtga-play-bot](https://github.com/Funny-Bones/mtga-play-bot).
 
+### Intelligent London Mulligan & Gameplay Enhancements
+
+- **London Mulligan Engine (`AI/Utilities/MulliganLogic.py`)**: Evaluates opening hands based on land-to-spell ratios, mana color alignment (ensures lands produce colors matching spells in hand), early curve castability (Turns 1-3 plays), and automatically selects optimal cards (excess lands or high-CMC spells) to tuck under the London Mulligan rule.
+- **Smart Selective Attacking (`Controller/MTGAController/Controller.py`)**: Integrates `CombatLogic.choose_attackers()` to evaluate lethal swings and per-creature safety instead of blindly swinging all creatures. Prevents suicidal attacks into superior blockers while preserving defensive lifegain guards. Configurable via `MTGA_SELECTIVE_ATTACK` / **Settings → Enhancements**.
+- **Threat-Prioritized Counterspells (`AI/Utilities/CounterLogic.py`)**: Scores opponent spells on the stack by threat level (Planeswalkers > Creature bombs > Spells) and CMC, ensuring counterspells target high-impact threats rather than low-value cantrips.
+- **Lethal Face-Burn Priority & Landfall Sequencing (`AI/DummyAI.py`)**: Checks for lethal direct damage before creature removal to immediately close games when face lethal is reached; sequences landfall creatures before land drops to capture triggers.
+- **Anti-Detection Bezier Mouse (`Controller/Utilities/input_controller.py`)**: Generates natural, human-like cubic Bezier mouse curves with smooth acceleration, micro-jitter, and randomized pre-click pauses to prevent behavioral detection.
+- **Per-Monitor DPI v2 & Window Snapping (`vision/window_locator.py`)**: Enables Windows Per-Monitor DPI Awareness v2 to eliminate coordinate drift across scaled monitors, with 16:9 window snapping support.
+- **Discord & Telegram Notifications (`notifications.py`)**: Non-blocking background dispatcher delivering live alerts for match results (victory/defeat with duration), rolling win-rate summaries every 10 games, completed daily quests, and account switches. Configurable in **Settings → Enhancements**.
+- **Low-Power / Overnight Mode (`low_power.py`)**: Paces vision template checks and idle polling loops to reduce CPU/GPU temperatures and power consumption during overnight farming sessions.
+- **Starter Deck Duel Matcher (`AI/Utilities/StarterDeckMatcher.py`)**: Parses active daily quest color requirements and selects the optimal two-color Starter Deck to maximize quest progress, with optional JSON configuration override.
+
 ## Architecture
 
 The codebase is split into clearly separated layers:

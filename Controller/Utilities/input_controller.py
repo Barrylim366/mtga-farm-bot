@@ -1,5 +1,7 @@
+import math
 import os
 import platform
+import random
 import select
 import shutil
 import subprocess
@@ -9,6 +11,7 @@ import time
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Tuple
 
 
 # Owns the X11 clipboard while the parent presses Ctrl+V, then wipes it. Run as
@@ -1054,3 +1057,87 @@ def create_input_controller(backend: str | None) -> InputController:
         return PyAutoGUIInputController()
 
     raise InputControllerError(f"Unknown input backend: {backend!r}")
+
+
+def bezier_point(p0: Tuple[float, float], p1: Tuple[float, float],
+                 p2: Tuple[float, float], p3: Tuple[float, float], t: float) -> Tuple[int, int]:
+    """Cubic Bezier curve formula."""
+    u = 1.0 - t
+    tt = t * t
+    uu = u * u
+    uuu = uu * u
+    ttt = tt * t
+
+    x = uuu * p0[0] + 3 * uu * t * p1[0] + 3 * u * tt * p2[0] + ttt * p3[0]
+    y = uuu * p0[1] + 3 * uu * t * p1[1] + 3 * u * tt * p2[1] + ttt * p3[1]
+    return int(round(x)), int(round(y))
+
+
+def generate_human_path(start: Tuple[int, int], end: Tuple[int, int],
+                        num_steps: int | None = None) -> list[Tuple[int, int]]:
+    """Generate a sequence of (x, y) coordinates forming a natural human curve."""
+    x0, y0 = float(start[0]), float(start[1])
+    x3, y3 = float(end[0]), float(end[1])
+
+    dist = math.hypot(x3 - x0, y3 - y0)
+    if dist < 5:
+        return [end]
+
+    if num_steps is None:
+        # Scale steps by distance: roughly 1 step every 15-25 pixels
+        num_steps = max(6, min(35, int(dist / random.uniform(15.0, 25.0))))
+
+    # Random control points with lateral deviation
+    dx = x3 - x0
+    dy = y3 - y0
+    perp_x = -dy
+    perp_y = dx
+    norm = math.hypot(perp_x, perp_y) or 1.0
+    perp_x /= norm
+    perp_y /= norm
+
+    # Deviation amplitude proportional to distance
+    dev = min(120.0, dist * random.uniform(0.10, 0.25)) * (1 if random.random() < 0.5 else -1)
+
+    p1 = (x0 + dx * 0.25 + perp_x * dev * random.uniform(0.6, 1.2),
+          y0 + dy * 0.25 + perp_y * dev * random.uniform(0.6, 1.2))
+    p2 = (x0 + dx * 0.75 + perp_x * dev * random.uniform(0.2, 0.8),
+          y0 + dy * 0.75 + perp_y * dev * random.uniform(0.2, 0.8))
+
+    path = []
+    for step in range(1, num_steps + 1):
+        # Ease in and ease out using smoothstep
+        linear_t = float(step) / float(num_steps)
+        t = linear_t * linear_t * (3.0 - 2.0 * linear_t)  # smoothstep
+        bx, by = bezier_point((x0, y0), p1, p2, (x3, y3), t)
+        # Add slight natural jitter to intermediate points
+        if step < num_steps:
+            jitter_x = random.randint(-1, 1) if random.random() < 0.2 else 0
+            jitter_y = random.randint(-1, 1) if random.random() < 0.2 else 0
+            path.append((bx + jitter_x, by + jitter_y))
+        else:
+            path.append((end[0], end[1]))
+
+    return path
+
+
+def human_move_and_click(input_controller, target_x: int, target_y: int,
+                         clicks: int = 1, delay_before_click: float | None = None) -> None:
+    """Move the mouse to (target_x, target_y) along a humanized path, then click."""
+    try:
+        curr_pos = input_controller.position()
+        start = (curr_pos.x, curr_pos.y)
+    except Exception:
+        start = (target_x, target_y)
+
+    path = generate_human_path(start, (target_x, target_y))
+    # Traverse path with realistic sleep interval
+    for point in path:
+        input_controller.move_abs(point[0], point[1])
+        time.sleep(random.uniform(0.003, 0.008))
+
+    # Randomized pre-click pause (100ms - 250ms)
+    pre_click = delay_before_click if delay_before_click is not None else random.uniform(0.08, 0.22)
+    time.sleep(pre_click)
+
+    input_controller.left_click(clicks)

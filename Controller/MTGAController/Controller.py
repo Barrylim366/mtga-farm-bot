@@ -442,6 +442,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
 
         self.updated_game_state = GameState()
         self.__inst_id_grp_id_dict = {}
+        self.__last_attack_decision = None
         # {instanceId: epoch when it was proven unreachable}. A cast whose hand
         # scan exhausted every retry is not worth re-sweeping for: each attempt
         # costs ~6.6s of rope against a card the hand does not contain. Cleared
@@ -1319,13 +1320,29 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return None
         return max(0.0, time.time() - ts)
 
+    def _human_move_abs(self, x: int, y: int) -> None:
+        try:
+            from Controller.Utilities.input_controller import NullInputController
+            delegate = getattr(self.input, "_delegate", self.input)
+            if not isinstance(delegate, NullInputController):
+                from Controller.Utilities.input_controller import generate_human_path
+                curr = self.input.position()
+                path = generate_human_path((curr.x, curr.y), (int(x), int(y)))
+                for pt in path:
+                    self.input.move_abs(pt[0], pt[1])
+                    time.sleep(0.004)
+                return
+        except Exception:
+            pass
+        self.input.move_abs(int(x), int(y))
+
     def _click_abs(self, x: int, y: int, tag: str, *, source: str | None = None) -> None:
         bot_logger.log_click(
             int(x), int(y), tag,
             source=source, region_age=self._region_age(), arena=self._arena_region,
         )
         runtime_status.touch_input(tag, (int(x), int(y)))
-        self.input.move_abs(int(x), int(y))
+        self._human_move_abs(int(x), int(y))
         time.sleep(0.1)
         self.input.left_down()
         time.sleep(0.06)
@@ -3271,6 +3288,22 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return None
         return self._resolved_alias_for_screen(scr)
 
+    def validate_account_credentials(self, account: dict) -> bool:
+        """Verify that an account dictionary has valid name and credentials before rotating.
+        Returns True if credentials are valid, False if incomplete or invalid.
+        """
+        if not isinstance(account, dict) or not account:
+            return False
+        name = str(account.get("name", "")).strip() or str(account.get("folder", "")).strip()
+        if not name:
+            return False
+        # If email or password is provided, neither may be empty
+        if "email" in account and not str(account.get("email", "")).strip():
+            return False
+        if "pw" in account and not str(account.get("pw", "")).strip():
+            return False
+        return True
+
     def _select_next_switch_target(self, accounts: list[dict], current_name: str | None):
         """Pick the next account to switch INTO. "Next" is anchored to the CURRENT
         account's slot in the play order (the account after it), so the sequence
@@ -3303,6 +3336,11 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 start = self._account_cycle_index if 0 <= self._account_cycle_index < order_len else 0
             for step in range(order_len):
                 p = (start + step) % order_len
+                cand = custom_order[p]
+                if not is_current(cand) and self.validate_account_credentials(accounts[cand]):
+                    return cand, p, order_len
+            for step in range(order_len):
+                p = (start + step) % order_len
                 if not is_current(custom_order[p]):
                     return custom_order[p], p, order_len
             # Every entry is the current account (single-account order) -> stay.
@@ -3313,6 +3351,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             start = (cur_idx + 1) % n
         else:
             start = self._account_cycle_index if 0 <= self._account_cycle_index < n else 0
+        for step in range(n):
+            idx = (start + step) % n
+            if not is_current(idx) and self.validate_account_credentials(accounts[idx]):
+                return idx, idx, n
         for step in range(n):
             idx = (start + step) % n
             if not is_current(idx):
@@ -3920,7 +3962,18 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             # Let the claimed/continued/reconnected screen settle before Home
             # navigation. The next probe must observe the resulting screen.
             return False
-        arena = self._ensure_arena_region(force_reacquire=True)
+        arena = self._ensure_arena_region(force_reacquire=False)
+        if arena is None:
+            last_det = getattr(self._arena_region_provider, "last_detection_result", None)
+            code = getattr(last_det, "code", None)
+            if code not in {"window_wrong_size", "window_off_screen"}:
+                arena = self._arena_region or self._last_good_arena_region
+        if arena is None:
+            arena = self._ensure_arena_region(force_reacquire=True)
+        if arena is None:
+            last_det = getattr(self._arena_region_provider, "last_detection_result", None)
+            if last_det and getattr(last_det, "region", None) and getattr(last_det, "code", None) == "anchor_not_found":
+                arena = last_det.region
         if arena is None:
             return False
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
@@ -3933,6 +3986,8 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             confidence=0.75, timeout=2.0,
         ) is not None
         if reached:
+            self._arena_region = arena
+            self._remember_arena_region(arena)
             bot_logger.log_info("Quest refresh: reached Home (fixed-coord click).")
         else:
             bot_logger.log_info("Quest refresh: Home click did not land on Home; will retry.")
@@ -8285,6 +8340,16 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         return self._all_attack_own()
 
     def _all_attack_own(self) -> bool:
+        decision = getattr(self, "_Controller__last_attack_decision", None)
+        self.__last_attack_decision = None
+        if self.__combat_selective_attack_enabled() and decision:
+            hold_back = decision.get("hold_back", [])
+            if hold_back:
+                try:
+                    return self._execute_selective_attack(decision)
+                except Exception as e:
+                    bot_logger.log_error(f"Selective attack execution failed ({e}); falling back to all attack.")
+
         target, source = self._map_abs_point_to_arena(
             self.main_br_button_coordinates,
             label="ATTACK_ALL",
@@ -8310,6 +8375,50 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         if self.__attack_target_required and not self.__attack_target_flow_lock.locked():
             time.sleep(0.3)
             self.select_target(-1)
+        return True
+
+    def _execute_selective_attack(self, decision: dict) -> bool:
+        attackers = decision.get("attackers", [])
+        hold_back = decision.get("hold_back", [])
+        bot_logger.log_info(
+            f"SELECTIVE_ATTACK executing: attackers={attackers}, hold_back={hold_back}, reason={decision.get('reason')!r}"
+        )
+        if not attackers:
+            base = self.main_br_button_coordinates
+            point = (int(base[0]), int(base[1]) - 50)
+            target, source = self._map_abs_point_to_arena(
+                point, label="NO_ATTACKS", force_reacquire=True, apply_correction=False
+            )
+            if source == "absolute_no_arena":
+                return False
+            self.__press_combat_button_verified(
+                target,
+                "NO_ATTACKS",
+                declared_markers=["SubmitAttackersReq"],
+                submitted_markers=["SubmitAttackersReq"],
+            )
+            self.__last_attack_submit_ts = time.time()
+            return True
+
+        for iid in attackers:
+            self.select_battlefield_permanent(iid, 1)
+            time.sleep(0.1)
+
+        target, source = self._map_abs_point_to_arena(
+            self.main_br_button_coordinates,
+            label="ATTACK_SELECTED",
+            force_reacquire=True,
+            apply_correction=False,
+        )
+        if source == "absolute_no_arena":
+            return False
+        self.__press_combat_button_verified(
+            target,
+            "ATTACK_SELECTED",
+            declared_markers=["AttackState_Declared", '"canSubmitAttackers": true'],
+            submitted_markers=["SubmitAttackersReq", "AttackState_Attacking"],
+        )
+        self.__last_attack_submit_ts = time.time()
         return True
 
     def __attack_target_prompt_active(self) -> bool:
@@ -8618,7 +8727,17 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     and self.__mulligan_decision_callback
                 ):
                     runtime_status.clear_intentional_wait()
-                    self.__mulligan_decision_callback([])
+                    # === BurningBot Enhancement: Extract hand cards for intelligent mulligan ===
+                    hand_cards = []
+                    try:
+                        zone = self.updated_game_state.get_zone("ZoneType_Hand", owner_seat_id=my_seat)
+                        obj_ids = set(zone.get("objectInstanceIds", []) if zone else [])
+                        full_state = self.updated_game_state.get_full_state() or {}
+                        game_objects = full_state.get("gameObjects", []) or []
+                        hand_cards = [o for o in game_objects if o.get("instanceId") in obj_ids]
+                    except Exception:
+                        hand_cards = []
+                    self.__mulligan_decision_callback(hand_cards)
                 else:
                     runtime_status.clear_intentional_wait()
                     bot_logger.log_info(
@@ -10085,6 +10204,23 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         )
         self.__cancel_pending_decisions_for_concede()
         self.__run_claimed_concede_sequence("STALL_CONCEDE", trigger_signature, expected_match_id)
+
+    def concede(self, reason: str = "manual") -> bool:
+        """Explicitly request a concession (e.g. from stall watchdog or match timeout)."""
+        if not self.__claim_concession(reason):
+            return False
+        expected_match_id = getattr(self, "_Controller__live_match_id", None)
+        self.__cancel_pending_decisions_for_concede()
+        threading.Thread(
+            target=self.__run_claimed_concede_sequence,
+            args=("TIMEOUT_CONCEDE", None, expected_match_id),
+            daemon=True,
+            name="TimeoutConcedeThread",
+        ).start()
+        return True
+
+    def concede_game(self, reason: str = "manual") -> bool:
+        return self.concede(reason)
 
     def __cancel_pending_decisions_for_concede(self) -> None:
         self._suppress_selections = True
@@ -11871,6 +12007,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             account = accounts[next_index]
             account_name = str(account.get("name", "")).strip() or str(account.get("folder", "")).strip()
 
+            if not self.validate_account_credentials(account):
+                bot_logger.log_error(f"Account switch validation failed for '{account_name}': invalid credentials format.")
+                self._abort_switch_and_resume(f"account '{account_name}' has invalid credentials")
+                queued_after_login = True
+                return
+
             # Never log out just to log back into the SAME account: that wastes a
             # full logout/login cycle and re-marks an account we already finished.
             # Only possible with >1 configured account when the selection could not
@@ -12040,6 +12182,15 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 # refresh_quests_cache also latches the new account's screenName.
                 try:
                     self.refresh_quests_cache()
+                except Exception:
+                    pass
+                try:
+                    from notifications import NotificationManager
+                    acc_label = account.get("label") or account.get("screen_name") or account.get("email") or "Account"
+                    NotificationManager.get_instance().notify_account_switched(
+                        previous_account="",
+                        next_account=str(acc_label),
+                    )
                 except Exception:
                     pass
                 # Quests were just read on Home here, so the incoming account starts
@@ -12331,7 +12482,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     def _click(self, pos: tuple[int, int], tag: str) -> None:
         x, y = pos
         bot_logger.log_click(x, y, tag)
-        self.input.move_abs(x, y)
+        self._human_move_abs(x, y)
         time.sleep(0.2)
         self.input.left_click(1)
 
@@ -16753,12 +16904,28 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     __combat_blocks_budget_sec = 12.0
 
     def __combat_blocks_enabled(self) -> bool:
-        value = str(os.environ.get("MTGA_COMBAT_BLOCKS", "1")).strip().lower()
-        return value not in ("0", "false", "no", "off")
+        try:
+            import feature_flags
+            return feature_flags.combat_blocks_enabled()
+        except Exception:
+            value = str(os.environ.get("MTGA_COMBAT_BLOCKS", "1")).strip().lower()
+            return value not in ("0", "false", "no", "off")
+
+    def __combat_selective_attack_enabled(self) -> bool:
+        try:
+            import feature_flags
+            return feature_flags.combat_selective_attack_enabled()
+        except Exception:
+            value = str(os.environ.get("MTGA_SELECTIVE_ATTACK", "1")).strip().lower()
+            return value not in ("0", "false", "no", "off")
 
     def __combat_debug_capture_enabled(self) -> bool:
-        value = str(os.environ.get("MTGA_COMBAT_BLOCK_CAPTURE", "1")).strip().lower()
-        return value not in ("0", "false", "no", "off")
+        try:
+            import feature_flags
+            return feature_flags.combat_debug_capture_enabled()
+        except Exception:
+            value = str(os.environ.get("MTGA_COMBAT_BLOCK_CAPTURE", "1")).strip().lower()
+            return value not in ("0", "false", "no", "off")
 
     def __combat_board_context(self) -> dict | None:
         """Board inputs shared by both shadow decisions, or None if unavailable."""
@@ -16947,7 +17114,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             for blocker_id, attacker_id in assignments:
                 if self._suppress_selections or self._stop_requested:
                     break
-                if time.time() > deadline:
+                if time.time() >= deadline:
                     bot_logger.log_error(
                         "DECLARE_BLOCKS budget spent after {}/{} block(s); submitting what is assigned.".format(
                             declared, len(assignments)
@@ -17396,6 +17563,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     "DeclareAttackersReq: preempted stale stack SelectN prompt."
                 )
                 shadow = self.__shadow_attack_decision(attackers)
+                self.__last_attack_decision = shadow
                 self.__record_decision(
                     "attackers", "declare_attackers_recovery",
                     {

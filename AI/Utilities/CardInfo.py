@@ -492,7 +492,7 @@ def get_land_produced_colors(arena_id: int):
     color_map = {'W': 'white', 'U': 'blue', 'B': 'black', 'R': 'red', 'G': 'green'}
 
     # First, try to get from local card data using titleId for basic lands
-    card_info = get_card_info(arena_id)
+    card_info = get_card_info_local(arena_id) or get_card_info(arena_id)
     if card_info:
         title_id = card_info.get('titleId')
         if title_id in BASIC_LAND_MANA_MAP:
