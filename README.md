@@ -112,7 +112,16 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.8.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.9.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+
+### Version 1.9.0
+
+- New: smarter **mulligans**. The bot checks lands, early plays and colors in the opening hand and, after a mulligan, puts the weakest cards on the bottom.
+- New: **selective attacks** (on by default). The bot only attacks with creatures that trade well or push for lethal instead of sending everything every turn.
+- Smarter play: counterspells go after the biggest threat, removal prefers creatures that hit hard, burn goes to the face when it wins the game, and landfall creatures come down before the land drop.
+- New: **Enhancements & Alerts** window with optional Discord/Telegram alerts for wins, losses, quests and account switches, human-like mouse movement, a low-power overnight mode and 16:9 window snapping.
+- New: a match that runs longer than 20 minutes is conceded so the bot never hangs in one game.
+- Fixed: closing the bot window could freeze the Windows taskbar.
 
 ### Version 1.8.0
 
