@@ -1,0 +1,22 @@
+name: Notify website
+
+# Tells the website repo (red-lotus-bot-website) about a version bump so its
+# "Change notes" workflow adds the entry for the new version. The entry text
+# comes from the "Change notes:" section of the bump commit (see CLAUDE.md).
+
+on:
+  push:
+    branches: [main]
+    paths: [version.py]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send bot-version-bump to the website repo
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.WEBSITE_DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Barrylim366/red-lotus-bot-website/dispatches \
+            -d '{"event_type":"bot-version-bump"}'

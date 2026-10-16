@@ -579,6 +579,10 @@ The rest of the codebase (`Controller/MTGAController/Controller.py`, `ui.py`, â€
 
 GitHub Actions runs the same Pyright check automatically for every push and pull request (`.github/workflows/pyright.yml`).
 
+### Change notes on the website
+
+A push to `main` that changes `version.py` runs `.github/workflows/notify-website.yml`. It sends a `bot-version-bump` dispatch to the website repo, which adds the new version to its change notes page. The text comes from the "Change notes:" section of the bump commit message (format in `CLAUDE.md`). Needs the secret `WEBSITE_DISPATCH_TOKEN`: a fine-grained token with Contents read and write on `Barrylim366/red-lotus-bot-website`.
+
 ### Prompt-injection screen
 
 PR and issue text is screened for prompt injection aimed at AI agents (`.github/workflows/injection-screen.yml`, using the [Jev](https://docs.typesafe.ai/api) classification model). Flagged items get the label `possible-injection`; `injection-unscreened` means the screen could not run; `injection-screened` means everything screened so far came back clean. CodeRabbit's comments and reviews (`coderabbitai[bot]`) are not screened: they quote diffs and address AI agents by design, so they were flagged as false positives. Setup and details: `tools/injection_screen.py` and `CLAUDE.md`; agent PR reviews start with `tools/screen_pr.py <nr>`, which rescreens the PR at review time.

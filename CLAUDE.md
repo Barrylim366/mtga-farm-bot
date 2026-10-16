@@ -36,6 +36,29 @@ it ("Should this trigger a user update? Bump the version?"). Only bump
 `version.py` after explicit confirmation. When in doubt, **don't** — ask. Bump
 semantically: patch for fixes, minor for features.
 
+### Change notes section in the bump commit
+
+Every commit that changes `__version__` in `version.py` must end its message
+(before the Co-Authored-By trailer) with a "Change notes:" section. A push of
+`version.py` to `main` triggers `.github/workflows/notify-website.yml`, and the
+website repo (`red-lotus-bot-website`) copies this section as-is onto its
+public change notes page:
+
+    Change notes:
+    Title: <a few words naming the main change>
+    Summary: <one sentence fragment listing the changes, for the website README>
+    - New: <what players notice, in short plain sentences>
+    - Fixed: <...>
+
+- Write for players, not developers: no file names, functions, env vars,
+  tests or refactors.
+- 2 to 7 bullets. Indented lines continue the bullet above them.
+- No em dashes, use a period instead. No shop or sales language.
+- If a version spans several commits, the section goes into the bump commit
+  and covers all of them.
+- Without the section the website falls back to the raw commit message, which
+  then has to be fixed by hand.
+
 ## Documentation
 
 Before a commit, README.md must be updated to reflect the current state.
