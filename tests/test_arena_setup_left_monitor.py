@@ -64,6 +64,30 @@ class LeftMonitorTest(unittest.TestCase):
         self.assertEqual(result.code, "ok")
         self.assertEqual(anchors, [(2080, 49, 1600, 900)])
 
+    def test_a_rejected_window_cannot_reuse_cached_coordinates(self):
+        """The result keeps the rejected rectangle for the debug bundle, so the
+        Controller must treat the code as rejected geometry, like
+        window_wrong_size and window_off_screen: no cached region for gameplay
+        or UI actions, and no navigation click, while the Arena sits there."""
+        from types import SimpleNamespace
+
+        from tests.test_cast_stall_guards import make_controller
+
+        controller = make_controller()
+        controller._arena_region = None
+        controller._last_good_arena_region = (160, 49, 1600, 900)
+        controller._should_reuse_cached_arena_region = lambda: True
+        controller._arena_region_provider = SimpleNamespace(
+            reacquire=lambda: None,
+            acquire=lambda: None,
+            last_detection_result=SimpleNamespace(code="window_left_of_primary"),
+        )
+        self.assertIsNone(controller._ensure_arena_region(force_reacquire=True))
+        self.assertIsNone(controller._get_ui_action_arena_region())
+        controller._dismiss_reward_popup = lambda: False
+        self.assertFalse(controller._navigate_to_home())
+        self.assertEqual(controller.input.moves, [])
+
     def test_a_few_pixels_past_the_left_edge_are_tolerated(self):
         """The off-screen check tolerates 4 px past the edge; so does this one,
         so a window dragged two pixels too far left is not sent to another monitor."""
