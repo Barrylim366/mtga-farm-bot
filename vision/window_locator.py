@@ -211,6 +211,27 @@ class ArenaRegionProvider:
                 diagnostics=diagnostics,
             )
 
+        # Screen captures start at the primary monitor's origin (see
+        # VisionEngine._cut_at_primary_origin), so a window on a monitor left of
+        # or above the primary has negative screen coordinates the captures never
+        # reach. Without this check capture() clamps the region to the primary
+        # and the anchors fail, which reads as a wrong screen or a wrong
+        # language. The 4 px tolerance matches the off-screen check above.
+        if rect.x < -4 or rect.y < -4:
+            return ArenaDetectionResult(
+                ok=False,
+                region=region,
+                code="window_left_of_primary",
+                message=(
+                    f"MTGA window is {rect.w}x{rect.h} at ({rect.x},{rect.y}): on a monitor left of or "
+                    "above the primary monitor. The bot's screen captures cover the primary monitor and "
+                    "the monitors right of and below it only, so it cannot see the Arena there. Move the "
+                    "Arena window onto the primary monitor (or one to the right of / below it) and run "
+                    "Arena Setup again."
+                ),
+                diagnostics=diagnostics,
+            )
+
         matched_anchor, anchor_checks = self._verify_region_with_any_anchor(region)
         diagnostics["anchor_checks"] = anchor_checks
         if matched_anchor is None:
