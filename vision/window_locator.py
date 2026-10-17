@@ -232,6 +232,23 @@ class ArenaRegionProvider:
                 diagnostics=diagnostics,
             )
 
+        scaling_risk = _get_windows_mixed_scaling_risk(int(selected.get("hwnd") or 0))
+        if scaling_risk is not None:
+            diagnostics["mixed_display_scaling"] = scaling_risk
+            return ArenaDetectionResult(
+                ok=False,
+                region=region,
+                code="window_mixed_scaling",
+                message=(
+                    "Arena is on a secondary display with different scaling "
+                    f"({scaling_risk['arena_scaling_percent']}%, primary "
+                    f"{scaling_risk['primary_scaling_percent']}%). "
+                    "The bot cannot safely click on this display in its current display mode. "
+                    "Move Arena to the primary monitor and press Start again."
+                ),
+                diagnostics=diagnostics,
+            )
+
         matched_anchor, anchor_checks = self._verify_region_with_any_anchor(region)
         diagnostics["anchor_checks"] = anchor_checks
         if matched_anchor is None:
@@ -1197,6 +1214,59 @@ def _with_physical_dpi(fn):
         return fn()
     finally:
         user32.SetThreadDpiAwarenessContext(previous)
+
+
+def _get_windows_mixed_scaling_risk(hwnd: int) -> dict[str, int] | None:
+    """Describe a proven DPI mismatch; do not reject primary or per-monitor-aware use.
+
+    Read the caller's awareness before temporarily changing the thread context
+    to query monitor DPI. The window rectangles use physical pixels, but a
+    system-aware input thread can interpret them differently on another DPI.
+    Older Windows versions without these APIs keep their existing behavior.
+    """
+    if os.name != "nt" or not hwnd:
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetThreadDpiAwarenessContext.argtypes = []
+        user32.GetThreadDpiAwarenessContext.restype = wintypes.HANDLE
+        user32.GetAwarenessFromDpiAwarenessContext.argtypes = [wintypes.HANDLE]
+        user32.GetAwarenessFromDpiAwarenessContext.restype = ctypes.c_int
+        context = user32.GetThreadDpiAwarenessContext()
+        awareness = int(user32.GetAwarenessFromDpiAwarenessContext(context))
+        if awareness not in (0, 1):
+            return None
+
+        def query() -> dict[str, int] | None:
+            user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+            user32.MonitorFromWindow.restype = wintypes.HANDLE
+            user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+            user32.MonitorFromPoint.restype = wintypes.HANDLE
+            arena_monitor = user32.MonitorFromWindow(wintypes.HWND(hwnd), 2)
+            primary_monitor = user32.MonitorFromPoint(wintypes.POINT(0, 0), 1)
+            if not arena_monitor or not primary_monitor or arena_monitor == primary_monitor:
+                return None
+            get_dpi = ctypes.windll.shcore.GetDpiForMonitor
+            get_dpi.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+            get_dpi.restype = ctypes.c_long
+            dpis = []
+            for monitor in (primary_monitor, arena_monitor):
+                x, y = ctypes.c_uint(), ctypes.c_uint()
+                if get_dpi(monitor, 0, ctypes.byref(x), ctypes.byref(y)) != 0 or not x.value or not y.value:
+                    return None
+                dpis.append((int(x.value), int(y.value)))
+            if dpis[0] == dpis[1]:
+                return None
+            return {
+                "thread_dpi_awareness": awareness,
+                "primary_scaling_percent": int(round(dpis[0][0] * 100 / 96)),
+                "arena_scaling_percent": int(round(dpis[1][0] * 100 / 96)),
+            }
+
+        return _with_physical_dpi(query)
+    except Exception:
+        return None
 
 
 def _visible_screen_bounds_physical() -> tuple[int, int, int, int] | None:

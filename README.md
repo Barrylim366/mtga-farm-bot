@@ -671,6 +671,10 @@ The cause is a mismatch between the capture and its readers. The bot grabs the w
 
 Also fixed: the Arena setup check reads the *screen* at the window's rectangle, not the window, so an Arena lying behind another window — the bot's own always-on-top window, a browser — failed every anchor with a capture of whatever covered it. The check now raises the Arena window first (`focus_mtga_window()`, 0.3 s to let it repaint), as the Controller already did before every cast, so pressing Start with the Arena covered no longer reports a wrong screen. On macOS and Linux the focus step does nothing, as before.
 
+### Different scaling on a secondary monitor (Windows)
+
+Arena Setup blocks starting the bot when Arena is on a secondary monitor with different display scaling and the bot's calling thread is not per-monitor DPI aware. This combination can pass screen detection while mouse clicks land in the wrong place. The error reports both scaling percentages and asks you to move Arena to the primary monitor and press Start again. Secondary monitors with the same scaling, and per-monitor-aware operation, remain supported. Unsupported scaling also prevents recovery paths from reusing cached click coordinates. If Windows cannot report the monitor DPI, this check cannot establish a mismatch and keeps the existing detection behavior.
+
 ### Window focus during a hand sweep
 
 To play a card the bot sweeps the mouse across the hand and waits for MTGA to log a hover; when that never arrives it gives up with `SCAN_STOPPED: No hover update before bounds` and the card is not played. Unity delivers no hover events to an *unfocused* window, so a lost foreground looks exactly like a hand that cannot be found.

@@ -1207,7 +1207,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         # restored a supported window size.
         last_detection = getattr(self._arena_region_provider, "last_detection_result", None)
         if last_detection is not None and getattr(last_detection, "code", None) in {
-            "window_wrong_size", "window_off_screen"
+            "window_wrong_size", "window_off_screen", "window_mixed_scaling"
         }:
             bot_logger.log_error(
                 "Arena region re-acquire found incompatible live MTGA geometry "
@@ -1354,7 +1354,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return arena
         last_detection = getattr(self._arena_region_provider, "last_detection_result", None)
         if last_detection is not None and getattr(last_detection, "code", None) in {
-            "window_wrong_size", "window_off_screen"
+            "window_wrong_size", "window_off_screen", "window_mixed_scaling"
         }:
             bot_logger.log_error(
                 f"{label}: live MTGA geometry is incompatible; refusing stale UI coordinates."
@@ -3966,7 +3966,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         if arena is None:
             last_det = getattr(self._arena_region_provider, "last_detection_result", None)
             code = getattr(last_det, "code", None)
-            if code not in {"window_wrong_size", "window_off_screen"}:
+            if code not in {"window_wrong_size", "window_off_screen", "window_mixed_scaling"}:
                 arena = self._arena_region or self._last_good_arena_region
         if arena is None:
             arena = self._ensure_arena_region(force_reacquire=True)
@@ -4323,7 +4323,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         if det is not None and det.ok:
             self._unknown_screen_strikes = 0
             return False
-        if det is not None and det.code in {"window_wrong_size", "window_off_screen"}:
+        if det is not None and det.code in {"window_wrong_size", "window_off_screen", "window_mixed_scaling"}:
             # A rejected rectangle is not an unknown result screen. Do not
             # bypass the geometry restrictions by using det.region directly.
             self._unknown_screen_strikes = 0

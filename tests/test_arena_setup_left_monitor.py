@@ -35,7 +35,8 @@ class LeftMonitorTest(unittest.TestCase):
         provider._verify_region_with_any_anchor = lambda region: anchors.append(region) or ("home_anchor.png", [])
         with patch.object(wl, "_list_mtga_window_rects_windows", lambda: [window]), \
              patch.object(wl, "_visible_screen_bounds_physical", lambda: virtual_screen), \
-             patch.object(wl, "_get_windows_display_scaling_percent", lambda: 100):
+             patch.object(wl, "_get_windows_display_scaling_percent", lambda: 100), \
+             patch.object(wl, "_get_windows_mixed_scaling_risk", lambda hwnd: None):
             return provider._detect_windows()
 
     def test_a_window_on_the_monitor_left_of_the_primary_is_reported_as_such(self):

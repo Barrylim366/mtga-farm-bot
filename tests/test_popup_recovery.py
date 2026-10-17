@@ -301,7 +301,7 @@ class PopupRecoveryTests(unittest.TestCase):
     def test_fallback_rejects_invalid_geometry_even_with_a_rectangle(self):
         self.unknown_screen()
         self.c._find_blocking_popup.return_value = None
-        for code in ("window_wrong_size", "window_off_screen"):
+        for code in ("window_wrong_size", "window_off_screen", "window_mixed_scaling"):
             with self.subTest(code=code):
                 self.c._unknown_screen_strikes = 2
                 self.c._arena_region_provider.detect.return_value = ArenaDetectionResult(
