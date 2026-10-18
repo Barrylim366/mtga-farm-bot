@@ -112,7 +112,14 @@ The bot checks GitHub for a newer version on startup and, when one is found, a d
 
 Either check is skipped when there's no network access. Every check writes its outcome (up to date, update available, or why it was skipped) to `bot.log`, so a missing update dialog can be diagnosed afterwards. Dependencies from `requirements.txt` are reinstalled automatically if they changed as part of the update.
 
-The app's current version (`1.9.0`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+The app's current version (`1.9.1`, sourced from `version.py`) is shown in **Settings**, above the Manage Accounts button.
+
+### Version 1.9.1
+
+- Fixed: Arena detection on the primary monitor when another display is positioned left of or above it.
+- Fixed: Windows startup now attempts to bring Arena forward before checking its screen.
+- New: Clear setup messages for unsupported monitor placement or unsafe mixed display scaling.
+- Fixed: Recovery avoids old click positions after Arena moves to an unsupported display.
 
 ### Version 1.9.0
 
