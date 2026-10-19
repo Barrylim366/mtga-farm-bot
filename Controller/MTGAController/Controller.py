@@ -4748,7 +4748,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         Callers check this again after every blocking probe and immediately before
         input.
         """
-        if self._stop_requested or self.__mulligan_decision_armed:
+        if self._stop_requested or self.check_play_time_limit() or self.__mulligan_decision_armed:
             return False
         try:
             return self._get_state_from_log() not in (BotState.FIND_MATCH, BotState.IN_GAME)
@@ -5076,14 +5076,35 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         bot_logger.log_info("Starter: Starter Deck Duel selected.")
         return True
 
+    def _main_quest_target_met(self) -> bool:
+        """Use the same absolute, fresh quest count for deck choice and switching."""
+        if self._account_switch_main_quests <= 0:
+            return True
+        remaining = self._last_valid_quest_active_incomplete
+        if remaining is None or not self._quest_count_confirmed_fresh:
+            return False
+        # Completed quests disappear from Arena's three slots. This includes
+        # completions by the player before the bot started, just like switching.
+        remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
+        return remaining <= remaining_target
+
     def _resolve_starter_target_colors(self) -> str:
         """Colors of the deck that best advances the current top quest.
 
         Prefers the locally cached quests (parsed once at startup / between
         matches) so we don't re-parse the player.log on every queue cycle; falls
         back to a live parse if the cache is empty. A valid completed quest list
-        selects WB; without a confirmed target, the current deck is kept.
+        selects WB. In quest/win mode, reaching the configured quest target
+        also selects WB for win farming, even if other quests remain open.
+        Without a confirmed target, the current deck is kept.
         """
+        if (self._account_switch_mode == "quests"
+                and self._account_switch_daily_wins > 0
+                and self._main_quest_target_met()):
+            bot_logger.log_info(
+                "Starter: configured quest target met; selecting WB win-farming deck."
+            )
+            return "WB"
         if (self._last_valid_quest_active_incomplete == 0
                 and self._quest_count_confirmed_fresh):
             bot_logger.log_info("Starter: all daily quests complete; selecting WB fallback deck.")
@@ -5607,8 +5628,12 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def _press_starter_event_play(self) -> bool:
         """Press the event page's own Play button to enter the queue."""
+        if self._stop_requested or self.check_play_time_limit():
+            return False
         runtime_status.set_startup_phase("Pressing Play")
         if not self._starter_event_page_confirmed("STARTER_EVENT_PLAY_GATE"):
+            return False
+        if self._stop_requested or self.check_play_time_limit():
             return False
         if self._click_starter_button("event_play.png", "STARTER_EVENT_PLAY"):
             bot_logger.log_info("Starter: queued from the event page via Play.")
@@ -6426,6 +6451,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     @serialized_home_navigation
     def start_game_from_home_screen(self):
+        if self._stop_requested or self.check_play_time_limit():
+            return
         if self._dismiss_reward_popup():
             return
         if not self.reroll_quest_on_landing():
@@ -6631,6 +6658,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     self.home_play_button_coors,
                 )
             )
+        if self._stop_requested or self.check_play_time_limit():
+            return
         bot_logger.log_info("Queue attempt: clicking queue button.")
         bot_logger.log_click(target[0], target[1], "QUEUE_BUTTON")
         runtime_status.touch_input("QUEUE_BUTTON", target)
@@ -10613,6 +10642,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self._click_abs(ok_x, ok_y, f"{label}_OKAY_FALLBACK")
 
     def dismiss_end_screen(self):
+        # Finalize the result and session counters before the deadline stops us.
+        self._play_match_end_in_progress = True
+        try:
+            self._dismiss_end_screen_and_record()
+        finally:
+            self._play_match_end_in_progress = False
+        self.check_play_time_limit(match_finished=True)
+
+    def _dismiss_end_screen_and_record(self):
         """Click to dismiss match end screen and return to main menu"""
         if self._stop_requested:
             bot_logger.log_info("Dismiss end screen skipped: stop requested.")
@@ -11240,30 +11278,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 wins_required = 0
             else:
                 wins_required = self._account_switch_daily_wins
-            if self._account_switch_main_quests <= 0:
-                main_ok = True
-            else:
-                remaining = self._last_valid_quest_active_incomplete
-                if remaining is None:
-                    # Quest state not read from Home yet -> never switch on a guess.
-                    return False
-                if not self._quest_count_confirmed_fresh:
-                    # A count IS available, but it came from a block that may
-                    # predate this account's turn -- typically the previous
-                    # session's, logged after its quests were cleared, i.e. a
-                    # confident "0 left". Playing on costs a few matches on an
-                    # account that may already be done; believing it logs out of
-                    # every account in seconds and ends the round having played
-                    # nothing. Keep playing until MTGA logs a real block.
-                    return False
-                # The threshold means "clear the account's daily quests", NOT "do
-                # exactly N quests": MTGA hands out 1 daily quest/day (up to 3 held),
-                # so an account may have only 1 or 2 to do. Completed quests drop out
-                # of the list, so the criterion is "few enough LEFT": with threshold
-                # 3 the account must reach 0 remaining (clear all it has, however
-                # many); a lower threshold tolerates that many still pending.
-                remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
-                main_ok = remaining <= remaining_target
+            main_ok = self._main_quest_target_met()
             wins_ok = self._wins_seen_for_current_account() >= wins_required
             return main_ok and wins_ok
         # Time mode (default): switch every N minutes.
@@ -11274,6 +11289,28 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
     def set_stop_bot_callback(self, method) -> None:
         """Register a UI callback the controller can use to stop the bot."""
         self.__stop_bot_callback = method
+
+    def set_play_deadline(self, deadline: float | None) -> None:
+        """One monotonic deadline shared by every account in this run."""
+        self._play_deadline = deadline
+        self._play_limit_stop_claimed = False
+        self._play_limit_lock = threading.RLock()
+
+    def check_play_time_limit(self, *, match_finished: bool = False) -> bool:
+        """Block navigation at expiry, but leave a committed match playable."""
+        deadline = getattr(self, "_play_deadline", None)
+        if deadline is None or time.monotonic() < deadline:
+            return False
+        with self._play_limit_lock:
+            if self._play_limit_stop_claimed or self._stop_requested:
+                return True
+            if getattr(self, "_play_match_end_in_progress", False):
+                return True
+            if not match_finished and self._get_state_from_log() in (BotState.IN_GAME, BotState.FIND_MATCH):
+                return True
+            self._play_limit_stop_claimed = True
+        self._request_stop_bot("play time limit reached")
+        return True
 
     def _request_stop_bot(self, reason: str) -> None:
         """Stop the bot from inside the controller (e.g. round complete)."""
@@ -11339,6 +11376,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
     def _maybe_post_match_action(self) -> None:
         if self._stop_requested:
             return
+        if self.check_play_time_limit():
+            return
         if self._account_switch_in_progress:
             return
         if self._post_match_ready_ts is None:
@@ -11375,6 +11414,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         return (time.time() - self._post_match_ready_ts) < self._post_match_delay_sec
 
     def start_queueing(self) -> None:
+        if self._stop_requested or self.check_play_time_limit():
+            return
         # Atomic check-and-create so two racing callers can't both spawn a queue
         # loop (which doubles every SWITCH CHECK / navigation and races switches).
         # Same lock as the switch start: the _account_switch_in_progress check below
@@ -11623,6 +11664,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
+            if self._stop_requested or self.check_play_time_limit():
+                return
             if self._account_switch_in_progress:
                 bot_logger.log_info("Queue spam stopping: account switch in progress.")
                 return
@@ -11839,6 +11882,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self.start_queueing()
 
     def _perform_account_switch(self) -> None:
+        if self._stop_requested or self.check_play_time_limit():
+            return
         # Atomic check-and-set so two racing callers can't both start a logout
         # sequence (which would click over each other and fail the switch).
         with self._switch_start_lock:
@@ -11867,6 +11912,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self._release_switch_ownership()
 
     def _perform_owned_account_switch(self) -> None:
+        if self._stop_requested or self.check_play_time_limit():
+            return
         # Never act while a match is running or starting. The post-match flow and
         # the queue loop can both fire this, and they race with the queue click:
         # observed live, the loop clicked Play and ~1s later a queue-ready marker

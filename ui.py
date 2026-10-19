@@ -13,6 +13,7 @@ import threading
 import overlay
 import runtime_status
 from bot_behavior import match_timeout_minutes as normalize_match_timeout
+from bot_behavior import DEFAULT_MAX_PLAY_HOURS, parse_max_play_hours
 import shutdown_scheduler
 import update_checker
 from version import __version__ as APP_VERSION
@@ -1578,6 +1579,7 @@ class ConfigManager:
             # from the UI, so it only ever happens because they asked for it.
             # Quests mode only; time mode never completes a round.
             "shutdown_pc_when_round_complete": False,
+            "max_play_hours": DEFAULT_MAX_PLAY_HOURS,
             # Recovery policy. Enabled by default: it concedes only when Arena
             # has left a locally-owned decision context unchanged for 30 seconds.
             "auto_concede_stalled_matches": True,
@@ -1823,6 +1825,22 @@ class ConfigManager:
         # Anything other than a stored True reads as off. A corrupt or
         # hand-edited value must never be the reason a machine powers down.
         return self.config.get("shutdown_pc_when_round_complete") is True
+
+    def get_max_play_hours(self) -> float:
+        try:
+            return parse_max_play_hours(self.config.get("max_play_hours", DEFAULT_MAX_PLAY_HOURS))
+        except ValueError:
+            return 0.0
+
+    def set_max_play_hours(self, hours) -> None:
+        value = parse_max_play_hours(hours)
+        previous = self.config.get("max_play_hours", DEFAULT_MAX_PLAY_HOURS)
+        self.config["max_play_hours"] = value
+        try:
+            self._save_config()
+        except Exception:
+            self.config["max_play_hours"] = previous
+            raise
 
     def set_shutdown_pc_when_round_complete(self, enabled: bool) -> None:
         self.config["shutdown_pc_when_round_complete"] = bool(enabled)
@@ -4357,6 +4375,10 @@ class MTGBotUI(tk.Tk):
             self._set_startup_loading(False)
             return
         self.bot_running = True
+        self._play_run_token = object()
+        hours = self.config_manager.get_max_play_hours()
+        self._play_deadline = time.monotonic() + hours * 3600 if hours else None
+        self._poll_play_time_limit(self._play_run_token)
         self._set_running_state(True)
         self._set_startup_loading(True, self._STARTUP_TEXT_CARDS)
 
@@ -4368,6 +4390,28 @@ class MTGBotUI(tk.Tk):
 
     def _check_arena_setup(self):
         self._run_arena_setup_check(show_success=True)
+
+    def _poll_play_time_limit(self, token):
+        if not self.bot_running or token is not self._play_run_token:
+            return
+        with self._controller_lock:
+            controller = self._controller
+        if controller is not None:
+            controller.check_play_time_limit()
+        self._play_limit_job = self.after(1000, lambda: self._poll_play_time_limit(token))
+
+    def _finish_controller_run(self, controller, token, reason):
+        """Ignore duplicate or retired-run callbacks before stopping or powering off."""
+        if not self.bot_running or token is not self._play_run_token:
+            return
+        with self._controller_lock:
+            if self._controller is not controller:
+                return
+        self._stop_bot()
+        if reason == "play time limit reached":
+            self._announce_round_complete(time_limit=True)
+        elif "account" in str(reason or "").lower() and "complet" in str(reason or "").lower():
+            self._announce_round_complete()
 
     def _run_arena_setup_check_async(
         self, *, show_success: bool, attempts: int = 1, retry_delay: float = 1.0, on_done=None
@@ -4553,6 +4597,8 @@ class MTGBotUI(tk.Tk):
         return chosen
 
     def _run_bot(self):
+        token = self._play_run_token
+        deadline = self._play_deadline
         try:
             import bot_logger
             log_path = self.config_manager.get_log_path()
@@ -4590,7 +4636,13 @@ class MTGBotUI(tk.Tk):
                                    gold_per_win=gold_per_win,
                                    account_switch_enabled=account_switch_enabled,
                                    auto_concede_stalled_matches=auto_concede_stalled_matches)
+            if not self.bot_running or token is not self._play_run_token:
+                return
+            controller.set_play_deadline(deadline)
             self._publish_controller(controller)
+            controller.set_stop_bot_callback(
+                lambda reason=None: self.after(
+                    0, lambda: self._finish_controller_run(controller, token, reason)))
             # Follow the controller's startup phases from here on. game.start()
             # below already reads the quests (clicking Home) and checks the
             # reroll, which takes ~40 s; polling only after it returned left the
@@ -4613,11 +4665,16 @@ class MTGBotUI(tk.Tk):
             # it unticked this is the bot's own DummyAI, unchanged.
             ai = ForgeEngine.make_ai(DummyAI(), self.config_manager.get_forge_engine_enabled)
             with self._controller_lock:
-                self.game = Game(
+                if not self.bot_running or token is not self._play_run_token:
+                    return
+                game = Game(
                     controller, ai, data_dir_prompt=self._resolve_mtga_data_dir,
                     match_timeout_minutes=self.config_manager.get_match_timeout_minutes())
+                self.game = game
             bot_logger.log_info("UI start: game.start() begin")
-            self.game.start()
+            game.start()
+            if not self.bot_running or token is not self._play_run_token:
+                return
             bot_logger.log_info("UI start: game.start() completed")
             # The queue thread now navigates Arena for ~15-20 s before the first
             # match. The bar stays up for that, relabelled from status.json by the
@@ -4646,26 +4703,8 @@ class MTGBotUI(tk.Tk):
 
             controller.set_match_end_callback(_on_match_end)
 
-            # Let the controller stop the bot itself (e.g. once every configured
-            # account has finished its daily quests). Marshal onto the UI thread.
-            def _on_controller_stop(reason=None):
-                try:
-                    bot_logger.log_info(f"Controller requested bot stop ({reason}).")
-                except Exception:
-                    pass
-                self.after(0, self._stop_bot)
-                # Tell the user WHY it stopped when it's the end-of-round completion,
-                # so a normal finish isn't mistaken for a crash/freeze.
-                reason_s = str(reason or "").lower()
-                if "account" in reason_s and "complet" in reason_s:
-                    # Queued after the _stop_bot above, so the bot is already
-                    # down by the time a shutdown can be armed.
-                    self.after(0, self._announce_round_complete)
-
-            controller.set_stop_bot_callback(_on_controller_stop)
-
             # Keep running while bot is active
-            while self.bot_running:
+            while self.bot_running and token is self._play_run_token:
                 import time
                 time.sleep(1)
 
@@ -4676,52 +4715,52 @@ class MTGBotUI(tk.Tk):
                 bot_logger.log_error(f"UI start failed: {err_msg}")
             except Exception:
                 pass
-            self.after(0, lambda msg=err_msg: self._handle_bot_error(msg))
+            self.after(0, lambda msg=err_msg: self._handle_bot_error(msg)
+                       if token is self._play_run_token and self.bot_running else None)
 
-    def _announce_round_complete(self):
-        """Tell the user the rotation finished -- and power the PC off if asked.
-
-        Reached from exactly one place: the controller stopping itself because
-        every configured account has hit its quest and daily-win thresholds. A
-        manual Stop, a crash or a time-mode rotation never gets here, which is
-        what keeps the shutdown from firing on anything but a real finish.
-        """
+    def _announce_round_complete(self, *, time_limit=False):
+        """Announce a finished round or run deadline with a cancellable shutdown."""
         import bot_logger
 
+        title = "Play time limit reached" if time_limit else "Round complete"
         text = (
             "All configured accounts have finished their daily quests.\n\n"
             "The bot stopped because there are no more accounts to play."
         )
+        if time_limit:
+            text = "The maximum play time was reached.\n\nThe bot has stopped. Any match in progress was allowed to finish."
         try:
-            wants_shutdown = bool(
+            wants_shutdown = time_limit or bool(
                 self.config_manager.get_shutdown_pc_when_round_complete()
             )
         except Exception:
             wants_shutdown = False
         if not wants_shutdown:
-            messagebox.showinfo("Round complete", text, parent=self)
+            messagebox.showinfo(title, text, parent=self)
             return
         delay = shutdown_scheduler.DEFAULT_DELAY_SEC
         if not shutdown_scheduler.schedule_shutdown(
-            delay, comment="Burning Lotus: all accounts finished their dailies."
+            delay, comment=("Burning Lotus: maximum play time reached." if time_limit
+                            else "Burning Lotus: all accounts finished their dailies.")
         ):
             # Never silently swallow this: the user went to bed expecting the
             # machine to be off, and it will not be.
             bot_logger.log_error(
-                "ROUND_COMPLETE_SHUTDOWN_FAILED: could not schedule the shutdown."
+                ("PLAY_TIME_LIMIT_SHUTDOWN_FAILED" if time_limit else "ROUND_COMPLETE_SHUTDOWN_FAILED")
+                + ": could not schedule the shutdown."
             )
             messagebox.showwarning(
-                "Round complete",
+                title,
                 text + "\n\nThe automatic shutdown could NOT be started -- "
                 "please power the PC off yourself.",
                 parent=self,
             )
             return
         bot_logger.log_info(
-            f"Round complete: PC shutdown scheduled in {delay}s (opt-in setting)."
+            f"{title}: PC shutdown scheduled in {delay}s."
         )
         cancel = messagebox.askyesno(
-            "Round complete - shutting down",
+            title + " - shutting down",
             text
             + f"\n\nThis PC will shut down in {delay // 60} minutes.\n\n"
             "Cancel the shutdown?",
@@ -4813,6 +4852,11 @@ class MTGBotUI(tk.Tk):
 
     def _stop_bot(self):
         self.bot_running = False
+        self._play_run_token = None
+        job = self.__dict__.get("_play_limit_job")
+        if job is not None:
+            self.after_cancel(job)
+            self._play_limit_job = None
 
         if self.game:
             try:
@@ -7442,16 +7486,10 @@ class SwitchAccountWindow(tk.Toplevel):
         self._content = cv
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
-        # switch_block carries a third row (the shutdown opt-in), so it is 32px
-        # taller than the two-row version and everything below it moved down by
-        # the same 32. The window itself needs no change: _apply_content_minsize
-        # fits it to the canvas content, which still ends above the 820 floor.
-        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=126)
-        # The separate Alias row is gone (one Arena Name field now does both jobs),
-        # so accounts_block is back to its pre-Alias height and order_block back to
-        # its pre-Alias y -- the -30 that undoes the +30 that row cost.
-        self._create_manage_group_panel("accounts_block", x=16, y=168, width=428, height=410)
-        self._create_manage_group_panel("order_block", x=16, y=590, width=428, height=220)
+        # Leave space for the run-wide shutdown timer below the completion toggle.
+        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=184)
+        self._create_manage_group_panel("accounts_block", x=16, y=226, width=428, height=410)
+        self._create_manage_group_panel("order_block", x=16, y=648, width=428, height=220)
 
         # Row 1: switch trigger mode (time vs quests, mutually exclusive) + time.
         cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
@@ -7493,13 +7531,21 @@ class SwitchAccountWindow(tk.Toplevel):
         # end of an account rotation, which is configured in this very block.
         self._build_shutdown_toggle(y=106)
 
-        cv.create_text(26, 178, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
-        cv.create_text(26, 206, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(62, 206, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(208, 206, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 146, text="Max play time (hours):", fill=c["text"], font=("Segoe UI", 9), anchor="nw")
+        self.max_play_hours_var = tk.StringVar(value=format(self._config_manager.get_max_play_hours(), "g"))
+        limit_entry = self._make_entry(self, textvariable=self.max_play_hours_var, width=7)
+        cv.create_window(178, 144, anchor="nw", window=limit_entry)
+        limit_entry.bind("<Return>", lambda _e: self._save_switch_settings())
+        cv.create_text(250, 146, text="(0 = off; next run)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_text(26, 176, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+
+        cv.create_text(26, 236, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
+        cv.create_text(26, 264, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(62, 264, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(208, 264, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
 
         self._table_rows = []
-        row_y_start = 226
+        row_y_start = 284
         row_step = 20
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
@@ -7520,27 +7566,27 @@ class SwitchAccountWindow(tk.Toplevel):
         # that appeared nowhere in Arena. The Arena name is the only identity the
         # Player.log exposes, so it is the one that has to be right; the label is
         # now just the same string.
-        cv.create_text(26, 436, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 494, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         name_entry = self._make_entry(self, textvariable=self.account_name_var, width=24)
         name_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 434, anchor="nw", window=name_entry)
-        cv.create_text(280, 436, text="(as shown in Arena)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_window(104, 492, anchor="nw", window=name_entry)
+        cv.create_text(280, 494, text="(as shown in Arena)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
 
-        cv.create_text(26, 466, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 524, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         email_entry = self._make_entry(self, textvariable=self.account_email_var, width=34)
         email_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 464, anchor="nw", window=email_entry)
+        cv.create_window(104, 522, anchor="nw", window=email_entry)
 
-        cv.create_text(26, 496, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 554, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
         password_entry = self._make_entry(self, textvariable=self.account_pw_var, width=34, show="*")
         password_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 494, anchor="nw", window=password_entry)
+        cv.create_window(104, 552, anchor="nw", window=password_entry)
 
         self._create_manage_canvas_button(
             name="save_row",
             text="Save Row",
             x=26,
-            y=530,
+            y=588,
             body_w=104,
             body_h=30,
             command=self._save_selected_account,
@@ -7551,7 +7597,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="delete_row",
             text="Delete Row",
             x=134,
-            y=530,
+            y=588,
             body_w=104,
             body_h=30,
             command=self._clear_selected_account_row,
@@ -7562,15 +7608,15 @@ class SwitchAccountWindow(tk.Toplevel):
             name="save_accounts",
             text="Save Accounts",
             x=244,
-            y=530,
+            y=588,
             body_w=158,
             body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(26, 602, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
-        cv.create_line(22, 619, 438, 619, fill=c["table_border"], width=1)
+        cv.create_text(26, 660, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
+        cv.create_line(22, 677, 438, 677, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
@@ -7580,7 +7626,7 @@ class SwitchAccountWindow(tk.Toplevel):
             col = idx // 5
             row = idx % 5
             lx, cx = col_x[col]
-            y = 626 + row * 24
+            y = 684 + row * 24
             cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
@@ -7595,13 +7641,13 @@ class SwitchAccountWindow(tk.Toplevel):
             self._order_vars.append(var)
             self._order_combos.append(combo)
         # vertical divider between columns
-        cv.create_line(230, 622, 230, 748, fill=c["table_border"], width=1)
+        cv.create_line(230, 680, 230, 806, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
             x=26,
-            y=758,
+            y=816,
             body_w=140,
             body_h=34,
             command=self._save_account_play_order,
@@ -7611,7 +7657,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="close_bottom",
             text="Back",
             x=246,
-            y=758,
+            y=816,
             body_w=120,
             body_h=34,
             command=self.destroy,
@@ -7781,6 +7827,12 @@ class SwitchAccountWindow(tk.Toplevel):
         return renames
 
     def _save_switch_settings(self):
+        try:
+            self._config_manager.set_max_play_hours(self.max_play_hours_var.get())
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Max play time", str(exc), parent=self)
+            return
+        self.max_play_hours_var.set(format(self._config_manager.get_max_play_hours(), "g"))
         # Mode (time vs quests -- mutually exclusive).
         mode = (self.switch_mode_var.get() or "time").strip().lower()
         self._config_manager.set_account_switch_mode(mode)
@@ -7815,7 +7867,7 @@ class SwitchAccountWindow(tk.Toplevel):
             detail = f"quests ({self.switch_main_var.get()} main + {self.switch_daily_var.get()} wins)"
         else:
             detail = f"time ({self.switch_minutes_var.get()} min)"
-        messagebox.showinfo("Saved", f"Account-switch settings saved: {detail}.")
+        messagebox.showinfo("Saved", f"Account-switch settings saved: {detail}.\nMax play time: {self.max_play_hours_var.get()} hours (0 = off; applies next run).")
 
     def _refresh_order_choices(self):
         names = []

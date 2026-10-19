@@ -169,7 +169,10 @@ class Game:
 
     def start(self):
         self._debug("Game.start() called")
-        self._stop_requested = False
+        # Each UI run creates a fresh Game. A Stop arriving before this worker
+        # starts must remain effective, including a deadline reached at startup.
+        if self._stop_requested:
+            return
         with self._match_end_lock:
             self._handled_match_end_key = None
         try:
@@ -208,6 +211,8 @@ class Game:
             # Clear the previous run's stop flag first: the priming below polls and
             # clicks, and would otherwise bail out on its first tick. start_game()
             # calls this again (it is idempotent).
+            if self._stop_requested:
+                return
             if hasattr(self.controller, "begin_session"):
                 self.controller.begin_session()
             if hasattr(self.controller, "prime_quests_for_new_session"):
@@ -398,7 +403,9 @@ class Game:
                 pass
         except Exception as e:
             self._debug(f"Match-end marker failed: {e}")
-        if self._stop_requested:
+        limit_check = getattr(self.controller, "check_play_time_limit", None)
+        limit_reached = callable(limit_check) and limit_check(match_finished=True)
+        if self._stop_requested or limit_reached is True:
             self._debug("Match ended but stop requested - not restarting")
             return True
         runtime_status.set_mode("match_end")

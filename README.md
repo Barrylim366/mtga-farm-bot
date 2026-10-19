@@ -296,6 +296,10 @@ Rotation always continues from the account actually logged in, so it never waste
 
 #### Shut down the PC when the round is done
 
+**Max play time (hours)** in Manage Accounts limits the entire run across all accounts, including startup and account switching. It defaults to **3 hours**; **0 disables it**. Both `0,1` and `0.1` mean six minutes. Click **Save** or press Enter to save; changes apply on the next Start, which resets the timer.
+
+Once the limit is reached, the bot finishes its current match (including one already matchmaking), stops, and schedules PC shutdown **regardless of the completion checkbox below**. It does not queue another match or switch accounts. Finishing the match can extend play beyond the limit. You then have **two minutes to cancel**: choose **Yes** in the “Cancel the shutdown?” popup, or run `shutdown /a` on Windows (`shutdown -c` on Linux). Cancelling leaves the bot stopped and the PC on. Manual Stop, errors, and closing the app cancel the run timer without scheduling shutdown. Normal round completion before the limit follows the existing checkbox.
+
 **Manage Accounts** has an opt-in checkbox, **Shut down PC when all accounts are done**, right below the switch settings it depends on. With it ticked, the end-of-round stop described above also powers the machine off — so an overnight run of every account ends with the PC off instead of idling at Home until morning.
 
 It is off by default and saved the moment you click it, not on **Save**. The guard rails matter more than the feature:
@@ -390,7 +394,7 @@ In Starter Deck Duel the quest target is re-checked before **every** queue, so w
 
 After dismissing the match result screen, the bot waits **20 seconds** before resuming queue navigation or an account switch. The ten-second game-state reset runs within that pause. Home quest refreshes and existing reward-popup recovery remain in place.
 
-When Arena confirms with a fresh quest list for the current account that all daily quests are complete, Starter Deck Duel selects the **WB (Vampiric Hunger)** deck for subsequent matches. On the account's recent deck statistics it had the highest observed win rate (32% across 1,673 matches). A stale or unreadable quest list does not trigger this fallback. Unfinished color-targeted quests still determine the deck first.
+In quest/win mode with a win target, Starter Deck Duel selects **WB (Vampiric Hunger)** as soon as the configured quest target is met. A **0 quests / 6 wins** setting uses WB immediately, even with unfinished quests. Nonzero quest targets count quests already completed by the player and require a fresh quest list for the current account, using the same completion rule as account switching. Until that target is met, unfinished color-targeted quests determine the deck. Outside this win-farming rule, a fresh list confirming all daily quests are complete also selects WB. WB is the fixed win-farming choice based on previously measured statistics (32% across 1,673 matches), rather than a live ranking of decks.
 
 In the account-switch win pass, an account that already banked its configured wins during the quest pass skips post-login deck selection and queueing; the queue loop switches to the next account instead of starting an unnecessary WB match.
 

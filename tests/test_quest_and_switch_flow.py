@@ -168,6 +168,64 @@ class QuestReadGateTests(_QuestLogTestBase):
 class QuestTargetSelectionTests(_QuestLogTestBase):
     """The colors the starter-deck swap is driven with."""
 
+    def test_zero_quest_win_target_uses_wb_with_open_or_unknown_quests(self):
+        c = self.controller
+        c._account_switch_mode = "quests"
+        c._account_switch_main_quests = 0
+        c._account_switch_daily_wins = 6
+        self.assertEqual(c._resolve_starter_target_colors(), "WB")
+        self.append(quests_block(SIMIC))
+        c.refresh_quests_cache()
+        self.assertEqual(c._cached_active_colors, "UG")
+        self.assertEqual(c._resolve_starter_target_colors(), "WB")
+
+    def test_win_deck_uses_same_absolute_quest_target_as_switching(self):
+        c = self.controller
+        c._account_switch_enabled = True
+        c._account_switch_mode = "quests"
+        c._account_switch_daily_wins = 6
+        c._cached_quests = [{"id": "open"}]
+        c._cached_active_colors = "UG"
+        for target in (1, 2, 3):
+            c._account_switch_main_quests = target
+            for remaining in (0, 1, 2, 3):
+                for fresh in (False, True):
+                    with self.subTest(target=target, remaining=remaining, fresh=fresh):
+                        c._last_valid_quest_active_incomplete = remaining
+                        c._quest_count_confirmed_fresh = fresh
+                        met = fresh and remaining <= 3 - target
+                        self.assertEqual(c._main_quest_target_met(), met)
+                        self.assertEqual(c._resolve_starter_target_colors(), "WB" if met else "UG")
+                        c._switch_phase = "quests"
+                        self.assertEqual(c._account_switch_due(), met)
+                        # Choosing WB must not finish the account before its wins.
+                        c._switch_phase = "wins"
+                        self.assertFalse(c._account_switch_due())
+
+    def test_two_previous_completions_then_final_quest_switches_to_wb(self):
+        c = self.controller
+        c._account_switch_mode = "quests"
+        c._account_switch_main_quests = 3
+        c._account_switch_daily_wins = 6
+        self.append(quests_block(SIMIC))
+        c.refresh_quests_cache()
+        c._quest_count_confirmed_fresh = True
+        self.assertEqual(c._resolve_starter_target_colors(), "UG")
+        self.append('<== QuestGetQuests {"quests": []}\n')
+        c.refresh_quests_cache()
+        self.assertEqual(c._resolve_starter_target_colors(), "WB")
+
+    def test_win_farming_override_requires_quest_mode_and_a_win_target(self):
+        c = self.controller
+        self.append(quests_block(SIMIC))
+        c.refresh_quests_cache()
+        c._account_switch_main_quests = 0
+        for mode, wins in (("time", 6), ("quests", 0)):
+            with self.subTest(mode=mode, wins=wins):
+                c._account_switch_mode = mode
+                c._account_switch_daily_wins = wins
+                self.assertEqual(c._resolve_starter_target_colors(), "UG")
+
     def test_completed_quests_select_wb_fallback(self):
         done = json.loads(quests_block(SIMIC).split(" ", 2)[2])["quests"][0]
         done["endingProgress"] = 20

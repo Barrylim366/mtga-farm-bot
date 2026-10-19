@@ -264,6 +264,20 @@ class AnnounceRoundCompleteTest(unittest.TestCase):
         self._ui(enabled=True)._announce_round_complete()
         self.assertEqual(self.scheduled, [120])
 
+    def test_time_limit_shuts_down_even_when_completion_checkbox_is_off(self):
+        self._ui(enabled=False)._announce_round_complete(time_limit=True)
+        self.assertEqual(self.scheduled, [120])
+
+    def test_time_limit_shutdown_can_be_cancelled(self):
+        self.answer = True
+        self._ui(enabled=False)._announce_round_complete(time_limit=True)
+        self.assertEqual(self.cancelled, [True])
+
+    def test_time_limit_shutdown_failure_warns(self):
+        self.fake_scheduler.ok = False
+        self._ui(enabled=False)._announce_round_complete(time_limit=True)
+        self.assertEqual(len(self.warnings), 1)
+
     def test_answering_the_prompt_cancels_the_shutdown(self):
         self.answer = True
         self._ui(enabled=True)._announce_round_complete()
