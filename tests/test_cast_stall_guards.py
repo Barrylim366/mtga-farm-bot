@@ -607,6 +607,7 @@ class GamePassesPriorityOnUncastableTest(unittest.TestCase):
                 return False
 
         game = GameModule.Game.__new__(GameModule.Game)
+        game._check_match_timeout = lambda: False
         game._stop_requested = False
         game.controller = SafetyController()
         game.game_started = True
@@ -688,6 +689,7 @@ class GameMoveRetryStateTest(unittest.TestCase):
 
     def make_game(self, cast_results):
         game = GameModule.Game.__new__(GameModule.Game)
+        game._check_match_timeout = lambda: False
         game._stop_requested = False
         game.controller = self.Controller(cast_results)
         game.game_started = True

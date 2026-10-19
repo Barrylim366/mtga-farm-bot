@@ -112,6 +112,7 @@ class ForgeHooks:
         self.bridge = bridge or shared()
         self.config = config
         self._attack_busy = threading.Lock()
+        self._ability_busy = threading.Lock()
         self._declined: tuple | None = None
         self._recent_groups: list = []
 
@@ -472,20 +473,43 @@ class ForgeHooks:
                 "offered": only_this_ability(card_id),
                 "twins": twins,
                 "name": bridge.name(card_id),
+                "match_id": tracker.game_info.get("matchID"),
+                "turn": tracker.turn_info.get("turnNumber"),
+                "pending_before": json.dumps(tracker.pending, sort_keys=True),
+                "stack_before": {a.get("instanceId") for a in tracker.abilities_on_stack()},
             }
 
-    def _started(self, sources: set) -> bool:
-        """An ability of one of ``sources`` is on the stack, or Arena asks for its cost/targets."""
+    def _started(self, situation: dict) -> bool:
+        """A new source ability is on the stack, or a fresh local cost/target request arrived."""
         bridge = self.bridge
         with bridge._lock:
             bridge.sync()
             tracker = bridge.tracker
-            if any(a.get("parentId") in sources for a in tracker.abilities_on_stack()):
+            if tracker.game_info.get("matchID") != situation["match_id"]:
+                return False
+            if any(a.get("parentId") in situation["twins"]
+                   and a.get("instanceId") not in situation["stack_before"]
+                   for a in tracker.abilities_on_stack()):
                 return True
             kind = tracker.pending_type
-            return kind in ("GREMessageType_PayCostsReq", "GREMessageType_SelectTargetsReq") and tracker.pending_is_current(kind)
+            pending = tracker.pending or {}
+            return (
+                kind in ("GREMessageType_PayCostsReq", "GREMessageType_SelectTargetsReq")
+                and tracker.pending_is_current(kind)
+                and tracker.my_seat in (pending.get("systemSeatIds") or [])
+                and json.dumps(pending, sort_keys=True) != situation["pending_before"]
+            )
 
     def activate_ability(self, controller, card_id: int, ability_id: int, own: Callable[[], None]) -> None:
+        if not self._ability_busy.acquire(blocking=False):
+            log(f"ability: concurrent activation skipped card={card_id} ability={ability_id}")
+            return
+        try:
+            self._activate_ability(controller, card_id, ability_id, own)
+        finally:
+            self._ability_busy.release()
+
+    def _activate_ability(self, controller, card_id: int, ability_id: int, own: Callable[[], None]) -> None:
         """The bot's "activate ability" with our permanents' abilities carried out first.
 
         The bot's own step only presses the button in the corner (its graveyard
@@ -508,19 +532,68 @@ class ForgeHooks:
             log(f"ability: {name}: no longer on offer; leaving it")
             self.bridge.ability_result(card_id, False)
             return None
-        if not controller.can_execute_game_action():
+        match_id = situation["match_id"]
+        context = f"match_id={match_id} card={card_id} ability={ability_id}"
+
+        def acknowledged(confirmed):
+            log(f"ABILITY_ACTIVATION_ACKNOWLEDGED: {context} confirmation_clicked={confirmed}")
+            self.bridge.ability_result(card_id, True)
+
+        def allowed():
+            if not match_id or not controller.can_execute_game_action(match_id):
+                return False
+            with self.bridge._lock:
+                self.bridge.sync()
+                tracker = self.bridge.tracker
+                return (tracker.game_info.get("matchID") == match_id
+                        and tracker.turn_info.get("turnNumber") == situation["turn"])
+
+        if not allowed():
             return None
         if not controller.select_battlefield_permanent(card_id, 1):
             log(f"ability: {name}: not found on the battlefield; not used this turn")
             self.bridge.ability_result(card_id, False)
             return None
+        log(f"ABILITY_ACTIVATION_SELECTED: {context} name={name}")
+        confirmed = False
         deadline = time.monotonic() + ABILITY_STARTED_WITHIN_SEC
         while time.monotonic() < deadline:
-            if self._started(situation["twins"]):
-                log(f"ability: {name}: started")
-                self.bridge.ability_result(card_id, True)
+            if not allowed():
                 return None
+            if self._started(situation):
+                acknowledged(confirmed)
+                return None
+            if not confirmed and controller.click_ability_control(
+                "activate", action_guard=lambda: allowed() and not self._started(situation),
+            ):
+                confirmed = True
+                log(f"ABILITY_ACTIVATION_CLICKED: {context}")
+                deadline = time.monotonic() + ABILITY_STARTED_WITHIN_SEC
             time.sleep(0.15)
-        log(f"ability: {name}: clicked, but Arena did not start it; not used again this turn")
-        self.bridge.ability_result(card_id, False)
+        if not allowed():
+            return None
+        if self._started(situation):
+            acknowledged(confirmed)
+            return None
+        log(f"ABILITY_ACTIVATION_TIMEOUT: {context} confirmation_clicked={confirmed}")
+        with self.bridge._lock:
+            pending_after = json.dumps(self.bridge.tracker.pending, sort_keys=True)
+        controller.write_ability_activation_debug({
+            "card_id": card_id, "ability_id": ability_id, "match_id": match_id,
+            "name": name, "confirmation_clicked": confirmed,
+            "pending_before": situation["pending_before"],
+            "pending_after": pending_after,
+        })
+        # Cancel only if the same local activation is still unacknowledged.
+        cancelled = controller.click_ability_control(
+            "cancel", action_guard=lambda: allowed() and not self._started(situation),
+        )
+        if not allowed():
+            return None
+        started = self._started(situation)
+        log(f"ABILITY_ACTIVATION_RECOVERY: {context} cancel_clicked={cancelled} acknowledged={started}")
+        if started:
+            acknowledged(confirmed)
+        else:
+            self.bridge.ability_result(card_id, False)
         return None

@@ -1,6 +1,7 @@
 from Controller.MTGAController.Controller import Controller
 from AI.DummyAI import DummyAI
 from Game import Game
+from bot_behavior import match_timeout_minutes as normalize_match_timeout
 import ForgeEngine
 import json
 import time
@@ -72,9 +73,10 @@ def _detect_player_log_path() -> str:
     return _default_player_log_path()
 
 
-def _load_runtime_bot_config(cfg_path: pathlib.Path) -> tuple[dict, bool]:
+def _load_runtime_bot_config(cfg_path: pathlib.Path) -> tuple[dict, bool, int]:
     """Load CLI settings while preserving defaults missing from older files."""
     click_targets: dict = {}
+    match_timeout_minutes = 10
     auto_concede_stalled_matches = True
     try:
         if cfg_path.is_file():
@@ -83,12 +85,13 @@ def _load_runtime_bot_config(cfg_path: pathlib.Path) -> tuple[dict, bool]:
             loaded_targets = cfg.get("click_targets")
             if isinstance(loaded_targets, dict):
                 click_targets = loaded_targets
+            match_timeout_minutes = normalize_match_timeout(cfg.get("match_timeout_minutes"))
             configured_auto_concede = cfg.get("auto_concede_stalled_matches")
             if isinstance(configured_auto_concede, bool):
                 auto_concede_stalled_matches = configured_auto_concede
     except Exception:
         click_targets = {}
-    return click_targets, auto_concede_stalled_matches
+    return click_targets, auto_concede_stalled_matches, match_timeout_minutes
 
 
 def _forge_engine_enabled(cfg_path: pathlib.Path | None) -> bool:
@@ -135,12 +138,13 @@ def main():
     # Fall back to 1920-relative defaults that match ui.ConfigManager._default_config()
     # so run_bot.py works out of the box on a fresh checkout.
     click_targets: dict = {}
+    match_timeout_minutes = 10
     auto_concede_stalled_matches = True
     cfg_path = None
     try:
         from runtime_paths import runtime_file  # type: ignore
         cfg_path = runtime_file("config", "calibration_config.json")
-        click_targets, auto_concede_stalled_matches = _load_runtime_bot_config(cfg_path)
+        click_targets, auto_concede_stalled_matches, match_timeout_minutes = _load_runtime_bot_config(cfg_path)
     except Exception:
         click_targets = {}
 
@@ -214,7 +218,7 @@ def main():
             print("Forge engine enabled: starting the advisor in the background.")
 
         print("Initializing Game...")
-        game = Game(controller, ai)
+        game = Game(controller, ai, match_timeout_minutes=match_timeout_minutes)
         
         print("Starting Game loop...")
         game.start()

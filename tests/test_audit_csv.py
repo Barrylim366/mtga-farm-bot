@@ -24,6 +24,37 @@ def summary(session="session-1", complete=True):
 
 
 class AuditHistoryTests(unittest.TestCase):
+    def test_activation_clicks_and_timeouts_are_reported_without_a_concede(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "analysis").mkdir()
+            kinds = ["ABILITY_ACTIVATION_SELECTED", "ABILITY_ACTIVATION_CLICKED",
+                     "ABILITY_ACTIVATION_ACKNOWLEDGED", "ABILITY_ACTIVATION_SELECTED",
+                     "ABILITY_ACTIVATION_CLICKED", "ABILITY_ACTIVATION_TIMEOUT",
+                     "ABILITY_ACTIVATION_RECOVERY"]
+            lines = [f"[2026-10-19 12:00:0{i}.000] [INFO] FORGE {kind}: match_id=m1 card=290 ability=21730"
+                     for i, kind in enumerate(kinds)]
+            (runtime / "analysis/history.log").write_text("\n".join(lines), encoding="utf-8")
+            end = audit.timestamp(lines[-1])
+            record = {"session_id": "s1", "ended_at_epoch": end, "duration_sec": 10,
+                      "match_index": 1, "result": "won", "account": "Alice#1",
+                      "alerts": {"ability_activation_timeout": 1},
+                      "_path": str(runtime / "match-0001.json")}
+            result = audit.summarize(runtime, [record], {}, runtime)
+            activation = result["ability_activation"]
+            self.assertEqual(activation["observed_event_counts"]["ABILITY_ACTIVATION_CLICKED"], 2)
+            self.assertEqual(activation["observed_event_counts"]["ABILITY_ACTIVATION_ACKNOWLEDGED"], 1)
+            self.assertEqual(activation["recorded_timeouts"], 1)
+            self.assertEqual(activation["events"][1]["line"], 2)
+            self.assertEqual(result["concede"]["attempts"], 0)
+            # Rotation removes click/ack evidence, but persistent match counts
+            # must still reveal the failure in an otherwise won game.
+            (runtime / "analysis/history.log").unlink()
+            rotated = audit.summarize(runtime, [record], {}, runtime)["ability_activation"]
+            self.assertFalse(rotated["history_available"])
+            self.assertEqual(rotated["observed_event_counts"], {})
+            self.assertEqual(rotated["recorded_timeouts"], 1)
+
     def test_invalid_gold_values_are_skipped_without_losing_valid_balances(self):
         for invalid in ("invalid", None, [], {}):
             with self.subTest(invalid=invalid):

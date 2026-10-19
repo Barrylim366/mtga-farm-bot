@@ -12,6 +12,7 @@ import bot_logger
 import debug_recorder
 import click_recorder
 import runtime_status
+from bot_behavior import match_timeout_minutes as normalize_match_timeout
 
 if TYPE_CHECKING:
     # Only the one real MTGA Controller and DummyAI are ever wired up (see
@@ -113,7 +114,7 @@ class Game:
             return
         self.controller.resolve()
 
-    def __init__(self, controller: "Controller", ai: "DummyAI", data_dir_prompt=None):
+    def __init__(self, controller: "Controller", ai: "DummyAI", data_dir_prompt=None, match_timeout_minutes: int = 10):
         self.ai = ai
         self.controller = controller
         self.last_logged_turn = -1
@@ -138,6 +139,13 @@ class Game:
         # the bot ever acts can never share a key (which would swallow the second
         # match's end and leave the bot idle with no restart scheduled).
         self._match_slot = 0
+        self._timeout_lock = threading.RLock()
+        self._match_timeout_minutes = normalize_match_timeout(match_timeout_minutes)
+        self._duration_timer = None
+        self._duration_generation = 0
+        self._duration_started = None
+        self._duration_match_id = None
+        self._duration_concede_claimed = False
         self._timers: list[threading.Timer] = []
         self._last_action_delay_turn = -1
         # Tracks (matchId, gameStateId, turn, phase, step, decisionPlayer,
@@ -236,31 +244,84 @@ class Game:
     def _mark_match_started(self) -> None:
         """A new match is confirmed live: first mulligan, or an inferred live state
         when we attached mid-game."""
-        self._match_started_ts = time.time()
-        try:
-            timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
-            if timeout_limit > 0:
-                def _on_match_timeout():
-                    if not self._stop_requested and self._match_started_ts:
-                        dur = time.time() - self._match_started_ts
-                        if dur >= timeout_limit - 1.0:
-                            auto_concede = getattr(self.controller, "get_auto_concede_stalled_matches", lambda: True)()
-                            if auto_concede:
-                                bot_logger.log_info(
-                                    f"[MATCH_TIMEOUT] Match exceeded {timeout_limit:.0f}s ({dur:.1f}s elapsed). Triggering concede."
-                                )
-                                if hasattr(self.controller, "concede"):
-                                    self.controller.concede("match_timeout_watchdog")
-                                elif hasattr(self.controller, "concede_game"):
-                                    self.controller.concede_game("match_timeout_watchdog")
-                timer = threading.Timer(timeout_limit, _on_match_timeout)
-                timer.daemon = True
-                if not hasattr(self, "_timers") or self._timers is None:
-                    self._timers = []
-                self._timers.append(timer)
-                timer.start()
-        except Exception:
-            pass
+        with self._timeout_lock:
+            self._match_started_ts = time.time()
+            self._duration_started = time.monotonic()
+            self._duration_match_id = self.controller.get_current_match_id()
+            self._duration_concede_claimed = False
+            self._reschedule_duration_timer()
+
+    def set_match_timeout_minutes(self, minutes: int) -> None:
+        """Apply a new deadline to the current game without resetting elapsed time."""
+        with self._timeout_lock:
+            self._match_timeout_minutes = normalize_match_timeout(minutes)
+            self._reschedule_duration_timer()
+
+    def _cancel_duration_timer(self, retire=False) -> None:
+        with self._timeout_lock:
+            self._duration_generation += 1
+            if self._duration_timer is not None:
+                self._duration_timer.cancel()
+                self._duration_timer = None
+            if retire:
+                self._duration_started = None
+                self._duration_match_id = None
+
+    def _reschedule_duration_timer(self, retry_delay=None) -> None:
+        # Caller holds _timeout_lock. Generation checks also invalidate callbacks
+        # that have already woken up and are waiting for this lock.
+        self._cancel_duration_timer()
+        if (self._stop_requested or self._duration_started is None
+                or not self._match_timeout_minutes):
+            return
+        limit = self._match_timeout_minutes * 60
+        # Very large valid integer settings must not overflow float conversion
+        # or the platform's thread wait limit.
+        remaining = (limit - (time.monotonic() - self._duration_started)
+                     if limit < threading.TIMEOUT_MAX else threading.TIMEOUT_MAX)
+        delay = max(0.0, remaining) if retry_delay is None else retry_delay
+        generation = self._duration_generation
+        timer = threading.Timer(min(delay, threading.TIMEOUT_MAX),
+                                self._check_match_timeout, args=(generation,))
+        timer.daemon = True
+        self._duration_timer = timer
+        timer.start()
+
+    def _check_match_timeout(self, generation=None) -> bool:
+        """Shared background/fallback check; True means normal decisions must wait."""
+        with self._timeout_lock:
+            if generation is not None and generation != self._duration_generation:
+                return False
+            if (self._stop_requested or self._duration_started is None
+                    or not self._match_timeout_minutes):
+                return False
+            if self._duration_concede_claimed:
+                if self.controller.is_concession_pending():
+                    if generation is not None:
+                        self._reschedule_duration_timer(retry_delay=1.0)
+                    return True
+                self._duration_concede_claimed = False
+            elapsed = time.monotonic() - self._duration_started
+            limit = self._match_timeout_minutes * 60
+            if elapsed < limit:
+                if generation is not None:
+                    self._reschedule_duration_timer()
+                return False
+            match_id = self._duration_match_id
+            if not match_id or self.controller.get_current_match_id() != match_id:
+                self._cancel_duration_timer(retire=True)
+                return False
+            claimed = self.controller.concede(
+                "match_duration_timeout_exceeded", expected_match_id=match_id)
+            if claimed:
+                self._duration_concede_claimed = True
+                self._reschedule_duration_timer(retry_delay=1.0)
+                bot_logger.log_info(
+                    f"[MATCH_TIMEOUT] Concede requested: {elapsed:.1f}s elapsed, "
+                    f"limit {self._match_timeout_minutes} minutes.")
+            else:
+                self._reschedule_duration_timer(retry_delay=1.0)
+            return True
 
     def _match_end_key(self) -> str:
         """Identity of the match that is ending, used to collapse duplicate
@@ -302,6 +363,7 @@ class Game:
                 self._debug(f"Duplicate match-end signal ignored ({key}).")
                 return False
             self._handled_match_end_key = key
+        self._cancel_duration_timer(retire=True)
         # Finalize the debug recording first, independently of the restart
         # logic below -- otherwise stopping the bot at match end (a common case)
         # would skip the match.json footer and leave the last match unfinalized.
@@ -363,6 +425,7 @@ class Game:
         # on the restart timer would reopen the duplicate-signal window ~10s after
         # the match. Instead the key rotates on its own: a new matchId when the next
         # match is joined, and the slot counter below as the fallback.
+        self._cancel_duration_timer(retire=True)
         self._match_slot += 1
 
         # Reset Game state
@@ -396,6 +459,7 @@ class Game:
     def stop(self):
         """Stop the game cleanly (cancel timers, stop log monitor, prevent restarts)."""
         self._stop_requested = True
+        self._cancel_duration_timer(retire=True)
         self.game_started = False
         runtime_status.set_mode("stopped")
 
@@ -616,23 +680,8 @@ class Game:
             if not self._infer_game_started_from_live_state(current_game_state):
                 self._debug("decision_method called but game not started yet, ignoring")
                 return
-        # Check match duration limit / stall watchdog
-        started_ts = getattr(self, "_match_started_ts", None)
-        if started_ts:
-            match_duration = time.time() - started_ts
-            timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
-            auto_concede = getattr(self.controller, "get_auto_concede_stalled_matches", lambda: True)()
-            if auto_concede and timeout_limit > 0 and match_duration > timeout_limit:
-                bot_logger.log_info(
-                    f"[STALL_WATCHDOG] Match duration {match_duration:.1f}s exceeded limit of {timeout_limit:.1f}s. "
-                    "Auto-conceding to prevent infinite stall."
-                )
-                self._debug("Match timeout exceeded; triggering concede.")
-                if hasattr(self.controller, "concede"):
-                    self.controller.concede("match_duration_timeout_exceeded")
-                elif hasattr(self.controller, "concede_game"):
-                    self.controller.concede_game("match_duration_timeout_exceeded")
-                return
+        if self._check_match_timeout():
+            return
 
         delay_wait_active = False
 

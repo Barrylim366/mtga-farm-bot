@@ -6,11 +6,25 @@ from unittest.mock import patch
 
 from state.state_machine import BotState
 from tools.session_watchdog import (
-    _Thresholds, _classify_line, _detect_stuck_reason, _write_match_record,
+    _Thresholds, _classify_line, _detect_stuck_reason, _write_match_record, _process_new_lines,
 )
 
 
 class SessionWatchdogStallTests(unittest.TestCase):
+    def test_activation_timeout_counts_without_stall_or_concede(self):
+        state = {}
+        lines = "\n".join([
+            "FORGE ABILITY_ACTIVATION_CLICKED: card=290 ability=21730",
+            "FORGE ABILITY_ACTIVATION_ACKNOWLEDGED: card=290 ability=21730",
+            "FORGE ABILITY_ACTIVATION_TIMEOUT: card=291 ability=21730",
+            "FORGE ABILITY_ACTIVATION_TIMEOUT: card=292 ability=21730",
+        ])
+        with patch("tools.session_watchdog._append_text") as append:
+            _process_new_lines(state, "session", lines, {})
+        self.assertEqual(state["match"]["alerts"], {"ability_activation_timeout": 2})
+        self.assertFalse(state["match"]["stalled"])
+        self.assertEqual(append.call_count, 1)  # writes throttled, counts preserved
+
     def setUp(self):
         self.thresholds = _Thresholds()
 

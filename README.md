@@ -46,6 +46,8 @@ Reward recovery runs before quest reroll and Home navigation. While a verified p
 
 During cost payment, the bot looks for **Auto Pay** if Submit is unavailable. If another selection is still using the controller, payment retries for up to 16 seconds while the same payment prompt remains active. Normal play stays paused until the game acknowledges advancement after payment.
 
+For Forge-selected battlefield abilities, the bot clicks the visible **Activate Ability** control when Arena requires confirmation after selecting the permanent. It waits for a fresh payment/target request or a new ability on the stack, rather than treating the click as success. An unacknowledged activation saves an `ability-activation-*` debug bundle and attempts a visually verified Cancel before suppressing that permanent's ability for the rest of the turn. Overnight audits distinguish confirmation clicks from acknowledged activations, timeouts, and Cancel recovery, including games that never concede; timeouts are retained in per-match watchdog counts. This recovery still needs supervised in-game validation.
+
 Quest reroll searches for the 500 Gold label in one continuous daily-quest area (x=50–910, y=750–960 in the normalized 1920×1080 Arena window). This avoids clipping labels at internal search boundaries while leaving win rewards farther to the right outside the search. The existing matching threshold and brightness checks still apply.
 
 Scry and Surveil keep normal gameplay paused until their central overlay is confirmed closed in two settled observations. Done is located again for each of up to three attempts, with input ownership held across recognition and the press. Surveil's fixed-position fallback requires its visible heading. Missing captures never count as completion. Recovery requires successful window focusing on Windows; Linux and macOS verify the visible overlay without requiring the Windows focus helper. The stall watchdog identifies the pending prompt and allows one final recovery attempt with a five-second grace period before conceding; recovery attempts do not reset the original stall age.
@@ -164,6 +166,21 @@ The app's current version (`1.9.1`, sourced from `version.py`) is shown in **Set
 Cast retry protection now counts repeated moves within the same match and Arena game state. When Arena reports a newer state, the bot can reconsider a cast that was cancelled because its decision became stale; three identical attempts in one unchanged state still trigger a priority pass.
 
 ## Configuration
+
+### Game-duration limit
+
+In **Settings > Bot Behavior**, set **Concede after (minutes)**.
+Press Enter or leave the field to save.
+The default is **10 minutes**; **0** disables the duration limit. This works
+independently of **Auto-concede stalled matches** and replaces the hidden
+20-minute timeout. `MTGA_MATCH_TIMEOUT_SEC` no longer overrides the limit.
+
+Time starts at the first mulligan decision (or when the bot recognizes a live
+game after attaching mid-game), excludes queueing, and includes opponent turns.
+Changes apply immediately using time already elapsed: shortening the limit below
+the game's current duration requests a concede, while 0 cancels the timeout.
+A concede already claimed by the controller may finish. Each new game starts a
+fresh timer. Command-line launches use the same saved setting.
 
 ### Auto-concede stalled matches
 

@@ -65,6 +65,8 @@ ALERT_SIGNATURES: tuple[tuple[str, tuple[str, ...], float], ...] = (
     ("combat_recovery_failed", ("Combat recovery exhausted attempts.", "COMBAT_RECOVERY_DEFER:"), 20.0),
     ("submit_failed", ("SUBMIT_SELECTION_FAILED:",), 20.0),
     ("pay_costs_unresolved", ("PAY_COSTS_UNRESOLVED:",), 20.0),
+    # A failed activation can recover and finish the match without conceding.
+    ("ability_activation_timeout", ("ABILITY_ACTIVATION_TIMEOUT:",), 20.0),
     ("chooser_unconfirmed", ("CHOOSER_TARGET_UNCONFIRMED:",), 20.0),
     ("unsupported_cast", ("UNSUPPORTED_CAST:",), 30.0),
     # Game.py's stuck-move breaker (_STUCK_MOVE_RETRY_LIMIT): the same active

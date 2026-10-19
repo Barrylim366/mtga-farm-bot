@@ -16,6 +16,70 @@ class RecordingInput(NullInputController):
         self.clicks += count
 
 
+class TimeoutConcedeOwnershipTest(unittest.TestCase):
+    def test_public_concede_returns_false_when_worker_cannot_claim(self):
+        controller = Controller.__new__(Controller)
+        controller._Controller__claim_concession = mock.Mock(return_value=False)
+        controller._Controller__cancel_pending_decisions_for_concede = mock.Mock()
+        controller._Controller__run_claimed_concede_sequence = mock.Mock()
+        self.assertFalse(controller.concede('timeout', expected_match_id='match-1'))
+        controller._Controller__cancel_pending_decisions_for_concede.assert_not_called()
+        controller._Controller__run_claimed_concede_sequence.assert_not_called()
+
+    def test_public_concede_worker_can_send_input_and_keeps_gameplay_blocked(self):
+        raw = RecordingInput()
+        raw.tap_escape = mock.Mock()
+        gated = ExclusiveInputController(raw)
+        controller = Controller.__new__(Controller)
+        controller._stop_requested = False
+        controller._Controller__concession_claimed = False
+        controller._Controller__concession_claim_lock = threading.Lock()
+        controller._Controller__concede_completed_event = threading.Event()
+        controller._Controller__concede_outcome = None
+        controller._Controller__live_match_id = 'match-1'
+        controller._Controller__last_seen_match_id = 'match-1'
+        controller._get_state_from_log = lambda: BotState.IN_GAME
+        controller.input = gated
+        controller._Controller__clear_stall_watchdog = mock.Mock()
+        controller._Controller__cancel_emergency_concede_timer = mock.Mock()
+        controller._Controller__cancel_pending_decisions_for_concede = mock.Mock()
+        entered = threading.Event()
+        proceed = threading.Event()
+        released = threading.Event()
+        allowed = []
+        release = gated.release_exclusive
+
+        def release_and_signal():
+            release()
+            released.set()
+
+        gated.release_exclusive = release_and_signal
+
+        def perform(*_args):
+            entered.set()
+            if not proceed.wait(timeout=2.0):
+                return
+            allowed.append(gated.tap_escape())
+            allowed.append(gated.left_click())
+            controller._Controller__concede_outcome = 'match_completed'
+            controller._Controller__concede_completed_event.set()
+
+        controller._Controller__perform_concede = perform
+        with mock.patch('Controller.MTGAController.Controller.ConcedeIncident.create', return_value=None):
+            try:
+                self.assertTrue(controller.concede('match_duration_timeout_exceeded', 'match-1'))
+                self.assertTrue(entered.wait(timeout=1.0))
+                self.assertFalse(gated.left_click(), 'caller must not own the worker input')
+                self.assertEqual(raw.clicks, 0)
+            finally:
+                proceed.set()
+                self.assertTrue(released.wait(timeout=2.0))
+        self.assertEqual(allowed, [True, True])
+        raw.tap_escape.assert_called_once()
+        self.assertEqual(raw.clicks, 1)
+        self.assertTrue(gated.left_click(), 'normal input resumes after completion')
+
+
 class OrderingInput(NullInputController):
     """Blocks inside a delegated call so a claim can be raced against it."""
 

@@ -12,6 +12,7 @@ import json
 import threading
 import overlay
 import runtime_status
+from bot_behavior import match_timeout_minutes as normalize_match_timeout
 import shutdown_scheduler
 import update_checker
 from version import __version__ as APP_VERSION
@@ -1580,6 +1581,7 @@ class ConfigManager:
             # Recovery policy. Enabled by default: it concedes only when Arena
             # has left a locally-owned decision context unchanged for 30 seconds.
             "auto_concede_stalled_matches": True,
+            "match_timeout_minutes": 10,
             # Forge's rules engine and AI choose the plays (ForgeEngine/).
             # Default enabled when Forge is installed on disk.
             "forge_engine_enabled": True,
@@ -1825,6 +1827,18 @@ class ConfigManager:
     def set_shutdown_pc_when_round_complete(self, enabled: bool) -> None:
         self.config["shutdown_pc_when_round_complete"] = bool(enabled)
         self._save_config()
+
+    def get_match_timeout_minutes(self) -> int:
+        return normalize_match_timeout(self.config.get("match_timeout_minutes"))
+
+    def set_match_timeout_minutes(self, minutes: int) -> None:
+        previous = self.config.get("match_timeout_minutes", 10)
+        self.config["match_timeout_minutes"] = normalize_match_timeout(minutes)
+        try:
+            self._save_config()
+        except Exception:
+            self.config["match_timeout_minutes"] = previous
+            raise
 
     def get_auto_concede_stalled_matches(self) -> bool:
         return self.config.get("auto_concede_stalled_matches") is True
@@ -4598,7 +4612,10 @@ class MTGBotUI(tk.Tk):
             # Forge is asked first while "Enable Forge Engine" is ticked; with
             # it unticked this is the bot's own DummyAI, unchanged.
             ai = ForgeEngine.make_ai(DummyAI(), self.config_manager.get_forge_engine_enabled)
-            self.game = Game(controller, ai, data_dir_prompt=self._resolve_mtga_data_dir)
+            with self._controller_lock:
+                self.game = Game(
+                    controller, ai, data_dir_prompt=self._resolve_mtga_data_dir,
+                    match_timeout_minutes=self.config_manager.get_match_timeout_minutes())
             bot_logger.log_info("UI start: game.start() begin")
             self.game.start()
             bot_logger.log_info("UI start: game.start() completed")
@@ -4832,6 +4849,14 @@ class MTGBotUI(tk.Tk):
             controller = self._controller
             if controller is not None or not persisted:
                 _apply_forge_engine(controller, self.config_manager)
+            return persisted
+
+    def _set_match_timeout_minutes(self, minutes: int) -> int:
+        with self._controller_lock:
+            self.config_manager.set_match_timeout_minutes(minutes)
+            persisted = self.config_manager.get_match_timeout_minutes()
+            if self.game is not None:
+                self.game.set_match_timeout_minutes(persisted)
             return persisted
 
     def _set_auto_concede_stalled_matches(self, enabled: bool) -> bool:
@@ -6049,6 +6074,7 @@ class BotBehaviorWindow(_FireSubWindow):
     """
 
     _TITLE = "Bot Behavior"
+    _HEIGHT = 580
 
     def _init_state(self) -> None:
         self._enabled = tk.BooleanVar(
@@ -6057,37 +6083,101 @@ class BotBehaviorWindow(_FireSubWindow):
         self._forge_enabled = tk.BooleanVar(
             value=bool(self._config_manager.get_forge_engine_enabled())
         )
+        self._timeout_minutes = tk.StringVar(
+            value=str(self._config_manager.get_match_timeout_minutes()))
+        self._timeout_status = tk.StringVar(value="")
+        self.protocol("WM_DELETE_WINDOW", self._close_behavior_window)
         self._forge_busy = False
 
     def _build_ui(self) -> None:
         c = self._theme
         cv = self._canvas
         text_width = 380
+        toggle_height = max(14, tkfont.Font(self, font=("Segoe UI", 10, "bold")).metrics("linespace"))
 
-        self._create_panel(16, 20, 428, 128)
-        cv.create_text(28, 30, text="Match recovery", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("concede", 66, "Auto-concede stalled matches", self._enabled,
+        def text(y, value, *, x=28, font=("Segoe UI", 9), width=text_width):
+            item = cv.create_text(x, y, text=value, width=width, fill=c["text"],
+                                  font=font, anchor="nw")
+            return cv.bbox(item)[3]
+
+        def panel(top, bottom):
+            # Draw behind content after measuring its actual font-scaled bounds.
+            self._create_panel(16, top, 428, bottom - top)
+            cv.tag_lower(cv.find_all()[-1])
+
+        top = 20
+        bottom = text(top + 12, "Match recovery", font=("Segoe UI", 13, "bold"))
+        toggle_y = bottom + 10
+        self._create_toggle("concede", toggle_y, "Auto-concede stalled matches", self._enabled,
                             self._toggle_auto_concede)
-        cv.create_text(54, 88, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Concede when Arena waits 30 seconds for bot input without game "
-                            "progress. Changes apply immediately.")
+        bottom = text(toggle_y + toggle_height + 8,
+                      "Concede when Arena waits 30 seconds for bot input without game progress.", x=54)
+        panel(top, bottom + 16)
 
-        self._create_panel(16, 162, 428, 178)
-        cv.create_text(28, 172, text="Decision engine", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("forge", 208, "Enable Forge Engine (experimental)", self._forge_enabled,
+        top = bottom + 30
+        bottom = text(top + 12, "Game duration", font=("Segoe UI", 13, "bold"))
+        row_y = bottom + 12
+        bottom = text(row_y, "Concede after (minutes)", font=("Segoe UI", 10), width=296)
+        entry = tk.Entry(self, textvariable=self._timeout_minutes,
+                         bg=c["entry_bg"], fg=c["text"], insertbackground=c["text"],
+                         font=("Segoe UI", 10))
+        row_height = max(bottom - row_y, entry.winfo_reqheight(), 30)
+        cv.create_window(336, row_y, width=92, height=row_height, window=entry, anchor="nw")
+        for event in ("<Return>", "<FocusOut>"):
+            entry.bind(event, lambda _event: self._apply_timeout_setting())
+        status_item = cv.create_text(28, row_y + row_height + 4, width=396,
+                                    fill=c["status"], font=("Segoe UI", 9), anchor="nw")
+        self._timeout_status.trace_add(
+            "write", lambda *_args: cv.itemconfigure(status_item, text=self._timeout_status.get()))
+        bottom = row_y + row_height + toggle_height + 12
+        panel(top, bottom)
+
+        top = bottom + 14
+        bottom = text(top + 12, "Decision engine", font=("Segoe UI", 13, "bold"))
+        toggle_y = bottom + 10
+        self._create_toggle("forge", toggle_y, "Enable Forge Engine (experimental)", self._forge_enabled,
                             self._toggle_forge)
-        cv.create_text(54, 230, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Forge's rules engine and AI choose lands, spells, abilities, attacks, "
-                            "blocks, targets and scry. Where Forge has no answer the bot decides as "
-                            "before. Needs a one-time download (Windows) and about 2 GB of RAM.")
+        bottom = text(toggle_y + toggle_height + 8,
+                      "Forge's rules engine and AI choose lands, spells, abilities, attacks, "
+                      "blocks, targets and scry. Where Forge has no answer the bot decides as "
+                      "before. Needs a one-time download (Windows) and about 2 GB of RAM.", x=54)
+        # Reserve enough space for the longest status, including after download.
+        status_height = 2 * toggle_height
         self._forge_status_item = cv.create_text(
-            54, 304, width=text_width, fill=c["status"], font=("Segoe UI", 9, "bold"), anchor="nw",
-            text=self._forge_status_text(),
-        )
+            54, bottom + 12, width=text_width, fill=c["status"], font=("Segoe UI", 9, "bold"),
+            anchor="nw", text=self._forge_status_text())
+        bottom += 12 + status_height + 16
+        panel(top, bottom)
 
-        self._create_button("back", "Back", 324, 358, 120, 40, self.destroy)
+        self._create_button("back", "Back", 324, bottom + 18, 120, 40, self._close_behavior_window)
+        height = bottom + 78
+        self.update_idletasks()
+        y = min(self.winfo_y(), max(0, self.winfo_screenheight() - height - 50))
+        self.geometry(f"{self._WIDTH}x{height}+{self.winfo_x()}+{y}")
+
+    def _close_behavior_window(self) -> None:
+        self._apply_timeout_setting()
+        self.destroy()
+
+    def _apply_timeout_setting(self) -> None:
+        text = self._timeout_minutes.get().strip()
+        if not text or not text.isascii() or not text.isdecimal():
+            self._timeout_status.set("Use a whole number, 0 or greater.")
+            return
+        try:
+            minutes = int(text)
+            app = getattr(self._parent, "master", None)
+            setter = getattr(app, "_set_match_timeout_minutes", None)
+            if callable(setter):
+                minutes = setter(minutes)
+            else:
+                self._config_manager.set_match_timeout_minutes(minutes)
+                minutes = self._config_manager.get_match_timeout_minutes()
+        except Exception:
+            self._timeout_status.set("Could not save. Please try again.")
+            return
+        self._timeout_minutes.set(str(minutes))
+        self._timeout_status.set("")
 
     def _toggle_auto_concede(self) -> None:
         self._enabled.set(not self._enabled.get())
@@ -6203,7 +6293,8 @@ class EnhancementsWindow(_FireSubWindow):
     """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, and Anti-Detection."""
 
     _TITLE = "Enhancements & Alerts"
-    _HEIGHT = 630
+    _WIDTH = 620
+    _HEIGHT = 780
 
     def _init_state(self) -> None:
         from notifications import NotificationManager
@@ -6224,55 +6315,93 @@ class EnhancementsWindow(_FireSubWindow):
     def _build_ui(self) -> None:
         c = self._theme
         cv = self._canvas
-        text_width = 380
+        right = self._WIDTH - 30
+        content_width = right - 30
+        toggle_font = tkfont.Font(self, font=("Segoe UI", 10, "bold"))
+        button_font = tkfont.Font(self, font=("Segoe UI", 11, "bold"))
+        toggle_height = max(14, toggle_font.metrics("linespace"))
+        button_height = max(40, button_font.metrics("linespace") + 16)
 
-        # Panel 1: Discord & Telegram Notifications
-        self._create_panel(16, 20, 428, 250)
-        cv.create_text(28, 30, text="Discord & Telegram Alerts", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("webhooks", 62, "Enable Webhook Notifications", self._webhooks_enabled,
+        def text(y, value, *, x=30, width=content_width, heading=False):
+            item = cv.create_text(
+                x, y, text=value, width=width,
+                fill=c["text"] if heading else c["text_muted"],
+                font=("Segoe UI", 13, "bold") if heading else ("Segoe UI", 9), anchor="nw")
+            return cv.bbox(item)[3]
+
+        def panel(top, bottom):
+            self._create_panel(16, top, self._WIDTH - 32, bottom - top)
+            cv.tag_lower(cv.find_all()[-1])
+
+        def entry(variable, x, y, width, **kwargs):
+            widget = tk.Entry(self, textvariable=variable, bg=c["entry_bg"], fg=c["text"],
+                              insertbackground=c["text"], relief=tk.FLAT,
+                              font=("Segoe UI", 9), **kwargs)
+            height = max(30, widget.winfo_reqheight() + 6)
+            cv.create_window(x, y, width=width, height=height, window=widget, anchor="nw")
+            return widget, y + height
+
+        top = 20
+        bottom = text(top + 14, "Discord & Telegram Alerts", heading=True)
+        toggle_y = bottom + 12
+        self._create_toggle("webhooks", toggle_y, "Enable Webhook Notifications", self._webhooks_enabled,
                             self._toggle_webhooks)
+        bottom = text(toggle_y + toggle_height + 14, "Discord Webhook URL:")
+        self._discord_entry, bottom = entry(self._discord_url, 30, bottom + 8, content_width)
 
-        cv.create_text(30, 92, text="Discord Webhook URL:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        self._discord_entry = tk.Entry(self, textvariable=self._discord_url, bg=c["entry_bg"], fg=c["text"],
-                                       insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
-        cv.create_window(30, 114, width=390, height=24, window=self._discord_entry, anchor="nw")
+        row_y = bottom + 16
+        chat_x = right - 168
+        token_width = chat_x - 46
+        token_bottom = text(row_y, "Telegram Bot Token:", width=token_width)
+        chat_bottom = text(row_y, "Chat ID:", x=chat_x, width=168)
+        entry_y = max(token_bottom, chat_bottom) + 8
+        self._tg_token_entry, token_bottom = entry(
+            self._telegram_token, 30, entry_y, token_width, show="*")
+        self._tg_chat_entry, chat_bottom = entry(self._telegram_chat_id, chat_x, entry_y, 168)
+        button_y = max(token_bottom, chat_bottom) + 18
+        save_width = button_font.measure("Save & Test Alert") + 36
+        self._create_button("save_test", "Save & Test Alert", 30, button_y, save_width,
+                            button_height, self._save_and_test)
+        status_y = button_y + button_height + 10
+        self._status_text_item = cv.create_text(
+            30, status_y, text="", width=content_width, fill=c["accent"],
+            font=("Segoe UI", 9, "bold"), anchor="nw")
+        bottom = status_y + toggle_height + 14
+        panel(top, bottom)
 
-        cv.create_text(30, 146, text="Telegram Bot Token:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        self._tg_token_entry = tk.Entry(self, textvariable=self._telegram_token, bg=c["entry_bg"], fg=c["text"],
-                                        show="*", insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
-        cv.create_window(30, 168, width=250, height=24, window=self._tg_token_entry, anchor="nw")
+        top = bottom + 16
+        bottom = text(top + 14, "Anti-Detection & Optimization", heading=True)
+        options = (
+            ("human_mouse", "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
+             self._toggle_human_mouse,
+             "Natural curved mouse paths with slight jitter."),
+            ("low_power", "Low-Power / Overnight Mode", self._low_power_enabled,
+             self._toggle_low_power,
+             "Reduces idle CPU/GPU use, heat, and fan noise."),
+            ("selective_attack", "Smart Selective Attacking (CombatLogic)", self._selective_attack_enabled,
+             self._toggle_selective_attack,
+             "Avoids unsafe attacks and checks for lethal."),
+        )
+        for name, label, variable, command, description in options:
+            toggle_y = bottom + 16
+            self._create_toggle(name, toggle_y, label, variable, command)
+            bottom = text(toggle_y + toggle_height + 8, description, x=54, width=right - 54)
+        bottom += 18
+        panel(top, bottom)
 
-        cv.create_text(290, 146, text="Chat ID:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        self._tg_chat_entry = tk.Entry(self, textvariable=self._telegram_chat_id, bg=c["entry_bg"], fg=c["text"],
-                                       insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
-        cv.create_window(290, 168, width=130, height=24, window=self._tg_chat_entry, anchor="nw")
-
-        self._create_button("save_test", "Save & Test Alert", 30, 210, 160, 36, self._save_and_test)
-        self._status_text_item = cv.create_text(205, 228, text="", fill=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
-
-        # Panel 2: Anti-Detection & Combat Optimization
-        self._create_panel(16, 285, 428, 250)
-        cv.create_text(28, 295, text="Anti-Detection & Optimization", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("human_mouse", 330, "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
-                            self._toggle_human_mouse)
-        cv.create_text(54, 350, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Generates natural curved paths with micro-jitter and smooth velocity.")
-
-        self._create_toggle("low_power", 385, "Low-Power / Overnight Mode", self._low_power_enabled,
-                            self._toggle_low_power)
-        cv.create_text(54, 405, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Paces idle checks to reduce overnight CPU/GPU temperatures and fan noise.")
-
-        self._create_toggle("selective_attack", 440, "Smart Selective Attacking (CombatLogic)", self._selective_attack_enabled,
-                            self._toggle_selective_attack)
-        cv.create_text(54, 460, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Prevents suicidal swings into enemy blockers; calculates lethal and safety.")
-
-        self._create_button("snap", "Snap MTGA 16:9", 24, 555, 130, 40, self._snap_window)
-        self._create_button("session_stats", "Session Stats", 164, 555, 130, 40, self._open_session_stats)
-        self._create_button("back", "Back", 304, 555, 130, 40, self.destroy)
+        # Measure the button captions too: point-sized fonts grow with Windows scaling.
+        buttons = (("snap", "Snap MTGA 16:9", self._snap_window),
+                   ("session_stats", "Session Stats", self._open_session_stats),
+                   ("back", "Back", self.destroy))
+        widths = [button_font.measure(label) + 30 for _, label, _ in buttons]
+        x = (self._WIDTH - sum(widths) - 24) // 2
+        for (name, label, command), width in zip(buttons, widths):
+            self._create_button(name, label, x, bottom + 20, width, button_height, command)
+            x += width + 12
+        height = bottom + button_height + 40
+        self.update_idletasks()
+        y = min(self.winfo_y(), max(0, self.winfo_screenheight() - height - 50))
+        self.geometry(f"{self._WIDTH}x{height}+{self.winfo_x()}+{y}")
 
     def _toggle_webhooks(self):
         self._webhooks_enabled.set(not self._webhooks_enabled.get())

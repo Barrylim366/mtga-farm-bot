@@ -20,6 +20,7 @@ import AI.Utilities.LifegainLogic as LifegainLogic
 from Controller.MTGAController.LogReader import LogReader
 from Controller.MTGAController.popup_recovery import PopupRecoveryMixin
 from Controller.MTGAController.group_recovery import GroupRecoveryMixin
+from Controller.MTGAController.ability_activation import AbilityActivationMixin
 from Controller.MTGAController.quest_reroll import (
     QuestRerollMixin, replacement_verified, serialized_home_navigation,
 )
@@ -75,7 +76,7 @@ _MY_TIMER_TYPES = {
 }
 
 
-class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, ControllerSecondary):
+class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, ControllerSecondary):
 
     # Forge engine hooks (see __init__); a class default so a controller built
     # without __init__ (the unit tests do) runs the bot's own code.
@@ -10084,11 +10085,13 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 )
                 bot_logger.log_info("STALL_WATCHDOG_ARMED: local responsibility; 30.0s window started")
 
-    def __claim_concession(self, reason: str) -> bool:
+    def __claim_concession(self, reason: str, expected_match_id: str | None = None) -> bool:
         # The stall timer and the Arena inactivity timer run on separate
         # threads. Keep the claim lock through input acquisition so a failed
         # acquisition cannot leave a claimed concede with no input owner.
         with self.__concession_claim_lock:
+            if expected_match_id is not None and not self.__is_live_match(expected_match_id):
+                return False
             if self._stop_requested or self.__concession_claimed:
                 bot_logger.log_info(f"CONCEDE_CLAIM_REJECTED: {reason}")
                 return False
@@ -10103,7 +10106,8 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                         f"CONCEDE_CLAIM_DEFERRED: input claim failed reason={reason} error={exc}"
                     )
                     return False
-            if self._stop_requested:
+            if self._stop_requested or (expected_match_id is not None
+                                       and not self.__is_live_match(expected_match_id)):
                 release_input = getattr(self.input, "release_exclusive", None)
                 if callable(release_input):
                     release_input()
@@ -10205,19 +10209,41 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self.__cancel_pending_decisions_for_concede()
         self.__run_claimed_concede_sequence("STALL_CONCEDE", trigger_signature, expected_match_id)
 
-    def concede(self, reason: str = "manual") -> bool:
+    def is_concession_pending(self) -> bool:
+        """Whether a concede sequence currently owns the match's input."""
+        with self.__concession_claim_lock:
+            return bool(self.__concession_claimed)
+
+    def concede(self, reason: str = "manual", expected_match_id: str | None = None) -> bool:
         """Explicitly request a concession (e.g. from stall watchdog or match timeout)."""
-        if not self.__claim_concession(reason):
-            return False
-        expected_match_id = getattr(self, "_Controller__live_match_id", None)
-        self.__cancel_pending_decisions_for_concede()
+        if expected_match_id is None:
+            expected_match_id = getattr(self, "_Controller__live_match_id", None)
+        claim_ready = threading.Event()
+        claimed = False
+
+        def run():
+            nonlocal claimed
+            # ExclusiveInputController authorizes only the claiming thread.
+            # Claim on the worker that will actually press Escape and click,
+            # keeping the gate closed to every gameplay/retry thread throughout.
+            try:
+                claimed = self.__claim_concession(reason, expected_match_id)
+            finally:
+                claim_ready.set()
+            if not claimed:
+                return
+            self.__cancel_pending_decisions_for_concede()
+            self.__run_claimed_concede_sequence("TIMEOUT_CONCEDE", None, expected_match_id)
+
         threading.Thread(
-            target=self.__run_claimed_concede_sequence,
-            args=("TIMEOUT_CONCEDE", None, expected_match_id),
+            target=run,
             daemon=True,
             name="TimeoutConcedeThread",
         ).start()
-        return True
+        # Preserve the synchronous claim result used by the duration retry
+        # policy; the potentially slow UI sequence remains asynchronous.
+        claim_ready.wait()
+        return claimed
 
     def concede_game(self, reason: str = "manual") -> bool:
         return self.concede(reason)

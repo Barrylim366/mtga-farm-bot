@@ -15,6 +15,28 @@ Use this skill when the user explicitly invokes `$audit-logs`. Report findings i
 
 Keep the final audit concise with evidence links. If an artefact has been rotated away, say what is unavailable instead of reporting a clean zero. Temporary soak signals may disappear after their bugs are fixed; the audit must continue to work from persistent match records and ordinary logs.
 
+### Game-length distribution
+
+Include a table of completed games where the bot did not concede, with columns
+`Length`, `Games`, `Share`, and `Win rate`, plus a Total row. Use these duration
+groups: under 3 minutes, 3-5, 5-7.5, 7.5-10, 10-15, 15-20, and 20+ minutes.
+Intervals include the lower bound and exclude the upper bound. Keep empty groups
+with zero games/share and an unavailable win rate. Share is the group's count
+divided by all included games; win rate is wins divided by games in that group.
+
+Use match-record `duration_sec`, excluding queues and account switches. Exclude
+unknown/incomplete results and missing, nonpositive, or invalid durations.
+Exclude confirmed bot-concedes and, conservatively, games with unresolved bot
+concede attempts or incident bundles; report those exclusion counts separately.
+Correlate incidents to games rather than counting repeated attempts as games.
+Opponent concessions remain included. When history is partial, label the table
+as best effort and note that unrecognised bot-concedes may remain. Do not treat
+these conservative exclusions as additional confirmed concedes in session stats.
+
+Report average, median, minimum, and maximum duration for the same included games.
+If none qualify, state that the distribution and duration statistics are
+unavailable.
+
 Include the deck played for each game using `match_details`, and summarize the
 session's deck counts. `logged_selection` means the bot logged a completed deck
 selection before that game; it does not independently verify the actual deck
@@ -50,6 +72,18 @@ Do not substitute screenshot completion outcomes for confirmed concede evidence.
 Inspect the summarizer's `optional_target_recovery` events from ordinary logs.
 Report attempts separately from acknowledged prompt advancement; neither proves
 that the Equipment was exiled or that the spell resolved.
+
+Inspect `ability_activation` even for games with no concede. Report selected
+sources, confirmation-button clicks, acknowledged activations, timeouts, and
+Cancel recovery separately. `ABILITY_ACTIVATION_CLICKED` means a recognized
+Activate Ability control received a click; only `ABILITY_ACTIVATION_ACKNOWLEDGED`
+means a fresh local payment/target request or new source ability was observed.
+Neither proves payment completed or the ability resolved. Link event lines and
+any retained `runtime/debug/ability-activation-*` bundles. Timeouts are also
+counted as `ability_activation_timeout` in match records, independent of concede
+or match result. A timeout can be followed by a late acknowledgment; do not count
+these observations as separate failed abilities. Log event counts cover retained
+history only; report rotated evidence as missing, never as zero successes.
 
 ### Permanent concede incidents
 
