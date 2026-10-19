@@ -146,22 +146,22 @@ class PopupRecoveryTests(unittest.TestCase):
         for filename, *_ in targets:
             self.assertTrue(os.path.exists(os.path.join(self.c._buttons_dir(), filename)))
 
-    def test_reconnect_waits_two_minutes_and_retries_only_after_another_wait(self):
+    def test_reconnect_waits_fifteen_seconds_and_retries_only_after_another_wait(self):
         self.c._find_blocking_popup.return_value = (
             "POPUP_RECONNECT", (960, 595), (0, 0, 1920, 1080),
         )
         self.assertFalse(self.c._recover_blocking_popup())
-        self.clock.return_value = 219.99
+        self.clock.return_value = 114.99
         self.assertFalse(self.c._recover_blocking_popup())
         self.c._click_abs.assert_not_called()
-        self.clock.return_value = 220.0
+        self.clock.return_value = 115.0
         self.assertTrue(self.c._recover_blocking_popup())
         self.c._click_abs.assert_called_once_with(960, 595, "POPUP_RECONNECT")
-        self.clock.return_value = 221.0
+        self.clock.return_value = 116.0
         self.assertFalse(self.c._recover_blocking_popup())
-        self.clock.return_value = 340.99
+        self.clock.return_value = 130.99
         self.assertFalse(self.c._recover_blocking_popup())
-        self.clock.return_value = 341.0
+        self.clock.return_value = 131.0
         self.assertTrue(self.c._recover_blocking_popup())
 
     def test_failed_focus_prevents_click(self):
@@ -343,7 +343,7 @@ class PopupRecoveryTests(unittest.TestCase):
         self.c._find_blocking_popup.return_value = ("POPUP_RECONNECT", (960, 600), (0, 0, 1920, 1080))
         for _ in range(3):
             self.c._dismiss_match_end_screen()
-        self.clock.return_value += 119
+        self.clock.return_value += 14
         self.assertTrue(self.c._dismiss_match_end_screen())
         self.c.input.left_click.assert_not_called()
         self.c._click_abs.assert_not_called()

@@ -11,7 +11,7 @@ from vision.window_locator import focus_mtga_window
 
 class PopupRecoveryMixin:
     _POPUP_IDLE_SEC = 5.0
-    _RECONNECT_IDLE_SEC = 120.0
+    _RECONNECT_IDLE_SEC = 15.0
     # Tight text captures from the reported seasonal-reward screen, normalized
     # to 1920x1080. Claim's lettering distinguishes it from orange Play pills.
     _POPUP_TARGETS = (
@@ -151,7 +151,7 @@ class PopupRecoveryMixin:
                      or self._switch_owner_ident == threading.get_ident()))
 
     def _recover_blocking_popup(self, *, stop_event=None, block_navigation=False):
-        """Verified reward/continue clicks after 5s; Reconnect after 120s idle.
+        """Verified reward/continue clicks after 5s; Reconnect after 15s idle.
 
         Also called by Home navigation so the thread owning login/quest work
         can clear its own overlay. Never steal that thread's UI or an input
