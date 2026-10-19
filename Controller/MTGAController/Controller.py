@@ -861,7 +861,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self._starter_dead_ends = 0
         self._starter_dead_end_bundle_ts = 0.0
         self._post_match_ready_ts = None
-        self._post_match_delay_sec = 30
+        self._post_match_delay_sec = 20
         self._stop_requested = False
         self._post_login_action_done = False
         # Which quest target the Historic format/deck selection in MTGA is known
@@ -879,6 +879,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # account name -> the deck thumbnail this bot last clicked on that
         # account's Historic grid. See _deck_is_known_selected.
         self._historic_selected_deck: dict[str, str] = {}
+        # Verified Starter selection for this session only: (account, deck code).
+        # Home visits and normal match resets do not change Arena's selected deck.
+        self._starter_selected_deck: tuple[str, str] | None = None
         self._suppress_selections = False
         self._state_tracker = PlayerLogStateTracker(max_lines=500)
         self._vision = VisionEngine()
@@ -2927,6 +2930,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     return
             if not owner or self._same_account(owner, self._current_account_screen_name):
                 return
+            self._forget_starter_deck("account identity changed")
             self._current_account_screen_name = owner
             # Whatever the log says now supersedes the credential-derived name
             # (the user can switch account in MTGA by hand), so stop protecting it.
@@ -5623,6 +5627,11 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         bot_logger.log_info(f"Starter: clicking back arrow at {back_target} ({back_src}).")
         self._click_abs(back_target[0], back_target[1], "STARTER_CHOOSER_BACK_ARROW")
 
+    def _forget_starter_deck(self, reason: str) -> None:
+        if self._starter_selected_deck is not None:
+            bot_logger.log_info(f"Starter: forgetting selected deck ({reason}).")
+        self._starter_selected_deck = None
+
     def _swap_starter_deck_for_quest(self, target_colors: str) -> None:
         """Change the selected starter deck to one matching the quest colors.
 
@@ -5637,6 +5646,27 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         if not desired_tpl:
             return
         desired_name = os.path.splitext(os.path.basename(desired_tpl))[0].upper()
+        # Use the real identity, never _current_account_key's generic fallback.
+        account = (self._current_account_screen_name or "").strip().casefold()
+        selection = (account, desired_name)
+        if account and self._starter_selected_deck == selection:
+            # The remembered deck only permits reuse on the event's Play page,
+            # never on Start/Choose Your Deck, a chooser or another event's page.
+            confirmed = (
+                self._starter_event_page_confirmed("STARTER_REUSE")
+                and self._starter_template_visible(
+                    "event_play.png", "STARTER_REUSE_PLAY", self._EVENT_PLAY_ROI
+                )
+            )
+            if not self._starter_navigation_may_act():
+                return
+            if (confirmed and self._starter_selected_deck == selection
+                    and (self._current_account_screen_name or "").strip().casefold() == account):
+                bot_logger.log_info(f"Starter: reusing remembered deck {desired_name}; skipping deck selection.")
+                return
+        # Clear BEFORE any selection work: a failed/interrupted attempt must not
+        # leave an old deck trusted, even if navigation backs out successfully.
+        self._forget_starter_deck("selection required or event page unconfirmed")
         runtime_status.set_startup_phase(f"Selecting the {desired_name} deck")
         grid_base = self._starter_deck_grid_point(desired_name)
         if grid_base is None:
@@ -5719,6 +5749,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             return
         if screen == self._STARTER_SCREEN_PLAY:
             bot_logger.log_info(f"Starter: deck {desired_name} submitted; event page ready to queue.")
+            if account and (self._current_account_screen_name or "").strip().casefold() == account:
+                self._starter_selected_deck = selection
+                bot_logger.log_info(f"Starter: remembered selected deck {desired_name} for {account}.")
         elif screen == self._STARTER_SCREEN_CHOOSER:
             bot_logger.log_error(
                 "Starter: still on the deck chooser after submitting; backing out to the event page."
@@ -6631,6 +6664,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
         self._forget_selected_deck()
+        self._forget_starter_deck("new bot session")
         # A new session always starts at the beginning of the round: pass 1
         # (quests), nobody finished yet, no wins banked. Without this a Start
         # after a completed round would resume in the win pass and skip the
@@ -11696,6 +11730,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
         self._forget_selected_deck()
+        self._forget_starter_deck("account logout/switch")
         # A switch really happened, so the logout works -> clear the failed-attempt
         # guard, and count this switch for the anti-storm guard (which asks "have we
         # cycled through every account without playing a single match?").
