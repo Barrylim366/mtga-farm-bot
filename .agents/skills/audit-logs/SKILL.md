@@ -85,6 +85,15 @@ or match result. A timeout can be followed by a late acknowledgment; do not coun
 these observations as separate failed abilities. Log event counts cover retained
 history only; report rotated evidence as missing, never as zero successes.
 
+For the temporary overnight feature soak, also run
+`.venv/Scripts/python.exe tools/temporary_feature_soak_audit.py` on Windows
+(or `.venv/bin/python tools/temporary_feature_soak_audit.py` elsewhere). It is
+read-only and reports retained log evidence for long-game concede attempts,
+Reconnect clicks, ability activation, the 750-gold quest policy, win-deck
+selection, and shutdown scheduling. Link its example lines in the audit. Treat
+zero as "not observed in retained history," not as a failure or proof the
+feature never ran. It cannot verify static UI appearance or deck win rate.
+
 ### Permanent concede incidents
 
 Inspect the summary's `concede_incidents` and matching `runtime/concedes/` bundles

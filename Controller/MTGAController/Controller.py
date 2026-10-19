@@ -10057,13 +10057,21 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             return None
         turn = self.updated_game_state.get_turn_info() or {}
         my_seat = self.__system_seat_id
+        local_priority = my_seat is not None and turn.get("decisionPlayer") == my_seat
+        # During DeclareBlock, Arena can leave priorityPlayer on the attacking
+        # player while the local player's blocker prompt is still open. The
+        # decisionPlayer plus the explicit combat step identify that prompt;
+        # stale cached prompts (notably MulliganResp) still need the priority
+        # guard below.
+        local_block_decision = (
+            local_priority and turn.get("step") == "Step_DeclareBlock"
+        )
         # A delayed opponent decision can leave our old prompt state in the
         # merged GameState. Explicit opponent priority rules out a local stall.
         priority_seat = turn.get("priorityPlayer")
         if (my_seat is not None and priority_seat is not None
-                and priority_seat != my_seat):
+                and priority_seat != my_seat and not local_block_decision):
             return None
-        local_priority = my_seat is not None and turn.get("decisionPlayer") == my_seat
         prompt_kind = None
         if getattr(self, "_group_prompt", None) is not None:
             context = self._group_prompt["context"].lower()
@@ -10082,6 +10090,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             prompt_kind = "assign_damage"
         elif self.__casting_time_options_until > time.time():
             prompt_kind = "casting_options"
+        elif local_block_decision:
+            prompt_kind = "blockers"
         # A prompt cached from an earlier GRE message is not sufficient proof
         # that we still own the decision. In particular, Player.pendingMessageType
         # can remain MulliganResp after the opponent has started their mulligan;
