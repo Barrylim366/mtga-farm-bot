@@ -115,6 +115,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         gold_per_win: int | None = None,
         account_switch_enabled: bool = True,
         auto_concede_stalled_matches: bool = False,
+        account_switch_750_only: bool = False,
     ):
         self.__decision_callback = None
         # Serialises decision EXECUTION. A decision runs for seconds (hand scans
@@ -597,6 +598,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self._account_switch_enabled = bool(account_switch_enabled)
         self._account_switch_main_quests = max(0, min(3, int(account_switch_main_quests or 0)))
         self._account_switch_daily_wins = max(0, min(15, int(account_switch_daily_wins or 0)))
+        self._account_switch_750_only = bool(account_switch_750_only)
         # Quest-mode tracking: a local win counter (the bot knows every match
         # result). Wins are tracked for stats/gold only -- the switch decision is
         # driven purely by absolute main-quest completion (see _account_switch_due).
@@ -3196,6 +3198,11 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def _select_best_quest(self) -> dict | None:
         quests = self._extract_latest_quests() or []
+        if self._750_quest_policy_enabled():
+            view = self._build_quest_view(quests)
+            candidates = self._quest_policy_candidates(view)
+            # Arena can reuse an id for different instances of a quest type.
+            quests = [raw for raw, entry in zip(quests, view) if entry in candidates]
         bot_logger.log_info(f"Post-login: parsed {len(quests)} quest entries from player.log.")
         guild_quests = self._parse_guild_quests(quests)
         if guild_quests:
@@ -3738,7 +3745,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # are complete, starter mode uses its dedicated WB farming fallback.
         active_id = ""
         active_colors = ""
-        guild_entries = [v for v in view if v.get("colors")]
+        # Publish the current snapshot locally before applying the stopping rule.
+        self._cached_quests = view
+        candidates = self._quest_policy_candidates(view)
+        guild_entries = [v for v in candidates if v.get("colors")]
         incomplete_guild = [
             v for v in guild_entries
             if not v.get("goal") or v.get("progress", 0) < v.get("goal", 0)
@@ -3747,8 +3757,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             best = max(incomplete_guild, key=lambda v: v.get("gold", 0))
             active_id = best.get("id", "")
             active_colors = best.get("colors", "")
+        elif self._750_quest_policy_enabled() and candidates:
+            active_id = candidates[0].get("id", "")
 
-        self._cached_quests = view
         self._cached_active_quest_id = active_id
         self._cached_active_colors = active_colors
         for v in view:
@@ -5078,15 +5089,46 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def _main_quest_target_met(self) -> bool:
         """Use the same absolute, fresh quest count for deck choice and switching."""
+        return self._main_quest_target_reason() is not None
+
+    def _750_quest_policy_enabled(self) -> bool:
+        return (
+            getattr(self, "_account_switch_750_only", False)
+            and self._account_switch_mode == "quests"
+            and self._account_switch_main_quests > 0
+        )
+
+    def _main_quest_target_reason(self) -> str | None:
         if self._account_switch_main_quests <= 0:
-            return True
+            return "quest target disabled"
         remaining = self._last_valid_quest_active_incomplete
         if remaining is None or not self._quest_count_confirmed_fresh:
-            return False
+            return None
         # Completed quests disappear from Arena's three slots. This includes
         # completions by the player before the bot started, just like switching.
         remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
-        return remaining <= remaining_target
+        if remaining <= remaining_target:
+            return "configured quest target met"
+        if self._750_quest_policy_enabled() and remaining < self._DAILY_QUEST_SLOTS:
+            incomplete = [q for q in self._cached_quests if not (
+                q.get("goal") and q.get("progress", 0) >= q["goal"]
+            )]
+            # Unknown rewards must not be mistaken for saved 500-gold quests.
+            if len(incomplete) == remaining and all(q.get("gold") == 500 for q in incomplete):
+                return "preserving 500-gold quests; a daily quest slot is free"
+        return None
+
+    def _quest_policy_candidates(self, view: list[dict]) -> list[dict]:
+        """Share reward priority across cached colors and all live quest types."""
+        if not self._750_quest_policy_enabled():
+            return view
+        if not self._quest_count_confirmed_fresh or self._main_quest_target_met():
+            return []
+        incomplete = [q for q in view if not (
+            q.get("goal") and q.get("progress", 0) >= q["goal"]
+        )]
+        high_value = [q for q in incomplete if q.get("gold") == 750]
+        return high_value or incomplete
 
     def _resolve_starter_target_colors(self) -> str:
         """Colors of the deck that best advances the current top quest.
@@ -5116,7 +5158,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 )
             else:
                 bot_logger.log_info("Starter: cached quests have no guild target; keeping current deck.")
-            return self._cached_active_colors
+            if self._cached_active_colors or not self._750_quest_policy_enabled():
+                return self._cached_active_colors
         quest = self._select_best_quest()
         if not quest:
             bot_logger.log_info("Starter: no active quest; keeping current deck.")
@@ -5799,6 +5842,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         Empty colors with no forced file means "no usable quest target"; the
         caller then keeps/falls back to whatever deck it can.
         """
+        if self._750_quest_policy_enabled() and self._main_quest_target_met():
+            bot_logger.log_info(f"{log_prefix}: quest target met; using fallback deck for wins.")
+            return "", None
         quest = self._select_best_quest()
         if not quest:
             colors = self._cached_active_colors or ""
@@ -6511,7 +6557,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
             bot_logger.log_info(
                 "SWITCH CHECK (account='{}'): enabled={} mode={}/{} | daily quests remaining={} "
-                "need<={} | wins(session)={} need>={} | attempt={} | due={}".format(
+                "need<={} | wins(session)={} need>={} | attempt={} | due={} | "
+                "750-only={} | quest result={}".format(
                     self._current_account_key(),
                     self._account_switch_enabled,
                     self._account_switch_mode,
@@ -6531,6 +6578,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     self._account_switch_daily_wins,
                     self._home_quest_check_attempts,
                     self._account_switch_due(),
+                    self._750_quest_policy_enabled(),
+                    self._main_quest_target_reason() or "quest target pending (or unreadable)",
                 )
             )
         if self._account_switch_in_progress or self._account_switch_due():
@@ -11204,6 +11253,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
     def get_account_switch_daily_wins(self) -> int:
         return self._account_switch_daily_wins
 
+    def get_account_switch_750_only(self) -> bool:
+        return bool(self._account_switch_750_only)
+
     def _wins_seen_for_current_account(self) -> int:
         """Wins this account has earned under the bot THIS SESSION.
 
@@ -11987,6 +12039,12 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         outgoing_key = self._account_identity_key(
             self._current_account_screen_name or self._pending_switch_alias
         )
+        if self._750_quest_policy_enabled() and self._switch_phase == "quests":
+            bot_logger.log_info(
+                "Quest pass finished for '{}': {} (750-only).".format(
+                    outgoing_key or "current account", self._main_quest_target_reason() or "switch requested"
+                )
+            )
         # Configured label of the account we're leaving, captured BEFORE the reset
         # below clears _current_account_screen_name, so the next-target selection
         # can skip re-logging into the account that is already current.

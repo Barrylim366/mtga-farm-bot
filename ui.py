@@ -1573,6 +1573,7 @@ class ConfigManager:
             "account_switch_mode": "time",
             "account_switch_main_quests": 0,   # 0-3 main quests to complete
             "account_switch_daily_wins": 0,    # 0-15 daily wins to reach
+            "account_switch_750_only": False,
             # Opt-in: power the PC off once every configured account has hit
             # those two thresholds and the round ends by itself. Off by default
             # -- an unattended shutdown is the one action the user cannot undo
@@ -1812,6 +1813,13 @@ class ConfigManager:
         except (TypeError, ValueError):
             value = 0
         return max(0, min(15, value))
+
+    def get_account_switch_750_only(self) -> bool:
+        return self.config.get("account_switch_750_only") is True
+
+    def set_account_switch_750_only(self, enabled: bool) -> None:
+        self.config["account_switch_750_only"] = bool(enabled)
+        self._save_config()
 
     def set_account_switch_daily_wins(self, count: int) -> None:
         try:
@@ -3735,7 +3743,8 @@ class MTGBotUI(tk.Tk):
             w = self.config_manager.get_account_switch_daily_wins()
         except Exception:
             m, w = 0, 0
-        return f"Account switch: on (quests: {m} main / {w} wins)"
+        policy = " / 750 only" if m > 0 and self.config_manager.get_account_switch_750_only() else ""
+        return f"Account switch: on (quests: {m} main / {w} wins{policy})"
 
     def _live_switch_disabled(self, controller) -> bool:
         """Mirror of _configured_switch_disabled but read from the LIVE, running
@@ -3767,7 +3776,8 @@ class MTGBotUI(tk.Tk):
             w = controller.get_account_switch_daily_wins()
         except Exception:
             m, w = 0, 0
-        return f"Account switch: on (quests: {m} main / {w} wins)"
+        policy = " / 750 only" if m > 0 and controller.get_account_switch_750_only() else ""
+        return f"Account switch: on (quests: {m} main / {w} wins{policy})"
 
     def _get_configured_switch_eta_text(self) -> str:
         if self._configured_switch_disabled():
@@ -4609,6 +4619,7 @@ class MTGBotUI(tk.Tk):
             account_switch_mode = self.config_manager.get_account_switch_mode()
             account_switch_main_quests = self.config_manager.get_account_switch_main_quests()
             account_switch_daily_wins = self.config_manager.get_account_switch_daily_wins()
+            account_switch_750_only = self.config_manager.get_account_switch_750_only()
             account_cycle_index = self.config_manager.get_account_cycle_index()
             account_play_order = self.config_manager.get_account_play_order()
             game_mode = self.config_manager.get_game_mode()
@@ -4630,6 +4641,7 @@ class MTGBotUI(tk.Tk):
                                    account_switch_mode=account_switch_mode,
                                    account_switch_main_quests=account_switch_main_quests,
                                    account_switch_daily_wins=account_switch_daily_wins,
+                                   account_switch_750_only=account_switch_750_only,
                                    account_cycle_index=account_cycle_index,
                                    account_play_order=account_play_order,
                                    game_mode=game_mode,
@@ -6895,7 +6907,7 @@ class SwitchAccountWindow(tk.Toplevel):
         on_close=None,
     ):
         super().__init__(parent)
-        self._ui_scale = _get_ui_scale_from_widget(parent)
+        self._ui_scale = _get_ui_scale_from_widget(parent) * 1.5
         self._parent = parent
         self._config_manager = config_manager
         self._on_close_callback = on_close
@@ -6975,11 +6987,16 @@ class SwitchAccountWindow(tk.Toplevel):
         self._title_label = None
         self._accounts_title_label = None
         self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._canvas.configure(yscrollcommand=self._scrollbar.set)
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._canvas.bind("<Configure>", self._on_resize_manage_background)
         self._load_accounts_from_config()
         self._setup_styles()
         self._build_ui()
+        self._scale_manage_layout()
+        self.bind("<MouseWheel>", self._scroll_manage_content)
         self._canvas.bind("<Delete>", lambda _e: self._clear_selected_account_row())
         self._canvas.bind("<BackSpace>", lambda _e: self._clear_selected_account_row())
         self._load_manage_background_image()
@@ -7026,6 +7043,53 @@ class SwitchAccountWindow(tk.Toplevel):
 
     def _s(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def _font(self, points: int, *styles):
+        # Canvas coordinates are pixels. Positive Tk font sizes are points and
+        # otherwise grow independently with Windows DPI, overlapping the layout.
+        # Keep the dialog geometry fixed while making its labels easier to read.
+        return ("Segoe UI", -self._s(points * 4 / 3 * 1.3), *styles)
+
+    def _scale_manage_layout(self):
+        cv = self._canvas
+        widths = {item: float(cv.itemcget(item, "width"))
+                  for item in cv.find_all() if cv.type(item) == "window"}
+        cv.scale("all", 0, 0, self._ui_scale, self._ui_scale)
+        # Native entries and comboboxes must use pixel bounds too; their default
+        # width is in characters and changes with the system font and DPI.
+        for item in cv.find_all():
+            if cv.type(item) != "window":
+                continue
+            widget = self.nametowidget(cv.itemcget(item, "window"))
+            widget.configure(font=self._font(9))
+            cv.itemconfigure(
+                item,
+                width=self._s(widths[item]),
+                height=self._s(24),
+            )
+            widget.bind("<FocusIn>", self._reveal_manage_field, add="+")
+        self._apply_content_minsize()
+
+    def _scroll_manage_content(self, event):
+        # Leave dropdown wheel handling to Tk while the popup is in use.
+        if isinstance(event.widget, ttk.Combobox):
+            return
+        self._canvas.yview_scroll(-int(event.delta / 120), "units")
+        return "break"
+
+    def _reveal_manage_field(self, event):
+        cv = self._canvas
+        for item in cv.find_all():
+            if cv.type(item) == "window" and cv.itemcget(item, "window") == str(event.widget):
+                bounds = cv.bbox(item)
+                top = cv.canvasy(0)
+                height = cv.winfo_height()
+                total = self._s(916)
+                if bounds[1] < top:
+                    cv.yview_moveto(max(0, bounds[1] - self._s(12)) / total)
+                elif bounds[3] > top + height:
+                    cv.yview_moveto((bounds[3] + self._s(12) - height) / total)
+                break
 
     def _load_accounts_from_config(self):
         existing = self._config_manager.get_managed_accounts()[: self._max_accounts]
@@ -7107,15 +7171,17 @@ class SwitchAccountWindow(tk.Toplevel):
         self._apply_content_minsize()
 
     def _apply_content_minsize(self):
-        _fit_window_to_canvas_content(
-            self,
-            self._canvas,
-            exclude_items={self._bg_canvas_item} if self._bg_canvas_item else None,
-            pad_x=18,
-            pad_y=20,
-            floor_w=460,
-            floor_h=820,
-        )
+        self._canvas.configure(scrollregion=(0, 0, self._s(460), self._s(916)))
+        width = self._s(460) + self._scrollbar.winfo_reqwidth()
+        height = min(self._s(916), max(240, self.winfo_screenheight() - 80))
+        self.minsize(width, min(height, self._s(560)))
+        if (self.winfo_width(), self.winfo_height()) != (width, height):
+            self.geometry(f"{width}x{height}")
+        if self.winfo_ismapped():
+            x = min(max(0, self.winfo_x()), max(0, self.winfo_screenwidth() - width))
+            y = min(max(0, self.winfo_y()), max(0, self.winfo_screenheight() - height - 40))
+            if (x, y) != (self.winfo_x(), self.winfo_y()):
+                self.geometry(f"+{x}+{y}")
 
     def _fit_window_to_content_width(self):
         try:
@@ -7145,7 +7211,7 @@ class SwitchAccountWindow(tk.Toplevel):
         if self._manage_bg_source_image is None:
             return
         width = max(2, self._canvas.winfo_width())
-        height = max(2, self._canvas.winfo_height())
+        height = max(2, self._s(916), self._canvas.winfo_height())
         try:
             fitted = ImageOps.fit(
                 self._manage_bg_source_image,
@@ -7236,7 +7302,7 @@ class SwitchAccountWindow(tk.Toplevel):
         return photo
 
     def _create_manage_group_panel(self, name: str, x: int, y: int, width: int, height: int):
-        panel_photo = self._render_manage_group_panel(width, height)
+        panel_photo = self._render_manage_group_panel(self._s(width), self._s(height))
         item = self._canvas.create_image(x, y, anchor="nw", image=panel_photo)
         self._group_panel_items[name] = item
 
@@ -7288,17 +7354,17 @@ class SwitchAccountWindow(tk.Toplevel):
         command,
         primary: bool,
     ):
-        skins = self._resolve_manage_button_skins(primary=primary, body_w=body_w, body_h=body_h)
+        skins = self._resolve_manage_button_skins(primary=primary, body_w=self._s(body_w), body_h=self._s(body_h))
         if not skins:
             return
         tag = f"manage_btn_{name}"
         bg_item = self._canvas.create_image(x, y, anchor="nw", image=skins["normal"], tags=(tag,))
         text_item = self._canvas.create_text(
-            x + (skins["normal"].width() // 2),
-            y + (skins["normal"].height() // 2) - 2,
+            x + (skins["normal"].width() / self._ui_scale / 2),
+            y + (skins["normal"].height() / self._ui_scale / 2) - 2,
             text=text,
             fill="#F2F6FF",
-            font=("Segoe UI", 11, "bold"),
+            font=self._font(11, "bold"),
             anchor="center",
             tags=(tag,),
         )
@@ -7387,7 +7453,7 @@ class SwitchAccountWindow(tk.Toplevel):
             bd=0,
             relief=tk.FLAT,
             highlightthickness=0,
-            font=("Segoe UI", 9),
+            font=self._font(9),
         )
         return entry
 
@@ -7409,10 +7475,38 @@ class SwitchAccountWindow(tk.Toplevel):
             highlightthickness=0,
             padx=8,
             pady=5,
-            font=("Segoe UI", 10, "bold"),
+            font=self._font(10, "bold"),
             cursor="hand2",
         )
         return btn
+
+    def _build_750_quest_toggle(self, y: int) -> None:
+        c = self._theme
+        cv = self._canvas
+        self.switch_750_only_var = tk.BooleanVar(
+            value=self._config_manager.get_account_switch_750_only()
+        )
+        box = cv.create_rectangle(
+            26, y, 40, y + 14, fill=c["entry_bg"], outline=c["widget_border"], width=1,
+        )
+        tick = cv.create_text(
+            33, y + 6, text="X", fill=c["text"], font=self._font(10, "bold"),
+            state="normal" if self.switch_750_only_var.get() else "hidden",
+        )
+        label = cv.create_text(
+            50, y - 1, text="750-gold quests only (free a slot if full)",
+            fill=c["text"], font=self._font(9), anchor="nw",
+        )
+
+        def toggle(_event=None):
+            self._config_manager.set_account_switch_750_only(not self.switch_750_only_var.get())
+            self.switch_750_only_var.set(self._config_manager.get_account_switch_750_only())
+            cv.itemconfigure(tick, state="normal" if self.switch_750_only_var.get() else "hidden")
+
+        for item in (box, tick, label):
+            cv.tag_bind(item, "<Button-1>", toggle)
+            cv.tag_bind(item, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
+            cv.tag_bind(item, "<Leave>", lambda _e: cv.configure(cursor=""))
 
     def _build_shutdown_toggle(self, y: int) -> None:
         """Canvas checkbox: power the PC off when the whole rotation is done.
@@ -7434,19 +7528,19 @@ class SwitchAccountWindow(tk.Toplevel):
         )
         self._shutdown_tick_item = cv.create_text(
             26 + box // 2, y + box // 2 - 1,
-            text="X", fill=c["text"], font=("Segoe UI", 10, "bold"), anchor="center",
+            text="X", fill=c["text"], font=self._font(10, "bold"), anchor="center",
         )
         self._shutdown_label_item = cv.create_text(
             50, y - 1,
             text="Shut down PC when all accounts are done",
-            fill=c["text"], font=("Segoe UI", 9), anchor="nw",
+            fill=c["text"], font=self._font(9), anchor="nw",
         )
         # Say plainly that this rides on quests mode -- in time mode the round
         # never ends, so the checkbox would look armed and never do anything.
         cv.create_text(
             26, y + 18,
             text="(quests mode only; a 2 min warning lets you cancel)",
-            fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw",
+            fill=c["text_muted"], font=self._font(8), anchor="nw",
         )
         for item in (self._shutdown_box_item, self._shutdown_tick_item, self._shutdown_label_item):
             cv.tag_bind(item, "<Button-1>", self._toggle_shutdown_when_round_complete)
@@ -7487,33 +7581,33 @@ class SwitchAccountWindow(tk.Toplevel):
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
         # Leave space for the run-wide shutdown timer below the completion toggle.
-        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=184)
-        self._create_manage_group_panel("accounts_block", x=16, y=226, width=428, height=410)
-        self._create_manage_group_panel("order_block", x=16, y=648, width=428, height=220)
+        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=212)
+        self._create_manage_group_panel("accounts_block", x=16, y=254, width=428, height=410)
+        self._create_manage_group_panel("order_block", x=16, y=676, width=428, height=220)
 
         # Row 1: switch trigger mode (time vs quests, mutually exclusive) + time.
-        cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
+        cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=self._font(10), anchor="nw")
         self.switch_mode_var = tk.StringVar(value=self._config_manager.get_account_switch_mode())
         mode_combo = ttk.Combobox(
             self, textvariable=self.switch_mode_var, values=["time", "quests"],
             state="readonly", width=8,
         )
         mode_combo.configure(style="ManageFire.TCombobox")
-        cv.create_window(104, 44, anchor="nw", window=mode_combo)
-        cv.create_text(206, 46, text="Time min:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_window(104, 44, anchor="nw", window=mode_combo, width=90)
+        cv.create_text(206, 46, text="Time min:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
         time_entry = self._make_entry(self, textvariable=self.switch_minutes_var, width=5)
-        cv.create_window(282, 44, anchor="nw", window=time_entry)
-        cv.create_text(360, 46, text="(0=off)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_window(282, 44, anchor="nw", window=time_entry, width=56)
+        cv.create_text(360, 46, text="(0=off)", fill=c["text_muted"], font=self._font(8), anchor="nw")
         # Row 2: quest-mode thresholds + save.
-        cv.create_text(26, 78, text="Main 0-3:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 78, text="Main 0-3:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_main_var = tk.StringVar(value=str(self._config_manager.get_account_switch_main_quests()))
         main_entry = self._make_entry(self, textvariable=self.switch_main_var, width=3)
-        cv.create_window(92, 76, anchor="nw", window=main_entry)
-        cv.create_text(150, 78, text="Wins 0-15:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_window(92, 76, anchor="nw", window=main_entry, width=32)
+        cv.create_text(150, 78, text="Wins 0-15:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_daily_var = tk.StringVar(value=str(self._config_manager.get_account_switch_daily_wins()))
         daily_entry = self._make_entry(self, textvariable=self.switch_daily_var, width=3)
-        cv.create_window(226, 76, anchor="nw", window=daily_entry)
+        cv.create_window(226, 76, anchor="nw", window=daily_entry, width=32)
         for _e in (time_entry, main_entry, daily_entry):
             _e.bind("<Return>", lambda _ev: self._save_switch_settings())
         self._create_manage_canvas_button(
@@ -7529,31 +7623,32 @@ class SwitchAccountWindow(tk.Toplevel):
         # Row 3: what happens after the LAST account finishes. It belongs here
         # rather than in the general settings because it only ever fires on the
         # end of an account rotation, which is configured in this very block.
-        self._build_shutdown_toggle(y=106)
+        self._build_750_quest_toggle(y=106)
+        self._build_shutdown_toggle(y=134)
 
-        cv.create_text(26, 146, text="Max play time (hours):", fill=c["text"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 174, text="Max play time (hours):", fill=c["text"], font=self._font(9), anchor="nw")
         self.max_play_hours_var = tk.StringVar(value=format(self._config_manager.get_max_play_hours(), "g"))
         limit_entry = self._make_entry(self, textvariable=self.max_play_hours_var, width=7)
-        cv.create_window(178, 144, anchor="nw", window=limit_entry)
+        cv.create_window(178, 172, anchor="nw", window=limit_entry, width=64)
         limit_entry.bind("<Return>", lambda _e: self._save_switch_settings())
-        cv.create_text(250, 146, text="(0 = off; next run)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
-        cv.create_text(26, 176, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_text(250, 174, text="(0 = off; next run)", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_text(26, 204, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=self._font(8), anchor="nw")
 
-        cv.create_text(26, 236, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
-        cv.create_text(26, 264, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(62, 264, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(208, 264, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 264, text="Accounts (max 10)", fill=c["text"], font=self._font(13, "bold"), anchor="nw")
+        cv.create_text(26, 292, text="#", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(62, 292, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(208, 292, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
 
         self._table_rows = []
-        row_y_start = 284
+        row_y_start = 312
         row_step = 20
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
             tag = f"acct_row_{idx}"
-            bg_item = cv.create_rectangle(22, y - 2, 438, y + 16, fill=c["row_bg"], outline=c["table_border"], tags=(tag,))
-            idx_item = cv.create_text(30, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw", tags=(tag,))
-            name_item = cv.create_text(62, y, text="", fill=c["text"], font=("Segoe UI", 9, "bold"), anchor="nw", tags=(tag,))
-            email_item = cv.create_text(208, y, text="", fill=c["text"], font=("Segoe UI", 9), anchor="nw", tags=(tag,))
+            bg_item = cv.create_rectangle(22, y - 2, 438, y + 18, fill=c["row_bg"], outline=c["table_border"], tags=(tag,))
+            idx_item = cv.create_text(30, y, text=str(idx + 1), fill=c["text_muted"], font=self._font(9), anchor="nw", tags=(tag,))
+            name_item = cv.create_text(62, y, text="", fill=c["text"], font=self._font(9, "bold"), anchor="nw", tags=(tag,))
+            email_item = cv.create_text(208, y, text="", fill=c["text"], font=self._font(9), anchor="nw", tags=(tag,))
             self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item, "bg": bg_item})
             self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, row_idx=idx: self._select_account_row(row_idx))
             self._canvas.tag_bind(tag, "<Enter>", lambda _e: self._canvas.configure(cursor="hand2"))
@@ -7566,27 +7661,27 @@ class SwitchAccountWindow(tk.Toplevel):
         # that appeared nowhere in Arena. The Arena name is the only identity the
         # Player.log exposes, so it is the one that has to be right; the label is
         # now just the same string.
-        cv.create_text(26, 494, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 522, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
         name_entry = self._make_entry(self, textvariable=self.account_name_var, width=24)
         name_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 492, anchor="nw", window=name_entry)
-        cv.create_text(280, 494, text="(as shown in Arena)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_window(104, 520, anchor="nw", window=name_entry, width=168)
+        cv.create_text(280, 522, text="(as shown in Arena)", fill=c["text_muted"], font=self._font(8), anchor="nw")
 
-        cv.create_text(26, 524, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 552, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
         email_entry = self._make_entry(self, textvariable=self.account_email_var, width=34)
         email_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 522, anchor="nw", window=email_entry)
+        cv.create_window(104, 550, anchor="nw", window=email_entry, width=318)
 
-        cv.create_text(26, 554, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 582, text="Password", fill=c["text_muted"], font=self._font(9), anchor="nw")
         password_entry = self._make_entry(self, textvariable=self.account_pw_var, width=34, show="*")
         password_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 552, anchor="nw", window=password_entry)
+        cv.create_window(104, 580, anchor="nw", window=password_entry, width=318)
 
         self._create_manage_canvas_button(
             name="save_row",
             text="Save Row",
             x=26,
-            y=588,
+            y=616,
             body_w=104,
             body_h=30,
             command=self._save_selected_account,
@@ -7597,7 +7692,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="delete_row",
             text="Delete Row",
             x=134,
-            y=588,
+            y=616,
             body_w=104,
             body_h=30,
             command=self._clear_selected_account_row,
@@ -7608,15 +7703,15 @@ class SwitchAccountWindow(tk.Toplevel):
             name="save_accounts",
             text="Save Accounts",
             x=244,
-            y=588,
+            y=616,
             body_w=158,
             body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(26, 660, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
-        cv.create_line(22, 677, 438, 677, fill=c["table_border"], width=1)
+        cv.create_text(26, 688, text="Account Play Order", fill=c["text"], font=self._font(10), anchor="nw")
+        cv.create_line(22, 705, 438, 705, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
@@ -7626,8 +7721,8 @@ class SwitchAccountWindow(tk.Toplevel):
             col = idx // 5
             row = idx % 5
             lx, cx = col_x[col]
-            y = 684 + row * 24
-            cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+            y = 712 + row * 24
+            cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=self._font(9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
                 self,
@@ -7637,17 +7732,17 @@ class SwitchAccountWindow(tk.Toplevel):
                 width=11,
             )
             combo.configure(style="ManageFire.TCombobox")
-            cv.create_window(cx, y - 2, anchor="nw", window=combo)
+            cv.create_window(cx, y - 2, anchor="nw", window=combo, width=174)
             self._order_vars.append(var)
             self._order_combos.append(combo)
         # vertical divider between columns
-        cv.create_line(230, 680, 230, 806, fill=c["table_border"], width=1)
+        cv.create_line(230, 708, 230, 834, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
             x=26,
-            y=816,
+            y=844,
             body_w=140,
             body_h=34,
             command=self._save_account_play_order,
@@ -7657,18 +7752,27 @@ class SwitchAccountWindow(tk.Toplevel):
             name="close_bottom",
             text="Back",
             x=246,
-            y=816,
+            y=844,
             body_w=120,
             body_h=34,
             command=self.destroy,
             primary=False,
         )
 
-    def _truncate_text(self, text: str, max_len: int) -> str:
+    def _set_table_text(self, item: int, text: str, max_width: int):
+        # Measure the rendered canvas item so even platform font substitutions
+        # and rounding at fractional UI scales stay inside the column.
         value = text or ""
-        if len(value) <= max_len:
-            return value
-        return value[: max_len - 1] + "..."
+        self._canvas.itemconfigure(item, text=value)
+        bounds = self._canvas.bbox(item)
+        width = self._s(max_width)
+        if bounds and bounds[2] - bounds[0] > width:
+            while value:
+                value = value[:-1]
+                self._canvas.itemconfigure(item, text=value + "...")
+                bounds = self._canvas.bbox(item)
+                if bounds[2] - bounds[0] <= width:
+                    break
 
     def _refresh_accounts_table(self):
         c = self._theme
@@ -7681,10 +7785,10 @@ class SwitchAccountWindow(tk.Toplevel):
             self._canvas.itemconfigure(row_widgets["idx"], fill=c["accent"] if selected else c["text_muted"])
             name_fg = c["accent"] if selected else (c["text"] if account["name"] else c["text_muted"])
             email_fg = c["accent"] if selected else (c["text"] if account["email"] else c["text_muted"])
-            name_text = self._truncate_text(account["name"], 14) if account["name"] else "click to edit"
-            self._canvas.itemconfigure(row_widgets["name"], fill=name_fg, text=name_text)
-            email_text = self._truncate_text(account["email"], 22) if account["email"] else ""
-            self._canvas.itemconfigure(row_widgets["email"], fill=email_fg, text=email_text)
+            self._canvas.itemconfigure(row_widgets["name"], fill=name_fg)
+            self._set_table_text(row_widgets["name"], account["name"] or "click to edit", 136)
+            self._canvas.itemconfigure(row_widgets["email"], fill=email_fg)
+            self._set_table_text(row_widgets["email"], account["email"], 220)
 
     def _populate_details_fields(self):
         account = self._accounts_data[self._selected_account_idx]
@@ -7865,6 +7969,8 @@ class SwitchAccountWindow(tk.Toplevel):
                 pass
         if mode == "quests":
             detail = f"quests ({self.switch_main_var.get()} main + {self.switch_daily_var.get()} wins)"
+            if self._config_manager.get_account_switch_750_only():
+                detail += "; 750-gold quests only (free a slot if full; next run)"
         else:
             detail = f"time ({self.switch_minutes_var.get()} min)"
         messagebox.showinfo("Saved", f"Account-switch settings saved: {detail}.\nMax play time: {self.max_play_hours_var.get()} hours (0 = off; applies next run).")
