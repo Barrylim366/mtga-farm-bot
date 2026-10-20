@@ -97,7 +97,7 @@ class Config:
             targets=_env("MTGA_FORGE_TARGETS", "abilities"),
             scry=_env("MTGA_FORGE_SCRY", "on"),
             timeout=timeout,
-            free_forge=_env("MTGA_FORGE_FREE", "off") not in _OFF,
+            free_forge=_env("MTGA_FORGE_FREE", "off") in _ON,
         )
 
     def off(self) -> bool:
@@ -478,8 +478,8 @@ class Bridge:
                     chosen_move = wanted
                 elif config.free_forge:
                     grp_id = ids.get(instance_id)
-                    is_unsupported = False
-                    is_dupe_legend = False
+                    is_unsupported = True
+                    is_dupe_legend = True
                     if grp_id is not None:
                         try:
                             import AI.Utilities.CardPolicy as CardPolicy
@@ -496,7 +496,8 @@ class Bridge:
                                 live_instance_ids=live_ids,
                             ) is not None
                         except Exception:
-                            pass
+                            is_unsupported = True
+                            is_dupe_legend = True
                     if not is_unsupported and not is_dupe_legend and instance_id in offered:
                         chosen_move = wanted
                         note = "approved by Forge (free forge; legal in Arena and safe)"
@@ -618,20 +619,35 @@ class Bridge:
                 wanted = {"cast": [instance_id]}
                 if bot_generate(filtered_state(game_state, instance_id, me), ids) == wanted:
                     chosen_move = wanted
-                else:
+                elif config.free_forge:
                     grp_id = ids.get(instance_id)
-                    is_unsupported = False
+                    is_unsupported = True
+                    is_dupe_legend = True
                     if grp_id is not None:
                         try:
                             import AI.Utilities.CardPolicy as CardPolicy
+                            from AI.Utilities import LegendRule, RemovalLogic
+                            full_state = game_state.get_full_state() or {}
+                            bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
+                            live_ids = RemovalLogic.battlefield_instance_ids(full_state, bf_ids)
                             is_unsupported = CardPolicy.is_unsupported_to_cast(grp_id)
+                            is_dupe_legend = LegendRule.duplicate_legend_in_play(
+                                cast_instance_id=instance_id,
+                                game_objects=full_state.get("gameObjects", []) or [],
+                                my_seat=me,
+                                battlefield_zone_ids=bf_ids,
+                                live_instance_ids=live_ids,
+                            ) is not None
                         except Exception:
-                            pass
-                    if not is_unsupported and instance_id in offered:
+                            is_unsupported = True
+                            is_dupe_legend = True
+                    if not is_unsupported and not is_dupe_legend and instance_id in offered:
                         chosen_move = wanted
-                        note = "approved by Forge (instant-speed legal in Arena)"
+                        note = "approved by Forge (free forge; instant-speed legal in Arena and safe)"
                     else:
                         note = "bot would not cast that card"
+                else:
+                    note = "bot would not cast that card"
             elif wants == "activate":
                 ability = next((e for e in usable if e.get("id") == decision.get("id")), None)
                 if ability is None:

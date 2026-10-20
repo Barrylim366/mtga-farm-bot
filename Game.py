@@ -119,6 +119,7 @@ class Game:
         self.controller = controller
         self.last_logged_turn = -1
         self.game_started = False
+        self._match_started_marked = False
         self.starting_hand_logged = False
         self._stop_requested = False
         # Key of the match whose end was already handled -- see _match_end_key.
@@ -237,6 +238,9 @@ class Game:
     def _mark_match_started(self) -> None:
         """A new match is confirmed live: first mulligan, or an inferred live state
         when we attached mid-game."""
+        if getattr(self, "_match_started_marked", False):
+            return
+        self._match_started_marked = True
         self._match_started_ts = time.time()
         try:
             timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
@@ -369,6 +373,7 @@ class Game:
         # Reset Game state
         self.last_logged_turn = -1
         self.game_started = False
+        self._match_started_marked = False
         self.starting_hand_logged = False
         self._last_action_delay_turn = -1
         self._match_started_ts = None
@@ -430,7 +435,7 @@ class Game:
             return
         self._debug(f"Mulligan decision called with {len(card_list)} cards")
         runtime_status.set_mode("in_game")
-        if not self.game_started:
+        if not getattr(self, "_match_started_marked", False):
             self._mark_match_started()
         mull_count = getattr(self.controller, "_mulligan_count", 0)
         try:

@@ -9990,11 +9990,14 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         so long scans and AI decisions use this predicate as cooperative
         cancellation immediately before probes and input.
         """
-        if self._stop_requested or self._suppress_selections:
+        if getattr(self, "_stop_requested", False) or getattr(self, "_suppress_selections", False):
             return False
         if getattr(self, "_Controller__concession_claimed", False):
             return False
-        return self.__is_live_match(expected_match_id)
+        is_live = getattr(self, "_Controller__is_live_match", None)
+        if callable(is_live):
+            return is_live(expected_match_id)
+        return True
 
     def __record_decision(self, decision_kind, move_name, move_data, extra=None) -> None:
         """Record a debug snapshot of the live game state for a prompt-handler
@@ -10114,12 +10117,39 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             bot_logger.log_error(f"select_cards_to_tuck failed: {e}")
             cards_to_tuck = list(range(count_to_tuck))
 
-        bot_logger.log_info(f"Target cards to tuck: {cards_to_tuck}")
-        target_ids_remaining = list(cards_to_tuck)
+        # Resolve index tokens into instanceId if card_list carries instanceId, while preserving direct instance IDs
+        known_instance_ids = {
+            int(c["instanceId"])
+            for c in card_list
+            if isinstance(c, dict) and c.get("instanceId") is not None
+        }
+        resolved_targets: list[int] = []
+        for t in cards_to_tuck:
+            if t in known_instance_ids:
+                resolved_targets.append(t)
+            elif isinstance(t, int) and 0 <= t < len(card_list):
+                c = card_list[t]
+                if isinstance(c, dict) and c.get("instanceId") is not None:
+                    resolved_targets.append(int(c["instanceId"]))
+                else:
+                    resolved_targets.append(t)
+            else:
+                resolved_targets.append(t)
 
-        centre_mapped, _ = self._map_abs_point_to_arena(
+        bot_logger.log_info(f"Target cards to tuck: {resolved_targets}")
+        target_ids_remaining = list(resolved_targets)
+
+        expected_match_id = getattr(self, "_Controller__live_match_id", None)
+        if expected_match_id is None:
+            expected_match_id = getattr(self, "__live_match_id", None)
+
+        centre_mapped, centre_src = self._map_abs_point_to_arena(
             self.mulligan_centre_coors, label="MULLIGAN_CENTRE", force_reacquire=True
         )
+        if centre_src == "absolute_no_arena":
+            bot_logger.log_error("MULLIGAN_TUCK aborted: arena_region unavailable.")
+            return
+
         library_mapped, _ = self._map_abs_point_to_arena(
             self.mulligan_library_coors, label="MULLIGAN_LIBRARY", force_reacquire=False
         )
@@ -10130,37 +10160,56 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         arena = self._ensure_arena_region()
         scale_x = (arena[2] / 1920.0) if arena else 1.0
 
-        # Sweep horizontally to the right from mulligan_centre
-        start_x = centre_mapped[0]
-        scan_y = centre_mapped[1]
-        end_mapped, _ = self._map_abs_point_to_arena(
-            (1680, self.mulligan_centre_coors[1]), label="MULLIGAN_SCAN_END"
-        )
+        # Sweep horizontally across the full hand row
+        sweep_start_abs = (480, self.mulligan_centre_coors[1])
+        sweep_end_abs = (1650, self.mulligan_centre_coors[1])
+        start_mapped, _ = self._map_abs_point_to_arena(sweep_start_abs, label="MULLIGAN_SWEEP_START")
+        end_mapped, _ = self._map_abs_point_to_arena(sweep_end_abs, label="MULLIGAN_SWEEP_END")
+        start_x = start_mapped[0]
         end_x = end_mapped[0]
+        scan_y = centre_mapped[1]
 
         dropped_count = 0
 
+        def _can_act() -> bool:
+            if getattr(self, "_stop_requested", False) or getattr(self, "_suppress_selections", False):
+                return False
+            if expected_match_id is not None:
+                can_exec = getattr(self, "can_execute_game_action", None)
+                if callable(can_exec) and not can_exec(expected_match_id):
+                    return False
+            return True
+
         def _drag_to_library(from_x: int, from_y: int):
+            if not _can_act():
+                bot_logger.log_info("MULLIGAN_TUCK drag aborted: match ended or action blocked.")
+                return
             bot_logger.log_info(f"Dragging card from ({from_x}, {from_y}) to library {library_mapped}")
             self.input.move_abs(from_x, from_y)
             time.sleep(0.15)
             self.input.left_down()
-            time.sleep(0.12)
-            steps = 15
-            dx = (library_mapped[0] - from_x) / steps
-            dy = (library_mapped[1] - from_y) / steps
-            for i in range(1, steps + 1):
-                cur_x = int(round(from_x + dx * i))
-                cur_y = int(round(from_y + dy * i))
-                self.input.move_abs(cur_x, cur_y)
-                time.sleep(0.015)
-            time.sleep(0.15)
-            self.input.left_up()
+            try:
+                time.sleep(0.12)
+                steps = 15
+                dx = (library_mapped[0] - from_x) / steps
+                dy = (library_mapped[1] - from_y) / steps
+                for i in range(1, steps + 1):
+                    cur_x = int(round(from_x + dx * i))
+                    cur_y = int(round(from_y + dy * i))
+                    self.input.move_abs(cur_x, cur_y)
+                    time.sleep(0.015)
+                time.sleep(0.15)
+            finally:
+                self.input.left_up()
             time.sleep(0.4)
 
         while dropped_count < count_to_tuck:
+            if not _can_act():
+                bot_logger.log_info("MULLIGAN_TUCK aborted: match ended or action blocked.")
+                break
+
             bot_logger.log_info(
-                f"Tuck iteration {dropped_count + 1}/{count_to_tuck}: returning to mulligan_centre {centre_mapped}"
+                f"Tuck iteration {dropped_count + 1}/{count_to_tuck}: sweeping hand row from ({start_x}, {scan_y})"
             )
             self.input.move_abs(start_x, scan_y)
             time.sleep(0.25)
@@ -10172,13 +10221,17 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             found_card = False
             found_id = None
             found_pos = None
+            saw_any_hover = False
 
             while cur_x <= end_x:
+                if not _can_act():
+                    break
                 cur_x += step_px
                 self.input.move_abs(cur_x, scan_y)
                 time.sleep(dwell_sec)
 
                 if self.log_reader.has_new_line(self.patterns['hover_id']):
+                    saw_any_hover = True
                     hover_line = self.log_reader.get_latest_line_containing_pattern(
                         self.patterns['hover_id']
                     )
@@ -10196,18 +10249,28 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 target_ids_remaining.remove(found_id)
                 _drag_to_library(found_pos[0], found_pos[1])
                 dropped_count += 1
-            else:
-                # Positional fallback if hover log lines weren't received
+            elif not saw_any_hover:
+                # Positional fallback ONLY when complete sweep received no hover events at all (e.g. log output not synced)
                 slot_index = dropped_count
                 card_spacing = int(115 * scale_x)
-                fallback_x = int(start_x + (slot_index * card_spacing))
+                fallback_x = int(centre_mapped[0] + (slot_index * card_spacing))
                 bot_logger.log_info(
-                    f"Hover detection did not match target card; using positional fallback at ({fallback_x}, {scan_y})"
+                    f"No hover events received across hand sweep; using positional fallback at ({fallback_x}, {scan_y})"
                 )
                 if target_ids_remaining:
                     target_ids_remaining.pop(0)
                 _drag_to_library(fallback_x, scan_y)
                 dropped_count += 1
+            else:
+                # Hover events were observed, but none matched remaining target cards.
+                bot_logger.log_error(
+                    f"MULLIGAN_TUCK: Hover events observed but no target cards {target_ids_remaining} matched; aborting tuck to prevent dragging wrong cards."
+                )
+                break
+
+        if not _can_act():
+            bot_logger.log_info("MULLIGAN_TUCK aborted before done click: match ended or stop requested.")
+            return
 
         # All required cards dropped to library; click Done button
         time.sleep(0.4)

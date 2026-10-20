@@ -47,7 +47,8 @@ def _payoff_lookup(grp_id: int) -> bool:
     if grp_id in _payoff_memo:
         return _payoff_memo[grp_id]
     try:
-        text = str(CardInfo.get_oracle_text(grp_id) or "")
+        card_info = CardInfo.get_card_info_local(grp_id) or {}
+        text = str(card_info.get("oracleText") or "")
     except Exception:
         text = ""
     result = bool(_RE_LIFEGAIN_PAYOFF.search(text))

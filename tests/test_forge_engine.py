@@ -264,8 +264,16 @@ class MainPhaseTest(unittest.TestCase):
         ai = FakeAI({"cast": [100]}, may_cast=())
         config = Config(free_forge=True)
         move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
-                                  bot_state(self.message), {}, config)
+                                  bot_state(self.message), {101: 20}, config)
         self.assertEqual(move, {"cast": [101]})
+
+    def test_free_forge_fails_closed_when_card_id_missing_or_unsupported(self):
+        bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                  bot_state(self.message), {}, config)
+        self.assertEqual(move, {"cast": [100]})
 
     def test_a_held_creature_is_cast_before_combat(self):
         answers = iter([{"action": "none"}, {"action": "cast", "id": 101}])

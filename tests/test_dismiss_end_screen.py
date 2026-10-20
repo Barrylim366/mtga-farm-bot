@@ -28,9 +28,17 @@ class DismissEndScreenTests(unittest.TestCase):
         self.c._get_ui_action_arena_region = lambda *a, **k: (0, 0, 1920, 1080)
         self.c._ensure_arena_region = lambda *a, **k: (0, 0, 1920, 1080)
         self.c.input = Mock()
+        self.current_pos = (0, 0)
         self.clicked_points = []
-        self.c.input.move_abs = lambda x, y: self.clicked_points.append((x, y))
-        self.c.input.left_click = Mock()
+
+        def _mock_move(x, y):
+            self.current_pos = (x, y)
+
+        def _mock_click(count=1):
+            self.clicked_points.append(self.current_pos)
+
+        self.c.input.move_abs = Mock(side_effect=_mock_move)
+        self.c.input.left_click = Mock(side_effect=_mock_click)
         self.c._note_match_finished = Mock()
         self.c._update_gold_from_inventory = Mock()
         self.c._maybe_post_match_action = Mock()
@@ -43,7 +51,8 @@ class DismissEndScreenTests(unittest.TestCase):
 
         self.c.dismiss_end_screen()
 
-        # Exactly 1 click position should be registered
+        # Exactly 1 click should be registered
+        self.assertEqual(self.c.input.left_click.call_count, 1)
         self.assertEqual(len(self.clicked_points), 1, "Must not fire blind second click after dismissal")
         click_x, click_y = self.clicked_points[0]
 
@@ -69,6 +78,7 @@ class DismissEndScreenTests(unittest.TestCase):
         self.c.dismiss_end_screen()
 
         # 2 clicks registered
+        self.assertEqual(self.c.input.left_click.call_count, 2)
         self.assertEqual(len(self.clicked_points), 2)
         first_x, first_y = self.clicked_points[0]
         second_x, second_y = self.clicked_points[1]
