@@ -294,6 +294,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self.mulligan_library_coors = self._default_mulligan_library_coors
         self.mulligan_done_coors = self._default_mulligan_done_coors
         self._mulligan_count = 0
+        self._mulligan_pending_done = False
         self.player_button_coors = (1699, 996)
         self.home_play_button_coors = (1699, 996)
         self.assign_damage_done_coors = (1280, 720)
@@ -5850,10 +5851,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return
         desired_name = os.path.splitext(os.path.basename(desired_tpl))[0].upper()
         if self._selected_starter_deck == desired_name:
-            bot_logger.log_info(
-                f"Starter: deck '{desired_name}' is already selected; skipping deck chooser."
-            )
-            return
+            if self._detect_starter_screen("STARTER_DECK_CACHED_CHECK") == self._STARTER_SCREEN_PLAY:
+                bot_logger.log_info(
+                    f"Starter: deck '{desired_name}' is already selected; skipping deck chooser."
+                )
+                return
+            self._selected_starter_deck = None
         runtime_status.set_startup_phase(f"Selecting the {desired_name} deck")
         grid_base = self._starter_deck_grid_point(desired_name)
         if grid_base is None:
@@ -6646,9 +6649,14 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         """True if there are active daily quests that still need progress.
 
         False if confirmed all daily quests are complete, or if only-grind
-        mode is enabled.
+        mode is enabled (and quest-mode account switching is not active).
         """
-        if self._only_grind_preferred_deck:
+        quest_switching = (
+            getattr(self, "_account_switch_enabled", False)
+            and getattr(self, "_account_switch_mode", "") == "quests"
+            and getattr(self, "_account_switch_main_quests", 0) > 0
+        )
+        if self._only_grind_preferred_deck and not quest_switching:
             return False
         if self._last_valid_quest_active_incomplete == 0 and self._quest_count_confirmed_fresh:
             return False
@@ -9472,8 +9480,14 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         count: int = 1,
         clicks: int = 1,
         max_scan_sec: float = 14.0,
+        fallback_candidate_ids: list[int] | set[int] | None = None,
     ) -> list[int]:
-        """Select up to `count` permanents from candidate_ids on our battlefield in a single sweep."""
+        """Select up to `count` permanents from candidate_ids on our battlefield in a single sweep.
+
+        If fewer than `count` permanents from candidate_ids are located, falls back to
+        fallback_candidate_ids to satisfy the remaining count while strictly respecting
+        priority order.
+        """
         expected_match_id = self.__live_match_id
         if not self.can_execute_game_action(expected_match_id):
             return []
@@ -9485,6 +9499,15 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             ordered_candidates = list(candidate_ids)
         intended_targets = ordered_candidates[:max(1, count)]
         targets_remaining = set(intended_targets)
+
+        fallback_remaining: list[int] = []
+        if fallback_candidate_ids:
+            if isinstance(fallback_candidate_ids, (list, tuple)):
+                fb_list = list(dict.fromkeys(fallback_candidate_ids))
+            else:
+                fb_list = list(fallback_candidate_ids)
+            fallback_remaining = [cid for cid in fb_list if cid not in targets_remaining]
+
         selected_ids: list[int] = []
         try:
             x1, y1 = scan_p1
@@ -9537,6 +9560,48 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                         if len(selected_ids) >= count:
                             bot_logger.log_info(f"select_battlefield_permanents complete: selected {selected_ids}")
                             return selected_ids
+
+            # Fallback pass if primary targets were missing and fallback candidates exist
+            if len(selected_ids) < count and fallback_remaining and (time.time() - start_ts) <= max_scan_sec:
+                needed_fb = count - len(selected_ids)
+                active_fallbacks = set(fallback_remaining[:needed_fb])
+                bot_logger.log_info(
+                    f"select_battlefield_permanents: primary sweep got {len(selected_ids)}/{count}; scanning for fallback candidates {active_fallbacks}"
+                )
+                for row_idx, y in enumerate(y_range):
+                    if not self.can_execute_game_action(expected_match_id):
+                        break
+                    if (time.time() - start_ts) > max_scan_sec:
+                        break
+                    x_range = range(x_min, x_max + 1, step) if (row_idx % 2 == 0) else range(x_max, x_min - 1, -step)
+                    for x in x_range:
+                        if not self.can_execute_game_action(expected_match_id):
+                            break
+                        if (time.time() - start_ts) > max_scan_sec:
+                            break
+                        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+                        self.input.move_abs(x, y)
+                        time.sleep(0.04)
+                        if not self.log_reader.has_new_line(self.patterns['hover_id']):
+                            continue
+                        parsed = self.__parse_hover_id_line(
+                            self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                        )
+                        if parsed is None:
+                            continue
+                        bot_logger.log_hover(parsed)
+                        if parsed in active_fallbacks:
+                            bot_logger.log_click(x, y, f"SELECT_BATTLEFIELD_MULTI_FALLBACK (id={parsed}, {len(selected_ids) + 1}/{count})")
+                            for _ in range(max(1, int(clicks))):
+                                self.input.left_click(1)
+                                time.sleep(0.1)
+                            active_fallbacks.remove(parsed)
+                            selected_ids.append(parsed)
+                            time.sleep(0.2)
+                            if len(selected_ids) >= count:
+                                bot_logger.log_info(f"select_battlefield_permanents complete with fallbacks: selected {selected_ids}")
+                                return selected_ids
+
             return selected_ids
         finally:
             bot_logger.set_hover_logging(False)
@@ -10091,9 +10156,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
 
         if keep:
             tuck_count = count_to_tuck if count_to_tuck is not None else self._mulligan_count
-            if tuck_count > 0:
+            pending_done = getattr(self, "_mulligan_pending_done", False)
+            if tuck_count > 0 or pending_done:
                 bot_logger.log_info(
-                    f"London Mulligan tuck required: {tuck_count} cards to bottom of library."
+                    f"London Mulligan tuck required: {tuck_count} cards to bottom of library (pending_done={pending_done})."
                 )
                 time.sleep(1.2)  # Wait for MTGA tuck dialog to appear
                 tuck_success = False
@@ -10103,9 +10169,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     bot_logger.log_error(f"Error during execute_london_mulligan_tuck: {e}")
                 if tuck_success:
                     self._mulligan_count = 0
+                    self._mulligan_pending_done = False
                 else:
                     bot_logger.log_info(
-                        f"London Mulligan tuck incomplete; preserving remaining count={self._mulligan_count} for recovery."
+                        f"London Mulligan tuck incomplete; preserving remaining count={self._mulligan_count}, pending_done={getattr(self, '_mulligan_pending_done', False)} for recovery."
                     )
 
     def execute_london_mulligan_tuck(self, card_list: list, count_to_tuck: int) -> bool:
@@ -10118,11 +10185,11 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             True if all required cards were successfully tucked and the Done button was clicked;
             False otherwise (preserving recovery state).
         """
-        if count_to_tuck <= 0:
+        if count_to_tuck <= 0 and not getattr(self, "_mulligan_pending_done", False):
             return True
 
         bot_logger.log_info(
-            f"Starting London Mulligan tuck: count={count_to_tuck}, hand={len(card_list)} cards"
+            f"Starting London Mulligan tuck: count={count_to_tuck}, hand={len(card_list)} cards, pending_done={getattr(self, '_mulligan_pending_done', False)}"
         )
 
         try:
@@ -10230,82 +10297,90 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             time.sleep(0.4)
             return True
 
-        while dropped_count < count_to_tuck:
-            if not _can_act():
-                bot_logger.log_info("MULLIGAN_TUCK aborted: match ended or action blocked.")
-                break
-
+        if getattr(self, "_mulligan_pending_done", False):
             bot_logger.log_info(
-                f"Tuck iteration {dropped_count + 1}/{count_to_tuck}: sweeping hand row from ({start_x}, {scan_y})"
+                "MULLIGAN_TUCK: Cards already dropped to library in prior attempt; proceeding directly to Done button."
             )
-            self.input.move_abs(start_x, scan_y)
-            time.sleep(0.25)
-            self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
-
-            cur_x = start_x
-            step_px = 12
-            dwell_sec = 0.025
-            found_card = False
-            found_id = None
-            found_pos = None
-            saw_any_hover = False
-
-            while cur_x <= end_x:
+        else:
+            while dropped_count < count_to_tuck:
                 if not _can_act():
+                    bot_logger.log_info("MULLIGAN_TUCK aborted: match ended or action blocked.")
                     break
-                cur_x += step_px
-                self.input.move_abs(cur_x, scan_y)
-                time.sleep(dwell_sec)
 
-                if self.log_reader.has_new_line(self.patterns['hover_id']):
-                    saw_any_hover = True
-                    hover_line = self.log_reader.get_latest_line_containing_pattern(
-                        self.patterns['hover_id']
-                    )
-                    parsed_id, _ = self.__parse_hover_observation(hover_line)
-                    if parsed_id is not None:
-                        bot_logger.log_info(f"Hovered card ID={parsed_id} at ({cur_x}, {scan_y}) during tuck scan")
-                        if parsed_id in target_ids_remaining:
-                            found_card = True
-                            found_id = parsed_id
-                            found_pos = (cur_x, scan_y)
-                            break
-
-            if found_card and found_pos is not None:
-                bot_logger.log_info(f"Identified target tuck card ID={found_id} at {found_pos}")
-                if _drag_to_library(found_pos[0], found_pos[1]):
-                    target_ids_remaining.remove(found_id)
-                    dropped_count += 1
-                    self._mulligan_count = max(0, count_to_tuck - dropped_count)
-                else:
-                    break
-            elif not saw_any_hover:
-                # Positional fallback ONLY when complete sweep received no hover events at all (e.g. log output not synced)
-                slot_index = dropped_count
-                card_spacing = int(115 * scale_x)
-                fallback_x = int(centre_mapped[0] + (slot_index * card_spacing))
                 bot_logger.log_info(
-                    f"No hover events received across hand sweep; using positional fallback at ({fallback_x}, {scan_y})"
+                    f"Tuck iteration {dropped_count + 1}/{count_to_tuck}: sweeping hand row from ({start_x}, {scan_y})"
                 )
-                if _drag_to_library(fallback_x, scan_y):
-                    if target_ids_remaining:
-                        target_ids_remaining.pop(0)
-                    dropped_count += 1
-                    self._mulligan_count = max(0, count_to_tuck - dropped_count)
+                self.input.move_abs(start_x, scan_y)
+                time.sleep(0.25)
+                self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+
+                cur_x = start_x
+                step_px = 12
+                dwell_sec = 0.025
+                found_card = False
+                found_id = None
+                found_pos = None
+                saw_any_hover = False
+
+                while cur_x <= end_x:
+                    if not _can_act():
+                        break
+                    cur_x += step_px
+                    self.input.move_abs(cur_x, scan_y)
+                    time.sleep(dwell_sec)
+
+                    if self.log_reader.has_new_line(self.patterns['hover_id']):
+                        saw_any_hover = True
+                        hover_line = self.log_reader.get_latest_line_containing_pattern(
+                            self.patterns['hover_id']
+                        )
+                        parsed_id, _ = self.__parse_hover_observation(hover_line)
+                        if parsed_id is not None:
+                            bot_logger.log_info(f"Hovered card ID={parsed_id} at ({cur_x}, {scan_y}) during tuck scan")
+                            if parsed_id in target_ids_remaining:
+                                found_card = True
+                                found_id = parsed_id
+                                found_pos = (cur_x, scan_y)
+                                break
+
+                if found_card and found_pos is not None and found_id is not None:
+                    bot_logger.log_info(f"Identified target tuck card ID={found_id} at {found_pos}")
+                    if _drag_to_library(found_pos[0], found_pos[1]):
+                        target_ids_remaining.remove(found_id)
+                        dropped_count += 1
+                        self._mulligan_count = max(0, count_to_tuck - dropped_count)
+                    else:
+                        break
+                elif not saw_any_hover:
+                    # Positional fallback ONLY when complete sweep received no hover events at all (e.g. log output not synced)
+                    slot_index = dropped_count
+                    card_spacing = int(115 * scale_x)
+                    fallback_x = int(centre_mapped[0] + (slot_index * card_spacing))
+                    bot_logger.log_info(
+                        f"No hover events received across hand sweep; using positional fallback at ({fallback_x}, {scan_y})"
+                    )
+                    if _drag_to_library(fallback_x, scan_y):
+                        if target_ids_remaining:
+                            target_ids_remaining.pop(0)
+                        dropped_count += 1
+                        self._mulligan_count = max(0, count_to_tuck - dropped_count)
+                    else:
+                        break
                 else:
-                    break
-            else:
-                # Hover events were observed, but none matched remaining target cards.
+                    # Hover events were observed, but none matched remaining target cards.
+                    bot_logger.log_error(
+                        f"MULLIGAN_TUCK: Hover events observed but no target cards {target_ids_remaining} matched; aborting tuck to prevent dragging wrong cards."
+                    )
+                    return False
+
+            if dropped_count < count_to_tuck:
                 bot_logger.log_error(
-                    f"MULLIGAN_TUCK: Hover events observed but no target cards {target_ids_remaining} matched; aborting tuck to prevent dragging wrong cards."
+                    f"MULLIGAN_TUCK incomplete: {dropped_count}/{count_to_tuck} cards tucked. Done button will not be clicked."
                 )
                 return False
 
-        if dropped_count < count_to_tuck:
-            bot_logger.log_error(
-                f"MULLIGAN_TUCK incomplete: {dropped_count}/{count_to_tuck} cards tucked. Done button will not be clicked."
-            )
-            return False
+            self._mulligan_pending_done = True
+            self._mulligan_count = 0
 
         if not _can_act():
             bot_logger.log_info("MULLIGAN_TUCK aborted before done click: match ended or stop requested.")
@@ -10325,6 +10400,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         self.input.left_click(1)
         time.sleep(0.5)
         bot_logger.log_info("London Mulligan tuck complete: clicked done button.")
+        self._mulligan_pending_done = False
         self._mulligan_count = 0
         return True
 
@@ -11438,6 +11514,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         """Reset controller state for a new game - complete fresh start"""
         bot_logger.log_info("Resetting controller state for new game")
         self._mulligan_count = 0
+        self._mulligan_pending_done = False
         self._starter_dead_ends = 0
         self.__clear_cast_ack_attempts("reset_for_new_game")
         self.__group_prompt_seq += 1
@@ -14578,20 +14655,69 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                                     _clear_pending_select_n()
                                     return
                             if use_battlefield_selection and not use_hand_selection and not use_stack_selection:
-                                # Multi-permanent battlefield selection in a single fast sweep.
-                                # Resolve intended target IDs before scanning to preserve sacrifice preferences
-                                # and never substitute protected creatures.
-                                target_candidates = ids_to_select[:min_sel] if len(ids_to_select) >= min_sel else ids_to_select
-                                selected_ids = self.select_battlefield_permanents(
-                                    target_candidates, count=min_sel, clicks=1, max_scan_sec=14.0
-                                )
-                                selected = len(selected_ids)
-                                if selected < min_sel:
-                                    bot_logger.log_error(
-                                        f"SelectN battlefield: only selected {selected}/{min_sel} permanents; aborting to avoid invalid submit."
+                                # Multi-permanent battlefield selection in a fast sweep.
+                                # Track already clicked IDs across attempts for this prompt.
+                                already_selected: list[int] = []
+                                if self.__pending_select_n is not None:
+                                    already_selected = self.__pending_select_n.setdefault("selected_battlefield_ids", [])
+
+                                active_candidates: list[int] = [int(cid) for cid in ids_to_select if cid is not None and int(cid) not in already_selected]
+                                needed = min_sel - len(already_selected)
+
+                                if needed <= 0:
+                                    selected_ids = list(already_selected)
+                                    selected = len(selected_ids)
+                                else:
+                                    # Separate primary candidates from fallback candidates.
+                                    # In sacrifice context, only unprotected candidates serve as fallbacks
+                                    # unless total unprotected candidates < min_sel.
+                                    primary_cands: list[int] = []
+                                    fallback_cands: list[int] = []
+                                    if sacrifice_context and len(active_candidates) > 1:
+                                        from AI.Utilities import RemovalLogic
+                                        unprotected_cands: list[int] = [
+                                            cid for cid in active_candidates
+                                            if not RemovalLogic.is_protected_from_sacrifice(
+                                                (game_objects_by_id.get(cid) or {}).get("grpId")
+                                            )
+                                        ]
+                                        protected_cands: list[int] = [
+                                            cid for cid in active_candidates
+                                            if RemovalLogic.is_protected_from_sacrifice(
+                                                (game_objects_by_id.get(cid) or {}).get("grpId")
+                                            )
+                                        ]
+                                        if len(unprotected_cands) >= needed:
+                                            primary_cands = unprotected_cands[:needed]
+                                            fallback_cands = unprotected_cands[needed:]
+                                        else:
+                                            primary_cands = unprotected_cands + protected_cands[: needed - len(unprotected_cands)]
+                                            fallback_cands = protected_cands[needed - len(unprotected_cands) :]
+                                    else:
+                                        primary_cands = active_candidates[:needed]
+                                        fallback_cands = active_candidates[needed:]
+
+                                    newly_selected = self.select_battlefield_permanents(
+                                        primary_cands, count=needed, clicks=1, max_scan_sec=14.0, fallback_candidate_ids=fallback_cands
                                     )
-                                    _clear_pending_select_n()
-                                    return
+                                    already_selected.extend(newly_selected)
+                                    selected_ids = list(already_selected)
+                                    selected = len(selected_ids)
+
+                                    if selected < min_sel:
+                                        remaining_unclicked = [cid for cid in active_candidates if cid not in already_selected]
+                                        if remaining_unclicked and attempt < 3:
+                                            bot_logger.log_info(
+                                                f"SelectN battlefield: partially selected {selected}/{min_sel} permanents; preserving selection and retrying (attempt {attempt + 1})."
+                                            )
+                                            _attempt_selection(attempt + 1, delay=0.8)
+                                            return
+                                        else:
+                                            bot_logger.log_error(
+                                                f"SelectN battlefield: only selected {selected}/{min_sel} permanents and no more candidates remain; aborting."
+                                            )
+                                            _clear_pending_select_n()
+                                            return
                             else:
                                 for idx, card_id in enumerate(ids_to_select):
                                     if not _select_n_valid():

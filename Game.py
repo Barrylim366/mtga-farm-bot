@@ -120,6 +120,8 @@ class Game:
         self.last_logged_turn = -1
         self.game_started = False
         self._match_started_marked = False
+        self._match_started_ts = None
+        self._match_started_lock = threading.Lock()
         self.starting_hand_logged = False
         self._stop_requested = False
         # Key of the match whose end was already handled -- see _match_end_key.
@@ -164,6 +166,9 @@ class Game:
     def start(self):
         self._debug("Game.start() called")
         self._stop_requested = False
+        with self._match_started_lock:
+            self._match_started_marked = False
+            self._match_started_ts = None
         with self._match_end_lock:
             self._handled_match_end_key = None
         try:
@@ -238,34 +243,35 @@ class Game:
     def _mark_match_started(self) -> None:
         """A new match is confirmed live: first mulligan, or an inferred live state
         when we attached mid-game."""
-        if getattr(self, "_match_started_marked", False):
-            return
-        self._match_started_marked = True
-        self._match_started_ts = time.time()
-        try:
-            timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
-            if timeout_limit > 0:
-                def _on_match_timeout():
-                    if not self._stop_requested and self._match_started_ts:
-                        dur = time.time() - self._match_started_ts
-                        if dur >= timeout_limit - 1.0:
-                            auto_concede = getattr(self.controller, "get_auto_concede_stalled_matches", lambda: True)()
-                            if auto_concede:
-                                bot_logger.log_info(
-                                    f"[MATCH_TIMEOUT] Match exceeded {timeout_limit:.0f}s ({dur:.1f}s elapsed). Triggering concede."
-                                )
-                                if hasattr(self.controller, "concede"):
-                                    self.controller.concede("match_timeout_watchdog")
-                                elif hasattr(self.controller, "concede_game"):
-                                    self.controller.concede_game("match_timeout_watchdog")
-                timer = threading.Timer(timeout_limit, _on_match_timeout)
-                timer.daemon = True
-                if not hasattr(self, "_timers") or self._timers is None:
-                    self._timers = []
-                self._timers.append(timer)
-                timer.start()
-        except Exception:
-            pass
+        with self._match_started_lock:
+            if getattr(self, "_match_started_marked", False):
+                return
+            self._match_started_marked = True
+            self._match_started_ts = time.time()
+            try:
+                timeout_limit = float(os.environ.get("MTGA_MATCH_TIMEOUT_SEC", 1200.0))
+                if timeout_limit > 0:
+                    def _on_match_timeout():
+                        if not self._stop_requested and self._match_started_ts:
+                            dur = time.time() - self._match_started_ts
+                            if dur >= timeout_limit - 1.0:
+                                auto_concede = getattr(self.controller, "get_auto_concede_stalled_matches", lambda: True)()
+                                if auto_concede:
+                                    bot_logger.log_info(
+                                        f"[MATCH_TIMEOUT] Match exceeded {timeout_limit:.0f}s ({dur:.1f}s elapsed). Triggering concede."
+                                    )
+                                    if hasattr(self.controller, "concede"):
+                                        self.controller.concede("match_timeout_watchdog")
+                                    elif hasattr(self.controller, "concede_game"):
+                                        self.controller.concede_game("match_timeout_watchdog")
+                    timer = threading.Timer(timeout_limit, _on_match_timeout)
+                    timer.daemon = True
+                    if not hasattr(self, "_timers") or self._timers is None:
+                        self._timers = []
+                    self._timers.append(timer)
+                    timer.start()
+            except Exception:
+                pass
 
     def _match_end_key(self) -> str:
         """Identity of the match that is ending, used to collapse duplicate
@@ -373,10 +379,11 @@ class Game:
         # Reset Game state
         self.last_logged_turn = -1
         self.game_started = False
-        self._match_started_marked = False
-        self.starting_hand_logged = False
-        self._last_action_delay_turn = -1
-        self._match_started_ts = None
+        with self._match_started_lock:
+            self._match_started_marked = False
+            self.starting_hand_logged = False
+            self._last_action_delay_turn = -1
+            self._match_started_ts = None
 
         # Reset AI state
         if hasattr(self.ai, 'reset'):
@@ -438,9 +445,20 @@ class Game:
         if not getattr(self, "_match_started_marked", False):
             self._mark_match_started()
         mull_count = getattr(self.controller, "_mulligan_count", 0)
+        has_mull_param = False
         try:
+            import inspect
+            sig = inspect.signature(self.ai.generate_keep)
+            has_mull_param = (
+                "mulligan_count" in sig.parameters
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            )
+        except Exception:
+            has_mull_param = False
+
+        if has_mull_param:
             keep = self.ai.generate_keep(card_list, mulligan_count=mull_count)
-        except TypeError:
+        else:
             keep = self.ai.generate_keep(card_list)
         self.game_started = bool(keep)  # Mark game as started after keeping
         bot_logger.log_mulligan_decision(keep, len(card_list))

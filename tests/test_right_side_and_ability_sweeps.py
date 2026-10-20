@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import unittest
+from typing import Any
 from unittest.mock import Mock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -249,6 +250,33 @@ class RightSideAndAbilitySweepsTests(unittest.TestCase):
         # Must NOT silently substitute protected creature 500
         self.assertEqual(selected, [])
         self.assertEqual(self.c.input.left_click.call_count, 0)
+
+    def test_select_battlefield_permanents_falls_back_to_unprotected_candidate_when_primary_missing(self):
+        """When primary candidate cannot be located on screen, fallback candidate is selected up to count."""
+        self.c._get_battlefield_scan_points_mapped = Mock(return_value=((100, 500), (200, 500)))
+        self.c.battlefield_scan_step = 100
+        self.c.screen_bounds = ((0, 0), (1920, 1080))
+
+        # Primary candidate 601 is not on screen.
+        # Fallback candidate 602 is at x=200 across sweeps.
+        current_x = [100]
+        input_mock: Any = self.c.input
+        input_mock.move_abs.side_effect = lambda x, y: current_x.__setitem__(0, x)
+
+        def mock_has_new_line(pattern):
+            return current_x[0] == 200
+
+        def mock_get_latest_line(pattern):
+            return '"objectId": 602'
+
+        self.c.log_reader.has_new_line = Mock(side_effect=mock_has_new_line)
+        self.c.log_reader.get_latest_line_containing_pattern = Mock(side_effect=mock_get_latest_line)
+
+        # Primary is [601], fallback is [602], count=1
+        selected = self.c.select_battlefield_permanents([601], count=1, clicks=1, fallback_candidate_ids=[602])
+
+        self.assertEqual(selected, [602])
+        self.assertEqual(input_mock.left_click.call_count, 1)
 
 
     def test_submit_selection_select_n_falls_back_to_coordinates(self):

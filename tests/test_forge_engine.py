@@ -305,6 +305,23 @@ class MainPhaseTest(unittest.TestCase):
                                       bot_state(self.message), {101: 20}, config)
         self.assertEqual(move, {"cast": [100]})
 
+    def test_free_forge_fails_closed_when_oracle_text_missing_even_with_types(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        # Direct CardPolicy unit check: {"name": "Unknown", "types": ["Creature"]} lacks oracleText -> (True, False)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Unknown", "types": ["Creature"]}):
+            is_unsupported, has_data = CardPolicy.is_unsupported_to_cast_local(20)
+            self.assertTrue(is_unsupported)
+            self.assertFalse(has_data)
+
+        # Bridge integration check: fails closed back to base move
+        bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Unknown", "types": ["Creature"]}):
+            move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                      bot_state(self.message), {101: 20}, config)
+        self.assertEqual(move, {"cast": [100]})
+
     def test_free_forge_fails_closed_when_card_unsupported(self):
         import AI.Utilities.CardPolicy as CardPolicy
         CardPolicy._unsupported_memo.clear()

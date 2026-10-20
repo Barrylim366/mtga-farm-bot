@@ -117,8 +117,6 @@ def is_unsupported_to_cast_local(grp_id) -> tuple[bool, bool]:
         return True, True
     if grp_id in SUPPORTED_CHOOSER_GRP_IDS:
         return False, True
-    if grp_id in _unsupported_memo:
-        return _unsupported_memo[grp_id], True
     try:
         card_info = CardInfo.get_card_info_local(grp_id)
     except Exception:
@@ -129,15 +127,12 @@ def is_unsupported_to_cast_local(grp_id) -> tuple[bool, bool]:
     if raw_text is None:
         raw_text = card_info.get("text")
     if raw_text is None:
-        # A valid card with empty oracle text (e.g. vanilla creature) has name and types
-        if card_info.get("name") and card_info.get("types"):
-            text = ""
-        else:
-            return True, False
-    else:
-        text = str(raw_text)
+        # Missing rules text cannot be verified offline -> fail closed
+        return True, False
+    text = str(raw_text)
     t = text.replace("\n", " ")
     result = any(pattern.search(t) for pattern in _UNSUPPORTED_PATTERNS)
-    _unsupported_memo[grp_id] = result
     return result, True
+
+
 

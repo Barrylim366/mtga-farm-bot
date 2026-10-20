@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 from unittest import mock
 
 from AI.Utilities.MulliganLogic import evaluate_opening_hand, select_cards_to_tuck
@@ -296,6 +297,56 @@ class DummyAIIntegrationTests(unittest.TestCase):
             ctrl.keep(True, card_list=cards)
 
         self.assertEqual(ctrl._mulligan_count, 1)
+
+    def test_execute_london_mulligan_tuck_cancels_after_final_drag_and_retries_done_without_redrag(self):
+        """When drag finishes but Done is interrupted before click, retry should click Done without re-dragging."""
+        from Controller.MTGAController.Controller import Controller
+        ctrl: Any = Controller.__new__(Controller)
+        ctrl.mulligan_centre_coors = (835, 562)
+        ctrl.mulligan_library_coors = (556, 578)
+        ctrl.mulligan_done_coors = (956, 868)
+        ctrl._mulligan_count = 1
+        ctrl._stop_requested = False
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.log_reader.has_new_line.return_value = False
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+
+        # First attempt: drag succeeds, but before Done click, interruption occurs
+        abort_on_pending = True
+
+        def fake_sleep(dur):
+            nonlocal abort_on_pending
+            if abort_on_pending and getattr(ctrl, "_mulligan_pending_done", False):
+                ctrl._stop_requested = True
+
+        with mock.patch("time.sleep", side_effect=fake_sleep):
+            cards = [{"instanceId": 1, "grpId": 101, "is_land": False, "cmc": 7}]
+            success1 = ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        self.assertFalse(success1)
+        self.assertTrue(getattr(ctrl, "_mulligan_pending_done", False))
+        # Drag happened once
+        self.assertEqual(ctrl.input.left_down.call_count, 1)
+        self.assertEqual(ctrl.input.left_click.call_count, 0)
+
+        # Second attempt: recovery retry without stop
+        abort_on_pending = False
+        ctrl._stop_requested = False
+        ctrl.input.reset_mock()
+
+        with mock.patch("time.sleep"):
+            success2 = ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        self.assertTrue(success2)
+        self.assertFalse(getattr(ctrl, "_mulligan_pending_done", False))
+        self.assertEqual(ctrl._mulligan_count, 0)
+        # Verify NO dragging occurred on retry, only the Done click
+        self.assertEqual(ctrl.input.left_down.call_count, 0)
+        self.assertEqual(ctrl.input.left_click.call_count, 1)
+
 
 
 

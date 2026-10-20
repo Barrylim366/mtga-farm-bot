@@ -205,10 +205,22 @@ class StarterDeckChooserSkipTests(_ThrowawayControllerBase):
         self.c._selected_starter_deck = "RG"
         self.c._starter_navigation_may_act = lambda: True
         self.c._choose_starter_deck_template = lambda colors: "assets/assert/starter_decks/RG.PNG"
+        self.c._detect_starter_screen = lambda label: Controller._STARTER_SCREEN_PLAY
         self.c._open_starter_deck_chooser = Mock()
 
         self.c._swap_starter_deck_for_quest("RG")
         self.c._open_starter_deck_chooser.assert_not_called()
+
+    def test_swap_opens_chooser_when_deck_cached_but_not_on_play_screen(self):
+        self.c._selected_starter_deck = "RG"
+        self.c._starter_navigation_may_act = lambda: True
+        self.c._choose_starter_deck_template = lambda colors: "assets/assert/starter_decks/RG.PNG"
+        self.c._detect_starter_screen = lambda label: Controller._STARTER_SCREEN_START
+        self.c._open_starter_deck_chooser = Mock(return_value=False)
+
+        self.c._swap_starter_deck_for_quest("RG")
+        self.c._open_starter_deck_chooser.assert_called_once()
+        self.assertIsNone(self.c._selected_starter_deck)
 
     def test_swap_opens_chooser_when_different_deck_selected(self):
         self.c._selected_starter_deck = "WB"
@@ -242,6 +254,14 @@ class PostMatchHomeDipBypassTests(_ThrowawayControllerBase):
         self.c._only_grind_preferred_deck = True
         self.c._last_valid_quest_active_incomplete = 2
         self.assertFalse(self.c._has_active_incomplete_daily_quests())
+
+    def test_has_active_incomplete_quests_true_when_only_grind_and_quest_switching_enabled(self):
+        self.c._only_grind_preferred_deck = True
+        self.c._account_switch_enabled = True
+        self.c._account_switch_mode = "quests"
+        self.c._account_switch_main_quests = 1
+        self.c._last_valid_quest_active_incomplete = 1
+        self.assertTrue(self.c._has_active_incomplete_daily_quests())
 
     def test_has_active_incomplete_quests_false_when_quests_complete(self):
         self.c._only_grind_preferred_deck = False
