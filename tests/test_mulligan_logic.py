@@ -155,3 +155,67 @@ class DummyAIIntegrationTests(unittest.TestCase):
         ai = DummyAI()
         # Empty list should keep by default
         self.assertTrue(ai.generate_keep([]))
+
+    def test_dummy_ai_generate_keep_passes_mulligan_count(self):
+        ai = DummyAI()
+        with mock.patch("AI.Utilities.MulliganLogic.evaluate_opening_hand", return_value=(True, "ok")) as mock_eval:
+            ai.generate_keep([{"grpId": 1}], mulligan_count=2)
+            mock_eval.assert_called_once_with([{"grpId": 1}], mulligan_count=2)
+
+    def test_controller_mulligan_coordinates_and_tuck_integration(self):
+        from Controller.MTGAController.Controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl._default_mulligan_centre_coors = (835, 562)
+        ctrl._default_mulligan_library_coors = (556, 578)
+        ctrl._default_mulligan_done_coors = (956, 868)
+        ctrl.mulligan_keep_coors = (1101, 870)
+        ctrl.mulligan_mull_coors = (801, 870)
+        ctrl.mulligan_centre_coors = ctrl._default_mulligan_centre_coors
+        ctrl.mulligan_library_coors = ctrl._default_mulligan_library_coors
+        ctrl.mulligan_done_coors = ctrl._default_mulligan_done_coors
+        ctrl._mulligan_count = 0
+        ctrl._arena_region = (0, 0, 1920, 1080)
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+        ctrl._write_keep_click_debug_bundle = mock.MagicMock()
+
+        # Mulligan increments count
+        ctrl.keep(False)
+        self.assertEqual(ctrl._mulligan_count, 1)
+
+        # Keep invokes tuck and resets count
+        tuck_called = []
+        ctrl.execute_london_mulligan_tuck = lambda cl, cnt: tuck_called.append((cl, cnt))
+        cards = [{"grpId": 101, "name": "Plains", "is_land": True, "instanceId": 1001}]
+        with mock.patch("time.sleep"):
+            ctrl.keep(True, card_list=cards)
+        self.assertEqual(len(tuck_called), 1)
+        self.assertEqual(tuck_called[0], (cards, 1))
+        self.assertEqual(ctrl._mulligan_count, 0)
+
+    def test_execute_london_mulligan_tuck_actions(self):
+        from Controller.MTGAController.Controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl.mulligan_centre_coors = (835, 562)
+        ctrl.mulligan_library_coors = (556, 578)
+        ctrl.mulligan_done_coors = (956, 868)
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.log_reader.has_new_line.return_value = False
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+
+        with mock.patch("time.sleep"):
+            cards = [{"instanceId": 1, "grpId": 101, "is_land": False, "cmc": 7}]
+            ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        # Verified that left_down and left_up were called (drag to library)
+        self.assertTrue(ctrl.input.left_down.called)
+        self.assertTrue(ctrl.input.left_up.called)
+        # Verified done button click at (956, 868)
+        self.assertTrue(ctrl.input.left_click.called)
+

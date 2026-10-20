@@ -62,3 +62,21 @@ class WebhooksTests(unittest.TestCase):
         # Check last notification has rolling summary
         items = [nm._queue.get_nowait() for _ in range(3)]
         self.assertIn("Recent (last 3): **2W - 1L** (67% win rate)", items[2]["description"])
+
+    def test_free_forge_config_persistence(self):
+        nm = NotificationManager.get_instance()
+        nm.save_config({"free_forge": True})
+        self.assertTrue(nm.get_config().get("free_forge"))
+        nm.save_config({"free_forge": False})
+        self.assertFalse(nm.get_config().get("free_forge"))
+
+    def test_config_manager_free_forge_methods(self):
+        import os
+        from ui import ConfigManager
+        cm = ConfigManager()
+        cm.set_free_forge_enabled(True)
+        self.assertTrue(cm.get_free_forge_enabled())
+        self.assertEqual(os.environ.get("MTGA_FORGE_FREE"), "on")
+        cm.set_free_forge_enabled(False)
+        self.assertFalse(cm.get_free_forge_enabled())
+        self.assertEqual(os.environ.get("MTGA_FORGE_FREE"), "off")

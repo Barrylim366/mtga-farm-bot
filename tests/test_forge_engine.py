@@ -141,6 +141,18 @@ class TrackerTest(unittest.TestCase):
         self.assertEqual(len(tracker.feed_line(line)), 1)
         self.assertTrue(tracker.in_sync)
 
+    def test_my_actions_ignores_stale_actions_available_req(self):
+        tracker = tracker_with(state_message(state_id=10))
+        tracker.feed_message({
+            "type": "GREMessageType_ActionsAvailableReq", "systemSeatIds": [ME], "gameStateId": 10,
+            "actionsAvailableReq": {"actions": [{"actionType": "ActionType_Cast", "instanceId": 500}]},
+        })
+        self.assertEqual(len(tracker.my_actions()), 1)
+        self.assertEqual(tracker.my_actions()[0].get("instanceId"), 500)
+        # Advance game state without a new action request
+        tracker.feed_message(state_message(state_id=11, full=False))
+        self.assertEqual(tracker.my_actions(), [])
+
 
 class SnapshotTest(unittest.TestCase):
     def test_board_is_described_from_our_side(self):
@@ -247,6 +259,14 @@ class MainPhaseTest(unittest.TestCase):
         move, _bridge, _ai = self.choose({"action": "cast", "id": 101}, {"cast": [100]}, may_cast=())
         self.assertEqual(move, {"cast": [100]})
 
+    def test_free_forge_casts_when_legal_and_safe(self):
+        bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                  bot_state(self.message), {}, config)
+        self.assertEqual(move, {"cast": [101]})
+
     def test_a_held_creature_is_cast_before_combat(self):
         answers = iter([{"action": "none"}, {"action": "cast", "id": 101}])
         move, bridge, _ai = self.choose(lambda state, extra: next(answers), {"resolve": []}, may_cast={101})
@@ -299,6 +319,11 @@ class BlocksTest(unittest.TestCase):
         bridge = bridge_with(self.tracker, {"block": RuntimeError("timeout")})
         own = {"assignments": [[310, 320]], "reason": "bot"}
         self.assertIs(ForgeHooks(bridge, Config).review_blocks(self.legal, {320}, own), own)
+
+    def test_forge_empty_blocks_fallback_to_bot_assignments(self):
+        bridge = bridge_with(self.tracker, {"block": {"blocks": [], "names": [], "notLegalInArena": ["X blocks Y"]}})
+        own = {"assignments": [[310, 320]], "reason": "bot"}
+        self.assertEqual(ForgeHooks(bridge, Config).review_blocks(self.legal, {320}, own), own)
 
 
 class TargetsTest(unittest.TestCase):

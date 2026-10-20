@@ -7,7 +7,7 @@ class AIKernel:
     Defines kernel methods for the AI type.
     """
 
-    def generate_keep(self, card_list) -> bool:
+    def generate_keep(self, card_list, mulligan_count: int = 0) -> bool:
         """ Returns a true or false value to determine whether a hand should be taken """
         raise NotImplementedError
 
@@ -22,5 +22,7 @@ class AIKernel:
         Returns:
             [valid_move: [int,...]]
         """
-        raise NotImplementedError
+    def reset(self) -> None:
+        """Reset AI state for a new game."""
+        pass
 

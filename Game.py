@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     # (see the __future__ import above) so this never actually imports
     # Controller.py's runtime dependencies (pyautogui, cv2, ...) at import time.
     from Controller.MTGAController.Controller import Controller
+    from AI.AIInterface import AIKernel
     from AI.DummyAI import DummyAI
 
 
@@ -113,7 +114,7 @@ class Game:
             return
         self.controller.resolve()
 
-    def __init__(self, controller: "Controller", ai: "DummyAI", data_dir_prompt=None):
+    def __init__(self, controller: "Controller", ai: "DummyAI | AIKernel", data_dir_prompt=None):
         self.ai = ai
         self.controller = controller
         self.last_logged_turn = -1
@@ -431,8 +432,12 @@ class Game:
         runtime_status.set_mode("in_game")
         if not self.game_started:
             self._mark_match_started()
-        self.game_started = True  # Mark game as started after mulligan
-        keep = self.ai.generate_keep(card_list)
+        mull_count = getattr(self.controller, "_mulligan_count", 0)
+        try:
+            keep = self.ai.generate_keep(card_list, mulligan_count=mull_count)
+        except TypeError:
+            keep = self.ai.generate_keep(card_list)
+        self.game_started = bool(keep)  # Mark game as started after keeping
         bot_logger.log_mulligan_decision(keep, len(card_list))
         try:
             debug_recorder.record(
@@ -445,7 +450,7 @@ class Game:
             )
         except Exception as e:
             self._debug(f"Decision recorder (mulligan) failed: {e}")
-        self.controller.keep(keep)
+        self.controller.keep(keep, card_list=card_list, count_to_tuck=mull_count)
 
     def _debug(self, message):
         """Debug log - detailed technical information"""
