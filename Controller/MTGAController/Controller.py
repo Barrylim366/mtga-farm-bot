@@ -10393,13 +10393,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             if focus_mtga_window(): time.sleep(0.3)
             if not self.__is_live_match(expected_match_id):
                 return
-            provider = getattr(self, "_arena_region_provider", None)
-            if provider is not None:
-                detection = provider.detect(write_debug_on_fail=False)
-                if (not detection.ok or detection.region is None
-                        or not provider.anchor_visible(detection.region, "ingame_anchor.png")):
-                    bot_logger.log_info(f"{label}: live match not visually confirmed; skipping concede")
-                    return
+            # Match identity and Player.log establish whether this match is live.
+            # The gear icon appears throughout Arena, in matches and menus;
+            # its changing background can also affect template matching.
+            # It cannot establish whether a match is being played.
             incident = getattr(self, "_Controller__active_concede_incident", None)
             if incident is not None:
                 incident.capture(self._vision, self._arena_region_provider)

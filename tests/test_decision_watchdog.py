@@ -354,16 +354,24 @@ class WatchdogControllerIntegrationTest(unittest.TestCase):
             self.c._Controller__run_claimed_concede_sequence("STALL_CONCEDE", expected_match_id="match")
         stop.assert_called_once_with("Auto-concede failed: input backend unresponsive")
 
-    def test_silent_log_menu_screen_prevents_concede_clicks(self):
+    def test_live_match_concedes_without_gear_icon(self):
         self.c._arena_region_provider = Mock()
         self.c._arena_region_provider.detect.return_value.ok = True
         self.c._arena_region_provider.detect.return_value.region = (0, 0, 1920, 1080)
         self.c._arena_region_provider.anchor_visible.return_value = False
         self.c.input = Mock()
+        self.c._Controller__active_concede_incident = None
+        self.c._loaded_click_targets = {"concede": {"x": 962, "y": 631}}
+        self.c._map_abs_point_to_arena = Mock(return_value=((100, 200), "arena"))
+        self.c._Controller__click_concede_and_confirm = Mock()
         with patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True), \
              patch("Controller.MTGAController.Controller.time.sleep"):
             self.c._Controller__perform_concede("STALL_CONCEDE_1", "match")
-        self.c.input.tap_escape.assert_not_called()
+        self.c.input.tap_escape.assert_called_once()
+        self.c._Controller__click_concede_and_confirm.assert_called_once_with(
+            (100, 200), label="STALL_CONCEDE_1", expected_match_id="match",
+        )
+        self.c._arena_region_provider.anchor_visible.assert_not_called()
 
     def test_disable_cancels_pending_takeover_before_it_reclaims_input(self):
         self.c.input = ExclusiveInputController(NullInputController())

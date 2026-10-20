@@ -2619,22 +2619,32 @@ class MTGBotUI(tk.Tk):
             pass
 
     def _setup_stop_hotkey(self):
-        # Global hotkey via pynput (mouse wheel).
+        # Keep the hook alive across Stop/Start. Hook callbacks must return
+        # promptly: calling Tk from a Windows hook can block and lose the hook.
+        self._stop_hotkey_requested = threading.Event()
         try:
             from pynput import mouse
-        except Exception:
-            mouse = None
 
-        if mouse:
-            try:
-                def _on_scroll(_x, _y, _dx, dy):
-                    if dy < 0:
-                        self.after(0, self._stop_bot)
-                self._stop_mouse_listener = mouse.Listener(on_scroll=_on_scroll)
-                self._stop_mouse_listener.daemon = True
-                self._stop_mouse_listener.start()
-            except Exception:
-                pass
+            def _on_scroll(_x, _y, _dx, dy):
+                if self.bot_running and dy:
+                    self._stop_hotkey_requested.set()
+
+            self._stop_mouse_listener = mouse.Listener(on_scroll=_on_scroll)
+            self._stop_mouse_listener.daemon = True
+            self._stop_mouse_listener.start()
+        except Exception as exc:
+            import bot_logger
+
+            bot_logger.log_error(f"Mouse-wheel stop hotkey unavailable: {exc}")
+            return
+        self.after(50, self._poll_stop_hotkey)
+
+    def _poll_stop_hotkey(self):
+        if self._stop_hotkey_requested.is_set():
+            self._stop_hotkey_requested.clear()
+            if self.bot_running:
+                self._stop_bot()
+        self.after(50, self._poll_stop_hotkey)
 
     def _pick_font_family(self):
         preferred = ["Segoe UI Variable", "Segoe UI", "Inter", "Arial"]
@@ -4364,8 +4374,8 @@ class MTGBotUI(tk.Tk):
             return
 
         # Retry the arena setup check for a few seconds: MTGA's game-start /
-        # turn-start animations transiently distort the in-game anchor (observed
-        # ingame_anchor score ~0.71 vs 0.78 threshold during the opening swirl),
+        # turn-start animations transiently affect settings gear matching (observed
+        # settings gear score ~0.71 vs 0.78 threshold during the opening swirl),
         # which would otherwise abort Start if the user presses it while a match
         # animation is playing. The common case (anchors match immediately) still
         # returns on the first attempt with zero added delay. Runs via self.after
@@ -4880,12 +4890,6 @@ class MTGBotUI(tk.Tk):
             self.game = None
 
         self._stop_session_watchdog()
-        if hasattr(self, "_stop_mouse_listener") and self._stop_mouse_listener:
-            try:
-                self._stop_mouse_listener.stop()
-            except Exception:
-                pass
-            self._stop_mouse_listener = None
         self._set_running_state(False)
         self._set_startup_loading(False)
         with self._controller_lock:

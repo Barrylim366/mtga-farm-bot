@@ -197,7 +197,11 @@ Accepted partial progress, such as assigning another blocker or selecting anothe
 required target, restarts the countdown. Repeated clicks, duplicate requests,
 rejected submissions, and toggling previously selected choices do not. The
 countdown continues if Arena's log becomes silent. Before conceding, the bot
-checks that the same match remains active and that a live match is visible.
+checks the match identity and Arena's log state to confirm the same match remains
+active. Conceding does not require the settings gear (`assets/assert/settings_gear.png`).
+The gear appears throughout the client, in matches and
+menus. Its background changes between screens and can affect image matching;
+its presence does not establish that a match is being played.
 
 At 30 seconds, gameplay recovery stops and concession begins; focusing Arena and
 confirming the dialog take additional time. If two concede attempts fail, normal
@@ -517,7 +521,9 @@ Both decisions are also written to `runtime/logs/bot.log` as `COMBAT_SHADOW` lin
 
 ### Stopping the bot
 
-Scroll **Mouse Wheel down** at any time to stop the bot immediately.
+**Scroll the mouse wheel up or down** to
+stop the bot, even while Magic Arena has focus. This works across repeated
+Stop/Start sessions; restart the bot app after updating to load this fix.
 
 ### Forge Engine (experimental)
 
