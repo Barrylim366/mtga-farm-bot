@@ -557,7 +557,6 @@ The advisor (`forge_advisor/`) is adapted from
 - **Anti-Detection Bezier Mouse (`Controller/Utilities/input_controller.py`)**: Generates natural, human-like cubic Bezier mouse curves with smooth acceleration, micro-jitter, and randomized pre-click pauses to prevent behavioral detection.
 - **Per-Monitor DPI v2 & Window Snapping (`vision/window_locator.py`)**: Enables Windows Per-Monitor DPI Awareness v2 to eliminate coordinate drift across scaled monitors, with 16:9 window snapping support.
 - **Discord & Telegram Notifications (`notifications.py`)**: Non-blocking background dispatcher delivering live alerts for match results (victory/defeat with duration), rolling win-rate summaries every 10 games, completed daily quests, and account switches. Configurable in **Settings → Enhancements**.
-- **Low-Power / Overnight Mode (`low_power.py`)**: Paces vision template checks and idle polling loops to reduce CPU/GPU temperatures and power consumption during overnight farming sessions.
 - **Starter Deck Duel Matcher (`AI/Utilities/StarterDeckMatcher.py`)**: Parses active daily quest color requirements and selects the optimal two-color Starter Deck to maximize quest progress, with optional JSON configuration override.
 
 ## Architecture

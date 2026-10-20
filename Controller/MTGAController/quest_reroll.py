@@ -296,7 +296,11 @@ class QuestRerollMixin:
             time.sleep(1.0)
             if not self._reroll_can_act():
                 return None
-            if self._navigate_to_home():
+            try:
+                reached = self._navigate_to_home(dismiss_popups=False)
+            except TypeError:
+                reached = self._navigate_to_home()
+            if reached:
                 reached_home = True
                 break
         if not reached_home:

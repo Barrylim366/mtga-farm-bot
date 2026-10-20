@@ -6498,19 +6498,16 @@ class EnhancementsWindow(_FireSubWindow):
     """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, Anti-Detection, and Free Forge."""
 
     _TITLE = "Enhancements & Alerts"
-    _HEIGHT = 630
+    _HEIGHT = 580
 
     def _init_state(self) -> None:
         from notifications import NotificationManager
-        from low_power import LowPowerManager
         nm = NotificationManager.get_instance()
-        lp = LowPowerManager.get_instance()
         self._cfg = nm.get_config() if hasattr(nm, "get_config") else getattr(nm, "_config", {})
         self._discord_url = tk.StringVar(value=self._cfg.get("discord_webhook_url", ""))
         self._telegram_token = tk.StringVar(value=self._cfg.get("telegram_bot_token", ""))
         self._telegram_chat_id = tk.StringVar(value=self._cfg.get("telegram_chat_id", ""))
         self._webhooks_enabled = tk.BooleanVar(value=bool(self._cfg.get("enabled", True)))
-        self._low_power_enabled = tk.BooleanVar(value=bool(lp.enabled))
         self._human_mouse_enabled = tk.BooleanVar(value=bool(self._cfg.get("human_mouse", True)))
 
         initial_free_forge = False
@@ -6557,7 +6554,7 @@ class EnhancementsWindow(_FireSubWindow):
         self._status_text_item = cv.create_text(205, 228, text="", fill=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
 
         # Panel 2: Anti-Detection & Engine Optimization
-        self._create_panel(16, 285, 428, 250)
+        self._create_panel(16, 285, 428, 200)
         cv.create_text(28, 295, text="Anti-Detection & Engine Optimization", fill=c["text"],
                        font=("Segoe UI", 13, "bold"), anchor="nw")
         self._create_toggle("human_mouse", 330, "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
@@ -6565,19 +6562,13 @@ class EnhancementsWindow(_FireSubWindow):
         cv.create_text(54, 350, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
                        text="Generates natural curved paths with micro-jitter and smooth velocity.")
 
-        self._create_toggle("low_power", 385, "Low-Power / Overnight Mode", self._low_power_enabled,
-                            self._toggle_low_power)
-        cv.create_text(54, 405, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Paces idle checks to reduce overnight CPU/GPU temperatures and fan noise.")
-
-        self._create_toggle("free_forge", 440, "Free Forge: Autonomous Casting (experimental)", self._free_forge_enabled,
+        self._create_toggle("free_forge", 390, "Free Forge: Autonomous Casting (experimental)", self._free_forge_enabled,
                             self._toggle_free_forge)
-        cv.create_text(54, 460, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+        cv.create_text(54, 410, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
                        text="Allows Forge AI to cast legal spells autonomously without requiring base AI double-approval. (Experimental)")
 
-        self._create_button("snap", "Snap MTGA 16:9", 24, 555, 130, 40, self._snap_window)
-        self._create_button("session_stats", "Session Stats", 164, 555, 130, 40, self._open_session_stats)
-        self._create_button("back", "Back", 304, 555, 130, 40, self.destroy)
+        self._create_button("snap", "Snap MTGA 16:9", 35, 505, 185, 42, self._snap_window)
+        self._create_button("back", "Back", 240, 505, 185, 42, self.destroy)
 
     def _toggle_webhooks(self):
         self._webhooks_enabled.set(not self._webhooks_enabled.get())
@@ -6589,13 +6580,6 @@ class EnhancementsWindow(_FireSubWindow):
         self._refresh_toggle("human_mouse")
         self._save_config_now()
 
-    def _toggle_low_power(self):
-        self._low_power_enabled.set(not self._low_power_enabled.get())
-        self._refresh_toggle("low_power")
-        from low_power import LowPowerManager
-        LowPowerManager.get_instance().set_enabled(self._low_power_enabled.get())
-        self._save_config_now()
-
     def _toggle_free_forge(self):
         val = not self._free_forge_enabled.get()
         self._free_forge_enabled.set(val)
@@ -6604,12 +6588,6 @@ class EnhancementsWindow(_FireSubWindow):
         if hasattr(self._config_manager, "set_free_forge_enabled"):
             self._config_manager.set_free_forge_enabled(val)
         self._save_config_now()
-
-    def _open_session_stats(self):
-        if hasattr(self.master, "_open_current_session"):
-            self.master._open_current_session()
-        else:
-            self._canvas.itemconfigure(self._status_text_item, text="Session stats active in main window")
 
     def _save_config_now(self):
         from notifications import NotificationManager
@@ -6621,7 +6599,6 @@ class EnhancementsWindow(_FireSubWindow):
             "telegram_chat_id": self._telegram_chat_id.get().strip(),
             "enabled": bool(self._webhooks_enabled.get()),
             "human_mouse": bool(self._human_mouse_enabled.get()),
-            "low_power_mode": bool(self._low_power_enabled.get()),
             "free_forge": val,
         })
         os.environ["MTGA_FORGE_FREE"] = "on" if val else "off"

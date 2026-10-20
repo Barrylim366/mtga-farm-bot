@@ -4029,7 +4029,10 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     bot_logger.log_info("Quest prime: no block yet; clicking Home once more.")
                     # Distinct label: the wait is now visibly a retry, not a stall.
                     runtime_status.set_startup_phase("Reading daily quests (retrying)")
-                    self._navigate_to_home()
+                    try:
+                        self._navigate_to_home(dismiss_popups=False)
+                    except TypeError:
+                        self._navigate_to_home()
                     continue
                 time.sleep(1.0)
             bot_logger.log_info(
@@ -4067,9 +4070,19 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 time.sleep(1.0)
                 if not self._reroll_can_act():
                     return False
-                if self._navigate_to_home():
+                try:
+                    reached = self._navigate_to_home(dismiss_popups=False)
+                except TypeError:
+                    reached = self._navigate_to_home()
+                if reached:
                     return True
             bot_logger.log_info("Quest prime: Home not verified after the Profile re-entry.")
+            if self._reroll_can_act():
+                arena = self._get_ui_action_arena_region(force_reacquire=False, label="QUEST_PRIME_HOME_FALLBACK")
+                if arena is not None:
+                    point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
+                    self._click_abs(int(point[0]), int(point[1]), "GO_HOME_FALLBACK")
+                    time.sleep(1.5)
             return False
         except Exception as exc:
             bot_logger.log_info(f"Quest prime: Home re-entry failed ({exc}).")
@@ -4082,7 +4095,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
     # main screen regardless of which tab is currently active.
     _HOME_TAB_POINT_1920 = (104, 39)
 
-    def _navigate_to_home(self) -> bool:
+    def _navigate_to_home(self, *, dismiss_popups: bool = True) -> bool:
         """Return to the Home screen by clicking the fixed top-left Home tab.
 
         Clicks a fixed 1920-frame coordinate (not a template match, which only
@@ -4090,7 +4103,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         on Home (its anchor then matches). Returns True only if Home was reached."""
         if self._stop_requested:
             return False
-        if self._dismiss_reward_popup():
+        if dismiss_popups and self._dismiss_reward_popup():
             # Let the claimed/continued/reconnected screen settle before Home
             # navigation. The next probe must observe the resulting screen.
             return False
@@ -4106,6 +4119,8 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             last_det = getattr(self._arena_region_provider, "last_detection_result", None)
             if last_det and getattr(last_det, "region", None) and getattr(last_det, "code", None) == "anchor_not_found":
                 arena = last_det.region
+        if arena is None:
+            arena = self._get_ui_action_arena_region(force_reacquire=False, label="GO_HOME")
         if arena is None:
             return False
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
@@ -5111,6 +5126,13 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             if not self._starter_navigation_may_act():
                 return False
             if self._dismiss_blocking_announcement("STARTER_NAV"):
+                return False
+            if not self._home_screen_confirmed("STARTER_NAV_HOME_RECOVERY"):
+                bot_logger.log_info("Starter: on unrecognized screen; clicking Home tab to recover.")
+                try:
+                    self._navigate_to_home(dismiss_popups=False)
+                except TypeError:
+                    self._navigate_to_home()
                 return False
             bot_logger.log_info("Starter: Events tab not found (not in Play blade yet); will retry.")
             return False
