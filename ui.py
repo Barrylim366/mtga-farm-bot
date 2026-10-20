@@ -7496,7 +7496,7 @@ class SwitchAccountWindow(tk.Toplevel):
             state="normal" if self.switch_750_only_var.get() else "hidden",
         )
         label = cv.create_text(
-            50, y - 1, text="750-gold quests only (free a slot if full)",
+            50, y - 1, text="750-gold quests only (ok to do one 500-gold quests if all three are 500)",
             fill=c["text"], font=self._font(9), anchor="nw",
         )
 
