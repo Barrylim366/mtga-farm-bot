@@ -349,7 +349,7 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         self.assertEqual(attempts, ["STALL_CONCEDE_1", "STALL_CONCEDE_2"])
         self.assertEqual(order, ["attempt-1", "STALL_CONCEDE_1", "attempt-2", "STALL_CONCEDE_2"])
 
-    def test_attempt_limit_releases_input_and_suppresses_same_signature(self):
+    def test_attempt_limit_releases_input_without_blacklisting_same_decision(self):
         class NeverCompletes:
             def is_set(self):
                 return False
@@ -380,7 +380,7 @@ class ClaimedConcedeRetryTest(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertFalse(controller._Controller__concession_claimed)
         self.assertFalse(controller._suppress_selections)
-        self.assertEqual(controller._Controller__failed_stall_signature, signature)
+        self.assertIsNone(controller._Controller__failed_stall_signature)
 
     def test_stop_wakes_sequence_as_cancellation_not_recovery(self):
         controller = Controller.__new__(Controller)

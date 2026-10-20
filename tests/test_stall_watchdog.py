@@ -67,18 +67,21 @@ class StallSignatureTest(unittest.TestCase):
         self.controller.updated_game_state = GameState(state)
         return self.controller._Controller__local_stall_signature()
 
-    def test_membership_changes_in_each_players_hand_and_battlefield_are_progress(self):
+    def test_only_local_hand_and_battlefield_membership_earns_more_time(self):
         baseline_state = _state()
-        baseline = self.signature(baseline_state)
-
         for zone_id in (10, 20, 11, 21):
             with self.subTest(zone_id=zone_id):
+                self.controller._Controller__decision_watchdog = None
+                baseline = self.signature(baseline_state)
                 changed = copy.deepcopy(baseline_state)
                 zone = next(zone for zone in changed["zones"] if zone["zoneId"] == zone_id)
                 new_id = zone_id * 100
                 zone["objectInstanceIds"].append(new_id)
                 changed["gameObjects"].append({"instanceId": new_id, "zoneId": zone_id, "grpId": new_id})
-                self.assertNotEqual(self.signature(changed), baseline)
+                if zone_id in (10, 11):
+                    self.assertNotEqual(self.signature(changed), baseline)
+                else:
+                    self.assertEqual(self.signature(changed), baseline)
 
     def test_existing_battlefield_object_change_is_progress(self):
         baseline_state = _state()

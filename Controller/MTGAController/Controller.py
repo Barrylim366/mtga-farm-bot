@@ -45,6 +45,7 @@ import bot_logger
 import debug_recorder
 from concede_diagnostics import ConcedeIncident
 import runtime_status
+from decision_watchdog import DecisionWatchdog
 from runtime_paths import runtime_file
 
 _TARGET_FIELD_UNSET = object()
@@ -155,6 +156,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self.__stall_context_started_at = None
         self.__stall_watchdog_timer = None
         self.__stall_concede_threshold_sec = 30.0
+        self.__decision_watchdog = DecisionWatchdog()
         # A merged GameState can outlive the match which produced it.  This is
         # deliberately separate from __last_seen_match_id: only a GameState
         # observed while Player.log says IN_GAME makes a match live enough for
@@ -235,6 +237,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             'client_set_settings': '"type": "ClientMessageType_SetSettingsReq"',
             'main_nav_loaded': 'MainNav load in',
             'queue_ready_marker': 'Unloading 1 Unused Serialized files (Serialized files now loaded:',
+            # Observe every GRE request, including choices with no gameplay
+            # handler yet. The tracker filters out client traffic itself.
+            'decision_request': 'Req"',
         }
         if not log_path or not os.path.isfile(log_path):
             raise FileNotFoundError(
@@ -271,6 +276,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 if isinstance(created_input, NullInputController)
                 else ExclusiveInputController(created_input)
             )
+            if isinstance(self.input, ExclusiveInputController):
+                self.input.backend_timeout_callback = self._input_backend_failed
         except InputControllerError as e:
             raise RuntimeError(f"Failed to initialize input backend {input_backend!r}: {e}") from e
         try:
@@ -4358,7 +4365,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         )
         if arena is None:
             return False
-        if not self.__decision_exec_lock.acquire(False):
+        decision_lock = self.__decision_exec_lock
+        if not decision_lock.acquire(False):
             return True
         try:
             with self.input.input_transaction(timeout=0.0) as acquired:
@@ -4399,7 +4407,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self._unknown_screen_strikes = 0
                 return True
         finally:
-            self.__decision_exec_lock.release()
+            decision_lock.release()
 
     def _queue_from_event_landing(self, target_colors: str) -> bool:
         """Re-queue directly from the Starter Deck Duel event landing page.
@@ -6808,6 +6816,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def end_game(self) -> None:
         self._stop_requested = True
+        if isinstance(self.input, ExclusiveInputController):
+            self.input.revoke_workers()
         self._popup_recovery_stop.set()
         self.__clear_cast_ack_attempts("bot_stopped")
         self.__concede_outcome = "stop_requested"
@@ -7403,7 +7413,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             },
         )
         if outcome in {"click_ineffective", "ambiguous"}:
-            worker = threading.Thread(
+            worker = self._input_thread(
                 target=self.__write_cast_ack_bundle, args=(payload,),
                 name="CastAckBundle", daemon=True,
             )
@@ -7577,7 +7587,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self.__arm_cast_clear_poll(key)
 
     def __arm_cast_clear_poll(self, key: tuple) -> None:
-        timer = threading.Timer(1.0, self.__poll_cast_clear, args=key)
+        timer = self._input_timer(1.0, self.__poll_cast_clear, args=key)
         timer.daemon = True
         timer.start()
 
@@ -7656,7 +7666,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 attempt["post_wait_image"] = None
             timers = []
             for delay, final_probe in ((0.35, False), (1.1, False), (2.2, True)):
-                timer = threading.Timer(delay, self.__probe_cast_ack, args=(attempt_id, final_probe))
+                timer = self._input_timer(delay, self.__probe_cast_ack, args=(attempt_id, final_probe))
                 timer.daemon = True
                 timers.append(timer)
             attempt["timers"] = timers
@@ -7787,7 +7797,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         if frame is None or time.monotonic() - self.__last_cast_blocker_bundle_ts < 30.0:
             return
         self.__last_cast_blocker_bundle_ts = time.monotonic()
-        worker = threading.Thread(
+        worker = self._input_thread(
             target=self.__write_cast_blocker_bundle,
             args=(frame, blocker, card_id, cursor_position),
             name="CastBlockerBundle", daemon=True,
@@ -8862,7 +8872,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 runtime_status.clear_intentional_wait()
                 bot_logger.log_error(f"Error in delayed mulligan callback: {e}")
 
-        self.__mulligan_execution_thread = threading.Timer(self.__intro_delay, _mulligan_if_still_mine)
+        self.__mulligan_execution_thread = self._input_timer(self.__intro_delay, _mulligan_if_still_mine)
         self.__mulligan_execution_thread.start()
         self.__mulligan_decision_armed = True
         runtime_status.set_intentional_wait(float(self.__intro_delay) + 2.0, "mulligan_wait")
@@ -8916,7 +8926,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.__clear_combat_recovery("Combat recovery exhausted attempts.")
                 return
             if not self.__combat_step_ready_for_recovery():
-                self.__combat_recovery_timer = threading.Timer(0.5, _tick)
+                self.__combat_recovery_timer = self._input_timer(0.5, _tick)
                 self.__combat_recovery_timer.start()
                 return
             if self.__attack_target_flow_lock.locked():
@@ -8926,7 +8936,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.__combat_recovery_deadline_ts = max(
                     self.__combat_recovery_deadline_ts, time.time() + 3.5
                 )
-                self.__combat_recovery_timer = threading.Timer(0.5, _tick)
+                self.__combat_recovery_timer = self._input_timer(0.5, _tick)
                 self.__combat_recovery_timer.start()
                 return
             if (time.time() - self.__last_attack_submit_ts) < 3.0:
@@ -8940,7 +8950,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.__combat_recovery_deadline_ts = max(
                     self.__combat_recovery_deadline_ts, time.time() + 3.5
                 )
-                self.__combat_recovery_timer = threading.Timer(0.5, _tick)
+                self.__combat_recovery_timer = self._input_timer(0.5, _tick)
                 self.__combat_recovery_timer.start()
                 return
             attempt = self.__combat_recovery_attempts + 1
@@ -8956,17 +8966,17 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 bot_logger.log_error(
                     f"COMBAT_RECOVERY_DEFER: no combat click sent because arena_region is unavailable (key={key})."
                 )
-                self.__combat_recovery_timer = threading.Timer(0.6, _tick)
+                self.__combat_recovery_timer = self._input_timer(0.6, _tick)
                 self.__combat_recovery_timer.start()
                 return
             self.__combat_recovery_attempts = attempt
             if attempt < 2:
-                self.__combat_recovery_timer = threading.Timer(1.2, _tick)
+                self.__combat_recovery_timer = self._input_timer(1.2, _tick)
                 self.__combat_recovery_timer.start()
             else:
                 self.__clear_combat_recovery("Combat recovery complete.")
 
-        self.__combat_recovery_timer = threading.Timer(max(0.0, float(delay)), _tick)
+        self.__combat_recovery_timer = self._input_timer(max(0.0, float(delay)), _tick)
         self.__combat_recovery_timer.start()
 
     def activate_ability(self, card_id: int, ability_id: int) -> None:
@@ -9313,7 +9323,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             if is_payment and pay_costs_retry_attempt < 80:
                 # Retry contention for at most 16 seconds. The captured prompt
                 # timestamp prevents a queued retry from paying a later cast.
-                threading.Timer(0.2, lambda: self.submit_selection(
+                self._input_timer(0.2, lambda: self.submit_selection(
                     reason=reason, force=force, expected_match_id=expected_match_id,
                     allow_okay_fallback=allow_okay_fallback,
                     expected_pay_costs_ts=expected_pay_costs_ts,
@@ -9937,7 +9947,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         bot_logger.log_info("TIMEOUT: No activity for 3 minutes - clicking next button")
         self.resolve()  # Click the "next" button
         # Reschedule timer to keep clicking until turn ends
-        self.__inactivity_timer = threading.Timer(
+        self.__inactivity_timer = self._input_timer(
             5.0,  # Click every 5 seconds until something happens
             self.__handle_inactivity_timeout
         )
@@ -9968,7 +9978,23 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self.__auto_concede_stalled_matches = bool(enabled)
             if not self.__auto_concede_stalled_matches:
                 self.__clear_stall_watchdog("setting disabled")
+                if getattr(self, "_Controller__concession_claim_reason", None) == "stalled_local_context":
+                    if isinstance(getattr(self, "input", None), ExclusiveInputController):
+                        self.input.revoke_workers()
+                        self.input.resume_input(adopt_current=True)
+                        self.input.release_exclusive()
+                    self.__concession_claimed = False
+                    self.__concession_claim_reason = None
+                    self.__concede_completed_event.set()
+                    self._suppress_selections = False
+                    tracker = getattr(self, "_Controller__decision_watchdog", None)
+                    if tracker is not None and tracker.pending is not None:
+                        self._input_timer(0.1, self.__resume_stalled_decision,
+                                          args=(self.__live_match_id, tracker.pending.token)).start()
             else:
+                tracker = getattr(self, "_Controller__decision_watchdog", None)
+                if tracker is not None:
+                    tracker.retry()
                 self.__update_stall_watchdog()
         bot_logger.log_info(
             "Auto-concede stalled matches {}.".format(
@@ -9986,8 +10012,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.__stall_watchdog_timer = None
             if self.__stall_context_started_at is not None:
                 bot_logger.log_info(f"STALL_WATCHDOG_CLEARED: {reason}")
+                runtime_status.update_status(decision_watchdog={
+                    "decision": None, "evidence": None, "reason": reason, "age_sec": None,
+                })
             self.__stall_context_signature = None
             self.__stall_context_started_at = None
+            if reason in ("bot stopped", "match completed", "new game / reset") or reason.startswith(("left live match", "state reset")):
+                tracker = getattr(self, "_Controller__decision_watchdog", None)
+                if tracker is not None:
+                    tracker.reset(reason)
 
     def __is_live_match(self, expected_match_id: str | None = None) -> bool:
         """Whether Arena is still in the exact match allowed to receive input."""
@@ -10003,13 +10036,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def __leave_live_match(self, reason: str, outcome: str = "left_match") -> None:
         """Retire all match-scoped state before menu navigation can use input."""
+        leaving_match_id = self.__live_match_id or self.__last_seen_match_id
         if getattr(self, "_Controller__concession_claimed", False):
             self.__concede_outcome = outcome
             self.__concede_completed_event.set()  # wake a retry; outcome says why.
         self._clear_group_prompt()
         self.__group_prompt_seq += 1
         self.__group_prompt_match_id = None
-        self.__retired_match_id = self.__live_match_id or self.__last_seen_match_id
+        if leaving_match_id:
+            self.__retired_match_id = leaving_match_id
         self.__live_match_id = None
         self.__last_seen_match_id = None
         self.__failed_stall_signature = None
@@ -10026,138 +10061,100 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # post-match/menu transition. A fresh match reset re-enables them.
         self._suppress_selections = True
         self.updated_game_state = GameState()
-        release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
-        if callable(release_input):
-            release_input()
+        # MainNav also loads after login and ordinary menu navigation. Only a
+        # real match departure may revoke workers: otherwise the login's switch
+        # worker loses its lease and its replacement queue silently never runs.
+        # Repeated MainNav events after match completion must likewise preserve
+        # the new menu workers and the retired match's late-message guard.
+        if leaving_match_id:
+            self._retire_input_workers()
+            release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
+            if callable(release_input):
+                release_input()
 
-    @staticmethod
-    def __freeze_stall_value(value):
-        """Convert JSON-shaped Arena state into a stable, hashable value."""
-        if isinstance(value, dict):
-            return tuple(
-                (str(key), Controller.__freeze_stall_value(item))
-                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+    def __watchdog_tracker(self):
+        tracker = getattr(self, "_Controller__decision_watchdog", None)
+        if tracker is None:
+            tracker = self.__decision_watchdog = DecisionWatchdog()
+        return tracker
+
+    def _input_timer(self, interval, function, args=None, kwargs=None):
+        if isinstance(getattr(self, "input", None), ExclusiveInputController):
+            function = self.input.worker_target(function)
+        options = {}
+        if args is not None:
+            options["args"] = args
+        if kwargs is not None:
+            options["kwargs"] = kwargs
+        return threading.Timer(interval, function, **options)
+
+    def _retire_input_workers(self):
+        if isinstance(getattr(self, "input", None), ExclusiveInputController):
+            self.input.revoke_workers()
+            self.input.resume_input(adopt_current=True)
+
+    def _input_thread(self, *args, **kwargs):
+        target = kwargs.get("target")
+        if target is not None and isinstance(getattr(self, "input", None), ExclusiveInputController):
+            kwargs["target"] = self.input.worker_target(target)
+        return threading.Thread(*args, **kwargs)
+
+    def _input_backend_failed(self, reason="input backend unresponsive"):
+        if self._stop_requested:
+            return
+        bot_logger.log_error("AUTO_CONCEDE_INPUT_FAILED: " + reason)
+        self._request_stop_bot("Auto-concede failed: " + reason)
+
+    def __resume_stalled_decision(self, match_id, token):
+        if self._stop_requested or self._suppress_selections or not self.__is_live_match(match_id):
+            return
+        tracker = self.__watchdog_tracker()
+        pending = tracker.pending
+        if pending is None or pending.token != token:
+            return
+        message = pending.request
+        if message is None or not pending.explicit:
+            self.__invoke_decision_callback("concession retry exhausted")
+            return
+        # Recreate workers from the latest server request, rather than waking
+        # a revoked worker or replaying a locally attempted selection.
+        self.__clear_pending_target_select_state("Concession failed: restarting target worker")
+        self.__clear_pending_select_n_state("Concession failed: restarting selection worker")
+        self.__select_n_token_counter += 1
+        self.__pending_card_prompt = None
+        self.__assign_damage_in_progress = False
+        self.__mulligan_decision_armed = False
+        self.__end_declare_blocks_pause()
+        payload = {"greToClientEvent": {"greToClientMessages": [message]}}
+        pattern = next((value for value in self.patterns.values()
+                        if value == '"type": "' + message["type"] + '"'), None)
+        if pattern is not None:
+            self.__log_callback(pattern, json.dumps(payload))
+        elif pending.kind == "mulligan":
+            self.__arm_mulligan_if_needed(self.updated_game_state.get_turn_info(), payload)
+
+    def __observe_watchdog_payload(self, payload):
+        with self.__stall_watchdog_lock:
+            if (not self.__is_live_match() or self._stop_requested
+                    or not hasattr(self, "_Controller__auto_concede_stalled_matches")):
+                return
+            self.__watchdog_tracker().observe_requests(
+                payload, self.__live_match_id, self.__system_seat_id,
+                self.updated_game_state.get_turn_info() or {},
             )
-        if isinstance(value, (list, tuple)):
-            return tuple(Controller.__freeze_stall_value(item) for item in value)
-        if isinstance(value, set):
-            return tuple(sorted(
-                (Controller.__freeze_stall_value(item) for item in value),
-                key=repr,
-            ))
-        try:
-            hash(value)
-            return value
-        except TypeError:
-            return repr(value)
+            # Keep ownership evidence current while the policy is off. Enabling
+            # during a silent, already-open prompt must not need another request.
+            if not self.__auto_concede_stalled_matches:
+                self.__local_stall_signature()
+            self.__update_stall_watchdog()
 
     def __local_stall_signature(self):
-        """A compact state signature.  Never include timer/message/click ids."""
         if self._stop_requested or self._suppress_selections:
             return None
-        turn = self.updated_game_state.get_turn_info() or {}
-        my_seat = self.__system_seat_id
-        local_priority = my_seat is not None and turn.get("decisionPlayer") == my_seat
-        # During DeclareBlock, Arena can leave priorityPlayer on the attacking
-        # player while the local player's blocker prompt is still open. The
-        # decisionPlayer plus the explicit combat step identify that prompt;
-        # stale cached prompts (notably MulliganResp) still need the priority
-        # guard below.
-        local_block_decision = (
-            local_priority and turn.get("step") == "Step_DeclareBlock"
+        return self.__watchdog_tracker().observe_state(
+            self.__live_match_id, self.__system_seat_id,
+            self.updated_game_state.get_full_state() or {},
         )
-        # A delayed opponent decision can leave our old prompt state in the
-        # merged GameState. Explicit opponent priority rules out a local stall.
-        priority_seat = turn.get("priorityPlayer")
-        if (my_seat is not None and priority_seat is not None
-                and priority_seat != my_seat and not local_block_decision):
-            return None
-        prompt_kind = None
-        if getattr(self, "_group_prompt", None) is not None:
-            context = self._group_prompt["context"].lower()
-            prompt_kind = "surveil" if "surveil" in context else "scry" if "scry" in context else "group"
-        elif self.__has_pending_mulligan_state():
-            prompt_kind = "mulligan"
-        elif self.__pending_card_prompt:
-            prompt_kind = str(self.__pending_card_prompt.get("kind") or "card")
-        elif self.__pending_target_select is not None:
-            prompt_kind = "target"
-        elif self.__pending_select_n is not None or self.__select_n_in_progress:
-            prompt_kind = "select_n"
-        elif self.__should_pause_for_pay_costs():
-            prompt_kind = "pay_costs"
-        elif self.__should_pause_for_assign_damage():
-            prompt_kind = "assign_damage"
-        elif self.__casting_time_options_until > time.time():
-            prompt_kind = "casting_options"
-        elif local_block_decision:
-            prompt_kind = "blockers"
-        # A prompt cached from an earlier GRE message is not sufficient proof
-        # that we still own the decision. In particular, Player.pendingMessageType
-        # can remain MulliganResp after the opponent has started their mulligan;
-        # priorityPlayer may be absent during that transition. Only arm recovery
-        # for a prompt when the current turn data assigns us the decision.
-        if prompt_kind is not None and not local_priority and priority_seat != my_seat:
-            return None
-        if not local_priority and prompt_kind is None:
-            return None
-        try:
-            actions = self.updated_game_state.get_actions() or []
-            action_keys = tuple(sorted(
-                (self.__freeze_stall_value(action) for action in actions if isinstance(action, dict)),
-                key=repr,
-            ))
-            full_state = self.updated_game_state.get_full_state() or {}
-            relevant_zone_types = {
-                "ZoneType_Hand",
-                "ZoneType_Battlefield",
-                "ZoneType_Stack",
-                "ZoneType_Pending",
-            }
-            zones = []
-            relevant_object_ids = set()
-            for zone in full_state.get("zones", []) or []:
-                if not isinstance(zone, dict) or zone.get("type") not in relevant_zone_types:
-                    continue
-                object_ids = tuple(sorted(zone.get("objectInstanceIds", []) or [], key=repr))
-                relevant_object_ids.update(object_ids)
-                zones.append((
-                    zone.get("type"),
-                    zone.get("ownerSeatId"),
-                    zone.get("zoneId"),
-                    object_ids,
-                ))
-            zones = tuple(sorted(zones, key=repr))
-            zone_objects = tuple(sorted(
-                (
-                    self.__freeze_stall_value(game_object)
-                    for game_object in (full_state.get("gameObjects", []) or [])
-                    if isinstance(game_object, dict)
-                    and game_object.get("instanceId") in relevant_object_ids
-                ),
-                key=repr,
-            ))
-            players = tuple(sorted(
-                (p.get("systemSeatNumber"), p.get("lifeTotal"), p.get("pendingMessageType"))
-                for p in (self.updated_game_state.get_players() or []) if isinstance(p, dict)
-            ))
-        except Exception:
-            action_keys, zones, zone_objects, players = (), (), (), ()
-        prompt_identity = ()
-        if getattr(self, "_group_prompt", None) is not None:
-            prompt_identity = (self._group_prompt["seq"], self._group_prompt["context"])
-        elif isinstance(self.__pending_card_prompt, dict):
-            prompt_identity = (
-                self.__pending_card_prompt.get("kind"),
-                self.__pending_card_prompt.get("source_id"),
-                tuple(sorted(self.__pending_card_prompt.get("ids", []) or [])),
-            )
-        elif isinstance(self.__pending_select_n, dict):
-            prompt_identity = (self.__pending_select_n.get("mode"), tuple(sorted(self.__pending_select_n.get("ids", []) or [])))
-        elif isinstance(self.__pending_target_select, dict):
-            prompt_identity = (self.__pending_target_select.get("source_id"), self.__pending_target_select.get("last_target"))
-        return (prompt_kind, prompt_identity, local_priority, turn.get("turnNumber"), turn.get("phase"), turn.get("step"),
-                action_keys, zones, zone_objects, players)
 
     def __arm_stall_watchdog_timer(
         self, arm_id, signature, started_at, match_id, delay: float
@@ -10185,32 +10182,30 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             if signature is None:
                 self.__clear_stall_watchdog("local responsibility ended")
                 return
-            failed_signature = getattr(self, "_Controller__failed_stall_signature", None)
-            if failed_signature == signature:
-                self.__clear_stall_watchdog("failed stall signature unchanged")
-                return
-            if failed_signature is not None:
-                self.__failed_stall_signature = None
             now = time.monotonic()
             if signature != self.__stall_context_signature:
                 self.__clear_stall_watchdog("meaningful game progress")
                 self.__stall_context_signature = signature
-                self.__stall_context_started_at = now
+                tracker = getattr(self, "_Controller__decision_watchdog", None)
+                self.__stall_context_started_at = (tracker.pending.last_progress_at
+                                                   if tracker and tracker.pending else now)
                 self.__stall_watchdog_generation += 1
                 match_id = self.__live_match_id
                 self.__arm_stall_watchdog_timer(
                     self.__stall_watchdog_generation,
                     signature,
-                    now,
+                    self.__stall_context_started_at,
                     match_id,
-                    self.__stall_concede_threshold_sec,
+                    max(0.1, self.__stall_concede_threshold_sec - (now - self.__stall_context_started_at)),
                 )
-                bot_logger.log_info("STALL_WATCHDOG_ARMED: local responsibility; 30.0s window started")
+                detail = tracker.describe() if tracker else {}
+                bot_logger.log_info(f"STALL_WATCHDOG_ARMED: local responsibility; 30.0s window started {detail}")
+                runtime_status.update_status(decision_watchdog=detail)
 
     def __claim_concession(self, reason: str, expected_match_id: str | None = None) -> bool:
-        # The stall timer and the Arena inactivity timer run on separate
-        # threads. Keep the claim lock through input acquisition so a failed
-        # acquisition cannot leave a claimed concede with no input owner.
+        # Reserve terminal recovery atomically, revoking existing workers now.
+        # The physical input operation finishes outside the watchdog lock, so
+        # the log reader can still report progress or a match transition.
         with self.__concession_claim_lock:
             if expected_match_id is not None and not self.__is_live_match(expected_match_id):
                 return False
@@ -10218,7 +10213,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 bot_logger.log_info(f"CONCEDE_CLAIM_REJECTED: {reason}")
                 return False
             claim_input = getattr(self.input, "claim_exclusive_for_current_thread", None)
-            if callable(claim_input):
+            if isinstance(self.input, ExclusiveInputController):
+                # Revoke immediately without waiting under the decision lock.
+                # The concession worker takes the physical gate below, allowing
+                # the log reader to continue observing match completion.
+                self._suppress_selections = True
+                self.input.revoke_workers()
+                self.__concede_needs_takeover = True
+            elif callable(claim_input):
                 try:
                     if claim_input() is False:
                         bot_logger.log_info(f"CONCEDE_CLAIM_DEFERRED: input busy reason={reason}")
@@ -10304,11 +10306,6 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 )
                 return
             trigger_signature = getattr(self, "_Controller__stall_context_signature", None)
-            if self._group_watchdog_recovery():
-                self.__arm_stall_watchdog_timer(
-                    arm_id, trigger_signature, started_at, expected_match_id, 5.0,
-                )
-                return
             if not self.__claim_concession("stalled_local_context"):
                 if not getattr(self, "_stop_requested", False) and not self.__concession_claimed:
                     self.__arm_stall_watchdog_timer(
@@ -10338,6 +10335,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def concede(self, reason: str = "manual", expected_match_id: str | None = None) -> bool:
         """Explicitly request a concession (e.g. from stall watchdog or match timeout)."""
+        if isinstance(getattr(self, "input", None), ExclusiveInputController) and not self.input._lease_valid():
+            return False
         if expected_match_id is None:
             expected_match_id = getattr(self, "_Controller__live_match_id", None)
         claim_ready = threading.Event()
@@ -10364,7 +10363,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         ).start()
         # Preserve the synchronous claim result used by the duration retry
         # policy; the potentially slow UI sequence remains asynchronous.
-        claim_ready.wait()
+        claim_ready.wait(timeout=6.0)
         return claimed
 
     def concede_game(self, reason: str = "manual") -> bool:
@@ -10372,6 +10371,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def __cancel_pending_decisions_for_concede(self) -> None:
         self._suppress_selections = True
+        # A wedged old worker must not hold the next generation's decision lock.
+        self.__decision_exec_lock = threading.Lock()
         self.__clear_cast_ack_attempts("concede")
         for attr in ("_Controller__decision_execution_thread", "_Controller__mulligan_execution_thread", "_Controller__group_resume_timer", "_Controller__decision_recovery_timer"):
             timer = getattr(self, attr, None)
@@ -10392,6 +10393,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             if focus_mtga_window(): time.sleep(0.3)
             if not self.__is_live_match(expected_match_id):
                 return
+            provider = getattr(self, "_arena_region_provider", None)
+            if provider is not None:
+                detection = provider.detect(write_debug_on_fail=False)
+                if (not detection.ok or detection.region is None
+                        or not provider.anchor_visible(detection.region, "ingame_anchor.png")):
+                    bot_logger.log_info(f"{label}: live match not visually confirmed; skipping concede")
+                    return
             incident = getattr(self, "_Controller__active_concede_incident", None)
             if incident is not None:
                 incident.capture(self._vision, self._arena_region_provider)
@@ -10422,9 +10430,23 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         attempt = 0
         completed = False
         cancelled = False
+        tracker = getattr(self, "_Controller__decision_watchdog", None)
+        if tracker is not None:
+            runtime_status.update_status(decision_watchdog=tracker.describe())
         incident = ConcedeIncident.create(label, expected_match_id)
         self.__active_concede_incident = incident
         try:
+            if self._stop_requested or self.__concede_completed_event.is_set():
+                return
+            if getattr(self, "_Controller__concede_needs_takeover", False):
+                self.__concede_needs_takeover = False
+                if not self.input.take_over_for_current_thread(timeout=5.0):
+                    if not self._stop_requested and not self.__concede_completed_event.is_set() and self.__is_live_match(expected_match_id):
+                        self._input_backend_failed()
+                    return
+                if not self.__is_live_match(expected_match_id) or self._stop_requested:
+                    return
+                self.input.left_up()
             while (
                 attempt < self._STALL_CONCEDE_MAX_ATTEMPTS
                 and not self._stop_requested
@@ -10457,14 +10479,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 and not cancelled
                 and self.__is_live_match(expected_match_id)
             ):
-                self.__failed_stall_signature = stalled_signature
+                self.__failed_stall_signature = None
                 self.__concession_claimed = False
                 self.__concession_claim_reason = None
                 self._suppress_selections = False
                 self.__concede_outcome = "attempt_limit"
                 bot_logger.log_error(
                     f"{label}: {self._STALL_CONCEDE_MAX_ATTEMPTS} attempts failed; "
-                    "resuming normal play until game progress."
+                    "resuming normal play with a fresh 30-second window."
                 )
         finally:
             self.__active_concede_incident = None
@@ -10479,6 +10501,19 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             release_input = getattr(getattr(self, "input", None), "release_exclusive", None)
             if callable(release_input):
                 release_input()
+            if (self.__concede_outcome == "attempt_limit" and not self._stop_requested
+                    and self.__is_live_match(expected_match_id)):
+                with self.__stall_watchdog_lock:
+                    tracker = getattr(self, "_Controller__decision_watchdog", None)
+                    if tracker is not None:
+                        tracker.retry()
+                    if hasattr(self, "_Controller__auto_concede_stalled_matches"):
+                        self.__update_stall_watchdog()
+                # Fresh work uses the current lease; the revoked workers stay
+                # unable to click even after normal input is released.
+                if tracker is not None and tracker.pending is not None:
+                    self._input_timer(0.1, self.__resume_stalled_decision,
+                                      args=(expected_match_id, tracker.pending.token)).start()
 
     def __get_running_inactivity_timer_remaining(self) -> float | None:
         remaining_values: list[float] = []
@@ -10561,7 +10596,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             bot_logger.log_info(
                 "EMERGENCY_CONCEDE: deferred — local input not currently required ({})".format(reason)
             )
-            self.__emergency_concede_timer = threading.Timer(5.0, self.__attempt_emergency_concede)
+            self.__emergency_concede_timer = self._input_timer(5.0, self.__attempt_emergency_concede)
             self.__emergency_concede_timer.daemon = True
             self.__emergency_concede_timer.start()
             return
@@ -10584,7 +10619,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 bot_logger.log_info(
                     f"EMERGENCY_CONCEDE: deferred — bot recently active (idle={idle_secs:.1f}s), retrying in 5s"
                 )
-                self.__emergency_concede_timer = threading.Timer(5.0, self.__attempt_emergency_concede)
+                self.__emergency_concede_timer = self._input_timer(5.0, self.__attempt_emergency_concede)
                 self.__emergency_concede_timer.daemon = True
                 self.__emergency_concede_timer.start()
                 return
@@ -10592,7 +10627,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             pass
         if not self.__claim_concession("arena_inactivity_emergency"):
             if not self._stop_requested and not self.__concession_claimed:
-                self.__emergency_concede_timer = threading.Timer(
+                self.__emergency_concede_timer = self._input_timer(
                     1.0, self.__attempt_emergency_concede
                 )
                 self.__emergency_concede_timer.daemon = True
@@ -10788,7 +10823,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # delta self-corrects once it does, and the Home reads also refresh it.
         self._update_gold_from_inventory()
         self._note_match_finished()
-        threading.Timer(self._post_match_delay_sec, self._maybe_post_match_action).start()
+        self._input_timer(self._post_match_delay_sec, self._maybe_post_match_action).start()
         if self._queue_ready:
             self._maybe_post_match_action()
 
@@ -10845,6 +10880,11 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
     def reset_for_new_game(self):
         """Reset controller state for a new game - complete fresh start"""
         bot_logger.log_info("Resetting controller state for new game")
+        # Match departure already retired gameplay workers. A delayed Game
+        # restart also runs during the post-match hold (or an account switch),
+        # so retiring again here would cancel the menu workers that resume play.
+        if self.__live_match_id or self.__last_seen_match_id:
+            self._retire_input_workers()
         self._starter_dead_ends = 0
         self.__clear_cast_ack_attempts("reset_for_new_game")
         self.__group_prompt_seq += 1
@@ -10915,6 +10955,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         preserve_match_id: str | None = None,
         preserve_retired_match_id: str | None = None,
     ) -> None:
+        self._retire_input_workers()
         preserved_seat = preserve_system_seat_id if preserve_system_seat_id is not None else self.__system_seat_id
         self.__clear_cast_ack_attempts("state_reset")
         self.__group_prompt_seq += 1
@@ -11104,8 +11145,21 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         )
 
     def __log_callback(self, pattern: str, line_containing_pattern: str):
+        process = self.__process_log_callback
+        if isinstance(getattr(self, "input", None), ExclusiveInputController):
+            process = self.input.worker_target(process, allow_cancelled=True)
+        return process(pattern, line_containing_pattern)
+
+    def __process_log_callback(self, pattern: str, line_containing_pattern: str):
         self._state_tracker.push_line(line_containing_pattern)
         current_state = self._get_state_from_log()
+        # Arm before prompt handlers: a stuck handler must not hide its request.
+        try:
+            payload = json.loads(line_containing_pattern[line_containing_pattern.index("{"):])
+        except (ValueError, TypeError):
+            payload = {}
+        if pattern not in (self.patterns["game_state"], self.patterns["timer_state"], self.patterns["match_completed"]):
+            self.__observe_watchdog_payload(payload)
         runtime_status.touch_playerlog_event(state=str(current_state))
         if pattern == self.patterns["game_state"]:
             self.__update_game_state(json.loads(line_containing_pattern))
@@ -11161,7 +11215,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self._match_end_dismissed = False
             self._post_match_ready_ts = None
             # Wait a moment for end screen to fully appear, then dismiss it
-            threading.Timer(6.0, self.dismiss_end_screen).start()
+            self._input_timer(6.0, self.dismiss_end_screen).start()
             if self._account_switch_due():
                 self._account_switch_pending = True
         elif pattern == self.patterns["queue_ready_marker"]:
@@ -11179,7 +11233,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             runtime_status.set_mode("in_game", bot_state=str(current_state))
             if not self.__assign_damage_in_progress:
                 self.__assign_damage_in_progress = True
-                self.__assign_damage_execution_thread = threading.Timer(1.0, self.__run_assign_damage_done)
+                self.__assign_damage_execution_thread = self._input_timer(1.0, self.__run_assign_damage_done)
                 self.__assign_damage_execution_thread.start()
                 bot_logger.log_info("ASSIGN_DAMAGE_ARMED: scheduled assign damage done handler")
             else:
@@ -11451,12 +11505,12 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             bot_logger.log_info(f"Post-match delay active ({remaining:.1f}s remaining).")
             runtime_status.set_intentional_wait(remaining + 0.2, "post_match_delay")
             # Ensure we re-check when the delay elapses to avoid getting stuck at ~0s.
-            threading.Timer(max(0.1, remaining + 0.1), self._maybe_post_match_action).start()
+            self._input_timer(max(0.1, remaining + 0.1), self._maybe_post_match_action).start()
             return
         runtime_status.clear_intentional_wait()
         if self._account_switch_pending or self._account_switch_due():
             bot_logger.log_info("Post-match UI ready; starting account switch.")
-            threading.Thread(target=self._perform_account_switch, daemon=True).start()
+            self._input_thread(target=self._perform_account_switch, daemon=True).start()
             return
         if self._queue_after_login:
             self._queue_after_login = False
@@ -11506,7 +11560,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 my_timer_timeout_at_epoch=0.0,
             )
             bot_logger.log_info("Starting queue spam loop.")
-            self._queue_spam_thread = threading.Thread(target=self._queue_spam_loop, daemon=True)
+            self._queue_spam_thread = self._input_thread(target=self._queue_spam_loop, daemon=True)
             self._queue_spam_thread.start()
 
     # Cancel's centre in the 1920x1080 game frame, measured from a live capture
@@ -11777,7 +11831,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 # _perform_account_switch guards against concurrent runs, so racing
                 # with a post-match trigger is harmless.
                 bot_logger.log_info("Account switch due; performing switch now.")
-                threading.Thread(target=self._perform_account_switch, daemon=True).start()
+                self._input_thread(target=self._perform_account_switch, daemon=True).start()
                 return
             self._probe_report_dialog_if_queue_is_stuck()
             self.start_game_from_home_screen()
@@ -12011,7 +12065,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     # daemon: a pending repair timer must never hold up shutdown
                     # (threading.Timer threads are non-daemon by default, so the
                     # process would sit out the full delay on exit).
-                    repair = threading.Timer(5.0, self._resume_queue_if_idle)
+                    repair = self._input_timer(5.0, self._resume_queue_if_idle)
                     repair.daemon = True
                     repair.start()
                 except Exception:
@@ -12832,12 +12886,12 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     # or did not register; guarded by _modal_still_open so we never
                     # click the board once it resolves.
                     if attempt < 2:
-                        threading.Timer(1.4, lambda: _click_bottom(attempt + 1)).start()
+                        self._input_timer(1.4, lambda: _click_bottom(attempt + 1)).start()
                 except Exception as e:
                     bot_logger.log_error(f"Modal choice click execution failed: {e}")
 
             # Let the "Choose One" overlay finish animating in before clicking.
-            threading.Timer(1.0, lambda: _click_bottom(0)).start()
+            self._input_timer(1.0, lambda: _click_bottom(0)).start()
         except Exception as e:
             bot_logger.log_error(f"Failed to handle modal choice: {e}")
 
@@ -12886,7 +12940,6 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self._group_prompt = {
                     "seq": prompt_seq, "match_id": prompt_match_id, "context": str(context),
                     "clicks": 0, "checks": 0, "seen": False, "absent_samples": 0,
-                    "watchdog_used": False,
                     "next_check": time.monotonic() + 0.8,
                 }
                 bot_logger.log_info(f"GROUP_REQ ({context}): awaiting verified Done completion.")
@@ -12912,7 +12965,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.__group_resume_timer.cancel()
         except Exception:
             pass
-        self.__group_resume_timer = threading.Timer(
+        self.__group_resume_timer = self._input_timer(
             max(0.2, float(delay)),
             self.__resume_decision_after_group_req,
             kwargs={
@@ -12952,7 +13005,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self, delay: float, origin: str, generation: int,
         match_id: str | None, decision_key,
     ) -> None:
-        self.__decision_recovery_timer = threading.Timer(
+        self.__decision_recovery_timer = self._input_timer(
             max(0.2, float(delay)), self.__resume_decision_after_recovery,
             kwargs={
                 "origin": origin,
@@ -13174,7 +13227,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 )
                 # Answer it once the window has finished animating in. Token-gated,
                 # so a prompt that is gone by then cannot be clicked into.
-                timer = threading.Timer(
+                timer = self._input_timer(
                     self._CARD_PROMPT_SETTLE_SEC, lambda t=token: self.__answer_card_prompt(t)
                 )
                 timer.daemon = True
@@ -13290,7 +13343,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             # no-op; if it is still open the clicks did not take and the attempt
             # is repeated with a shifted spread until the cap is reached. Without
             # this the retry path above would never run.
-            retry = threading.Timer(
+            retry = self._input_timer(
                 self._CARD_PROMPT_RETRY_SEC, lambda t=token: self.__answer_card_prompt(t)
             )
             retry.daemon = True
@@ -13494,7 +13547,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self.__write_target_debug_bundle("graveyard_choice_unconfirmed")
 
         def later(callback):
-            timer = threading.Timer(0.6, callback)
+            timer = self._input_timer(0.6, callback)
             timer.daemon = True
             timer.start()
 
@@ -13741,7 +13794,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     bot_logger.log_info(
                         f"SelectN delayed: stack has {stack_count} object(s) during resolution."
                     )
-                    threading.Timer(0.6, lambda: self.__handle_select_n_req(line)).start()
+                    self._input_timer(0.6, lambda: self.__handle_select_n_req(line)).start()
                     return
                 if not ids_in_hand:
                     # Hand zone can be missing in this update (e.g., discard prompts from opponent effects).
@@ -13759,7 +13812,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             bot_logger.log_info(
                                 "SelectN discard: hand zone missing, retrying once after delay."
                             )
-                            threading.Timer(1.0, lambda: self.__handle_select_n_req(line)).start()
+                            self._input_timer(1.0, lambda: self.__handle_select_n_req(line)).start()
                             return
                     if not use_hand_selection and not use_stack_selection and not use_battlefield_selection:
                         bot_logger.log_info("SelectN aborting: ids not in hand and no prompt candidates found.")
@@ -13882,7 +13935,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                                 )
                                 if self.__pending_select_n is not None:
                                     self.__pending_select_n["ts"] = time.time()
-                                threading.Timer(1.2, _verify_selection, args=(selected_ids, attempt + 1)).start()
+                                self._input_timer(1.2, _verify_selection, args=(selected_ids, attempt + 1)).start()
                             return
                         pending_count = self.updated_game_state.get_pending_message_count()
                         pending_zone = self.updated_game_state.get_zone("ZoneType_Pending")
@@ -13901,7 +13954,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             ):
                                 if self.__pending_select_n is not None:
                                     self.__pending_select_n["ts"] = time.time()
-                                threading.Timer(1.2, _verify_selection, args=(selected_ids, attempt + 1)).start()
+                                self._input_timer(1.2, _verify_selection, args=(selected_ids, attempt + 1)).start()
                                 return
                             if attempt < max_attempts:
                                 bot_logger.log_info(
@@ -14090,15 +14143,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                                 ):
                                     if self.__pending_select_n is not None:
                                         self.__pending_select_n["ts"] = time.time()
-                                threading.Timer(1.2, _retry_submit_only, args=(retry_idx + 1,)).start()
+                                self._input_timer(1.2, _retry_submit_only, args=(retry_idx + 1,)).start()
 
-                            threading.Timer(1.2, _retry_submit_only, args=(1,)).start()
-                            threading.Timer(1.2, _verify_selection, args=(selected_ids, attempt)).start()
+                            self._input_timer(1.2, _retry_submit_only, args=(1,)).start()
+                            self._input_timer(1.2, _verify_selection, args=(selected_ids, attempt)).start()
                         except Exception as e:
                             bot_logger.log_error(f"SelectN selection failed: {e}")
                             _clear_pending_select_n("SelectN failed: clearing pending selection.")
 
-                    threading.Timer(delay, _do_selection).start()
+                    self._input_timer(delay, _do_selection).start()
 
                 delay = 0.6
                 if not ids_in_hand:
@@ -14139,7 +14192,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         try:
             start = line.find("{")
             if start == -1:
-                threading.Timer(0.6, lambda: self.submit_selection(
+                self._input_timer(0.6, lambda: self.submit_selection(
                     reason="pay_costs_no_payload", force=True,
                     expected_match_id=payment_match_id,
                     expected_pay_costs_ts=payment_ts,
@@ -14279,7 +14332,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     except Exception as e:
                         bot_logger.log_error(f"PayCostsReq selection execution failed: {e}")
 
-                threading.Timer(0.6, _do_cost_selection, args=(chosen_ids, click_kind)).start()
+                self._input_timer(0.6, _do_cost_selection, args=(chosen_ids, click_kind)).start()
                 break
 
             if not handled_selection:
@@ -14290,7 +14343,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 # the options overlay covering the board and the bot clicking
                 # blindly behind it. A real cancel needs the on-screen Cancel
                 # button (no template for it yet).
-                threading.Timer(
+                self._input_timer(
                     0.6,
                     lambda: self.submit_selection(
                         reason="pay_costs_auto_submit", force=True,
@@ -14320,7 +14373,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         try:
             if self._stop_requested:
                 return
-            self.__maybe_wake_stalled_decision()
+            tick = self.__maybe_wake_stalled_decision
+            if isinstance(getattr(self, "input", None), ExclusiveInputController):
+                tick = self.input.worker_target(tick)
+            tick()
         except Exception as e:
             bot_logger.log_error(f"Decision heartbeat failed: {e}")
         finally:
@@ -14475,7 +14531,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         stops two hand scans from racing the mouse."""
         if not self.__decision_callback:
             return False
-        if not self.__decision_exec_lock.acquire(blocking=False):
+        decision_lock = self.__decision_exec_lock
+        if not decision_lock.acquire(blocking=False):
             bot_logger.log_info(
                 f"Decision skipped: another decision is already executing ({reason})."
             )
@@ -14487,7 +14544,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             # Stamp on completion, so the heartbeat measures idle time since the
             # decision actually finished (a cast's hand scan runs for seconds).
             self.__last_decision_ts = time.time()
-            self.__decision_exec_lock.release()
+            decision_lock.release()
 
     # Modal "Choose one" spells whose SECOND (right) plate is the mode we want.
     # Valorous Stance (all printings): always take "Destroy target creature with
@@ -14654,11 +14711,11 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     # the cast flow's own mouse work) used to hang the match for
                     # good; the resolved-check above is what makes a repeat safe.
                     if attempt < self.__CASTING_TIME_OPTION_MAX_RETRIES:
-                        threading.Timer(1.6, lambda: _click_option(attempt + 1)).start()
+                        self._input_timer(1.6, lambda: _click_option(attempt + 1)).start()
                     else:
                         # Out of attempts: stop pausing decisions so the bot plays
                         # on (badly) rather than idling into the priority rope.
-                        threading.Timer(
+                        self._input_timer(
                             1.6,
                             lambda: self.__clear_casting_time_options_wait("retries exhausted"),
                         ).start()
@@ -14673,7 +14730,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             # so a no-click exit above never blocks a legitimate follow-up.
             self.__last_casting_time_options_ts = now
             # Give the overlay a moment to finish animating in.
-            threading.Timer(1.0, lambda: _click_option(0)).start()
+            self._input_timer(1.0, lambda: _click_option(0)).start()
         except Exception as e:
             bot_logger.log_error(f"Failed to handle CastingTimeOptionsReq: {e}")
 
@@ -15204,7 +15261,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             # A submit operation may still be unwinding its finally block.
             if not self.__submit_selection_lock.acquire(blocking=False):
                 self.__target_submit_lock_wait_expired(current, "zero_recovery", waiting=True)
-                threading.Timer(0.2, recover).start()
+                self._input_timer(0.2, recover).start()
                 return
             try:
                 current.pop("zero_recovery_queued", None)
@@ -15245,9 +15302,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     self.__write_target_debug_bundle("submit_zero_unconfirmed")
                     if current.get("cancel_after_zero_failure"):
                         self.input.tap_escape()
-            threading.Timer(3.0, check_result).start()
+            self._input_timer(3.0, check_result).start()
 
-        threading.Timer(0.0, recover).start()
+        self._input_timer(0.0, recover).start()
         return True
 
     def __watch_target_submission(self, token, clicked: bool, reason: str) -> None:
@@ -15258,7 +15315,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             current = self.__pending_target_select or {}
             if current.get("token") == token:
                 self.__target_recovery_exhausted(f"submit_{'unconfirmed' if clicked else 'failed'}:{reason}")
-        threading.Timer(3.0 if clicked else 0.0, check).start()
+        self._input_timer(3.0 if clicked else 0.0, check).start()
 
     def __schedule_ready_target_submit(self) -> None:
         pending = self.__pending_target_select or {}
@@ -15277,7 +15334,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 if self.__target_submit_lock_wait_expired(current, "ready_submit", waiting=busy):
                     return
                 if busy:
-                    threading.Timer(0.2, submit).start()
+                    self._input_timer(0.2, submit).start()
                     return
                 current["ready_submit_attempts"] = current.get("ready_submit_attempts", 0) + 1
                 if self.submit_selection(reason="target_selection_ready", expected_match_id=match_id):
@@ -15292,14 +15349,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 # prompts without waiting for another GRE request, which may
                 # never arrive while Arena is waiting for confirmation.
                 if current["ready_submit_attempts"] < self._READY_TARGET_SUBMIT_MAX_ATTEMPTS:
-                    threading.Timer(1.0, submit).start()
+                    self._input_timer(1.0, submit).start()
                 else:
                     bot_logger.log_error("TARGET_READY_SUBMIT_EXHAUSTED: required-target submit failed after bounded retries.")
             elif current.get("token") == token:
                 # Selection changed before the callback ran. A later ready
                 # update may start another flow using the remaining attempts.
                 current.pop("ready_submit_started", None)
-        threading.Timer(0.2, submit).start()
+        self._input_timer(0.2, submit).start()
 
     def __try_handle_fiery_equipment(self) -> bool:
         pending = self.__pending_target_select or {}
@@ -15372,10 +15429,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 if current["groups"][1]["selected"] or time.monotonic() >= deadline:
                     finish()
                 else:
-                    threading.Timer(0.1, wait_for_selection).start()
+                    self._input_timer(0.1, wait_for_selection).start()
             self._dismiss_are_you_sure_if_present(context="FIERY_EQUIPMENT", expected_match_id=match_id)
             wait_for_selection()
-        threading.Timer(0.8, flow).start()
+        self._input_timer(0.8, flow).start()
         return True
 
     def __get_target_click_offsets(self) -> list[tuple[int, int]]:
@@ -15865,7 +15922,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                         expected_match_id=expected_match_id,
                     )
 
-                threading.Timer(0.7, _confirm_if_still_valid).start()
+                self._input_timer(0.7, _confirm_if_still_valid).start()
                 return
             pending = self.__pending_target_select or {}
             if clicked and pending.get("selected_update_seq", 0) <= selected_update_seq:
@@ -15873,7 +15930,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 # can deselect a target whose acknowledgement is merely late.
                 if (acknowledgement_deadline is not None
                         and time.monotonic() < acknowledgement_deadline):
-                    threading.Timer(0.5, lambda: _attempt_submit(
+                    self._input_timer(0.5, lambda: _attempt_submit(
                         attempt, clicked=True,
                         selected_update_seq=selected_update_seq,
                         acknowledgement_deadline=acknowledgement_deadline,
@@ -15894,7 +15951,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 # missed click. Retry only after that window and stop after two
                 # retries so a delayed acknowledgement cannot cause a click loop.
                 if attempt < 2 and _valid() and self.can_execute_game_action(expected_match_id):
-                    threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
+                    self._input_timer(0.9, lambda: _do_click(attempt + 1)).start()
                 elif _valid():
                     # Let a fresh SelectTargetsReq start another flow if Arena
                     # keeps the prompt open after all local attempts.
@@ -15902,7 +15959,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     self.__target_recovery_exhausted("creature_retries_exhausted")
                 return
             if attempt < 2:
-                threading.Timer(0.9, lambda: _do_click(attempt + 1)).start()
+                self._input_timer(0.9, lambda: _do_click(attempt + 1)).start()
             else:
                 self.__write_target_debug_bundle("target_click_ack_timeout")
                 pending = self.__pending_target_select or {}
@@ -15973,13 +16030,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     acknowledgement_deadline=deadline,
                 )
 
-            threading.Timer(0.5, _after_target_click).start()
+            self._input_timer(0.5, _after_target_click).start()
 
         delay_remaining = self.__get_delay_timer_remaining()
         start_delay = 0.8
         if delay_remaining > 0.05:
             start_delay = delay_remaining + 0.4
-        threading.Timer(start_delay, lambda: _do_click(0)).start()
+        self._input_timer(start_delay, lambda: _do_click(0)).start()
 
     def __try_handle_fight_targets(self, req) -> bool:
         """Handle a two-target pump-fight spell (e.g. Felling Blow): pick our
@@ -16094,7 +16151,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
         delay_remaining = self.__get_delay_timer_remaining()
         start_delay = 0.8 if delay_remaining <= 0.05 else delay_remaining + 0.4
-        threading.Timer(start_delay, _flow).start()
+        self._input_timer(start_delay, _flow).start()
 
     def _get_chooser_scan_points_mapped(
         self,
@@ -16277,7 +16334,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.__write_target_debug_bundle("chooser_target_selection_unconfirmed")
                 self.__target_recovery_exhausted("chooser_ack_timeout")
             elif attempt < 2 and not (self._suppress_selections or self._stop_requested):
-                threading.Timer(1.0, lambda: _do(attempt + 1)).start()
+                self._input_timer(1.0, lambda: _do(attempt + 1)).start()
             else:
                 bot_logger.log_error(
                     f"CHOOSER_TARGET: giving up on id={target_id} after {attempt + 1} attempt(s); "
@@ -16287,7 +16344,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
         delay = self.__get_delay_timer_remaining()
         start_delay = 0.8 if delay <= 0.05 else delay + 0.4
-        threading.Timer(start_delay, lambda: _do(0)).start()
+        self._input_timer(start_delay, lambda: _do(0)).start()
 
     def __schedule_target_selection(
         self,
@@ -16503,7 +16560,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 return False
             if self.__pending_target_ready_to_submit():
                 self.__last_submit_targets_ts = time.time()
-                threading.Timer(0.3, _submit_if_still_valid).start()
+                self._input_timer(0.3, _submit_if_still_valid).start()
                 return True
             return False
 
@@ -16557,8 +16614,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             _click_player(
                 x, y, label, f"SELECT_OPPONENT_AVATAR_RETRY_{attempts + 1}", fast=True
             )
-            threading.Timer(0.5, _attempt_submit).start()
-            threading.Timer(0.7, _retry_if_needed).start()
+            self._input_timer(0.5, _attempt_submit).start()
+            self._input_timer(0.7, _retry_if_needed).start()
 
         def _do_click():
             if not _target_selection_still_valid():
@@ -16575,14 +16632,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 _click_player(x, y, label, "SELECT_OPPONENT_AVATAR")
             elif not own_player:
                 self.__click_opponent_avatar_with_offset((0, 0), "SELECT_OPPONENT_AVATAR")
-            threading.Timer(0.7, _attempt_submit).start()
-            threading.Timer(1.0, _retry_if_needed).start()
+            self._input_timer(0.7, _attempt_submit).start()
+            self._input_timer(1.0, _retry_if_needed).start()
 
         delay_remaining = self.__get_delay_timer_remaining()
         start_delay = 0.8
         if delay_remaining > 0.05:
             start_delay = delay_remaining + 0.4
-        threading.Timer(start_delay, _do_click).start()
+        self._input_timer(start_delay, _do_click).start()
 
     def __is_selecting_targets(self) -> bool:
         try:
@@ -17562,7 +17619,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                         bot_logger.log_error(f"Forge block review failed: {e}")
                     self.__declare_blocks_from_decision(reviewed, end_pause_on_no_blocks=True)
 
-                threading.Thread(
+                self._input_thread(
                     target=_review_then_declare, name="forge-blocks", daemon=True
                 ).start()
                 return
@@ -17603,7 +17660,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 # inside the 0.8s gap, and a flag set inside the Timer would be
                 # set too late to stop it.
                 self.__begin_declare_blocks_pause()
-                threading.Timer(0.8, self.__execute_blocks, args=(assignments,)).start()
+                self._input_timer(0.8, self.__execute_blocks, args=(assignments,)).start()
                 return
 
             bot_logger.log_info("DeclareBlockersReq: declaring NO blocks.")
@@ -17613,7 +17670,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             )
             if end_pause_on_no_blocks:
                 self.__end_declare_blocks_pause()
-            threading.Timer(0.8, self.__click_combat_submit_button, args=("NO_BLOCKS",)).start()
+            self._input_timer(0.8, self.__click_combat_submit_button, args=("NO_BLOCKS",)).start()
         except Exception as e:
             if end_pause_on_no_blocks:
                 self.__end_declare_blocks_pause()
@@ -18076,14 +18133,17 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self.__maybe_clear_pending_pay_costs()
 
         game_state = Controller.__get_game_state_from_raw_dict(raw_dict, fallback_seat_id=self.__system_seat_id or 1)
-        self.updated_game_state.update(game_state)
-        # This assignment intentionally follows the merge: a match id alone is
-        # not permission to interact with Arena.
-        if incoming_match_id and self._get_state_from_log() == BotState.IN_GAME:
-            if self.__live_match_id != incoming_match_id:
-                self.__failed_stall_signature = None
-                self.__concede_outcome = None
-            self.__live_match_id = incoming_match_id
+        with self.__stall_watchdog_lock:
+            # The expiry callback must see either the old state or the complete
+            # new observation, never a partially merged choice.
+            self.updated_game_state.update(game_state)
+            # A match id alone is not permission to interact with Arena.
+            if incoming_match_id and self._get_state_from_log() == BotState.IN_GAME:
+                if self.__live_match_id != incoming_match_id:
+                    self.__failed_stall_signature = None
+                    self.__concede_outcome = None
+                self.__live_match_id = incoming_match_id
+            self.__observe_watchdog_payload(raw_dict)
         keep_observed = self.__infer_keep_from_raw_dict(raw_dict)
         if self.__has_local_mulligan_request(raw_dict) and not keep_observed:
             self.__clear_premature_mulligan_keep("Local MulliganReq observed: clearing premature keep state.")
@@ -18258,18 +18318,18 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     try:
                         ti = self.updated_game_state.get_turn_info() or {}
                         if self.__should_pause_for_pay_costs():
-                            self.__decision_execution_thread = threading.Timer(0.5, _retry_after_pay_costs_pause)
+                            self.__decision_execution_thread = self._input_timer(0.5, _retry_after_pay_costs_pause)
                             self.__decision_execution_thread.start()
                             return
                         if self.__should_pause_for_targets():
-                            self.__decision_execution_thread = threading.Timer(0.5, _retry_after_pay_costs_pause)
+                            self.__decision_execution_thread = self._input_timer(0.5, _retry_after_pay_costs_pause)
                             self.__decision_execution_thread.start()
                             return
                         # A Choose One overlay can open while the pay-costs pause
                         # is running (or outlive it); resuming into it is the same
                         # unreachable-hand-row bug as issue #41.
                         if self.__should_pause_for_casting_time_options():
-                            self.__decision_execution_thread = threading.Timer(0.5, _retry_after_pay_costs_pause)
+                            self.__decision_execution_thread = self._input_timer(0.5, _retry_after_pay_costs_pause)
                             self.__decision_execution_thread.start()
                             return
                         if (
@@ -18282,7 +18342,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     except Exception as e:
                         bot_logger.log_error(f"Error in pay-costs pause retry: {e}")
 
-                self.__decision_execution_thread = threading.Timer(0.5, _retry_after_pay_costs_pause)
+                self.__decision_execution_thread = self._input_timer(0.5, _retry_after_pay_costs_pause)
                 self.__decision_execution_thread.start()
             return
 
@@ -18379,7 +18439,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             )
                             runtime_status.set_intentional_wait(2.0, "scry_wait")
                             runtime_status.touch_decision()
-                            self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
+                            self.__decision_execution_thread = self._input_timer(0.5, _decision_if_still_my_priority)
                             self.__decision_delay_key = delay_key
                             self.__decision_delay_scheduled_at = time.time()
                             self.__decision_execution_thread.start()
@@ -18397,7 +18457,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             bot_logger.log_info("Deferring decision; pay-costs prompt still pending")
                             runtime_status.set_intentional_wait(3.0, "pay_costs_wait")
                             runtime_status.touch_decision()
-                            self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
+                            self.__decision_execution_thread = self._input_timer(0.5, _decision_if_still_my_priority)
                             self.__decision_delay_key = delay_key
                             self.__decision_delay_scheduled_at = time.time()
                             self.__decision_execution_thread.start()
@@ -18411,7 +18471,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             bot_logger.log_info("Deferring decision; casting-time Choose One dialog still open")
                             runtime_status.set_intentional_wait(3.0, "casting_time_option_wait")
                             runtime_status.touch_decision()
-                            self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
+                            self.__decision_execution_thread = self._input_timer(0.5, _decision_if_still_my_priority)
                             self.__decision_delay_key = delay_key
                             self.__decision_delay_scheduled_at = time.time()
                             self.__decision_execution_thread.start()
@@ -18420,7 +18480,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             bot_logger.log_info("Deferring decision; assign damage handler is pending")
                             runtime_status.set_intentional_wait(3.0, "assign_damage_wait")
                             runtime_status.touch_decision()
-                            self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
+                            self.__decision_execution_thread = self._input_timer(0.5, _decision_if_still_my_priority)
                             self.__decision_delay_key = delay_key
                             self.__decision_delay_scheduled_at = time.time()
                             self.__decision_execution_thread.start()
@@ -18430,7 +18490,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             bot_logger.log_info("Deferring decision; target selection still pending")
                             runtime_status.set_intentional_wait(15.0, "target_selection_wait")
                             runtime_status.touch_decision()
-                            self.__decision_execution_thread = threading.Timer(0.5, _decision_if_still_my_priority)
+                            self.__decision_execution_thread = self._input_timer(0.5, _decision_if_still_my_priority)
                             self.__decision_delay_key = delay_key
                             self.__decision_delay_scheduled_at = time.time()
                             self.__decision_execution_thread.start()
@@ -18482,7 +18542,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                         effective_delay,
                     )
                 )
-                self.__decision_execution_thread = threading.Timer(effective_delay, _decision_if_still_my_priority)
+                self.__decision_execution_thread = self._input_timer(effective_delay, _decision_if_still_my_priority)
                 self.__decision_execution_thread.start()
                 return
 

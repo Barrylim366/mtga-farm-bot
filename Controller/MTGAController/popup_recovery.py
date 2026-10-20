@@ -61,7 +61,11 @@ class PopupRecoveryMixin:
             while not stop.wait(1.0):
                 if self._stop_requested:
                     return
-                self._recover_blocking_popup(stop_event=stop)
+                recover = self._recover_blocking_popup
+                worker_target = getattr(self.input, "worker_target", None)
+                if callable(worker_target):
+                    recover = worker_target(recover)
+                recover(stop_event=stop)
 
         self._popup_recovery_thread = threading.Thread(
             target=watch, name="popup-recovery", daemon=True,

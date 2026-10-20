@@ -4418,6 +4418,8 @@ class MTGBotUI(tk.Tk):
             if self._controller is not controller:
                 return
         self._stop_bot()
+        if str(reason).startswith("Auto-concede failed:"):
+            messagebox.showerror("Bot stopped", str(reason), parent=self)
         if reason == "play time limit reached":
             self._announce_round_complete(time_limit=True)
         elif "account" in str(reason or "").lower() and "complet" in str(reason or "").lower():

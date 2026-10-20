@@ -2,6 +2,8 @@
 
 Startup reward recovery requires Claim text, preventing orange Play and Submit Deck buttons from being mistaken for rewards.
 Pending startup/login rerolls are retried before an account switch, including accounts that already met their farming target.
+Account login and repeated Home transitions preserve the queue worker; leaving a match still cancels that match's pending input.
+Post-match resets preserve delayed queueing and account switching. Cancelled input transactions release their reservation without unlocking newer work.
 <img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
 
 Free, open-source Magic the Gathering Arena (MTGA) bot for automating daily quests, daily wins, and account switching. Burning Lotus runs on Windows, macOS, and Linux without code injection or subscriptions. Built in Python with a graphical UI, no command-line knowledge required.
@@ -50,7 +52,7 @@ For Forge-selected battlefield abilities, the bot clicks the visible **Activate 
 
 Quest reroll searches for the 500 Gold label in one continuous daily-quest area (x=50–910, y=750–960 in the normalized 1920×1080 Arena window). This avoids clipping labels at internal search boundaries while leaving win rewards farther to the right outside the search. The existing matching threshold and brightness checks still apply.
 
-Scry and Surveil keep normal gameplay paused until their central overlay is confirmed closed in two settled observations. Done is located again for each of up to three attempts, with input ownership held across recognition and the press. Surveil's fixed-position fallback requires its visible heading. Missing captures never count as completion. Recovery requires successful window focusing on Windows; Linux and macOS verify the visible overlay without requiring the Windows focus helper. The stall watchdog identifies the pending prompt and allows one final recovery attempt with a five-second grace period before conceding; recovery attempts do not reset the original stall age.
+Scry and Surveil keep normal gameplay paused until their central overlay is confirmed closed in two settled observations. Done is located again for each of up to three attempts, with input ownership held across recognition and the press. Surveil's fixed-position fallback requires its visible heading. Missing captures never count as completion. Recovery requires successful window focusing on Windows; Linux and macOS verify the visible overlay without requiring the Windows focus helper. Recovery attempts do not reset the stall countdown; auto-concede starts at 30 seconds without confirmed progress.
 
 ## Quick Start
 
@@ -184,15 +186,23 @@ fresh timer. Command-line launches use the same saved setting.
 
 ### Auto-concede stalled matches
 
-When enabled in Settings, the bot can concede only after Arena has confirmed a
-live match and the same local decision state has remained unchanged for 30
-seconds. It never acts from stale post-match data or while Arena is in a menu.
-If Arena changes the local prompt while that 30-second deadline is firing, the
-bot starts a fresh deadline for the new prompt instead of silently losing the
-watchdog timer.
-If the Concede dialog cannot be completed after two attempts, normal play is
-resumed and that unchanged state is not retried until Arena reports real game
-progress.
+When enabled in Settings, the bot starts conceding after **30 seconds without
+confirmed progress on a decision Arena is waiting for it to complete**. This
+covers normal play, mulligans, attacks, blocks, targets, costs, and other choices.
+Requests addressed to the bot and Arena's local decision timers establish whose
+decision it is, even when the priority fields disagree. Waiting for the opponent
+does not count as a bot stall.
+
+Accepted partial progress, such as assigning another blocker or selecting another
+required target, restarts the countdown. Repeated clicks, duplicate requests,
+rejected submissions, and toggling previously selected choices do not. The
+countdown continues if Arena's log becomes silent. Before conceding, the bot
+checks that the same match remains active and that a live match is visible.
+
+At 30 seconds, gameplay recovery stops and concession begins; focusing Arena and
+confirming the dialog take additional time. If two concede attempts fail, normal
+play resumes with a fresh 30-second countdown. If the mouse or keyboard backend
+itself hangs, the bot stops and displays an error.
 
 The 30-second deadline is checked and the concession is claimed as one
 indivisible step, so a prompt that changes (or the setting being switched off)
@@ -209,14 +219,11 @@ dropped rather than landing on whatever Arena is showing by then. The
 unconditional concede that follows an expired Arena turn timer is unaffected —
 it deliberately does not depend on a known match id.
 
-While a concede is running it holds sole ownership of mouse and keyboard, and
-a gameplay action that was authorised a moment earlier can no longer slip
-through: the permission check and the input itself are now a single step, so a
-claim waits for any action still in flight and the mouse is released only once
-that action has finished.
-If input remains busy, the claim stops waiting after one second and the bot
-retries the stall or emergency concede shortly afterward. It does not start
-the concede clicks without owning input.
+While a concede is running it holds sole ownership of mouse and keyboard. Old
+gameplay workers lose permission to click and remain cancelled after normal play
+resumes. An actual input operation already in flight gets up to five seconds to
+finish before the bot reports an input failure. Match changes and Stop cancel
+old decisions and pending clicks.
 
 ### Input backend
 

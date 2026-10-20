@@ -80,7 +80,8 @@ class GroupRecoveryMixin:
             if time.monotonic() < prompt["next_check"]:
                 self._Controller__schedule_group_resume(self._GROUP_SETTLE_SEC)
                 return False
-            if not self._Controller__decision_exec_lock.acquire(False):
+            decision_lock = self._Controller__decision_exec_lock
+            if not decision_lock.acquire(False):
                 self._Controller__schedule_group_resume(self._GROUP_SETTLE_SEC)
                 return False
             try:
@@ -101,13 +102,18 @@ class GroupRecoveryMixin:
                         prompt["absent_samples"] += 1
                         if prompt["absent_samples"] >= 2:
                             self._clear_group_prompt()
+                            tracker = getattr(self, "_Controller__decision_watchdog", None)
+                            if tracker is not None and tracker.pending is not None and tracker.pending.kind == "group":
+                                with self._Controller__stall_watchdog_lock:
+                                    tracker.clear("group overlay visibly closed")
+                                    self._Controller__update_stall_watchdog()
                             bot_logger.log_info("GROUP_RECOVERY_CLOSED: overlay absent in two settled observations.")
                             return True
                     else:
                         prompt["absent_samples"] = 0
                     if state == "open":
                         prompt["seen"] = True
-                        budget = self._GROUP_DONE_ATTEMPTS + int(prompt["watchdog_used"])
+                        budget = self._GROUP_DONE_ATTEMPTS
                         if prompt["clicks"] < budget and point is not None:
                             prompt["clicks"] += 1
                             # Own input from capture through move/down/up. Recheck
@@ -119,7 +125,7 @@ class GroupRecoveryMixin:
                                 )
                     prompt["next_check"] = time.monotonic() + self._GROUP_SETTLE_SEC
             finally:
-                self._Controller__decision_exec_lock.release()
+                decision_lock.release()
             if prompt["checks"] < self._GROUP_CHECK_LIMIT:
                 self._Controller__schedule_group_resume(self._GROUP_SETTLE_SEC)
             else:
@@ -134,16 +140,3 @@ class GroupRecoveryMixin:
             return False
         finally:
             self._group_recovery_lock.release()
-
-    def _group_watchdog_recovery(self):
-        """One final recovery opportunity, without resetting the stall age."""
-        prompt = getattr(self, "_group_prompt", None)
-        if prompt is None or prompt["watchdog_used"] or not self._group_prompt_may_act(prompt):
-            return False
-        prompt["watchdog_used"] = True
-        # Permit the final press plus two closure observations, even after the
-        # ordinary checking budget was exhausted.
-        prompt["checks"] = min(prompt["checks"], self._GROUP_CHECK_LIMIT - 3)
-        self._Controller__schedule_group_resume(0.01)
-        bot_logger.log_info("GROUP_WATCHDOG_RECOVERY: one final Done attempt before concession.")
-        return True

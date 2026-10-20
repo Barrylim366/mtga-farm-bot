@@ -128,24 +128,106 @@ class ExclusiveInputController(InputController):
         self._exclusive = False
         self._owner_ident: int | None = None
         self._transaction_depth = 0
+        self._transaction_generation: int | None = None
+        self._generation = 0
+        self._lease_local = threading.local()
+        # Separate from the physical-call lock: cancellation must remain possible
+        # even if a backend call is hung while holding _gate_lock.
+        self._lease_lock = threading.RLock()
+        self._input_disabled = False
+        self.backend_timeout_callback = None
+
+    def worker_target(self, target, *, allow_cancelled=False):
+        """Capture permission when work is scheduled, including nested retries."""
+        with self._lease_lock:
+            generation = getattr(self._lease_local, "generation", self._generation)
+
+        def run(*args, **kwargs):
+            previous = getattr(self._lease_local, "generation", None)
+            self._lease_local.generation = generation
+            try:
+                if allow_cancelled or self._lease_valid():
+                    return target(*args, **kwargs)
+            finally:
+                if previous is None:
+                    del self._lease_local.generation
+                else:
+                    self._lease_local.generation = previous
+        return run
+
+    def revoke_workers(self):
+        with self._lease_lock:
+            self._generation += 1
+            self._input_disabled = True
+
+    def resume_input(self, *, adopt_current=False):
+        """Permit new work; revoked worker leases remain invalid."""
+        with self._lease_lock:
+            self._input_disabled = False
+            if adopt_current:
+                self._lease_local.generation = self._generation
+
+    def _lease_valid(self):
+        with self._lease_lock:
+            return (not self._input_disabled and
+                    getattr(self._lease_local, "generation", self._generation) == self._generation)
+
+    def take_over_for_current_thread(self, timeout=5.0):
+        """Revoke workers, then wait boundedly for the physical call in flight."""
+        with self._lease_lock:
+            self._generation += 1
+            self._lease_local.generation = self._generation
+            generation = self._generation
+            self._input_disabled = True
+        if not self._gate_lock.acquire(timeout=timeout):
+            return False
+        try:
+            if generation != self._generation:
+                return False
+            self._transaction_depth = 0
+            self._transaction_generation = None
+            self._exclusive = True
+            self._owner_ident = threading.get_ident()
+            with self._lease_lock:
+                self._input_disabled = False
+        finally:
+            self._gate_lock.release()
+        # left_up is itself a backend call and can hang. Perform it through the
+        # bounded concession worker rather than blocking the watchdog scheduler.
+        return True
 
     def _acquire_gate_until(self, deadline: float) -> bool:
         """Bound lock acquisition even when a delegate call holds the gate."""
         return self._gate_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
 
+    def _discard_revoked_transaction(self):
+        """Called under the gate; revoked workers no longer reserve input."""
+        if self._transaction_depth and self._transaction_generation != self._generation:
+            self._transaction_depth = 0
+            self._transaction_generation = None
+            if not self._exclusive:
+                self._owner_ident = None
+
     @contextmanager
     def input_transaction(self, timeout: float = 0.25):
         """Temporarily serialize input for a short, safety-critical sequence."""
         owner = threading.get_ident()
+        generation = self._generation
+        previous = getattr(self._lease_local, "generation", None)
+        self._lease_local.generation = previous if previous is not None else generation
         acquired = False
         deadline = time.monotonic() + max(0.0, float(timeout))
         while self._acquire_gate_until(deadline):
             try:
+                self._discard_revoked_transaction()
+                if not self._lease_valid():
+                    break
                 busy = ((self._transaction_depth or self._exclusive)
                         and self._owner_ident != owner)
                 if not busy:
                     if self._transaction_depth == 0:
                         self._owner_ident = owner
+                        self._transaction_generation = generation
                     self._transaction_depth += 1
                     acquired = True
                     break
@@ -160,16 +242,26 @@ class ExclusiveInputController(InputController):
         finally:
             if acquired:
                 with self._gate_lock:
-                    self._transaction_depth -= 1
-                    if self._transaction_depth == 0 and not self._exclusive:
-                        self._owner_ident = None
+                    if self._transaction_generation == generation and self._owner_ident == owner:
+                        self._transaction_depth -= 1
+                        if self._transaction_depth == 0:
+                            self._transaction_generation = None
+                            if not self._exclusive:
+                                self._owner_ident = None
+            if previous is None:
+                del self._lease_local.generation
+            else:
+                self._lease_local.generation = previous
 
     def claim_exclusive_for_current_thread(self, timeout: float = 1.0) -> bool:
         """Claim input only after in-flight input has finished, or fail boundedly."""
+        if not self._lease_valid():
+            return False
         owner = threading.get_ident()
         deadline = time.monotonic() + max(0.0, float(timeout))
         while self._acquire_gate_until(deadline):
             try:
+                self._discard_revoked_transaction()
                 busy = ((self._transaction_depth or self._exclusive)
                         and self._owner_ident != owner)
                 if not busy:
@@ -191,14 +283,22 @@ class ExclusiveInputController(InputController):
         return False
 
     def release_exclusive(self) -> None:
-        with self._gate_lock:
+        if getattr(self._lease_local, "generation", self._generation) != self._generation:
+            return
+        if not self._gate_lock.acquire(timeout=0.25):
+            self.revoke_workers()
+            return
+        try:
+            self._discard_revoked_transaction()
             self._exclusive = False
             if self._transaction_depth == 0:
                 self._owner_ident = None
+        finally:
+            self._gate_lock.release()
 
     def _allowed(self) -> bool:
         with self._gate_lock:
-            return not self._exclusive or threading.get_ident() == self._owner_ident
+            return self._lease_valid() and (not self._exclusive or threading.get_ident() == self._owner_ident)
 
     def _gated(self, method_name: str, *args, timeout: float = 5.0):
         """Run a delegate method only while the caller still holds permission."""
@@ -206,10 +306,29 @@ class ExclusiveInputController(InputController):
         deadline = time.monotonic() + max(0.0, float(timeout))
         while self._acquire_gate_until(deadline):
             try:
+                self._discard_revoked_transaction()
+                if not self._lease_valid():
+                    return False
                 if self._exclusive and owner != self._owner_ident:
                     return False
                 if not self._transaction_depth or owner == self._owner_ident:
-                    getattr(self._delegate, method_name)(*args)
+                    finished = threading.Event()
+                    monitor = None
+                    callback = self.backend_timeout_callback
+                    if callback is not None:
+                        def expired():
+                            if not finished.is_set():
+                                self.revoke_workers()
+                                callback("input backend unresponsive")
+                        monitor = threading.Timer(5.0, expired)
+                        monitor.daemon = True
+                        monitor.start()
+                    try:
+                        getattr(self._delegate, method_name)(*args)
+                    finally:
+                        finished.set()
+                        if monitor is not None:
+                            monitor.cancel()
                     return True
             finally:
                 self._gate_lock.release()
