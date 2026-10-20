@@ -3958,6 +3958,11 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         on Home (its anchor then matches). Returns True only if Home was reached."""
         if self._stop_requested:
             return False
+
+        if self._check_login_splash():
+            return False 
+
+
         if self._dismiss_reward_popup():
             # Let the claimed/continued/reconnected screen settle before Home
             # navigation. The next probe must observe the resulting screen.
@@ -3992,6 +3997,123 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         else:
             bot_logger.log_info("Quest refresh: Home click did not land on Home; will retry.")
         return reached
+
+
+    def _check_login_splash(self, account: dict | None = None) -> bool:
+        """Detect MTGA's login splash screen and click "Log In".
+
+        After a successful click the credentials are typed in -- for `account`
+        if provided, otherwise for the next account in the play order."""
+        splash_btn_img = self._app_path("assets", "login_splash_btn.png")
+        if not os.path.exists(splash_btn_img):
+            splash_btn_img = os.path.join(self._buttons_dir(), "login_splash_btn.png")
+
+        if not os.path.exists(splash_btn_img):
+            if not hasattr(self, "_splash_missing_logged"):
+                bot_logger.log_error(
+                    f"LOGIN_SPLASH_MISSING: File not found in 'assets' or 'Buttons'! Path: {splash_btn_img}"
+                )
+                self._splash_missing_logged = True
+            return False
+
+        # Scale range so the image is still found with small size differences.
+        scales = [round(0.70 + 0.05 * i, 2) for i in range(13)]
+
+        point = self._locate_image_center_in_scaled_arena_region(
+            splash_btn_img, "LOGIN_SPLASH_BTN",
+            rel_region=None, confidence=0.70, timeout=1.0, scales=scales,
+        )
+
+        if point is not None:
+            bot_logger.log_info(
+                f"LOGIN_SCREEN_DETECTED: Login splash screen is visible. "
+                f"Clicking 'Log In' at {point}."
+            )
+            self._click_abs(point[0], point[1], "LOGIN_SPLASH_BTN")
+            time.sleep(2.5)  # Wait for the email field to load.
+
+            target_account = account
+            if target_account is None:
+                target_account = self._resolve_next_account_for_login()
+            if target_account is not None:
+                self._type_login_credentials(target_account)
+            else:
+                bot_logger.log_error(
+                    "LOGIN_SPLASH: Splash clicked, but no target account could be "
+                    "resolved -- check calibration/play order."
+                )
+            return True
+        else:
+            if not hasattr(self, "_splash_not_found_logged"):
+                bot_logger.log_info(
+                    f"LOGIN_SPLASH_NOT_FOUND: Image not recognized in the MTGA window. "
+                    f"(Arena: {self._arena_region})"
+                )
+                self._splash_not_found_logged = True
+
+        return False
+        #⠀⠀⠀⢀⠀⠀⠀⠀⠀⠀⠀⣀⣀⡤⠤⠤⠤⣄⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+        #⠀⠀⢴⠋⠙⠳⣤⡀⣠⠖⠋⠁⠀⠀⠀⠀⠀⠀⠀⠉⠓⠤⡀⣠⡴⠟⠛⣷⠀⠀
+        #⠀⠀⠈⠳⢤⣀⢈⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⢏⣀⣠⡴⠋⠀⠀
+        #⢀⣠⣤⣄⣄⣉⡏⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣇⣡⣤⡴⣦⣀
+        #⢹⣅⡀⠀⠀⠈⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡏⠁⠀⢀⣠⠏
+        #⠀⠈⠙⠉⢋⣉⣇⠀⠀⣾⣷⠄⠀⠀⠀⠀⠀⠀⠀⢴⣿⡆⠀⢀⣿⡙⠋⠋⠀⠀
+        #⠀⠀⢤⠶⠋⠉⢈⣦⡀⠈⠉⠀⠀⠀⠉⠉⠉⠀⠀⠀⠉⠀⣠⣎⠈⠉⠛⢷⡀⠀
+        #⠀⠀⠻⣤⣤⠶⠋⠀⠈⠑⠠⠄⣀⣀⣀⣀⣀⣀⡀⠤⠐⠉⠀⠈⠻⠶⠖⠶⠃⠀
+        #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⠃⠤⡀⠀⡠⠤⢱⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+        #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡎⠀⠉⠁⠀⠉⠉⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+        #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⢀⠤⡀⠀⡠⢄⢀⠇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+        #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⠢⣀⣀⣀⣈⡠⠊⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+        #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡌⡇⠀⣎⠇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+        #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢡⡇⣸⠜⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+        #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠓⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+ 
+        
+    def _resolve_next_account_for_login(self) -> dict | None:
+        """Resolve the next account from the play order for the auto-login."""
+        try:
+            accounts = self._load_accounts_from_dirs()
+            if not accounts:
+                bot_logger.log_error("LOGIN_RESOLVE: no accounts found.")
+                return None
+            next_index, _, _ = self._select_next_switch_target(
+                accounts, self._current_account_config_name()
+            )
+            if next_index is None:
+                bot_logger.log_error("LOGIN_RESOLVE: no target account could be determined.")
+                return None
+            account = accounts[next_index]
+            bot_logger.log_info(
+                f"LOGIN_RESOLVE: target account is '{account.get('name')}' "
+                f"(index {next_index})."
+            )
+            return account
+        except Exception as exc:
+            bot_logger.log_error(f"LOGIN_RESOLVE failed: {exc}")
+            return None
+
+    def _type_login_credentials(self, account: dict) -> None:
+        """Type email/password into the login form and submit with Enter."""
+        name = str(account.get("name", "")).strip() or "?"
+        try:
+            bot_logger.log_info(f"LOGIN_TYPED: typing credentials for '{name}'.")
+            self.input.tap_delete()
+            time.sleep(0.2)
+            self.input.type_text(account.get("email", ""))
+            time.sleep(0.2)
+            self.input.tap_tab()
+            time.sleep(0.2)
+            self.input.type_text(account.get("pw", ""))
+            time.sleep(0.2)
+            self.input.tap_enter()
+            bot_logger.log_info(f"LOGIN_TYPED: login submitted for '{name}'.")
+            try:
+                self._latch_identity_from_switch_target(account)
+            except Exception as exc:
+                bot_logger.log_error(f"LOGIN_TYPED: failed to set identity: {exc}")
+        except Exception as exc:
+            bot_logger.log_error(f"LOGIN_TYPED failed: {exc}")
+    
 
     def _refresh_quests_from_home(self) -> bool:
         """Dip back to Home so MTGA re-fetches quests, then refresh the local
@@ -11566,6 +11688,11 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             if self._account_switch_in_progress:
                 bot_logger.log_info("Queue spam stopping: account switch in progress.")
                 return
+
+            if self._check_login_splash():
+                time.sleep(2.0)
+                continue
+
             if self._check_foreign_event_entry():
                 return
             # A transient startup/login failure retains this account's reroll.
@@ -12137,6 +12264,19 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             if self._stop_requested:
                 bot_logger.log_info("Account switch aborted before typing: stop requested.")
                 return
+
+                            # NEU: Prüfen, ob der "Register/Log In"-Zwischenbildschirm angezeigt wird
+            splash_btn_img = os.path.join(self._buttons_dir(), "login_splash_btn.png")
+            if os.path.exists(splash_btn_img):
+                # Wir suchen den Button im gesamten Arena-Fenster
+                splash_point = self._locate_image_center_in_scaled_arena_region(
+                    splash_btn_img, "LOGIN_SPLASH_BTN", rel_region=None, confidence=0.80, timeout=1.5
+                )
+                if splash_point is not None:
+                    bot_logger.log_info(f"Account switch: Zwischenbildschirm erkannt, klicke auf 'Log In' bei {splash_point}.")
+                    self._click_abs(splash_point[0], splash_point[1], "LOGIN_SPLASH_BTN")
+                    time.sleep(2.0) # Warten, bis das E-Mail-Feld geladen ist
+
             self.input.tap_delete()
             time.sleep(0.2)
             self.input.type_text(account.get("email", ""))
