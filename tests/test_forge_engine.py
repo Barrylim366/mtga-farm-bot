@@ -7,6 +7,7 @@ steps the hooks call.
 import json
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 from Controller.Utilities.GameState import GameState
 from ForgeEngine import hooks as hooks_module
@@ -233,6 +234,8 @@ def bot_state(message):
 
 class MainPhaseTest(unittest.TestCase):
     def setUp(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
         self.message = state_message(
             hand=[hand_card(100, 10, ("CardType_Land",)), hand_card(101, 20)],
             actions=[{"actionType": "ActionType_Play", "instanceId": 100},
@@ -260,20 +263,120 @@ class MainPhaseTest(unittest.TestCase):
         self.assertEqual(move, {"cast": [100]})
 
     def test_free_forge_casts_when_legal_and_safe(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
         bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
         ai = FakeAI({"cast": [100]}, may_cast=())
         config = Config(free_forge=True)
-        move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
-                                  bot_state(self.message), {101: 20}, config)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Bear", "types": ["Creature"], "oracleText": ""}):
+            move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                      bot_state(self.message), {101: 20}, config)
         self.assertEqual(move, {"cast": [101]})
 
     def test_free_forge_fails_closed_when_card_id_missing_or_unsupported(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
         bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
         ai = FakeAI({"cast": [100]}, may_cast=())
         config = Config(free_forge=True)
         move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
                                   bot_state(self.message), {}, config)
         self.assertEqual(move, {"cast": [100]})
+
+    def test_free_forge_fails_closed_when_card_data_missing(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
+        bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value=None):
+            move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                      bot_state(self.message), {101: 20}, config)
+        self.assertEqual(move, {"cast": [100]})
+
+    def test_free_forge_fails_closed_when_oracle_text_unavailable(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
+        bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Unknown"}):
+            move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                      bot_state(self.message), {101: 20}, config)
+        self.assertEqual(move, {"cast": [100]})
+
+    def test_free_forge_fails_closed_when_card_unsupported(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
+        bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Choice", "types": ["Sorcery"], "oracleText": "Return a creature card from your graveyard to your hand."}):
+            move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                      bot_state(self.message), {101: 20}, config)
+        self.assertEqual(move, {"cast": [100]})
+
+    def test_free_forge_fails_closed_when_duplicate_legend_in_play(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
+        leg_obj = creature(200, 20, 2, 2, ME, superTypes=["SuperType_Legendary"], name=555)
+        tracker = tracker_with(state_message(battlefield=[leg_obj, creature(101, 20, 2, 2, ME, superTypes=["SuperType_Legendary"], name=555)]))
+        bridge = bridge_with(tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Legend", "types": ["Creature"], "oracleText": ""}):
+            move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                      bot_state(self.message), {101: 20}, config)
+        self.assertEqual(move, {"cast": [100]})
+
+    def test_free_forge_fails_closed_on_policy_exception(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
+        bridge = bridge_with(self.tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"cast": [100]}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardPolicy.is_unsupported_to_cast_local", side_effect=RuntimeError("disk read failed")):
+            move = bridge.choose_move({"cast": [100]}, lambda s, i: probe_safely(ai, s, i),
+                                      bot_state(self.message), {101: 20}, config)
+        self.assertEqual(move, {"cast": [100]})
+
+    def test_free_instant_speed_cast_fails_closed_when_data_missing(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
+        combat_msg = state_message(
+            phase="Phase_Combat", step="Step_DeclareBlock", active=OPP,
+            hand=[hand_card(101, 20)],
+            actions=[{"actionType": "ActionType_Cast", "instanceId": 101}],
+        )
+        combat_msg["gameStateMessage"]["turnInfo"]["priorityPlayer"] = ME
+        combat_msg["gameStateMessage"]["turnInfo"]["decisionPlayer"] = ME
+        tracker = tracker_with(combat_msg)
+        bridge = bridge_with(tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"resolve": []}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value=None):
+            move = bridge.choose_instant({"resolve": []}, lambda s, i: probe_safely(ai, s, i),
+                                         bot_state(combat_msg), {101: 20}, config)
+        self.assertEqual(move, {"resolve": []})
+
+    def test_free_instant_speed_cast_approved_when_safe_and_data_present(self):
+        import AI.Utilities.CardPolicy as CardPolicy
+        CardPolicy._unsupported_memo.clear()
+        combat_msg = state_message(
+            phase="Phase_Combat", step="Step_DeclareBlock", active=OPP,
+            hand=[hand_card(101, 20)],
+            actions=[{"actionType": "ActionType_Cast", "instanceId": 101}],
+        )
+        combat_msg["gameStateMessage"]["turnInfo"]["priorityPlayer"] = ME
+        combat_msg["gameStateMessage"]["turnInfo"]["decisionPlayer"] = ME
+        tracker = tracker_with(combat_msg)
+        bridge = bridge_with(tracker, {"main": {"action": "cast", "id": 101}})
+        ai = FakeAI({"resolve": []}, may_cast=())
+        config = Config(free_forge=True)
+        with patch("AI.Utilities.CardInfo.get_card_info_local", return_value={"name": "Shock", "types": ["Instant"], "oracleText": "Deal 2 damage"}):
+            move = bridge.choose_instant({"resolve": []}, lambda s, i: probe_safely(ai, s, i),
+                                         bot_state(combat_msg), {101: 20}, config)
+        self.assertEqual(move, {"cast": [101]})
 
     def test_a_held_creature_is_cast_before_combat(self):
         answers = iter([{"action": "none"}, {"action": "cast", "id": 101}])

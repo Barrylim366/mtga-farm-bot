@@ -9479,7 +9479,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
             return []
         bot_logger.set_hover_logging(True)
         scan_p1, scan_p2 = self._get_battlefield_scan_points_mapped(force_reacquire=True)
-        targets_remaining = set(candidate_ids)
+        if isinstance(candidate_ids, (list, tuple)):
+            ordered_candidates = list(dict.fromkeys(candidate_ids))
+        else:
+            ordered_candidates = list(candidate_ids)
+        intended_targets = ordered_candidates[:max(1, count)]
+        targets_remaining = set(intended_targets)
         selected_ids: list[int] = []
         try:
             x1, y1 = scan_p1
@@ -10091,20 +10096,30 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     f"London Mulligan tuck required: {tuck_count} cards to bottom of library."
                 )
                 time.sleep(1.2)  # Wait for MTGA tuck dialog to appear
+                tuck_success = False
                 try:
-                    self.execute_london_mulligan_tuck(card_list or [], tuck_count)
+                    tuck_success = bool(self.execute_london_mulligan_tuck(card_list or [], tuck_count))
                 except Exception as e:
                     bot_logger.log_error(f"Error during execute_london_mulligan_tuck: {e}")
-                self._mulligan_count = 0
+                if tuck_success:
+                    self._mulligan_count = 0
+                else:
+                    bot_logger.log_info(
+                        f"London Mulligan tuck incomplete; preserving remaining count={self._mulligan_count} for recovery."
+                    )
 
-    def execute_london_mulligan_tuck(self, card_list: list, count_to_tuck: int) -> None:
+    def execute_london_mulligan_tuck(self, card_list: list, count_to_tuck: int) -> bool:
         """London Mulligan tuck: move mouse to mulligan_centre, sweep horizontally right
 
         Iterating over hand cards, and drag the cards chosen by MulliganLogic to the
         library drop location, then click mulligan_done.
+
+        Returns:
+            True if all required cards were successfully tucked and the Done button was clicked;
+            False otherwise (preserving recovery state).
         """
         if count_to_tuck <= 0:
-            return
+            return True
 
         bot_logger.log_info(
             f"Starting London Mulligan tuck: count={count_to_tuck}, hand={len(card_list)} cards"
@@ -10148,7 +10163,7 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
         )
         if centre_src == "absolute_no_arena":
             bot_logger.log_error("MULLIGAN_TUCK aborted: arena_region unavailable.")
-            return
+            return False
 
         library_mapped, _ = self._map_abs_point_to_arena(
             self.mulligan_library_coors, label="MULLIGAN_LIBRARY", force_reacquire=False
@@ -10180,28 +10195,40 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                     return False
             return True
 
-        def _drag_to_library(from_x: int, from_y: int):
+        def _drag_to_library(from_x: int, from_y: int) -> bool:
             if not _can_act():
                 bot_logger.log_info("MULLIGAN_TUCK drag aborted: match ended or action blocked.")
-                return
+                return False
             bot_logger.log_info(f"Dragging card from ({from_x}, {from_y}) to library {library_mapped}")
             self.input.move_abs(from_x, from_y)
             time.sleep(0.15)
+            if not _can_act():
+                bot_logger.log_info("MULLIGAN_TUCK drag aborted before mouse down: action blocked.")
+                return False
             self.input.left_down()
+            interrupted = False
             try:
                 time.sleep(0.12)
                 steps = 15
                 dx = (library_mapped[0] - from_x) / steps
                 dy = (library_mapped[1] - from_y) / steps
                 for i in range(1, steps + 1):
+                    if not _can_act():
+                        bot_logger.log_info("MULLIGAN_TUCK drag interrupted during interpolation.")
+                        interrupted = True
+                        break
                     cur_x = int(round(from_x + dx * i))
                     cur_y = int(round(from_y + dy * i))
                     self.input.move_abs(cur_x, cur_y)
                     time.sleep(0.015)
-                time.sleep(0.15)
+                if not interrupted:
+                    time.sleep(0.15)
             finally:
                 self.input.left_up()
+            if interrupted or not _can_act():
+                return False
             time.sleep(0.4)
+            return True
 
         while dropped_count < count_to_tuck:
             if not _can_act():
@@ -10246,9 +10273,12 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
 
             if found_card and found_pos is not None:
                 bot_logger.log_info(f"Identified target tuck card ID={found_id} at {found_pos}")
-                target_ids_remaining.remove(found_id)
-                _drag_to_library(found_pos[0], found_pos[1])
-                dropped_count += 1
+                if _drag_to_library(found_pos[0], found_pos[1]):
+                    target_ids_remaining.remove(found_id)
+                    dropped_count += 1
+                    self._mulligan_count = max(0, count_to_tuck - dropped_count)
+                else:
+                    break
             elif not saw_any_hover:
                 # Positional fallback ONLY when complete sweep received no hover events at all (e.g. log output not synced)
                 slot_index = dropped_count
@@ -10257,29 +10287,46 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                 bot_logger.log_info(
                     f"No hover events received across hand sweep; using positional fallback at ({fallback_x}, {scan_y})"
                 )
-                if target_ids_remaining:
-                    target_ids_remaining.pop(0)
-                _drag_to_library(fallback_x, scan_y)
-                dropped_count += 1
+                if _drag_to_library(fallback_x, scan_y):
+                    if target_ids_remaining:
+                        target_ids_remaining.pop(0)
+                    dropped_count += 1
+                    self._mulligan_count = max(0, count_to_tuck - dropped_count)
+                else:
+                    break
             else:
                 # Hover events were observed, but none matched remaining target cards.
                 bot_logger.log_error(
                     f"MULLIGAN_TUCK: Hover events observed but no target cards {target_ids_remaining} matched; aborting tuck to prevent dragging wrong cards."
                 )
-                break
+                return False
+
+        if dropped_count < count_to_tuck:
+            bot_logger.log_error(
+                f"MULLIGAN_TUCK incomplete: {dropped_count}/{count_to_tuck} cards tucked. Done button will not be clicked."
+            )
+            return False
 
         if not _can_act():
             bot_logger.log_info("MULLIGAN_TUCK aborted before done click: match ended or stop requested.")
-            return
+            return False
 
         # All required cards dropped to library; click Done button
         time.sleep(0.4)
+        if not _can_act():
+            bot_logger.log_info("MULLIGAN_TUCK aborted before done click: match ended or stop requested.")
+            return False
         bot_logger.log_info(f"Clicking mulligan_done button at {done_mapped}")
         self.input.move_abs(done_mapped[0], done_mapped[1])
         time.sleep(0.15)
+        if not _can_act():
+            bot_logger.log_info("MULLIGAN_TUCK aborted before click: match ended or stop requested.")
+            return False
         self.input.left_click(1)
         time.sleep(0.5)
         bot_logger.log_info("London Mulligan tuck complete: clicked done button.")
+        self._mulligan_count = 0
+        return True
 
     def click_assign_damage_done(self):
         """Click the Done button during damage assignment"""
@@ -14531,11 +14578,20 @@ class Controller(GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, Contr
                                     _clear_pending_select_n()
                                     return
                             if use_battlefield_selection and not use_hand_selection and not use_stack_selection:
-                                # Multi-permanent battlefield selection in a single fast sweep
+                                # Multi-permanent battlefield selection in a single fast sweep.
+                                # Resolve intended target IDs before scanning to preserve sacrifice preferences
+                                # and never substitute protected creatures.
+                                target_candidates = ids_to_select[:min_sel] if len(ids_to_select) >= min_sel else ids_to_select
                                 selected_ids = self.select_battlefield_permanents(
-                                    ids_to_select, count=min_sel, clicks=1, max_scan_sec=14.0
+                                    target_candidates, count=min_sel, clicks=1, max_scan_sec=14.0
                                 )
                                 selected = len(selected_ids)
+                                if selected < min_sel:
+                                    bot_logger.log_error(
+                                        f"SelectN battlefield: only selected {selected}/{min_sel} permanents; aborting to avoid invalid submit."
+                                    )
+                                    _clear_pending_select_n()
+                                    return
                             else:
                                 for idx, card_id in enumerate(ids_to_select):
                                     if not _select_n_valid():

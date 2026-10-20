@@ -478,27 +478,28 @@ class Bridge:
                     chosen_move = wanted
                 elif config.free_forge:
                     grp_id = ids.get(instance_id)
-                    is_unsupported = True
-                    is_dupe_legend = True
+                    is_safe = False
                     if grp_id is not None:
                         try:
                             import AI.Utilities.CardPolicy as CardPolicy
                             from AI.Utilities import LegendRule, RemovalLogic
-                            full_state = game_state.get_full_state() or {}
-                            bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
-                            live_ids = RemovalLogic.battlefield_instance_ids(full_state, bf_ids)
-                            is_unsupported = CardPolicy.is_unsupported_to_cast(grp_id)
-                            is_dupe_legend = LegendRule.duplicate_legend_in_play(
-                                cast_instance_id=instance_id,
-                                game_objects=full_state.get("gameObjects", []) or [],
-                                my_seat=me,
-                                battlefield_zone_ids=bf_ids,
-                                live_instance_ids=live_ids,
-                            ) is not None
+                            is_unsupported, has_data = CardPolicy.is_unsupported_to_cast_local(grp_id)
+                            if has_data and not is_unsupported:
+                                full_state = game_state.get_full_state() or {}
+                                bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
+                                live_ids = RemovalLogic.battlefield_instance_ids(full_state, bf_ids)
+                                is_dupe_legend = LegendRule.duplicate_legend_in_play(
+                                    cast_instance_id=instance_id,
+                                    game_objects=full_state.get("gameObjects", []) or [],
+                                    my_seat=me,
+                                    battlefield_zone_ids=bf_ids,
+                                    live_instance_ids=live_ids,
+                                ) is not None
+                                if not is_dupe_legend and instance_id in offered:
+                                    is_safe = True
                         except Exception:
-                            is_unsupported = True
-                            is_dupe_legend = True
-                    if not is_unsupported and not is_dupe_legend and instance_id in offered:
+                            is_safe = False
+                    if is_safe:
                         chosen_move = wanted
                         note = "approved by Forge (free forge; legal in Arena and safe)"
                     else:
@@ -621,27 +622,28 @@ class Bridge:
                     chosen_move = wanted
                 elif config.free_forge:
                     grp_id = ids.get(instance_id)
-                    is_unsupported = True
-                    is_dupe_legend = True
+                    is_safe = False
                     if grp_id is not None:
                         try:
                             import AI.Utilities.CardPolicy as CardPolicy
                             from AI.Utilities import LegendRule, RemovalLogic
-                            full_state = game_state.get_full_state() or {}
-                            bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
-                            live_ids = RemovalLogic.battlefield_instance_ids(full_state, bf_ids)
-                            is_unsupported = CardPolicy.is_unsupported_to_cast(grp_id)
-                            is_dupe_legend = LegendRule.duplicate_legend_in_play(
-                                cast_instance_id=instance_id,
-                                game_objects=full_state.get("gameObjects", []) or [],
-                                my_seat=me,
-                                battlefield_zone_ids=bf_ids,
-                                live_instance_ids=live_ids,
-                            ) is not None
+                            is_unsupported, has_data = CardPolicy.is_unsupported_to_cast_local(grp_id)
+                            if has_data and not is_unsupported:
+                                full_state = game_state.get_full_state() or {}
+                                bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
+                                live_ids = RemovalLogic.battlefield_instance_ids(full_state, bf_ids)
+                                is_dupe_legend = LegendRule.duplicate_legend_in_play(
+                                    cast_instance_id=instance_id,
+                                    game_objects=full_state.get("gameObjects", []) or [],
+                                    my_seat=me,
+                                    battlefield_zone_ids=bf_ids,
+                                    live_instance_ids=live_ids,
+                                ) is not None
+                                if not is_dupe_legend and instance_id in offered:
+                                    is_safe = True
                         except Exception:
-                            is_unsupported = True
-                            is_dupe_legend = True
-                    if not is_unsupported and not is_dupe_legend and instance_id in offered:
+                            is_safe = False
+                    if is_safe:
                         chosen_move = wanted
                         note = "approved by Forge (free forge; instant-speed legal in Arena and safe)"
                     else:

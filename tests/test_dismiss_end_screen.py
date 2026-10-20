@@ -42,6 +42,11 @@ class DismissEndScreenTests(unittest.TestCase):
         self.c._note_match_finished = Mock()
         self.c._update_gold_from_inventory = Mock()
         self.c._maybe_post_match_action = Mock()
+        self.c._find_blocking_popup = Mock(return_value=None)
+        self.c._click_abs = Mock()
+        self.c._locate_image_center = Mock(return_value=None)
+        self.c._locate_image_center_in_rescaled_region = Mock(return_value=None)
+        self.c._locate_image_center_in_scaled_arena_region = Mock(return_value=None)
 
     @patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True)
     def test_single_click_dismiss_stops_immediately_and_never_clicks_banners(self, _mock_focus):
@@ -90,6 +95,22 @@ class DismissEndScreenTests(unittest.TestCase):
         self.assertAlmostEqual(second_y, int(1080 * 0.82), delta=5)
         self.assertNotEqual(second_y, 540)
 
+    @patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True)
+    def test_reward_popup_is_claimed_when_detected(self, _mock_focus):
+        """When reward overlay (Claim/Continue) is detected post-match, it is clicked directly."""
+        self.c._match_end_screen_cleared = Mock(return_value=True)
+        popups = [
+            ("POPUP_CLAIM", (960, 800), (0, 0, 1920, 1080)),
+            None,
+        ]
+        self.c._find_blocking_popup = Mock(side_effect=popups)
+
+        self.c.dismiss_end_screen()
+
+        # Should click the reward popup via _click_abs
+        self.c._click_abs.assert_called_once_with(960, 800, "POPUP_CLAIM")
+
 
 if __name__ == "__main__":
     unittest.main()
+

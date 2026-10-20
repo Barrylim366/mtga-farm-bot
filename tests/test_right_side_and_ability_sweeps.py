@@ -189,6 +189,68 @@ class RightSideAndAbilitySweepsTests(unittest.TestCase):
         self.assertEqual(selected, [389, 392])
         self.assertEqual(self.c.input.left_click.call_count, 2)
 
+    def test_select_battlefield_permanents_preserves_priority_over_screen_order(self):
+        """A protected creature appearing earlier on screen must NOT be selected over preferred fodder."""
+        self.c._get_battlefield_scan_points_mapped = Mock(return_value=((100, 500), (300, 500)))
+        self.c.battlefield_scan_step = 100
+        self.c.screen_bounds = ((0, 0), (1920, 1080))
+
+        # ID 500 is protected creature at x=100 (appears first on screen)
+        # ID 600 is sacrificial fodder at x=200 (appears second on screen)
+        hover_seq = [
+            '"objectId": 500',  # protected creature encountered first in screen sweep
+            '"objectId": 600',  # sacrificial fodder encountered second
+        ]
+        seq_idx = [0]
+        def mock_has_new_line(pattern):
+            return seq_idx[0] < len(hover_seq)
+
+        def mock_get_latest_line(pattern):
+            val = hover_seq[seq_idx[0]]
+            seq_idx[0] += 1
+            return val
+
+        self.c.log_reader.has_new_line = Mock(side_effect=mock_has_new_line)
+        self.c.log_reader.get_latest_line_containing_pattern = Mock(side_effect=mock_get_latest_line)
+
+        # Fodder 600 is preferred (first in list); protected 500 is last
+        candidates = [600, 500]
+        selected = self.c.select_battlefield_permanents(candidates, count=1, clicks=1)
+
+        # Must select fodder 600, skipping the earlier-appearing protected creature 500
+        self.assertEqual(selected, [600])
+        self.assertEqual(self.c.input.left_click.call_count, 1)
+
+    def test_select_battlefield_permanents_does_not_silently_substitute_protected_when_fodder_missing(self):
+        """When preferred fodder cannot be located on screen, protected creature must NOT be silently clicked."""
+        self.c._get_battlefield_scan_points_mapped = Mock(return_value=((100, 500), (200, 500)))
+        self.c.battlefield_scan_step = 100
+        self.c.screen_bounds = ((0, 0), (1920, 1080))
+
+        # Only protected creature 500 is visible on screen; fodder 600 is not found
+        hover_seq = [
+            '"objectId": 500',
+        ]
+        seq_idx = [0]
+        def mock_has_new_line(pattern):
+            return seq_idx[0] < len(hover_seq)
+
+        def mock_get_latest_line(pattern):
+            val = hover_seq[seq_idx[0]]
+            seq_idx[0] += 1
+            return val
+
+        self.c.log_reader.has_new_line = Mock(side_effect=mock_has_new_line)
+        self.c.log_reader.get_latest_line_containing_pattern = Mock(side_effect=mock_get_latest_line)
+
+        candidates = [600, 500]
+        selected = self.c.select_battlefield_permanents(candidates, count=1, clicks=1)
+
+        # Must NOT silently substitute protected creature 500
+        self.assertEqual(selected, [])
+        self.assertEqual(self.c.input.left_click.call_count, 0)
+
+
     def test_submit_selection_select_n_falls_back_to_coordinates(self):
         self.c._locate_image_center_in_scaled_arena_region = Mock(return_value=None)
         self.c._locate_image_center = Mock(return_value=None)
