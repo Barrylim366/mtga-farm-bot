@@ -118,16 +118,21 @@ class ForgeHooks:
 
     # -- attack -----------------------------------------------------------------
 
-    def _marked(self) -> list:
+    def _marked(self) -> list[int]:
         """Our creatures Arena currently shows as declared attackers."""
         with self.bridge._lock:
             self.bridge.sync()
             tracker = self.bridge.tracker
-            return sorted(
-                o.get("instanceId")
-                for o in tracker.zone_objects("ZoneType_Battlefield")
-                if o.get("controllerSeatId") == tracker.my_seat and o.get("attackState") in DECLARED
-            )
+            result: list[int] = []
+            for o in tracker.zone_objects("ZoneType_Battlefield"):
+                iid = o.get("instanceId")
+                if (
+                    isinstance(iid, int)
+                    and o.get("controllerSeatId") == tracker.my_seat
+                    and o.get("attackState") in DECLARED
+                ):
+                    result.append(iid)
+            return sorted(result)
 
     def _still_asked(self) -> bool:
         with self.bridge._lock:
@@ -263,8 +268,12 @@ class ForgeHooks:
             return decision
         if pairs is None or not config.acting():
             return decision
+        bot_assignments = list((decision or {}).get("assignments") or [])
+        if not pairs and bot_assignments:
+            log("Forge returned no legal blocks; retaining the bot's defensive block assignments")
+            return decision
         reviewed = dict(decision or {})
-        reviewed["bot_assignments"] = list((decision or {}).get("assignments") or [])
+        reviewed["bot_assignments"] = bot_assignments
         reviewed["assignments"] = [[b, a] for b, a in pairs]
         reviewed["detail"] = [{"blocker": b, "attacker": a, "outcome": "forge"} for b, a in pairs]
         reviewed["reason"] = "forge"
@@ -355,7 +364,7 @@ class ForgeHooks:
             bridge.sync()
             tracker = bridge.tracker
             asked_of_us = not request["seats"] or tracker.my_seat in request["seats"]
-            if not tracker.in_sync or not asked_of_us:
+            if not tracker.in_sync or not asked_of_us or bridge.cards is None:
                 return None
             position = snapshot.build_state(tracker, bridge.cards)
             if position is None:

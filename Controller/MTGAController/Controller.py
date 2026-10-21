@@ -117,6 +117,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         account_switch_enabled: bool = True,
         auto_concede_stalled_matches: bool = False,
         account_switch_750_only: bool = False,
+
+        preferred_starter_deck: str | None = None,
+        preferred_historic_deck: str | None = None,
+        only_grind_preferred_deck: bool = False,
     ):
         self.__decision_callback = None
         # Serialises decision EXECUTION. A decision runs for seconds (hand scans
@@ -291,8 +295,16 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self.main_br_button_offset = (165, 136)
         self._default_mulligan_keep_coors = (1101, 870)
         self._default_mulligan_mull_coors = (801, 870)
+        self._default_mulligan_centre_coors = (835, 562)
+        self._default_mulligan_library_coors = (556, 578)
+        self._default_mulligan_done_coors = (956, 868)
         self.mulligan_keep_coors = self._default_mulligan_keep_coors
         self.mulligan_mull_coors = self._default_mulligan_mull_coors
+        self.mulligan_centre_coors = self._default_mulligan_centre_coors
+        self.mulligan_library_coors = self._default_mulligan_library_coors
+        self.mulligan_done_coors = self._default_mulligan_done_coors
+        self._mulligan_count = 0
+        self._mulligan_pending_done = False
         self.player_button_coors = (1699, 996)
         self.home_play_button_coors = (1699, 996)
         self.assign_damage_done_coors = (1280, 720)
@@ -353,9 +365,21 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             int(1080 * 0.75),
         )
         self.stack_scan_fallback_step = 50
+        self.right_side_scan_p1 = (
+            int(1920 * 0.65),
+            int(1080 * 0.25),
+        )
+        self.right_side_scan_p2 = (
+            int(1920 * 0.96),
+            int(1080 * 0.88),
+        )
+        self.right_side_scan_step = 75
         self._default_points_1920 = {
             "mulligan_keep_coors": self.mulligan_keep_coors,
             "mulligan_mull_coors": self.mulligan_mull_coors,
+            "mulligan_centre_coors": self.mulligan_centre_coors,
+            "mulligan_library_coors": self.mulligan_library_coors,
+            "mulligan_done_coors": self.mulligan_done_coors,
             "player_button_coors": self.player_button_coors,
             "home_play_button_coors": self.home_play_button_coors,
             "main_br_button_coordinates": self.main_br_button_coordinates,
@@ -369,6 +393,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             "stack_scan_p2": self.stack_scan_p2,
             "stack_scan_fallback_p1": self.stack_scan_fallback_p1,
             "stack_scan_fallback_p2": self.stack_scan_fallback_p2,
+            "right_side_scan_p1": self.right_side_scan_p1,
+            "right_side_scan_p2": self.right_side_scan_p2,
             "log_out_focus_coors": self.home_play_button_coors,
             # "Log Out" is a CENTERED text link on the Options overlay, measured
             # at (959, 667) in the 1920x1080 reference frame from a live capture
@@ -436,6 +462,20 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     self.stack_scan_fallback_step = int(click_targets["stack_scan_fallback_step"])
                 except (TypeError, ValueError):
                     pass
+            if "right_side_scan_points" in click_targets:
+                self.right_side_scan_p1 = (
+                    click_targets["right_side_scan_points"]["p1"]["x"],
+                    click_targets["right_side_scan_points"]["p1"]["y"],
+                )
+                self.right_side_scan_p2 = (
+                    click_targets["right_side_scan_points"]["p2"]["x"],
+                    click_targets["right_side_scan_points"]["p2"]["y"],
+                )
+            if "right_side_scan_step" in click_targets:
+                try:
+                    self.right_side_scan_step = int(click_targets["right_side_scan_step"])
+                except (TypeError, ValueError):
+                    pass
             if "log_out_btn" in click_targets:
                 self.log_out_btn_coors = (click_targets["log_out_btn"]["x"], click_targets["log_out_btn"]["y"])
             if "log_out_focus" in click_targets:
@@ -444,6 +484,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.log_out_ok_btn_coors = (click_targets["log_out_ok_btn"]["x"], click_targets["log_out_ok_btn"]["y"])
             elif "logout_ok_btn" in click_targets:
                 self.log_out_ok_btn_coors = (click_targets["logout_ok_btn"]["x"], click_targets["logout_ok_btn"]["y"])
+            if "mulligan_centre" in click_targets:
+                self.mulligan_centre_coors = (click_targets["mulligan_centre"]["x"], click_targets["mulligan_centre"]["y"])
+            if "library" in click_targets:
+                self.mulligan_library_coors = (click_targets["library"]["x"], click_targets["library"]["y"])
+            elif "mulligan_library" in click_targets:
+                self.mulligan_library_coors = (click_targets["mulligan_library"]["x"], click_targets["mulligan_library"]["y"])
+            if "mulligan_done" in click_targets:
+                self.mulligan_done_coors = (click_targets["mulligan_done"]["x"], click_targets["mulligan_done"]["y"])
         self._normalize_loaded_click_targets_to_1920()
         self._legacy_origin_hint = self._infer_legacy_origin_from_loaded_targets()
         if self._legacy_origin_hint is not None:
@@ -891,6 +939,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # Verified Starter selection for this session only: (account, deck code).
         # Home visits and normal match resets do not change Arena's selected deck.
         self._starter_selected_deck: tuple[str, str] | None = None
+
+        self._preferred_starter_deck = str(preferred_starter_deck or "").strip()
+        self._preferred_historic_deck = str(preferred_historic_deck or "").strip()
+        self._only_grind_preferred_deck = bool(only_grind_preferred_deck)
         self._suppress_selections = False
         self._state_tracker = PlayerLogStateTracker(max_lines=500)
         self._vision = VisionEngine()
@@ -942,6 +994,24 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             return os.path.abspath(os.path.dirname(sys.executable))
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+    def set_deck_preferences(
+        self,
+        preferred_starter_deck: str | None = None,
+        preferred_historic_deck: str | None = None,
+        only_grind_preferred_deck: bool | None = None,
+    ) -> None:
+        """Update preferred deck configuration dynamically."""
+        if preferred_starter_deck is not None:
+            self._preferred_starter_deck = str(preferred_starter_deck).strip()
+        if preferred_historic_deck is not None:
+            self._preferred_historic_deck = str(preferred_historic_deck).strip()
+        if only_grind_preferred_deck is not None:
+            self._only_grind_preferred_deck = bool(only_grind_preferred_deck)
+        bot_logger.log_info(
+            f"Deck preferences updated: starter='{self._preferred_starter_deck}' "
+            f"historic='{self._preferred_historic_deck}' only_grind={self._only_grind_preferred_deck}"
+        )
+
     def _app_path(self, *parts: str) -> str:
         return os.path.join(self._app_root_dir(), *parts)
 
@@ -973,6 +1043,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             ("log_out_focus_coors", "log_out_focus"),
             ("log_out_btn_coors", "log_out_btn"),
             ("log_out_ok_btn_coors", "log_out_ok_btn"),
+            ("mulligan_centre_coors", "mulligan_centre"),
+            ("mulligan_library_coors", "library"),
+            ("mulligan_done_coors", "mulligan_done"),
         ]
         for attr, label in points_to_normalize:
             raw = getattr(self, attr, None)
@@ -1033,6 +1106,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             ("keep_hand", self._default_points_1920.get("mulligan_keep_coors")),
             ("next", self._default_points_1920.get("main_br_button_coordinates")),
             ("assign_damage_done", self._default_points_1920.get("assign_damage_done_coors")),
+            ("mulligan_centre", self._default_points_1920.get("mulligan_centre_coors")),
+            ("library", self._default_points_1920.get("mulligan_library_coors")),
+            ("mulligan_done", self._default_points_1920.get("mulligan_done_coors")),
         ]
         origins: list[tuple[int, int]] = []
         for key, rel in anchors:
@@ -2107,6 +2183,63 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 s1,
                 s2,
             )
+        )
+        return p1, p2
+
+    def _get_stack_scan_points_mapped(
+        self,
+        *,
+        force_reacquire: bool = False,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        p1, _s1 = self._map_abs_point_to_arena(
+            self.stack_scan_p1,
+            label="STACK_SCAN_P1",
+            force_reacquire=force_reacquire,
+            apply_correction=False,
+        )
+        p2, _s2 = self._map_abs_point_to_arena(
+            self.stack_scan_p2,
+            label="STACK_SCAN_P2",
+            force_reacquire=False,
+            apply_correction=False,
+        )
+        return p1, p2
+
+    def _get_stack_fallback_scan_points_mapped(
+        self,
+        *,
+        force_reacquire: bool = False,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        p1, _s1 = self._map_abs_point_to_arena(
+            self.stack_scan_fallback_p1,
+            label="STACK_FALLBACK_SCAN_P1",
+            force_reacquire=force_reacquire,
+            apply_correction=False,
+        )
+        p2, _s2 = self._map_abs_point_to_arena(
+            self.stack_scan_fallback_p2,
+            label="STACK_FALLBACK_SCAN_P2",
+            force_reacquire=False,
+            apply_correction=False,
+        )
+        return p1, p2
+
+    def _get_right_side_scan_points_mapped(
+        self,
+        *,
+        force_reacquire: bool = False,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        p1, _s1 = self._map_abs_point_to_arena(
+            self.right_side_scan_p1,
+            label="RIGHT_SIDE_SCAN_P1",
+            force_reacquire=force_reacquire,
+            apply_correction=False,
+        )
+        p2, _s2 = self._map_abs_point_to_arena(
+            self.right_side_scan_p2,
+            label="RIGHT_SIDE_SCAN_P2",
+            force_reacquire=False,
+            apply_correction=False,
         )
         return p1, p2
 
@@ -3920,7 +4053,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     bot_logger.log_info("Quest prime: no block yet; clicking Home once more.")
                     # Distinct label: the wait is now visibly a retry, not a stall.
                     runtime_status.set_startup_phase("Reading daily quests (retrying)")
-                    self._navigate_to_home()
+                    try:
+                        self._navigate_to_home(dismiss_popups=False)
+                    except TypeError:
+                        self._navigate_to_home()
                     continue
                 time.sleep(1.0)
             bot_logger.log_info(
@@ -3958,9 +4094,19 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 time.sleep(1.0)
                 if not self._reroll_can_act():
                     return False
-                if self._navigate_to_home():
+                try:
+                    reached = self._navigate_to_home(dismiss_popups=False)
+                except TypeError:
+                    reached = self._navigate_to_home()
+                if reached:
                     return True
             bot_logger.log_info("Quest prime: Home not verified after the Profile re-entry.")
+            if self._reroll_can_act():
+                arena = self._get_ui_action_arena_region(force_reacquire=False, label="QUEST_PRIME_HOME_FALLBACK")
+                if arena is not None:
+                    point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
+                    self._click_abs(int(point[0]), int(point[1]), "GO_HOME_FALLBACK")
+                    time.sleep(1.5)
             return False
         except Exception as exc:
             bot_logger.log_info(f"Quest prime: Home re-entry failed ({exc}).")
@@ -3973,7 +4119,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
     # main screen regardless of which tab is currently active.
     _HOME_TAB_POINT_1920 = (104, 39)
 
-    def _navigate_to_home(self) -> bool:
+    def _navigate_to_home(self, *, dismiss_popups: bool = True) -> bool:
         """Return to the Home screen by clicking the fixed top-left Home tab.
 
         Clicks a fixed 1920-frame coordinate (not a template match, which only
@@ -3981,7 +4127,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         on Home (its anchor then matches). Returns True only if Home was reached."""
         if self._stop_requested:
             return False
-        if self._dismiss_reward_popup():
+        if dismiss_popups and self._dismiss_reward_popup():
             # Let the claimed/continued/reconnected screen settle before Home
             # navigation. The next probe must observe the resulting screen.
             return False
@@ -3997,6 +4143,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             last_det = getattr(self._arena_region_provider, "last_detection_result", None)
             if last_det and getattr(last_det, "region", None) and getattr(last_det, "code", None) == "anchor_not_found":
                 arena = last_det.region
+        if arena is None:
+            arena = self._get_ui_action_arena_region(force_reacquire=False, label="GO_HOME")
         if arena is None:
             return False
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
@@ -4183,7 +4331,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         if forced_filename:
             force_lower = forced_filename.lower()
             for name in images:
-                if name.lower() == force_lower:
+                if name.lower() == force_lower or os.path.splitext(name)[0].lower() == force_lower:
                     bot_logger.log_info(f"Post-login: forced quest deck selected {name}.")
                     return os.path.join(account_dir, name)
             bot_logger.log_info(
@@ -4381,10 +4529,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     return False
                 if focused:
                     time.sleep(0.2)
-                for index, ty in enumerate((int(arena[1] + arena[3] * 0.93), int(arena[1] + arena[3] // 2))):
+                for index, ty in enumerate((
+                    int(arena[1] + arena[3] * 0.93),
+                    int(arena[1] + arena[3] * 0.82),
+                )):
                     if index:
                         # The first press may already have dismissed the result.
-                        # Never send the centre press onto a recognized page,
+                        # Never send the fallback press onto a recognized page,
                         # a popup, or changed/unverifiable window geometry.
                         try:
                             after = self._arena_region_provider.detect(write_debug_on_fail=False)
@@ -4921,6 +5072,12 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self._navigate_to_home()
             return False
 
+        # Fast path: If already on Starter Deck Duel event landing page, queue directly!
+        if self._on_starter_event_landing_page("STARTER_EVENT_FAST_QUEUE_CHECK"):
+            bot_logger.log_info("Starter: already on event landing page; queueing directly.")
+            if self._queue_from_event_landing(target_colors):
+                return True
+
         # 1) Open the Play blade from Home. Only when Home is PROVEN: the pill
         #    template alone matches any event's Play button (see
         #    _starter_event_page_confirmed). If we are already in the blade the
@@ -4994,6 +5151,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             if not self._starter_navigation_may_act():
                 return False
             if self._dismiss_blocking_announcement("STARTER_NAV"):
+                return False
+            if not self._home_screen_confirmed("STARTER_NAV_HOME_RECOVERY"):
+                bot_logger.log_info("Starter: on unrecognized screen; clicking Home tab to recover.")
+                try:
+                    self._navigate_to_home(dismiss_popups=False)
+                except TypeError:
+                    self._navigate_to_home()
                 return False
             bot_logger.log_info("Starter: Events tab not found (not in Play blade yet); will retry.")
             return False
@@ -5138,40 +5302,106 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         high_value = [q for q in incomplete if q.get("gold") == 750]
         return high_value or incomplete
 
+    @staticmethod
+    def _normalize_starter_deck_code(deck_value: str | None) -> str:
+        """Normalize a starter deck name or code to its two-letter abbreviation.
+
+        Returns one of ('WU', 'WG', 'UB', 'UG', 'WR', 'BG', 'RG', 'BR', 'WB', 'UR'),
+        or '' if unrecognised/empty.
+        """
+        if not deck_value:
+            return ""
+        val = str(deck_value).strip()
+        val_lower = val.lower()
+        if any(val_lower.startswith(prefix) for prefix in ("none", "auto", "default", "blank", "empty")):
+            return ""
+
+        val_upper = val.upper()
+        if val_upper in Controller._STARTER_DECK_GRID_INDEX:
+            return val_upper
+
+        name_map = {
+            "arcane aerialists": "WU",
+            "cat attack": "WG",
+            "graveyard gifts": "UB",
+            "learn from the land": "UG",
+            "might of the legion": "WR",
+            "morbid machinations": "BG",
+            "path of power": "RG",
+            "reckless raid": "BR",
+            "vampiric hunger": "WB",
+            "wondrous wizardry": "UR",
+        }
+        for name, code in name_map.items():
+            if name in val_lower:
+                return code
+
+        tokens = set(re.findall(r'\b[A-Za-z]{2}\b', val_upper))
+        for code in Controller._STARTER_DECK_GRID_INDEX:
+            if code in tokens:
+                return code
+        return ""
+
     def _resolve_starter_target_colors(self) -> str:
         """Colors of the deck that best advances the current top quest.
 
         Prefers the locally cached quests (parsed once at startup / between
         matches) so we don't re-parse the player.log on every queue cycle; falls
-        back to a live parse if the cache is empty. A valid completed quest list
-        selects WB. In quest/win mode, reaching the configured quest target
-        also selects WB for win farming, even if other quests remain open.
-        Without a confirmed target, the current deck is kept.
+        back to a live parse if the cache is empty.
+        If only_grind_preferred_deck is enabled, plays the preferred starter deck.
+        When daily quests are complete, automatically switches to the preferred
+        starter deck (or falls back to WB).
         """
+        preferred = self._normalize_starter_deck_code(self._preferred_starter_deck)
+        if self._only_grind_preferred_deck and preferred:
+            bot_logger.log_info(
+                f"Starter: only-grind preferred deck active; selecting {preferred} deck."
+            )
+            return preferred
+
         if (self._account_switch_mode == "quests"
                 and self._account_switch_daily_wins > 0
                 and self._main_quest_target_met()):
+            target = preferred or "WB"
             bot_logger.log_info(
-                "Starter: configured quest target met; selecting WB win-farming deck."
+                f"Starter: configured quest target met; selecting {target} win-farming deck."
             )
-            return "WB"
+            return target
         if (self._last_valid_quest_active_incomplete == 0
                 and self._quest_count_confirmed_fresh):
+            if preferred:
+                bot_logger.log_info(
+                    f"Starter: all daily quests complete; selecting preferred {preferred} deck."
+                )
+                return preferred
             bot_logger.log_info("Starter: all daily quests complete; selecting WB fallback deck.")
             return "WB"
+
         if self._cached_quests:
             if self._cached_active_colors:
                 bot_logger.log_info(
                     f"Starter: using cached quest colors {self._cached_active_colors}."
                 )
+                return self._cached_active_colors
+            elif preferred and not self._750_quest_policy_enabled():
+                bot_logger.log_info(
+                    f"Starter: cached quests have no guild target; selecting preferred {preferred} deck."
+                )
+                return preferred
             else:
                 bot_logger.log_info("Starter: cached quests have no guild target; keeping current deck.")
             if self._cached_active_colors or not self._750_quest_policy_enabled():
                 return self._cached_active_colors
         quest = self._select_best_quest()
         if not quest:
+            if preferred:
+                bot_logger.log_info(
+                    f"Starter: no active quest; selecting preferred {preferred} deck."
+                )
+                return preferred
             bot_logger.log_info("Starter: no active quest; keeping current deck.")
             return ""
+
         qtype = quest.get("type")
         if qtype == "guild":
             colors = _GUILD_COLOR_MAP.get(quest.get("guild") or "", "")
@@ -5189,6 +5419,11 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 f"Starter: forced quest ({quest.get('reason')}) colors={colors}."
             )
             return colors
+        if preferred:
+            bot_logger.log_info(
+                f"Starter: quest type={qtype} has no starter-deck color mapping; selecting preferred {preferred} deck."
+            )
+            return preferred
         bot_logger.log_info(
             f"Starter: quest type={qtype} has no starter-deck color mapping; keeping current deck."
         )
@@ -5850,9 +6085,34 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         Empty colors with no forced file means "no usable quest target"; the
         caller then keeps/falls back to whatever deck it can.
         """
+        pref = str(self._preferred_historic_deck or "").strip()
+
+        def _resolve_historic_preferred() -> tuple[str, str | None]:
+            if not pref:
+                return "", None
+            if not pref.lower().endswith((".png", ".jpg", ".jpeg")) and all(ch.upper() in _COLOR_LETTERS for ch in pref):
+                return pref.upper(), None
+            return "", pref
+
+        if self._only_grind_preferred_deck and pref:
+            target_colors, target_forced = _resolve_historic_preferred()
+            bot_logger.log_info(
+                f"{log_prefix}: only-grind preferred historic deck active (colors={target_colors or '-'} forced={target_forced or '-'})."
+            )
+            return target_colors, target_forced
+
+        # If daily quests are complete, switch to preferred deck
+        if (self._last_valid_quest_active_incomplete == 0 and self._quest_count_confirmed_fresh):
+            if pref:
+                target_colors, target_forced = _resolve_historic_preferred()
+                bot_logger.log_info(
+                    f"{log_prefix}: all daily quests complete; selecting preferred historic deck (colors={target_colors or '-'} forced={target_forced or '-'})."
+                )
+                return target_colors, target_forced
+
         if self._750_quest_policy_enabled() and self._main_quest_target_met():
             bot_logger.log_info(f"{log_prefix}: quest target met; using fallback deck for wins.")
-            return "", None
+            return _resolve_historic_preferred()
         quest = self._select_best_quest()
         if not quest:
             colors = self._cached_active_colors or ""
@@ -5865,12 +6125,18 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     f"{log_prefix}: no quest in the live parse; using cached quest colors {colors}."
                 )
                 return colors, None
+            if pref:
+                target_colors, target_forced = _resolve_historic_preferred()
+                bot_logger.log_info(
+                    f"{log_prefix}: no active quest; using preferred historic deck (colors={target_colors or '-'} forced={target_forced or '-'})."
+                )
+                return target_colors, target_forced
             bot_logger.log_info(f"{log_prefix}: no guild quests found; using fallback deck.")
             return "", None
         qtype = quest.get("type")
         if qtype == "guild":
             guild = quest.get("guild")
-            colors = _GUILD_COLOR_MAP.get(guild or "", "")
+            colors = _GUILD_COLOR_MAP.get(str(guild or "").lower(), "")
             bot_logger.log_info(
                 f"{log_prefix}: selected quest guild={guild} colors={colors} gold={quest.get('gold', 0)}."
             )
@@ -6178,7 +6444,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         """Whether a chosen thumbnail really satisfies the quest target."""
         name = os.path.basename(deck_image)
         if forced_filename:
-            return name.lower() == str(forced_filename).lower()
+            force_lower = str(forced_filename).lower()
+            return name.lower() == force_lower or os.path.splitext(name)[0].lower() == force_lower
         target = {ch for ch in (colors or "").upper() if ch in _COLOR_LETTERS}
         if not target:
             return True
@@ -6503,6 +6770,31 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         bot_logger.log_info(f"Post-login: deck selected ({os.path.basename(selected_deck)}) and play clicked.")
         return True
 
+    def _has_active_incomplete_daily_quests(self) -> bool:
+        """True if there are active daily quests that still need progress.
+
+        False if confirmed all daily quests are complete, or if only-grind
+        mode is enabled (and quest-mode account switching is not active).
+        """
+        quest_switching = (
+            getattr(self, "_account_switch_enabled", False)
+            and getattr(self, "_account_switch_mode", "") == "quests"
+            and getattr(self, "_account_switch_main_quests", 0) > 0
+        )
+        if self._only_grind_preferred_deck and not quest_switching:
+            return False
+        if self._last_valid_quest_active_incomplete == 0 and self._quest_count_confirmed_fresh:
+            return False
+        if self._last_valid_quest_active_incomplete is not None:
+            return self._last_valid_quest_active_incomplete > 0
+        if self._cached_quests:
+            incomplete = sum(
+                1 for q in self._cached_quests
+                if not (q.get("goal") and q.get("progress", 0) >= q.get("goal", 0))
+            )
+            return incomplete > 0
+        return False
+
     @serialized_home_navigation
     def start_game_from_home_screen(self):
         if self._stop_requested or self.check_play_time_limit():
@@ -6594,20 +6886,22 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self._account_switch_pending = True
             bot_logger.log_info("Account switch pending; skipping queue click.")
             return
+        should_refresh_quests = (
+            self._has_active_incomplete_daily_quests()
+            and self._matches_since_quest_refresh >= self._quest_refresh_every_n_matches
+        )
         if self._game_mode == "starter":
             # Every N matches, dip back to Home so MTGA re-fetches quest progress
-            # (it is only logged on Home). Bounded + self-healing: on any failure
-            # we simply continue the normal re-queue below, so this can never
-            # stall the bot. The subsequent navigation naturally resumes from Home.
-            if self._matches_since_quest_refresh >= self._quest_refresh_every_n_matches:
+            # (it is only logged on Home), BUT ONLY when there are active incomplete
+            # quests and only_grind_preferred_deck is off.
+            if should_refresh_quests:
                 self._matches_since_quest_refresh = 0
                 try:
                     self._refresh_quests_from_home()
                 except Exception as e:
                     bot_logger.log_error(f"Quest refresh error: {e}")
-            # Starter Deck Duel is not re-entered by a single Play click; it needs
-            # the full Events > In Progress > banner navigation each time. The
-            # navigation is self-limiting when not on the home/Play blade screen.
+            # Starter Deck Duel re-queues directly from the event page when already there,
+            # or does full Events navigation if on Home.
             self._navigate_starter_deck()
             return
         # Historic mode: a bare Play click re-enters whatever MTGA last had
@@ -6615,7 +6909,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # it. Make the format and deck explicit and quest-aware first; on failure
         # do NOT fall through to the queue click, or we would re-enter the stale
         # selection (e.g. the last Starter Duel event and its deck).
-        if self._matches_since_quest_refresh >= self._quest_refresh_every_n_matches:
+        if should_refresh_quests:
             # Same dip-to-Home the Starter path does: MTGA only logs quest
             # progress on Home, so without it the target below would stay frozen
             # at the session's first quest for the whole run.
@@ -8203,6 +8497,87 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self.__schedule_decision_recovery(1.0, "cast_failure_recovery")
         return False
 
+    def _is_card_off_hand(self, card_id: int) -> bool:
+        """True if the card is known to be in a zone other than hand (e.g. Exile, Graveyard, Stack, Command)."""
+        try:
+            full_state = self.updated_game_state.get_full_state()
+            hand_ids = set()
+            for z in full_state.get("zones", []) or []:
+                if z.get("type") == "ZoneType_Hand":
+                    hand_ids.update(z.get("objectInstanceIds", []) or [])
+            if int(card_id) in hand_ids:
+                return False
+            for obj in full_state.get("gameObjects", []) or []:
+                if int(obj.get("instanceId", -1)) == int(card_id):
+                    for z in full_state.get("zones", []) or []:
+                        if z.get("zoneId") == obj.get("zoneId"):
+                            return z.get("type") in (
+                                "ZoneType_Exile", "ZoneType_Graveyard",
+                                "ZoneType_Stack", "ZoneType_Command",
+                                "ZoneType_Pending", "ZoneType_Limbo",
+                            )
+        except Exception:
+            pass
+        return False
+
+    def _scan_right_side_for_cast(
+        self,
+        card_id: int,
+        *,
+        attempt: int = 0,
+        expected_match_id: str | None = None,
+        cast_ack_id: str | None = None,
+        decision_context: dict | None = None,
+    ) -> tuple[int | None, str | None, float | None, tuple[int, int] | None]:
+        """Scan the right-side / exile / stack zone for an exiled, adventure, or off-hand playable card."""
+        if not self.can_execute_game_action(expected_match_id):
+            return None, None, None, None
+        try:
+            p1, p2 = self._get_right_side_scan_points_mapped(force_reacquire=False)
+        except Exception:
+            return None, None, None, None
+        if not p1 or not p2:
+            return None, None, None, None
+        x_min, x_max = min(p1[0], p2[0]), max(p1[0], p2[0])
+        y_min, y_max = min(p1[1], p2[1]), max(p1[1], p2[1])
+        step_x = max(20, getattr(self, "right_side_scan_step", 75))
+        step_y = max(20, int(step_x * 1.25))
+
+        reset_pos = (x_min, max(self.screen_bounds[0][1], y_min - 80))
+        bot_logger.log_move(reset_pos[0], reset_pos[1], f"RESET_BEFORE_RIGHT_SCAN (target card_id={card_id})")
+        self.input.move_abs(reset_pos[0], reset_pos[1])
+        time.sleep(0.1)
+
+        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+        y_range = list(range(y_min, y_max + 1, step_y))
+        for row_idx, y in enumerate(y_range):
+            if not self.can_execute_game_action(expected_match_id):
+                break
+            if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                break
+            if self.__abort_stale_cast_context(
+                cast_ack_id, card_id, decision_context, "right_scan_row", attempt
+            ):
+                return None, None, None, None
+            x_range = range(x_min, x_max + 1, step_x) if (row_idx % 2 == 0) else range(x_max, x_min - 1, -step_x)
+            for x in x_range:
+                if not self.can_execute_game_action(expected_match_id):
+                    return None, None, None, None
+                self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+                self.input.move_abs(x, y)
+                time.sleep(0.025)
+                if self.log_reader.has_new_line(self.patterns['hover_id']):
+                    hover_line = self.log_reader.get_latest_line_containing_pattern(
+                        self.patterns['hover_id']
+                    )
+                    parsed, hover_source = self.__parse_hover_observation(hover_line)
+                    if parsed is not None:
+                        bot_logger.log_hover(parsed)
+                        if parsed == card_id:
+                            pos = self.input.position()
+                            return parsed, hover_source, time.monotonic(), (int(pos.x), int(pos.y))
+        return None, None, None, None
+
     def _cast_once(
         self, card_id: int, *, attempt: int = 0, expected_match_id: str | None = None,
         cast_ack_id: str | None = None, decision_context: dict | None = None,
@@ -8223,20 +8598,6 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 return False
             if not self._ensure_options_overlay_closed(context=f"CAST_CARD id={card_id}"):
                 return False
-            # The hand scan identifies cards purely from MTGA's hover events, and
-            # Unity only emits those while the window has focus. If anything else
-            # took focus (observed: the user browsing Explorer), the scan sweeps
-            # the whole hand, hovers NOTHING, and the cast fails -- the bot then
-            # sat 36s burning the rope with Valorous Stance stuck in hand at 3
-            # life. Focus MTGA first, exactly like the logout ESC path does.
-            # Do not reactivate an MTGA window that already owns the foreground.
-            # ShowWindow/BringWindowToTop/SetActiveWindow is not a harmless no-op
-            # for Unity: in a long live session we observed three cast sweeps get
-            # zero hover events with that sequence in the path, while the
-            # select-N hand sweep (which does not refocus) reported every card a
-            # few seconds later over the identical row. This makes redundant
-            # activation the strongest remaining suspect. Only ask Windows for
-            # a focus transition when another window actually owns it.
             foreground = _describe_foreground_window()
             if cast_ack_id is not None:
                 self.__cast_ack_event("foreground_before_scan", attempt_id=cast_ack_id, foreground=foreground)
@@ -8251,119 +8612,36 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     self.__schedule_decision_recovery(0.2, "cast_foreground_recovery")
                     return False
             elif foreground.get("is_mtga") is not True:
-                # Ownership measurement is unavailable (non-Windows or an API
-                # failure); preserve the historical behavior.
                 focus_mtga_window()
             if not self.can_execute_game_action(expected_match_id):
                 self.__finish_cast_ack_without_click(cast_ack_id, "action_cancelled_after_scan")
                 return False
-            # NOTE: an "Are You Sure?" confirm dialog, if present, is probed for
-            # reactively in cast() after a failed attempt -- not here. See the
-            # comment in cast() for why running that scan up front on every
-            # attempt was too expensive to do speculatively.
             hand_p1, hand_p2 = self._get_hand_scan_points_mapped(force_reacquire=True)
             if hand_p1 is None or hand_p2 is None:
                 bot_logger.log_error(
                     f"CAST aborted: arena_region unavailable, refusing to scan the desktop for card {card_id}."
                 )
                 return False
-            # Clear any stale hover events from previous scans
             self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
-
-            # Move above start point first to reset any hover states
-            reset_pos = (hand_p1[0], hand_p1[1] - 100)
-            bot_logger.log_move(
-                reset_pos[0],
-                reset_pos[1],
-                f"RESET_BEFORE_SCAN (target card_id={card_id})",
-            )
-            self.input.move_abs(reset_pos[0], reset_pos[1])
-            time.sleep(0.5)
-
-            # Move to start of hand scan
-            bot_logger.log_move(hand_p1[0], hand_p1[1], "START_HAND_SCAN")
-            self.input.move_abs(hand_p1[0], hand_p1[1])
 
             current_hovered_id = None
             current_hovered_source = None
             current_hover_observed_monotonic = None
-            start_x = hand_p1[0]
-            end_x = hand_p2[0]
+            click_position = None
 
-            # Ensure we are scanning in the correct direction (left to right usually)
-            direction = 1 if end_x > start_x else -1
-            total_dx = (end_x - start_x) if end_x != start_x else 1
-            start_y = hand_p1[1]
-            end_y = hand_p2[1]
-
-            while current_hovered_id != card_id:
-                if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
-                    return False
-                if (not self.can_execute_game_action(expected_match_id)
-                        or self._group_prompt_blocks_gameplay()):
-                    break
-                if self.__abort_stale_cast_context(
-                    cast_ack_id, card_id, decision_context, "scan_loop", attempt
-                ):
-                    return False
-                # Check if we have exceeded the scan area
-                current_x = self.input.position().x
-                if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
-                    bot_logger.log_error(
-                        f"SCAN_FAILED: Card {card_id} not found. Scanned from x={start_x} to x={end_x}, ended at x={current_x}"
-                    )
-                    current_pos = self.input.position()
-                    self._write_hand_select_debug_bundle(
-                        reason="cast_scan_failed",
-                        card_id=card_id,
-                        scan_start=hand_p1,
-                        scan_end=hand_p2,
-                        current_pos=(current_pos.x, current_pos.y),
-                        current_hovered_id=current_hovered_id,
-                    )
-                    print(f"Scanned entire hand area but did not find card_id: {card_id}")
-                    break
-
-                # Inner loop: move until log updates or bounds hit
-                while not self.log_reader.has_new_line(self.patterns['hover_id']):
-                    if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
-                        return False
-                    if not self.can_execute_game_action(expected_match_id):
-                        return False
-                    if self.__abort_stale_cast_context(
-                        cast_ack_id, card_id, decision_context, "scan_motion", attempt
-                    ):
-                        return False
-                    step_dx = step_px * direction
-                    pos = self.input.position()
-                    next_x = pos.x + step_dx
-                    # Follow a (potentially sloped) scan line from p1 -> p2 to better match fanned hands.
-                    t = (next_x - start_x) / total_dx
-                    if t < 0:
-                        t = 0
-                    elif t > 1:
-                        t = 1
-                    desired_y = int(round(start_y + t * (end_y - start_y)))
-                    dy = desired_y - pos.y
-                    self.input.move_rel(step_dx, dy)
-                    time.sleep(dwell_sec)
-
-                    # Check bounds inside inner loop too
-                    current_x = self.input.position().x
-                    if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
-                        break
-
-                if self.log_reader.has_new_line(self.patterns['hover_id']):
-                    hover_line = self.log_reader.get_latest_line_containing_pattern(
-                        self.patterns['hover_id']
-                    )
-                    parsed, hover_source = self.__parse_hover_observation(hover_line)
-                    if parsed is None:
-                        continue
-                    current_hovered_id = parsed
-                    current_hovered_source = hover_source
-                    current_hover_observed_monotonic = time.monotonic()
-                    if cast_ack_id is not None and current_hovered_id == card_id:
+            is_off_hand = self._is_card_off_hand(card_id)
+            if is_off_hand:
+                bot_logger.log_info(f"Card {card_id} is in exile/graveyard/command; scanning right side first.")
+                r_id, r_source, r_ts, r_pos = self._scan_right_side_for_cast(
+                    card_id, attempt=attempt, expected_match_id=expected_match_id,
+                    cast_ack_id=cast_ack_id, decision_context=decision_context,
+                )
+                if r_id == card_id:
+                    current_hovered_id = r_id
+                    current_hovered_source = r_source
+                    current_hover_observed_monotonic = r_ts
+                    click_position = r_pos
+                    if cast_ack_id is not None:
                         with self.__cast_ack_lock:
                             attempt_state = self.__cast_ack_attempts.get(cast_ack_id)
                             if attempt_state is not None:
@@ -8372,33 +8650,148 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                                     "hover_id": current_hovered_id,
                                     "hover_source": current_hovered_source,
                                 }
-                    # Seeing it proves it is in hand and reachable, so an earlier
-                    # give-up on this id was wrong -- do not hold it against a
-                    # card the mouse just passed over.
                     self.clear_cast_suppression(current_hovered_id)
-                    bot_logger.log_hover(current_hovered_id)
-                    print(str(current_hovered_id) + '|' + str(card_id))
-                else:
-                    # Break outer loop if we hit bounds without finding new log line
-                    bot_logger.log_error(
-                        f"SCAN_STOPPED: No hover update before bounds (target={card_id}, "
-                        f"start=({start_x},{start_y}), end=({end_x},{end_y}), "
-                        f"attempt={attempt}, pacing={step_px}px/{dwell_sec}s)"
-                    )
-                    current_pos = self.input.position()
-                    self._write_hand_select_debug_bundle(
-                        reason="cast_scan_stopped",
-                        card_id=card_id,
-                        scan_start=hand_p1,
-                        scan_end=hand_p2,
-                        current_pos=(current_pos.x, current_pos.y),
-                        current_hovered_id=current_hovered_id,
-                    )
-                    break
+
+            if current_hovered_id != card_id:
+                # Move above start point first to reset any hover states
+                reset_pos = (hand_p1[0], hand_p1[1] - 100)
+                bot_logger.log_move(
+                    reset_pos[0],
+                    reset_pos[1],
+                    f"RESET_BEFORE_SCAN (target card_id={card_id})",
+                )
+                self.input.move_abs(reset_pos[0], reset_pos[1])
+                time.sleep(0.5)
+
+                # Move to start of hand scan
+                bot_logger.log_move(hand_p1[0], hand_p1[1], "START_HAND_SCAN")
+                self.input.move_abs(hand_p1[0], hand_p1[1])
+
+                start_x = hand_p1[0]
+                end_x = hand_p2[0]
+
+                direction = 1 if end_x > start_x else -1
+                total_dx = (end_x - start_x) if end_x != start_x else 1
+                start_y = hand_p1[1]
+                end_y = hand_p2[1]
+
+                while current_hovered_id != card_id:
+                    if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                        return False
+                    if (not self.can_execute_game_action(expected_match_id)
+                            or self._group_prompt_blocks_gameplay()):
+                        break
+                    if self.__abort_stale_cast_context(
+                        cast_ack_id, card_id, decision_context, "scan_loop", attempt
+                    ):
+                        return False
+                    current_x = self.input.position().x
+                    if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                        bot_logger.log_error(
+                            f"SCAN_FAILED: Card {card_id} not found. Scanned from x={start_x} to x={end_x}, ended at x={current_x}"
+                        )
+                        current_pos = self.input.position()
+                        self._write_hand_select_debug_bundle(
+                            reason="cast_scan_failed",
+                            card_id=card_id,
+                            scan_start=hand_p1,
+                            scan_end=hand_p2,
+                            current_pos=(current_pos.x, current_pos.y),
+                            current_hovered_id=current_hovered_id,
+                        )
+                        print(f"Scanned entire hand area but did not find card_id: {card_id}")
+                        break
+
+                    while not self.log_reader.has_new_line(self.patterns['hover_id']):
+                        if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
+                            return False
+                        if not self.can_execute_game_action(expected_match_id):
+                            return False
+                        if self.__abort_stale_cast_context(
+                            cast_ack_id, card_id, decision_context, "scan_motion", attempt
+                        ):
+                            return False
+                        step_dx = step_px * direction
+                        pos = self.input.position()
+                        next_x = pos.x + step_dx
+                        t = (next_x - start_x) / total_dx
+                        if t < 0:
+                            t = 0
+                        elif t > 1:
+                            t = 1
+                        desired_y = int(round(start_y + t * (end_y - start_y)))
+                        dy = desired_y - pos.y
+                        self.input.move_rel(step_dx, dy)
+                        time.sleep(dwell_sec)
+
+                        current_x = self.input.position().x
+                        if (direction == 1 and current_x >= end_x) or (direction == -1 and current_x <= end_x):
+                            break
+
+                    if self.log_reader.has_new_line(self.patterns['hover_id']):
+                        hover_line = self.log_reader.get_latest_line_containing_pattern(
+                            self.patterns['hover_id']
+                        )
+                        parsed, hover_source = self.__parse_hover_observation(hover_line)
+                        if parsed is None:
+                            continue
+                        current_hovered_id = parsed
+                        current_hovered_source = hover_source
+                        current_hover_observed_monotonic = time.monotonic()
+                        if cast_ack_id is not None and current_hovered_id == card_id:
+                            with self.__cast_ack_lock:
+                                attempt_state = self.__cast_ack_attempts.get(cast_ack_id)
+                                if attempt_state is not None:
+                                    attempt_state["hover_observed_monotonic"] = current_hover_observed_monotonic
+                                    attempt_state["hover_observation"] = {
+                                        "hover_id": current_hovered_id,
+                                        "hover_source": current_hovered_source,
+                                    }
+                        self.clear_cast_suppression(current_hovered_id)
+                        bot_logger.log_hover(current_hovered_id)
+                        print(str(current_hovered_id) + '|' + str(card_id))
+                    else:
+                        bot_logger.log_error(
+                            f"SCAN_STOPPED: No hover update before bounds (target={card_id}, "
+                            f"start=({start_x},{start_y}), end=({end_x},{end_y}), "
+                            f"attempt={attempt}, pacing={step_px}px/{dwell_sec}s)"
+                        )
+                        current_pos = self.input.position()
+                        self._write_hand_select_debug_bundle(
+                            reason="cast_scan_stopped",
+                            card_id=card_id,
+                            scan_start=hand_p1,
+                            scan_end=hand_p2,
+                            current_pos=(current_pos.x, current_pos.y),
+                            current_hovered_id=current_hovered_id,
+                        )
+                        break
+
+            # Fallback: if not found in hand scan and not already scanned off-hand, check the right side
+            if current_hovered_id != card_id and not is_off_hand:
+                bot_logger.log_info(f"Card {card_id} not found in hand scan; checking right side zone as fallback.")
+                r_id, r_source, r_ts, r_pos = self._scan_right_side_for_cast(
+                    card_id, attempt=attempt, expected_match_id=expected_match_id,
+                    cast_ack_id=cast_ack_id, decision_context=decision_context,
+                )
+                if r_id == card_id:
+                    current_hovered_id = r_id
+                    current_hovered_source = r_source
+                    current_hover_observed_monotonic = r_ts
+                    click_position = r_pos
+                    if cast_ack_id is not None:
+                        with self.__cast_ack_lock:
+                            attempt_state = self.__cast_ack_attempts.get(cast_ack_id)
+                            if attempt_state is not None:
+                                attempt_state["hover_observed_monotonic"] = current_hover_observed_monotonic
+                                attempt_state["hover_observation"] = {
+                                    "hover_id": current_hovered_id,
+                                    "hover_source": current_hovered_source,
+                                }
+                    self.clear_cast_suppression(current_hovered_id)
 
             clicked = (current_hovered_id == card_id
                        and current_hovered_source == "local_fragment")
-            click_position = None
             if clicked:
                 if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
                     return False
@@ -8409,8 +8802,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     cast_ack_id, card_id, decision_context, "before_click", attempt
                 ):
                     return False
-                click_pos = self.input.position()
-                click_position = (click_pos.x, click_pos.y)
+                if click_position is None:
+                    click_pos = self.input.position()
+                    click_position = (click_pos.x, click_pos.y)
                 time.sleep(0.5)
                 if self.__abort_cast_for_target_selection(cast_ack_id, expected_match_id):
                     return False
@@ -8993,7 +9387,23 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
     def _activate_ability_own(self, card_id: int, ability_id: int) -> None:
         bot_logger.log_info(f"Activating ability: card_id={card_id}, ability_id={ability_id}")
-        # Most optional triggers are confirmed via the bottom-right prompt button.
+        is_battlefield = False
+        try:
+            full_state = self.updated_game_state.get_full_state()
+            bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
+            for obj in full_state.get("gameObjects", []) or []:
+                if int(obj.get("instanceId", -1)) == int(card_id) and obj.get("zoneId") in bf_ids:
+                    is_battlefield = True
+                    break
+        except Exception:
+            pass
+
+        if is_battlefield:
+            bot_logger.log_info(f"Activating battlefield ability on permanent card_id={card_id}")
+            if self.select_battlefield_permanent(card_id, clicks=1):
+                time.sleep(0.3)
+                self.submit_selection(reason="activate_ability", force=True)
+                return
         time.sleep(0.2)
         self.submit_selection(reason="activate_ability", force=True)
     
@@ -9146,25 +9556,27 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         """Select a stack/prompt item by scanning a grid for matching hover objectId."""
         bot_logger.set_hover_logging(True)
         try:
+            p1, p2 = self._get_stack_scan_points_mapped(force_reacquire=True)
             if self.__select_object_in_region(
                 card_id=card_id,
-                p1=self.stack_scan_p1,
-                p2=self.stack_scan_p2,
+                p1=p1,
+                p2=p2,
                 step=self.stack_scan_step,
                 clicks=clicks,
                 label="STACK_ITEM",
-                max_scan_sec=3.0,
+                max_scan_sec=3.5,
             ):
                 return True
             bot_logger.log_info("Stack scan fallback to center region")
+            fb_p1, fb_p2 = self._get_stack_fallback_scan_points_mapped(force_reacquire=False)
             return self.__select_object_in_region(
                 card_id=card_id,
-                p1=self.stack_scan_fallback_p1,
-                p2=self.stack_scan_fallback_p2,
+                p1=fb_p1,
+                p2=fb_p2,
                 step=self.stack_scan_fallback_step,
                 clicks=clicks,
                 label="STACK_ITEM_FALLBACK",
-                max_scan_sec=4.0,
+                max_scan_sec=4.5,
             )
         finally:
             bot_logger.set_hover_logging(False)
@@ -9181,7 +9593,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 step=self.battlefield_scan_step,
                 clicks=clicks,
                 label="BATTLEFIELD_ITEM",
-                max_scan_sec=4.0,
+                max_scan_sec=7.5,
             ):
                 return True
             current_pos = self.input.position()
@@ -9194,6 +9606,138 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 current_hovered_id=None,
             )
             return False
+        finally:
+            bot_logger.set_hover_logging(False)
+
+    def select_battlefield_permanents(
+        self,
+        candidate_ids: list[int] | set[int],
+        count: int = 1,
+        clicks: int = 1,
+        max_scan_sec: float = 14.0,
+        fallback_candidate_ids: list[int] | set[int] | None = None,
+    ) -> list[int]:
+        """Select up to `count` permanents from candidate_ids on our battlefield in a single sweep.
+
+        If fewer than `count` permanents from candidate_ids are located, falls back to
+        fallback_candidate_ids to satisfy the remaining count while strictly respecting
+        priority order.
+        """
+        expected_match_id = self.__live_match_id
+        if not self.can_execute_game_action(expected_match_id):
+            return []
+        bot_logger.set_hover_logging(True)
+        scan_p1, scan_p2 = self._get_battlefield_scan_points_mapped(force_reacquire=True)
+        if isinstance(candidate_ids, (list, tuple)):
+            ordered_candidates = list(dict.fromkeys(candidate_ids))
+        else:
+            ordered_candidates = list(candidate_ids)
+        intended_targets = ordered_candidates[:max(1, count)]
+        targets_remaining = set(intended_targets)
+
+        fallback_remaining: list[int] = []
+        if fallback_candidate_ids:
+            if isinstance(fallback_candidate_ids, (list, tuple)):
+                fb_list = list(dict.fromkeys(fallback_candidate_ids))
+            else:
+                fb_list = list(fallback_candidate_ids)
+            fallback_remaining = [cid for cid in fb_list if cid not in targets_remaining]
+
+        selected_ids: list[int] = []
+        try:
+            x1, y1 = scan_p1
+            x2, y2 = scan_p2
+            x_min, x_max = (x1, x2) if x1 <= x2 else (x2, x1)
+            y_min, y_max = (y1, y2) if y1 <= y2 else (y2, y1)
+            step = max(10, int(self.battlefield_scan_step))
+            start_ts = time.time()
+
+            reset_x = x_min
+            reset_y = max(self.screen_bounds[0][1], y_min - 80)
+            bot_logger.log_move(reset_x, reset_y, f"RESET_BEFORE_MULTI_BATTLEFIELD (target_count={count})")
+            self.input.move_abs(reset_x, reset_y)
+            time.sleep(0.1)
+
+            y_range = list(range(y_min, y_max + 1, step))
+            for row_idx, y in enumerate(y_range):
+                if not self.can_execute_game_action(expected_match_id):
+                    break
+                if (time.time() - start_ts) > max_scan_sec:
+                    bot_logger.log_info(
+                        f"select_battlefield_permanents timeout after {max_scan_sec:.1f}s; selected {len(selected_ids)}/{count}"
+                    )
+                    break
+                x_range = range(x_min, x_max + 1, step) if (row_idx % 2 == 0) else range(x_max, x_min - 1, -step)
+                for x in x_range:
+                    if not self.can_execute_game_action(expected_match_id):
+                        break
+                    if (time.time() - start_ts) > max_scan_sec:
+                        break
+                    self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+                    self.input.move_abs(x, y)
+                    time.sleep(0.04)
+                    if not self.log_reader.has_new_line(self.patterns['hover_id']):
+                        continue
+                    parsed = self.__parse_hover_id_line(
+                        self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                    )
+                    if parsed is None:
+                        continue
+                    bot_logger.log_hover(parsed)
+                    if parsed in targets_remaining:
+                        bot_logger.log_click(x, y, f"SELECT_BATTLEFIELD_MULTI (id={parsed}, {len(selected_ids) + 1}/{count})")
+                        for _ in range(max(1, int(clicks))):
+                            self.input.left_click(1)
+                            time.sleep(0.1)
+                        targets_remaining.remove(parsed)
+                        selected_ids.append(parsed)
+                        time.sleep(0.2)
+                        if len(selected_ids) >= count:
+                            bot_logger.log_info(f"select_battlefield_permanents complete: selected {selected_ids}")
+                            return selected_ids
+
+            # Fallback pass if primary targets were missing and fallback candidates exist
+            if len(selected_ids) < count and fallback_remaining and (time.time() - start_ts) <= max_scan_sec:
+                needed_fb = count - len(selected_ids)
+                active_fallbacks = set(fallback_remaining[:needed_fb])
+                bot_logger.log_info(
+                    f"select_battlefield_permanents: primary sweep got {len(selected_ids)}/{count}; scanning for fallback candidates {active_fallbacks}"
+                )
+                for row_idx, y in enumerate(y_range):
+                    if not self.can_execute_game_action(expected_match_id):
+                        break
+                    if (time.time() - start_ts) > max_scan_sec:
+                        break
+                    x_range = range(x_min, x_max + 1, step) if (row_idx % 2 == 0) else range(x_max, x_min - 1, -step)
+                    for x in x_range:
+                        if not self.can_execute_game_action(expected_match_id):
+                            break
+                        if (time.time() - start_ts) > max_scan_sec:
+                            break
+                        self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+                        self.input.move_abs(x, y)
+                        time.sleep(0.04)
+                        if not self.log_reader.has_new_line(self.patterns['hover_id']):
+                            continue
+                        parsed = self.__parse_hover_id_line(
+                            self.log_reader.get_latest_line_containing_pattern(self.patterns['hover_id'])
+                        )
+                        if parsed is None:
+                            continue
+                        bot_logger.log_hover(parsed)
+                        if parsed in active_fallbacks:
+                            bot_logger.log_click(x, y, f"SELECT_BATTLEFIELD_MULTI_FALLBACK (id={parsed}, {len(selected_ids) + 1}/{count})")
+                            for _ in range(max(1, int(clicks))):
+                                self.input.left_click(1)
+                                time.sleep(0.1)
+                            active_fallbacks.remove(parsed)
+                            selected_ids.append(parsed)
+                            time.sleep(0.2)
+                            if len(selected_ids) >= count:
+                                bot_logger.log_info(f"select_battlefield_permanents complete with fallbacks: selected {selected_ids}")
+                                return selected_ids
+
+            return selected_ids
         finally:
             bot_logger.set_hover_logging(False)
 
@@ -9431,10 +9975,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                         bot_logger.log_info("SUBMIT_SELECTION: submit_btn not found, clicked okay_btn as fallback")
                         self.__last_submit_selection_ts = time.time()
                         return True
-                bot_logger.log_error(
-                    f"SUBMIT_SELECTION_FAILED: no submit control recognized (reason={reason})"
-                )
-                return False
+                if allow_okay_fallback and reason.startswith("select_n"):
+                    bot_logger.log_info(
+                        f"SUBMIT_SELECTION: templates not found on screen for {reason}; attempting bottom-right button coordinate fallback."
+                    )
+                else:
+                    bot_logger.log_error(
+                        f"SUBMIT_SELECTION_FAILED: no submit control recognized (reason={reason})"
+                    )
+                    return False
             if is_payment:
                 return _try_auto_pay()
             if not _still_active():
@@ -9646,11 +10195,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         so long scans and AI decisions use this predicate as cooperative
         cancellation immediately before probes and input.
         """
-        if self._stop_requested or self._suppress_selections:
+        if getattr(self, "_stop_requested", False) or getattr(self, "_suppress_selections", False):
             return False
         if getattr(self, "_Controller__concession_claimed", False):
             return False
-        return self.__is_live_match(expected_match_id)
+        is_live = getattr(self, "_Controller__is_live_match", None)
+        if callable(is_live):
+            return is_live(expected_match_id)
+        return True
 
     def __record_decision(self, decision_kind, move_name, move_data, extra=None) -> None:
         """Record a debug snapshot of the live game state for a prompt-handler
@@ -9677,7 +10229,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             except Exception:
                 pass
 
-    def keep(self, keep: bool):
+    def keep(self, keep: bool, card_list: list | None = None, count_to_tuck: int | None = None):
         if keep:
             used_raw = self.mulligan_keep_coors
             target, source = self._map_abs_point_to_arena(
@@ -9713,6 +10265,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             bot_logger.log_click(target[0], target[1], "KEEP_HAND")
             self.input.move_abs(target[0], target[1])
         else:
+            self._mulligan_count += 1
             target, source = self._map_abs_point_to_arena(
                 self.mulligan_mull_coors,
                 label="MULLIGAN",
@@ -9735,6 +10288,256 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             )
         except Exception as e:
             bot_logger.log_error(f"Failed to write mulligan click debug bundle: {e}")
+
+        if keep:
+            tuck_count = count_to_tuck if count_to_tuck is not None else self._mulligan_count
+            pending_done = getattr(self, "_mulligan_pending_done", False)
+            if tuck_count > 0 or pending_done:
+                bot_logger.log_info(
+                    f"London Mulligan tuck required: {tuck_count} cards to bottom of library (pending_done={pending_done})."
+                )
+                time.sleep(1.2)  # Wait for MTGA tuck dialog to appear
+                tuck_success = False
+                try:
+                    tuck_success = bool(self.execute_london_mulligan_tuck(card_list or [], tuck_count))
+                except Exception as e:
+                    bot_logger.log_error(f"Error during execute_london_mulligan_tuck: {e}")
+                if tuck_success:
+                    self._mulligan_count = 0
+                    self._mulligan_pending_done = False
+                else:
+                    bot_logger.log_info(
+                        f"London Mulligan tuck incomplete; preserving remaining count={self._mulligan_count}, pending_done={getattr(self, '_mulligan_pending_done', False)} for recovery."
+                    )
+
+    def execute_london_mulligan_tuck(self, card_list: list, count_to_tuck: int) -> bool:
+        """London Mulligan tuck: move mouse to mulligan_centre, sweep horizontally right
+
+        Iterating over hand cards, and drag the cards chosen by MulliganLogic to the
+        library drop location, then click mulligan_done.
+
+        Returns:
+            True if all required cards were successfully tucked and the Done button was clicked;
+            False otherwise (preserving recovery state).
+        """
+        if count_to_tuck <= 0 and not getattr(self, "_mulligan_pending_done", False):
+            return True
+
+        bot_logger.log_info(
+            f"Starting London Mulligan tuck: count={count_to_tuck}, hand={len(card_list)} cards, pending_done={getattr(self, '_mulligan_pending_done', False)}"
+        )
+
+        try:
+            from AI.Utilities.MulliganLogic import select_cards_to_tuck
+            cards_to_tuck = select_cards_to_tuck(card_list, count_to_tuck)
+        except Exception as e:
+            bot_logger.log_error(f"select_cards_to_tuck failed: {e}")
+            cards_to_tuck = list(range(count_to_tuck))
+
+        # Resolve index tokens into instanceId if card_list carries instanceId, while preserving direct instance IDs
+        known_instance_ids = {
+            int(c["instanceId"])
+            for c in card_list
+            if isinstance(c, dict) and c.get("instanceId") is not None
+        }
+        resolved_targets: list[int] = []
+        for t in cards_to_tuck:
+            if t in known_instance_ids:
+                resolved_targets.append(t)
+            elif isinstance(t, int) and 0 <= t < len(card_list):
+                c = card_list[t]
+                if isinstance(c, dict) and c.get("instanceId") is not None:
+                    resolved_targets.append(int(c["instanceId"]))
+                else:
+                    resolved_targets.append(t)
+            else:
+                resolved_targets.append(t)
+
+        bot_logger.log_info(f"Target cards to tuck: {resolved_targets}")
+        target_ids_remaining = list(resolved_targets)
+
+        expected_match_id = getattr(self, "_Controller__live_match_id", None)
+        if expected_match_id is None:
+            expected_match_id = getattr(self, "__live_match_id", None)
+
+        centre_mapped, centre_src = self._map_abs_point_to_arena(
+            self.mulligan_centre_coors, label="MULLIGAN_CENTRE", force_reacquire=True
+        )
+        if centre_src == "absolute_no_arena":
+            bot_logger.log_error("MULLIGAN_TUCK aborted: arena_region unavailable.")
+            return False
+
+        library_mapped, _ = self._map_abs_point_to_arena(
+            self.mulligan_library_coors, label="MULLIGAN_LIBRARY", force_reacquire=False
+        )
+        done_mapped, _ = self._map_abs_point_to_arena(
+            self.mulligan_done_coors, label="MULLIGAN_DONE", force_reacquire=False
+        )
+
+        arena = self._ensure_arena_region()
+        scale_x = (arena[2] / 1920.0) if arena else 1.0
+
+        # Sweep horizontally across the full hand row
+        sweep_start_abs = (480, self.mulligan_centre_coors[1])
+        sweep_end_abs = (1650, self.mulligan_centre_coors[1])
+        start_mapped, _ = self._map_abs_point_to_arena(sweep_start_abs, label="MULLIGAN_SWEEP_START")
+        end_mapped, _ = self._map_abs_point_to_arena(sweep_end_abs, label="MULLIGAN_SWEEP_END")
+        start_x = start_mapped[0]
+        end_x = end_mapped[0]
+        scan_y = centre_mapped[1]
+
+        dropped_count = 0
+
+        def _can_act() -> bool:
+            if getattr(self, "_stop_requested", False) or getattr(self, "_suppress_selections", False):
+                return False
+            if expected_match_id is not None:
+                can_exec = getattr(self, "can_execute_game_action", None)
+                if callable(can_exec) and not can_exec(expected_match_id):
+                    return False
+            return True
+
+        def _drag_to_library(from_x: int, from_y: int) -> bool:
+            if not _can_act():
+                bot_logger.log_info("MULLIGAN_TUCK drag aborted: match ended or action blocked.")
+                return False
+            bot_logger.log_info(f"Dragging card from ({from_x}, {from_y}) to library {library_mapped}")
+            self.input.move_abs(from_x, from_y)
+            time.sleep(0.15)
+            if not _can_act():
+                bot_logger.log_info("MULLIGAN_TUCK drag aborted before mouse down: action blocked.")
+                return False
+            self.input.left_down()
+            interrupted = False
+            try:
+                time.sleep(0.12)
+                steps = 15
+                dx = (library_mapped[0] - from_x) / steps
+                dy = (library_mapped[1] - from_y) / steps
+                for i in range(1, steps + 1):
+                    if not _can_act():
+                        bot_logger.log_info("MULLIGAN_TUCK drag interrupted during interpolation.")
+                        interrupted = True
+                        break
+                    cur_x = int(round(from_x + dx * i))
+                    cur_y = int(round(from_y + dy * i))
+                    self.input.move_abs(cur_x, cur_y)
+                    time.sleep(0.015)
+                if not interrupted:
+                    time.sleep(0.15)
+            finally:
+                self.input.left_up()
+            if interrupted or not _can_act():
+                return False
+            time.sleep(0.4)
+            return True
+
+        if getattr(self, "_mulligan_pending_done", False):
+            bot_logger.log_info(
+                "MULLIGAN_TUCK: Cards already dropped to library in prior attempt; proceeding directly to Done button."
+            )
+        else:
+            while dropped_count < count_to_tuck:
+                if not _can_act():
+                    bot_logger.log_info("MULLIGAN_TUCK aborted: match ended or action blocked.")
+                    break
+
+                bot_logger.log_info(
+                    f"Tuck iteration {dropped_count + 1}/{count_to_tuck}: sweeping hand row from ({start_x}, {scan_y})"
+                )
+                self.input.move_abs(start_x, scan_y)
+                time.sleep(0.25)
+                self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+
+                cur_x = start_x
+                step_px = 12
+                dwell_sec = 0.025
+                found_card = False
+                found_id = None
+                found_pos = None
+                saw_any_hover = False
+
+                while cur_x <= end_x:
+                    if not _can_act():
+                        break
+                    cur_x += step_px
+                    self.input.move_abs(cur_x, scan_y)
+                    time.sleep(dwell_sec)
+
+                    if self.log_reader.has_new_line(self.patterns['hover_id']):
+                        saw_any_hover = True
+                        hover_line = self.log_reader.get_latest_line_containing_pattern(
+                            self.patterns['hover_id']
+                        )
+                        parsed_id, _ = self.__parse_hover_observation(hover_line)
+                        if parsed_id is not None:
+                            bot_logger.log_info(f"Hovered card ID={parsed_id} at ({cur_x}, {scan_y}) during tuck scan")
+                            if parsed_id in target_ids_remaining:
+                                found_card = True
+                                found_id = parsed_id
+                                found_pos = (cur_x, scan_y)
+                                break
+
+                if found_card and found_pos is not None and found_id is not None:
+                    bot_logger.log_info(f"Identified target tuck card ID={found_id} at {found_pos}")
+                    if _drag_to_library(found_pos[0], found_pos[1]):
+                        target_ids_remaining.remove(found_id)
+                        dropped_count += 1
+                        self._mulligan_count = max(0, count_to_tuck - dropped_count)
+                    else:
+                        break
+                elif not saw_any_hover:
+                    # Positional fallback ONLY when complete sweep received no hover events at all (e.g. log output not synced)
+                    slot_index = dropped_count
+                    card_spacing = int(115 * scale_x)
+                    fallback_x = int(centre_mapped[0] + (slot_index * card_spacing))
+                    bot_logger.log_info(
+                        f"No hover events received across hand sweep; using positional fallback at ({fallback_x}, {scan_y})"
+                    )
+                    if _drag_to_library(fallback_x, scan_y):
+                        if target_ids_remaining:
+                            target_ids_remaining.pop(0)
+                        dropped_count += 1
+                        self._mulligan_count = max(0, count_to_tuck - dropped_count)
+                    else:
+                        break
+                else:
+                    # Hover events were observed, but none matched remaining target cards.
+                    bot_logger.log_error(
+                        f"MULLIGAN_TUCK: Hover events observed but no target cards {target_ids_remaining} matched; aborting tuck to prevent dragging wrong cards."
+                    )
+                    return False
+
+            if dropped_count < count_to_tuck:
+                bot_logger.log_error(
+                    f"MULLIGAN_TUCK incomplete: {dropped_count}/{count_to_tuck} cards tucked. Done button will not be clicked."
+                )
+                return False
+
+            self._mulligan_pending_done = True
+            self._mulligan_count = 0
+
+        if not _can_act():
+            bot_logger.log_info("MULLIGAN_TUCK aborted before done click: match ended or stop requested.")
+            return False
+
+        # All required cards dropped to library; click Done button
+        time.sleep(0.4)
+        if not _can_act():
+            bot_logger.log_info("MULLIGAN_TUCK aborted before done click: match ended or stop requested.")
+            return False
+        bot_logger.log_info(f"Clicking mulligan_done button at {done_mapped}")
+        self.input.move_abs(done_mapped[0], done_mapped[1])
+        time.sleep(0.15)
+        if not _can_act():
+            bot_logger.log_info("MULLIGAN_TUCK aborted before click: match ended or stop requested.")
+            return False
+        self.input.left_click(1)
+        time.sleep(0.5)
+        bot_logger.log_info("London Mulligan tuck complete: clicked done button.")
+        self._mulligan_pending_done = False
+        self._mulligan_count = 0
+        return True
 
     def click_assign_damage_done(self):
         """Click the Done button during damage assignment"""
@@ -10754,50 +11557,77 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         arena = self._get_ui_action_arena_region(force_reacquire=True, label="DISMISS_END_SCREEN")
         if arena is not None:
             center_x = int(arena[0] + (arena[2] // 2))
-            center_y = int(arena[1] + (arena[3] // 2))
-            # The DEFEAT/VICTORY "[Click to Continue]" prompt sits near the bottom
-            # of the board, not the middle. Clicking only the arena center lands on
-            # the DEFEAT crest and does NOT advance the screen, leaving the bot stuck
-            # on the match-end screen forever (no supervisor to recover it). Click
-            # the continue prompt too.
             continue_x = center_x
             continue_y = int(arena[1] + (arena[3] * 0.93))
+            safe_fallback_y = int(arena[1] + (arena[3] * 0.82))
+            mid_continue_y = int(arena[1] + (arena[3] * 0.68))
             source = f"arena_center arena={arena}"
         else:
             center_x = (self.screen_bounds[0][0] + self.screen_bounds[1][0]) // 2
-            center_y = (self.screen_bounds[0][1] + self.screen_bounds[1][1]) // 2
             continue_x = center_x
             continue_y = int(self.screen_bounds[0][1] + (self.screen_bounds[1][1] - self.screen_bounds[0][1]) * 0.93)
+            safe_fallback_y = int(self.screen_bounds[0][1] + (self.screen_bounds[1][1] - self.screen_bounds[0][1]) * 0.82)
+            mid_continue_y = int(self.screen_bounds[0][1] + (self.screen_bounds[1][1] - self.screen_bounds[0][1]) * 0.68)
             source = f"screen_bounds_center screen_bounds={self.screen_bounds}"
-        bot_logger.log_info(f"Dismiss end screen: clicking {source} center=({center_x}, {center_y}) continue=({continue_x}, {continue_y})")
-        bot_logger.log_click(center_x, center_y, "DISMISS_END_SCREEN")
-        runtime_status.touch_input("DISMISS_END_SCREEN", (center_x, center_y))
-        # Click to advance past the result screen, then VERIFY we actually left it
-        # before handing off to the queue loop. A single center click lands on the
-        # DEFEAT crest and does not always advance; a late-rendering result screen
-        # also swallows the first click. Without a verified dismissal the queue loop
-        # spins forever navigating a screen that still shows the result (this
-        # stalled farming until an external clicker intervened). Retry the
-        # continue-prompt + center clicks until the top-left nav anchor reappears --
-        # language-independent, since that anchor is absent on the full-screen
-        # result and present on every normal Arena screen.
+        bot_logger.log_info(f"Dismiss end screen: clicking {source} continue=({continue_x}, {continue_y}) fallback=({center_x}, {safe_fallback_y})")
+        bot_logger.log_click(continue_x, continue_y, "DISMISS_END_SCREEN")
+        runtime_status.touch_input("DISMISS_END_SCREEN", (continue_x, continue_y))
+        # Click to advance past the result screen, verifying immediately after every
+        # individual click so we NEVER fire a blind secondary click onto the Home
+        # screen (which lands on promotional carousel banners and opens web browsers).
+        # We also use safe lower-screen coordinates (y=0.82, y=0.68) instead of dead-center
+        # (y=0.50) to stay completely clear of banner hyperlinks.
         advanced = False
+        click_targets = [
+            (continue_x, continue_y, "continue_prompt"),
+            (center_x, safe_fallback_y, "safe_lower_fallback"),
+            (center_x, mid_continue_y, "safe_mid_continue"),
+        ]
         for attempt in range(1, 7):
             if self._stop_requested:
                 break
-            for (tx, ty) in ((continue_x, continue_y), (center_x, center_y)):
+            for (tx, ty, label) in click_targets:
+                if self._stop_requested:
+                    break
                 self.input.move_abs(tx, ty)
-                time.sleep(0.25)
+                time.sleep(0.2)
                 self.input.left_click(1)
-                time.sleep(0.4)
-            time.sleep(1.1)
+                time.sleep(0.5)
+                if self._match_end_screen_cleared():
+                    advanced = True
+                    bot_logger.log_info(
+                        f"Match completed - dismissed end screen via {label} (confirmed on attempt {attempt})"
+                    )
+                    break
+            if advanced:
+                break
+            time.sleep(0.8)
             if self._match_end_screen_cleared():
                 advanced = True
-                bot_logger.log_info(f"Match completed - dismissed end screen (confirmed after {attempt} attempt(s))")
+                bot_logger.log_info(f"Match completed - dismissed end screen (confirmed after attempt {attempt})")
                 break
             bot_logger.log_info(f"Dismiss end screen: result screen still up after attempt {attempt}; retrying continue-click.")
         if not advanced:
             bot_logger.log_info("Match completed - dismissed end screen (unconfirmed; queue loop safety net will keep retrying)")
+
+        # Directly claim any post-match reward overlays (Claim, Continue, Level Up)
+        # without idling through the post-match delay or waiting for the queue loop.
+        find_popup = getattr(self, "_find_blocking_popup", None)
+        if callable(find_popup):
+            for _ in range(5):
+                if self._stop_requested:
+                    break
+                popup = find_popup()
+                if popup is not None:
+                    label, point, _arena = popup
+                    if label in ("POPUP_CLAIM", "POPUP_CLAIM_REWARDS", "POPUP_CLAIM_BTN", "POPUP_CONTINUE", "POPUP_NOTIFICATION_CONTINUE"):
+                        bot_logger.log_info(f"Post-match reward popup detected ({label}); clicking to claim at {point}.")
+                        self._click_abs(int(point[0]), int(point[1]), label)
+                        time.sleep(1.2)
+                    else:
+                        break
+                else:
+                    break
         self._match_end_dismissed = True
         self._matches_since_quest_refresh += 1
         # Count a daily win once per match (the bot knows the result). Used by
@@ -10854,7 +11684,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         self._queue_progress_ts = now
 
     def _match_end_screen_cleared(self) -> bool:
-        """True once we are back on a recognizable Arena screen after a match.
+        """True once we are back on a recognizable Arena screen or reward popup after a match.
 
         The full-screen DEFEAT/VICTORY result hides the top-left navigation
         anchor, so a positive anchor match (detect().ok) means the result screen
@@ -10868,7 +11698,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         except Exception:
             pass
         try:
-            if self._get_state_from_log() == BotState.HOME:
+            state = self._get_state_from_log()
+            if state in (BotState.HOME, BotState.EVENT_PLAY, BotState.FIND_MATCH, BotState.MY_DECKS):
+                return True
+        except Exception:
+            pass
+        try:
+            find_popup = getattr(self, "_find_blocking_popup", None)
+            if callable(find_popup) and find_popup() is not None:
                 return True
         except Exception:
             pass
@@ -10882,6 +11719,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # so retiring again here would cancel the menu workers that resume play.
         if self.__live_match_id or self.__last_seen_match_id:
             self._retire_input_workers()
+
+        self._mulligan_count = 0
+        self._mulligan_pending_done = False
         self._starter_dead_ends = 0
         self.__clear_cast_ack_attempts("reset_for_new_game")
         self.__group_prompt_seq += 1
@@ -13972,7 +14812,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                             self.__select_n_in_progress = True
                             self.__select_n_in_progress_since = time.time()
                             if attempt == 1:
-                                wait_sec = 3.0
+                                wait_sec = 0.5 if use_battlefield_selection else 3.0
                                 if discard_context:
                                     wait_sec = 3.5
                                 bot_logger.log_info(
@@ -14052,52 +14892,115 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                                     )
                                     _clear_pending_select_n()
                                     return
-                            for idx, card_id in enumerate(ids_to_select):
-                                if not _select_n_valid():
-                                    bot_logger.log_info(
-                                        "SelectN selection canceled mid-loop: prompt token no longer valid."
-                                    )
-                                    return
-                                if selected >= min_sel:
-                                    break
-                                selected_ok = False
-                                if use_hand_selection:
-                                    selected_ok = self.select_hand_card(card_id, clicks=clicks)
-                                    if not selected_ok and discard_context:
-                                        for y_offset in (-120, -200):
-                                            selected_ok = self.select_hand_card_offset(
-                                                card_id, clicks=clicks, y_offset=y_offset
+                            if use_battlefield_selection and not use_hand_selection and not use_stack_selection:
+                                # Multi-permanent battlefield selection in a fast sweep.
+                                # Track already clicked IDs across attempts for this prompt.
+                                already_selected: list[int] = []
+                                if self.__pending_select_n is not None:
+                                    already_selected = self.__pending_select_n.setdefault("selected_battlefield_ids", [])
+
+                                active_candidates: list[int] = [int(cid) for cid in ids_to_select if cid is not None and int(cid) not in already_selected]
+                                needed = min_sel - len(already_selected)
+
+                                if needed <= 0:
+                                    selected_ids = list(already_selected)
+                                    selected = len(selected_ids)
+                                else:
+                                    # Separate primary candidates from fallback candidates.
+                                    # In sacrifice context, only unprotected candidates serve as fallbacks
+                                    # unless total unprotected candidates < min_sel.
+                                    primary_cands: list[int] = []
+                                    fallback_cands: list[int] = []
+                                    if sacrifice_context and len(active_candidates) > 1:
+                                        from AI.Utilities import RemovalLogic
+                                        unprotected_cands: list[int] = [
+                                            cid for cid in active_candidates
+                                            if not RemovalLogic.is_protected_from_sacrifice(
+                                                (game_objects_by_id.get(cid) or {}).get("grpId")
                                             )
-                                            if selected_ok:
-                                                break
-                                elif use_stack_selection:
-                                    if card_id not in _current_prompt_ids():
-                                        bot_logger.log_info(
-                                            f"SelectN skipping stale prompt id={card_id} before stack click."
-                                        )
-                                        continue
-                                    hover_id = card_id
-                                    if idx < len(stack_targets_to_select):
-                                        hover_id = int(stack_targets_to_select[idx].get("hover_id") or card_id)
-                                    if hover_id in used_hover_ids:
-                                        bot_logger.log_info(
-                                            f"SelectN skipping duplicate stack hover target id={hover_id} for prompt id={card_id}."
-                                        )
-                                        continue
-                                    selected_ok = self.select_stack_item(hover_id, clicks=1)
-                                    if selected_ok:
-                                        used_hover_ids.add(hover_id)
-                                elif use_battlefield_selection:
-                                    selected_ok = self.select_battlefield_permanent(card_id, clicks=1)
-                                if selected_ok:
+                                        ]
+                                        protected_cands: list[int] = [
+                                            cid for cid in active_candidates
+                                            if RemovalLogic.is_protected_from_sacrifice(
+                                                (game_objects_by_id.get(cid) or {}).get("grpId")
+                                            )
+                                        ]
+                                        if len(unprotected_cands) >= needed:
+                                            primary_cands = unprotected_cands[:needed]
+                                            fallback_cands = unprotected_cands[needed:]
+                                        else:
+                                            primary_cands = unprotected_cands + protected_cands[: needed - len(unprotected_cands)]
+                                            fallback_cands = protected_cands[needed - len(unprotected_cands) :]
+                                    else:
+                                        primary_cands = active_candidates[:needed]
+                                        fallback_cands = active_candidates[needed:]
+
+                                    newly_selected = self.select_battlefield_permanents(
+                                        primary_cands, count=needed, clicks=1, max_scan_sec=14.0, fallback_candidate_ids=fallback_cands
+                                    )
+                                    already_selected.extend(newly_selected)
+                                    selected_ids = list(already_selected)
+                                    selected = len(selected_ids)
+
+                                    if selected < min_sel:
+                                        remaining_unclicked = [cid for cid in active_candidates if cid not in already_selected]
+                                        if remaining_unclicked and attempt < 3:
+                                            bot_logger.log_info(
+                                                f"SelectN battlefield: partially selected {selected}/{min_sel} permanents; preserving selection and retrying (attempt {attempt + 1})."
+                                            )
+                                            _attempt_selection(attempt + 1, delay=0.8)
+                                            return
+                                        else:
+                                            bot_logger.log_error(
+                                                f"SelectN battlefield: only selected {selected}/{min_sel} permanents and no more candidates remain; aborting."
+                                            )
+                                            _clear_pending_select_n()
+                                            return
+                            else:
+                                for idx, card_id in enumerate(ids_to_select):
                                     if not _select_n_valid():
                                         bot_logger.log_info(
-                                            "SelectN selection canceled after click: prompt token no longer valid."
+                                            "SelectN selection canceled mid-loop: prompt token no longer valid."
                                         )
                                         return
-                                    selected += 1
-                                    selected_ids.append(card_id)
-                                    time.sleep(0.3)
+                                    if selected >= min_sel:
+                                        break
+                                    selected_ok = False
+                                    if use_hand_selection:
+                                        selected_ok = self.select_hand_card(card_id, clicks=clicks)
+                                        if not selected_ok and discard_context:
+                                            for y_offset in (-120, -200):
+                                                selected_ok = self.select_hand_card_offset(
+                                                    card_id, clicks=clicks, y_offset=y_offset
+                                                )
+                                                if selected_ok:
+                                                    break
+                                    elif use_stack_selection:
+                                        if card_id not in _current_prompt_ids():
+                                            bot_logger.log_info(
+                                                f"SelectN skipping stale prompt id={card_id} before stack click."
+                                            )
+                                            continue
+                                        hover_id = card_id
+                                        if idx < len(stack_targets_to_select):
+                                            hover_id = int(stack_targets_to_select[idx].get("hover_id") or card_id)
+                                        if hover_id in used_hover_ids:
+                                            bot_logger.log_info(
+                                                f"SelectN skipping duplicate stack hover target id={hover_id} for prompt id={card_id}."
+                                            )
+                                            continue
+                                        selected_ok = self.select_stack_item(hover_id, clicks=1)
+                                        if selected_ok:
+                                            used_hover_ids.add(hover_id)
+                                    if selected_ok:
+                                        if not _select_n_valid():
+                                            bot_logger.log_info(
+                                                "SelectN selection canceled after click: prompt token no longer valid."
+                                            )
+                                            return
+                                        selected += 1
+                                        selected_ids.append(card_id)
+                                        time.sleep(0.3)
                             if not selected_ids:
                                 bot_logger.log_error("SelectN failed to select any cards")
                                 _clear_pending_select_n()
@@ -16774,7 +17677,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     self.__clear_pending_select_n_state("SelectN auto-clear: stack prompt resolved.")
                     return False
             # Hard timeout guard to avoid infinite selection stalls.
-            if in_progress_age > 20.0:
+            if in_progress_age > 25.0:
                 self.__clear_pending_select_n_state("SelectN auto-clear: in-progress timeout.")
                 return False
             bot_logger.log_info("SelectN in progress: pausing other decisions.")

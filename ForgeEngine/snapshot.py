@@ -218,10 +218,12 @@ def build_state(tracker: ArenaTracker, cards: CardDb) -> dict | None:
         # land; not offering one means the drop is used (or there is no land
         # to play, where the value does not matter).
         players[0]["landsPlayed"] = 1
+    active_seat = turn_info.get("activePlayer")
+    active_idx = seat_index.get(active_seat, 0) if isinstance(active_seat, int) else 0
     return {
         "turn": turn_info.get("turnNumber", 1),
         "phase": forge_phase(turn_info) or "MAIN1",
-        "activePlayer": seat_index.get(turn_info.get("activePlayer"), 0),
+        "activePlayer": active_idx,
         "players": players,
     }
 

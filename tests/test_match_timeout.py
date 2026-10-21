@@ -47,6 +47,16 @@ class MatchTimeoutTest(unittest.TestCase):
         self.assertEqual(self.timer.call_args.args[0], 0)
         self.assertTrue(self.game._check_match_timeout())
 
+    def test_repeated_mulligan_start_does_not_extend_deadline(self):
+        generation = self.game._duration_generation
+        started_ts = self.game._match_started_ts
+        self.advance(60)
+        self.game._mark_match_started()
+        self.assertEqual(self.game._duration_generation, generation)
+        self.assertEqual(self.game._match_started_ts, started_ts)
+        self.advance(600)
+        self.assertTrue(self.game._check_match_timeout())
+
     def test_disable_invalidates_pending_callback_and_enable_uses_elapsed_time(self):
         generation = self.game._duration_generation
         self.game.set_match_timeout_minutes(0)

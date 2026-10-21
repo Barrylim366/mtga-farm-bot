@@ -416,6 +416,7 @@ class TestChooseAttackers(CombatLogicTestCase):
         decision = CombatLogic.choose_attackers(
             attackers_req(20, 21, 22), mine + theirs, MY_SEAT, 6, 20,
             live_instance_ids=live(*mine, *theirs),
+            untapped_enemies_only=False,
         )
         self.assertTrue(decision["hold_back"], "expected some creatures kept home")
         self.assertGreater(decision["projected_life_after"], 0)
@@ -426,6 +427,7 @@ class TestChooseAttackers(CombatLogicTestCase):
         decision = CombatLogic.choose_attackers(
             attackers_req(20, 21, 22), mine + theirs, MY_SEAT, 6, 20,
             live_instance_ids=live(*mine, *theirs),
+            untapped_enemies_only=False,
         )
         self.assertEqual(decision["attackers"], [20, 21, 22])
         self.assertEqual(decision["hold_back"], [])
@@ -445,6 +447,18 @@ class TestChooseAttackers(CombatLogicTestCase):
         )
         self.assertEqual(decision["attackers"], [])
         self.assertEqual(decision["reason"], "no legal attackers")
+
+    def test_untapped_enemies_only_allows_swinging_when_opponent_tapped_out(self):
+        mine = [creature(20 + i, MY_SEAT, 2, 2) for i in range(3)]
+        theirs = [creature(10 + i, OPP_SEAT, 3, 3, tapped=True) for i in range(3)]
+        # When untapped_enemies_only=True, tapped enemies are not projected for counter-attack
+        decision = CombatLogic.choose_attackers(
+            attackers_req(20, 21, 22), mine + theirs, MY_SEAT, 6, 20,
+            live_instance_ids=live(*mine, *theirs),
+            untapped_enemies_only=True,
+        )
+        self.assertEqual(decision["attackers"], [20, 21, 22])
+        self.assertEqual(decision["hold_back"], [])
 
 
 if __name__ == "__main__":

@@ -147,13 +147,16 @@ class ControllerKernel:
         """
         pass
 
-    def keep(self, keep: bool):
+    def keep(self, keep: bool, card_list: list | None = None, count_to_tuck: int | None = None):
         """
         Parameters
             keep: whether or not to keep the hand given
+            card_list: opening hand cards (for London mulligan tucking)
+            count_to_tuck: number of cards to tuck on keep (defaults to mulligan count)
         Requires:
             the player must be being prompted for a mulligan decision
         """
+        pass
 
 class ControllerSecondary(ControllerKernel):
     """

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 from unittest import mock
 
 from AI.Utilities.MulliganLogic import evaluate_opening_hand, select_cards_to_tuck
@@ -155,3 +156,193 @@ class DummyAIIntegrationTests(unittest.TestCase):
         ai = DummyAI()
         # Empty list should keep by default
         self.assertTrue(ai.generate_keep([]))
+
+    def test_dummy_ai_generate_keep_passes_mulligan_count(self):
+        ai = DummyAI()
+        with mock.patch("AI.Utilities.MulliganLogic.evaluate_opening_hand", return_value=(True, "ok")) as mock_eval:
+            ai.generate_keep([{"grpId": 1}], mulligan_count=2)
+            mock_eval.assert_called_once_with([{"grpId": 1}], mulligan_count=2)
+
+    def test_controller_mulligan_coordinates_and_tuck_integration(self):
+        from Controller.MTGAController.Controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl._default_mulligan_centre_coors = (835, 562)
+        ctrl._default_mulligan_library_coors = (556, 578)
+        ctrl._default_mulligan_done_coors = (956, 868)
+        ctrl.mulligan_keep_coors = (1101, 870)
+        ctrl.mulligan_mull_coors = (801, 870)
+        ctrl.mulligan_centre_coors = ctrl._default_mulligan_centre_coors
+        ctrl.mulligan_library_coors = ctrl._default_mulligan_library_coors
+        ctrl.mulligan_done_coors = ctrl._default_mulligan_done_coors
+        ctrl._mulligan_count = 0
+        ctrl._arena_region = (0, 0, 1920, 1080)
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+        ctrl._write_keep_click_debug_bundle = mock.MagicMock()
+
+        # Mulligan increments count
+        ctrl.keep(False)
+        self.assertEqual(ctrl._mulligan_count, 1)
+
+        # Keep invokes tuck and resets count
+        tuck_called = []
+        ctrl.execute_london_mulligan_tuck = lambda cl, cnt: tuck_called.append((cl, cnt)) or True
+        cards = [{"grpId": 101, "name": "Plains", "is_land": True, "instanceId": 1001}]
+        with mock.patch("time.sleep"):
+            ctrl.keep(True, card_list=cards)
+        self.assertEqual(len(tuck_called), 1)
+        self.assertEqual(tuck_called[0], (cards, 1))
+        self.assertEqual(ctrl._mulligan_count, 0)
+
+    def test_execute_london_mulligan_tuck_actions(self):
+        from Controller.MTGAController.Controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl.mulligan_centre_coors = (835, 562)
+        ctrl.mulligan_library_coors = (556, 578)
+        ctrl.mulligan_done_coors = (956, 868)
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.log_reader.has_new_line.return_value = False
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+
+        with mock.patch("time.sleep"):
+            cards = [{"instanceId": 1, "grpId": 101, "is_land": False, "cmc": 7}]
+            success = ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        self.assertTrue(success)
+        # Verified that left_down and left_up were called (drag to library)
+        self.assertTrue(ctrl.input.left_down.called)
+        self.assertTrue(ctrl.input.left_up.called)
+        # Verified done button click at (956, 868)
+        self.assertTrue(ctrl.input.left_click.called)
+
+    def test_execute_london_mulligan_tuck_unmatched_hovers_aborts_without_done_click(self):
+        """When hover events are observed but match no target cards, abort without dragging or clicking Done."""
+        from Controller.MTGAController.Controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl.mulligan_centre_coors = (835, 562)
+        ctrl.mulligan_library_coors = (556, 578)
+        ctrl.mulligan_done_coors = (956, 868)
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.log_reader.has_new_line.return_value = True
+        ctrl.log_reader.get_latest_line_containing_pattern.return_value = '{"objectId": 9999}'
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+
+        with mock.patch("time.sleep"):
+            cards = [{"instanceId": 1, "grpId": 101, "is_land": False, "cmc": 7}]
+            success = ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        self.assertFalse(success)
+        self.assertFalse(ctrl.input.left_down.called)
+        self.assertFalse(ctrl.input.left_click.called)
+
+    def test_execute_london_mulligan_tuck_interruption_releases_mouse_and_preserves_remaining(self):
+        """When interrupted during drag, mouse button is guaranteed released and Done is NOT clicked."""
+        from Controller.MTGAController.Controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl.mulligan_centre_coors = (835, 562)
+        ctrl.mulligan_library_coors = (556, 578)
+        ctrl.mulligan_done_coors = (956, 868)
+        ctrl._stop_requested = False
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.log_reader.has_new_line.return_value = False
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+
+        # Trigger interruption once left_down is engaged during drag interpolation
+        ctrl.input.left_down.side_effect = lambda: setattr(ctrl, "_stop_requested", True)
+
+        with mock.patch("time.sleep"):
+            cards = [{"instanceId": 1, "grpId": 101, "is_land": False, "cmc": 7}]
+            success = ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        self.assertFalse(success)
+        self.assertTrue(ctrl.input.left_down.called)
+        self.assertTrue(ctrl.input.left_up.called)
+        self.assertFalse(ctrl.input.left_click.called)
+
+    def test_keep_preserves_mulligan_count_on_tuck_failure(self):
+        """If tuck fails or is interrupted, keep() preserves _mulligan_count for retry recovery."""
+        from Controller.MTGAController.Controller import Controller
+        ctrl = Controller.__new__(Controller)
+        ctrl.mulligan_keep_coors = (100, 100)
+        ctrl.mulligan_mull_coors = (200, 200)
+        ctrl._default_mulligan_keep_coors = (100, 100)
+        ctrl._default_mulligan_mull_coors = (200, 200)
+        ctrl._default_mulligan_centre_coors = (835, 562)
+        ctrl._default_mulligan_done_coors = (956, 868)
+        ctrl.mulligan_done_coors = (956, 868)
+        ctrl._arena_region = (0, 0, 1920, 1080)
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+        ctrl._write_keep_click_debug_bundle = mock.MagicMock()
+        ctrl._mulligan_count = 1
+        ctrl.execute_london_mulligan_tuck = mock.MagicMock(return_value=False)
+
+        cards = [{"grpId": 101, "name": "Plains", "is_land": True, "instanceId": 1001}]
+        with mock.patch("time.sleep"):
+            ctrl.keep(True, card_list=cards)
+
+        self.assertEqual(ctrl._mulligan_count, 1)
+
+    def test_execute_london_mulligan_tuck_cancels_after_final_drag_and_retries_done_without_redrag(self):
+        """When drag finishes but Done is interrupted before click, retry should click Done without re-dragging."""
+        from Controller.MTGAController.Controller import Controller
+        ctrl: Any = Controller.__new__(Controller)
+        ctrl.mulligan_centre_coors = (835, 562)
+        ctrl.mulligan_library_coors = (556, 578)
+        ctrl.mulligan_done_coors = (956, 868)
+        ctrl._mulligan_count = 1
+        ctrl._stop_requested = False
+        ctrl.input = mock.MagicMock()
+        ctrl.log_reader = mock.MagicMock()
+        ctrl.log_reader.has_new_line.return_value = False
+        ctrl.patterns = {"hover_id": "test_pattern"}
+        ctrl._map_abs_point_to_arena = lambda pt, **kw: (pt, "direct")
+        ctrl._ensure_arena_region = lambda **kw: (0, 0, 1920, 1080)
+
+        # First attempt: drag succeeds, but before Done click, interruption occurs
+        abort_on_pending = True
+
+        def fake_sleep(dur):
+            nonlocal abort_on_pending
+            if abort_on_pending and getattr(ctrl, "_mulligan_pending_done", False):
+                ctrl._stop_requested = True
+
+        with mock.patch("time.sleep", side_effect=fake_sleep):
+            cards = [{"instanceId": 1, "grpId": 101, "is_land": False, "cmc": 7}]
+            success1 = ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        self.assertFalse(success1)
+        self.assertTrue(getattr(ctrl, "_mulligan_pending_done", False))
+        # Drag happened once
+        self.assertEqual(ctrl.input.left_down.call_count, 1)
+        self.assertEqual(ctrl.input.left_click.call_count, 0)
+
+        # Second attempt: recovery retry without stop
+        abort_on_pending = False
+        ctrl._stop_requested = False
+        ctrl.input.reset_mock()
+
+        with mock.patch("time.sleep"):
+            success2 = ctrl.execute_london_mulligan_tuck(cards, count_to_tuck=1)
+
+        self.assertTrue(success2)
+        self.assertFalse(getattr(ctrl, "_mulligan_pending_done", False))
+        self.assertEqual(ctrl._mulligan_count, 0)
+        # Verify NO dragging occurred on retry, only the Done click
+        self.assertEqual(ctrl.input.left_down.call_count, 0)
+        self.assertEqual(ctrl.input.left_click.call_count, 1)

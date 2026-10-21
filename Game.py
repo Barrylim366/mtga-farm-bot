@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     # (see the __future__ import above) so this never actually imports
     # Controller.py's runtime dependencies (pyautogui, cv2, ...) at import time.
     from Controller.MTGAController.Controller import Controller
+    from AI.AIInterface import AIKernel
     from AI.DummyAI import DummyAI
 
 
@@ -114,11 +115,12 @@ class Game:
             return
         self.controller.resolve()
 
-    def __init__(self, controller: "Controller", ai: "DummyAI", data_dir_prompt=None, match_timeout_minutes: int = 10):
+    def __init__(self, controller: "Controller", ai: "DummyAI | AIKernel", data_dir_prompt=None, match_timeout_minutes: int = 10):
         self.ai = ai
         self.controller = controller
         self.last_logged_turn = -1
         self.game_started = False
+        self._match_started_marked = False
         self.starting_hand_logged = False
         self._stop_requested = False
         # Key of the match whose end was already handled -- see _match_end_key.
@@ -250,6 +252,9 @@ class Game:
         """A new match is confirmed live: first mulligan, or an inferred live state
         when we attached mid-game."""
         with self._timeout_lock:
+            if self._match_started_marked:
+                return
+            self._match_started_marked = True
             self._match_started_ts = time.time()
             self._duration_started = time.monotonic()
             self._duration_match_id = self.controller.get_current_match_id()
@@ -438,9 +443,11 @@ class Game:
         # Reset Game state
         self.last_logged_turn = -1
         self.game_started = False
-        self.starting_hand_logged = False
-        self._last_action_delay_turn = -1
-        self._match_started_ts = None
+        with self._timeout_lock:
+            self._match_started_marked = False
+            self.starting_hand_logged = False
+            self._last_action_delay_turn = -1
+            self._match_started_ts = None
 
         # Reset AI state
         if hasattr(self.ai, 'reset'):
@@ -500,10 +507,25 @@ class Game:
             return
         self._debug(f"Mulligan decision called with {len(card_list)} cards")
         runtime_status.set_mode("in_game")
-        if not self.game_started:
+        if not getattr(self, "_match_started_marked", False):
             self._mark_match_started()
-        self.game_started = True  # Mark game as started after mulligan
-        keep = self.ai.generate_keep(card_list)
+        mull_count = getattr(self.controller, "_mulligan_count", 0)
+        has_mull_param = False
+        try:
+            import inspect
+            sig = inspect.signature(self.ai.generate_keep)
+            has_mull_param = (
+                "mulligan_count" in sig.parameters
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            )
+        except Exception:
+            has_mull_param = False
+
+        if has_mull_param:
+            keep = self.ai.generate_keep(card_list, mulligan_count=mull_count)
+        else:
+            keep = self.ai.generate_keep(card_list)
+        self.game_started = bool(keep)  # Mark game as started after keeping
         bot_logger.log_mulligan_decision(keep, len(card_list))
         try:
             debug_recorder.record(
@@ -516,7 +538,7 @@ class Game:
             )
         except Exception as e:
             self._debug(f"Decision recorder (mulligan) failed: {e}")
-        self.controller.keep(keep)
+        self.controller.keep(keep, card_list=card_list, count_to_tuck=mull_count)
 
     def _debug(self, message):
         """Debug log - detailed technical information"""
