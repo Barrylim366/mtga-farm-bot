@@ -9,6 +9,7 @@ import ctypes
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from Controller.ControllerInterface import ControllerSecondary
 import AI.Utilities.RemovalLogic as RemovalLogic
@@ -19,6 +20,7 @@ import AI.Utilities.CardInfo as CardInfo
 import AI.Utilities.LifegainLogic as LifegainLogic
 from Controller.MTGAController.LogReader import LogReader
 from Controller.MTGAController.popup_recovery import PopupRecoveryMixin
+from Controller.MTGAController.block_recovery import BlockRecoveryMixin
 from Controller.MTGAController.group_recovery import GroupRecoveryMixin
 from Controller.MTGAController.ability_activation import AbilityActivationMixin
 from Controller.MTGAController.quest_reroll import (
@@ -77,7 +79,7 @@ _MY_TIMER_TYPES = {
 }
 
 
-class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, ControllerSecondary):
+class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin, QuestRerollMixin, ControllerSecondary):
 
     # Forge engine hooks (see __init__); a class default so a controller built
     # without __init__ (the unit tests do) runs the bot's own code.
@@ -207,6 +209,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             # blocks to avoid freezing on 'Choose blockers'.
             'declare_blockers': '"type": "GREMessageType_DeclareBlockersReq"',
             'select_n': '"type": "GREMessageType_SelectNReq"',
+            'select_n_group': '"type": "GREMessageType_SelectNGroupReq"',
             # Library-search prompts ("search your library for up to two basic
             # land cards …", e.g. Circuitous Route). MTGA opens a full-window card
             # browser and waits; the board and hand behind it are dead. Without
@@ -612,6 +615,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         # from a genuinely unreachable hand card for Game's fallback policy.
         self.__last_cast_abort_reason = None
         self.__last_declare_blockers_ts = 0.0
+        self._init_block_recovery()
         # Calibration captures are bounded: one per block prompt would be ~30
         # screenshots a session, and a handful is enough to measure the band.
         self.__declare_block_captures = 0
@@ -9552,10 +9556,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         finally:
             bot_logger.set_hover_logging(False)
 
-    def select_stack_item(self, card_id: int, clicks: int = 1) -> bool:
+    def select_stack_item(self, card_id: int, clicks: int = 1,
+                          *, still_active: Callable[[], bool] | None = None) -> bool:
         """Select a stack/prompt item by scanning a grid for matching hover objectId."""
         bot_logger.set_hover_logging(True)
         try:
+            if still_active is not None and not still_active():
+                return False
             p1, p2 = self._get_stack_scan_points_mapped(force_reacquire=True)
             if self.__select_object_in_region(
                 card_id=card_id,
@@ -9565,8 +9572,11 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 clicks=clicks,
                 label="STACK_ITEM",
                 max_scan_sec=3.5,
+                still_active=still_active,
             ):
                 return True
+            if still_active is not None and not still_active():
+                return False
             bot_logger.log_info("Stack scan fallback to center region")
             fb_p1, fb_p2 = self._get_stack_fallback_scan_points_mapped(force_reacquire=False)
             return self.__select_object_in_region(
@@ -9577,11 +9587,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 clicks=clicks,
                 label="STACK_ITEM_FALLBACK",
                 max_scan_sec=4.5,
+                still_active=still_active,
             )
         finally:
             bot_logger.set_hover_logging(False)
 
-    def select_battlefield_permanent(self, card_id: int, clicks: int = 1) -> bool:
+    def select_battlefield_permanent(self, card_id: int, clicks: int = 1,
+                                     *, max_scan_sec: float = 7.5) -> bool:
         """Select a permanent on our battlefield by scanning the lower arena region for matching hover objectId."""
         bot_logger.set_hover_logging(True)
         scan_p1, scan_p2 = self._get_battlefield_scan_points_mapped(force_reacquire=True)
@@ -9593,7 +9605,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 step=self.battlefield_scan_step,
                 clicks=clicks,
                 label="BATTLEFIELD_ITEM",
-                max_scan_sec=7.5,
+                max_scan_sec=max_scan_sec,
             ):
                 return True
             current_pos = self.input.position()
@@ -9769,7 +9781,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         )
         return p1, p2
 
-    def select_attacking_creature(self, card_id: int, clicks: int = 1) -> bool:
+    def select_attacking_creature(self, card_id: int, clicks: int = 1,
+                                 *, max_scan_sec: float | None = None) -> bool:
         """Select an attacking creature during Step_DeclareBlock.
 
         This is just the opponent's row, and that is the finding rather than an
@@ -9778,7 +9791,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         (see the note on the scan regions in __init__). Scanning the opponent
         row is therefore both correct and cheaper than a region of our own.
         """
-        return self.select_opponent_battlefield_permanent(card_id, clicks=clicks)
+        if max_scan_sec is None:
+            return self.select_opponent_battlefield_permanent(card_id, clicks=clicks)
+        return self.select_opponent_battlefield_permanent(
+            card_id, clicks=clicks, max_scan_sec=max_scan_sec)
 
     def select_opponent_battlefield_permanent(self, card_id: int, clicks: int = 1,
                                              *, max_scan_sec: float | None = None) -> bool:
@@ -10030,6 +10046,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 self.__watch_target_submission(target_token, target_clicked, reason)
 
     def resolve(self) -> None:
+        if self._group_prompt_blocks_gameplay():
+            bot_logger.log_info("RESOLVE skipped: group/pile prompt is active.")
+            return
         expected_match_id = self.__live_match_id
         if not self.can_execute_game_action(expected_match_id):
             bot_logger.log_info("RESOLVE skipped: no matching live game may receive input.")
@@ -10080,6 +10099,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
         region_age = self._region_age()
         for pos in positions:
+            if self._group_prompt_blocks_gameplay():
+                bot_logger.log_info("RESOLVE cancelled before click: group/pile prompt is active.")
+                return
             if not self.can_execute_game_action(expected_match_id):
                 bot_logger.log_info("RESOLVE cancelled before click: live match ended or input was suppressed.")
                 return
@@ -10105,9 +10127,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         clicks: int,
         label: str,
         max_scan_sec: float | None = None,
+        *,
+        still_active: Callable[[], bool] | None = None,
     ) -> bool:
         expected_match_id = self.__live_match_id
-        if not self.can_execute_game_action(expected_match_id):
+        def _valid() -> bool:
+            return (self.can_execute_game_action(expected_match_id)
+                    and (still_active is None or still_active()))
+
+        if not _valid():
             return False
         self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
         x1, y1 = p1
@@ -10121,13 +10149,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
 
         reset_x = x_min
         reset_y = max(self.screen_bounds[0][1], y_min - 80)
+        if not _valid():
+            return False
         bot_logger.log_move(reset_x, reset_y, f"RESET_BEFORE_{label} (target card_id={card_id})")
         self.input.move_abs(reset_x, reset_y)
         time.sleep(0.1)
 
         for y in range(y_min, y_max + 1, step):
             for x in range(x_min, x_max + 1, step):
-                if not self.can_execute_game_action(expected_match_id):
+                if not _valid():
                     bot_logger.log_info(f"{label}_ABORTED: live match ended or input was suppressed")
                     return False
                 if max_scan_sec is not None and (time.time() - start_ts) > max_scan_sec:
@@ -10137,9 +10167,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                         f"hovers={hover_count} last_hover={last_hovered_id}"
                     )
                     return False
+                if not _valid():
+                    return False
                 self.log_reader.clear_new_line_flag(self.patterns['hover_id'])
+                if not _valid():
+                    return False
                 self.input.move_abs(x, y)
                 time.sleep(0.05)
+                if not _valid():
+                    return False
                 if not self.log_reader.has_new_line(self.patterns['hover_id']):
                     continue
                 parsed = self.__parse_hover_id_line(
@@ -10152,7 +10188,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 bot_logger.log_hover(parsed)
                 if parsed != card_id:
                     continue
-                if not self.can_execute_game_action(expected_match_id):
+                if not _valid():
                     return False
                 if int(clicks) <= 0:
                     # Locate only: leave the cursor resting on the card.
@@ -10160,7 +10196,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     return True
                 bot_logger.log_click(x, y, f"SELECT_{label} (id={card_id})")
                 for _ in range(max(1, int(clicks))):
-                    if not self.can_execute_game_action(expected_match_id):
+                    if not _valid():
                         return False
                     self.input.left_click(1)
                     time.sleep(0.1)
@@ -10661,7 +10697,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         the pause has to expire on its own or resolve() is muted for the rest of
         the match, which would stall far worse than a missed block.
         """
-        return time.time() < self.__declaring_blocks_until
+        return self._block_submission_blocked() or time.time() < self.__declaring_blocks_until
 
     def __begin_declare_blocks_pause(self) -> None:
         """Mute resolve() for as long as a block assignment can legitimately take."""
@@ -10950,6 +10986,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             if not self.__auto_concede_stalled_matches:
                 self.__local_stall_signature()
             self.__update_stall_watchdog()
+
+            self._observe_pile_choice_payload(payload)
 
     def __local_stall_signature(self):
         if self._stop_requested or self._suppress_selections:
@@ -11714,6 +11752,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
     def reset_for_new_game(self):
         """Reset controller state for a new game - complete fresh start"""
         bot_logger.log_info("Resetting controller state for new game")
+        self._reset_block_recovery()
         # Match departure already retired gameplay workers. A delayed Game
         # restart also runs during the post-match hold (or an account switch),
         # so retiring again here would cancel the menu workers that resume play.
@@ -11793,6 +11832,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         preserve_retired_match_id: str | None = None,
     ) -> None:
         self._retire_input_workers()
+        self._reset_block_recovery()
         preserved_seat = preserve_system_seat_id if preserve_system_seat_id is not None else self.__system_seat_id
         self.__clear_cast_ack_attempts("state_reset")
         self.__group_prompt_seq += 1
@@ -12084,6 +12124,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         elif pattern == self.patterns["select_n"]:
             runtime_status.set_mode("in_game", bot_state=str(current_state))
             self.__handle_select_n_req(line_containing_pattern)
+        elif pattern == self.patterns["select_n_group"]:
+            runtime_status.set_mode("in_game", bot_state=str(current_state))
+            # Already armed by __observe_watchdog_payload, before decisions.
+            self._observe_pile_choice_payload(payload)
         elif pattern == self.patterns["search_req"]:
             runtime_status.set_mode("in_game", bot_state=str(current_state))
             self.__handle_search_req(line_containing_pattern)
@@ -14524,7 +14568,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                     min_sel = 1
                 random.shuffle(ids)
                 def _clear_pending_select_n(reason: str | None = None) -> None:
-                    self.__clear_pending_select_n_state(reason or "SelectN cleared.")
+                    pending = self.__pending_select_n
+                    if pending and pending.get("token") == token:
+                        self.__clear_pending_select_n_state(reason or "SelectN cleared.")
 
                 informational_use_only = bool(message.get("informationalUseOnly"))
                 if informational_use_only:
@@ -14989,7 +15035,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                                                 f"SelectN skipping duplicate stack hover target id={hover_id} for prompt id={card_id}."
                                             )
                                             continue
-                                        selected_ok = self.select_stack_item(hover_id, clicks=1)
+                                        selected_ok = self.select_stack_item(
+                                            hover_id, clicks=1, still_active=_select_n_valid
+                                        )
                                         if selected_ok:
                                             used_hover_ids.add(hover_id)
                                     if selected_ok:
@@ -15011,8 +15059,12 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                                 )
                                 return
                             time.sleep(0.8)
+                            if not _select_n_valid():
+                                return
                             bot_logger.log_info("SelectN submitting selection.")
                             self.submit_selection(reason="select_n_initial_submit", force=True)
+                            if not _select_n_valid():
+                                return
                             if self.__pending_select_n is not None:
                                 self.__pending_select_n["ts"] = time.time()
                             # If the submit click doesn't register, retry submit without reselecting.
@@ -15037,11 +15089,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                                     and decision_player != self.__system_seat_id
                                 ) or pending_count > 0:
                                     return
+                                if not _select_n_valid():
+                                    return
                                 if self.submit_selection(
                                     reason=f"select_n_retry_submit_{retry_idx}",
                                     force=True,
                                 ):
-                                    if self.__pending_select_n is not None:
+                                    if _select_n_valid():
                                         self.__pending_select_n["ts"] = time.time()
                                 self._input_timer(1.2, _retry_submit_only, args=(retry_idx + 1,)).start()
 
@@ -16074,6 +16128,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         Selection updates belong to the same stage. A changed group/prompt or
         candidate set invalidates callbacks even when the source is unchanged.
         """
+        ordering = self.__pending_select_n or {}
+        source_id = req.get("sourceId")
+        if (ordering.get("mode") == "stack"
+                and source_id in (ordering.get("ids") or [])):
+            self.__clear_pending_select_n_state(
+                f"SelectN stack cancelled: token={ordering.get('token')} "
+                f"target sourceId={source_id}."
+            )
+
         def count(group, key):
             value = group.get(key, 0)
             return value if type(value) is int and value >= 0 else None
@@ -18181,7 +18244,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             bot_logger.log_error(f"COMBAT_SHADOW blocks failed: {e}")
             return None
 
-    def _write_declare_block_debug_bundle(self, *, shadow: dict | None, executing: bool) -> None:
+    def _write_declare_block_debug_bundle(self, *, shadow: dict | None, executing: bool,
+                                        force: bool = False) -> None:
         """Capture the board at Step_DeclareBlock so the combat band can be measured.
 
         This is the calibration input for `combat_band_scan_p1/p2`: the arena
@@ -18190,9 +18254,9 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         being executed, so a normal (blocks-off) farming session still produces
         everything needed to turn blocks on. Never raises into the handler.
         """
-        if not self.__combat_debug_capture_enabled():
+        if not force and not self.__combat_debug_capture_enabled():
             return
-        if self.__declare_block_captures >= self.__declare_block_capture_limit:
+        if not force and self.__declare_block_captures >= self.__declare_block_capture_limit:
             return
         try:
             self.__declare_block_captures += 1
@@ -18223,7 +18287,22 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         except Exception as exc:
             bot_logger.log_error(f"Failed to write declare-block debug bundle: {exc}")
 
-    def __execute_blocks(self, assignments: list[tuple[int, int]]) -> None:
+    def __execute_blocks(self, assignments: list[tuple[int, int]], *,
+                         context=None, plan_id=None) -> None:
+        if not hasattr(self, "_block_execution_lock"):
+            self._init_block_recovery()
+        if not self._block_execution_lock.acquire(blocking=False):
+            return
+        try:
+            if plan_id is not None and plan_id != self._block_plan_id:
+                return
+            if context is not None and not self._block_live(context):
+                return
+            self.__execute_blocks_owned(assignments, context=context)
+        finally:
+            self._block_execution_lock.release()
+
+    def __execute_blocks_owned(self, assignments: list[tuple[int, int]], *, context=None) -> None:
         """Declare the blocks CombatLogic picked, then submit.
 
         Blocking in MTGA is click-the-blocker-then-click-the-attacker. The
@@ -18246,6 +18325,8 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             deadline = time.time() + self.__combat_blocks_budget_sec
             for blocker_id, attacker_id in assignments:
                 if self._suppress_selections or self._stop_requested:
+                    break
+                if context is not None and not self._block_live(context):
                     break
                 if time.time() >= deadline:
                     bot_logger.log_error(
@@ -18278,10 +18359,15 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             # Submit first, then let resolve() back in: the submit click and the
             # RESOLVE click are the same button, so lifting the pause any earlier
             # just reopens the race we came here to close.
-            self.__click_combat_submit_button(
-                "SUBMIT_BLOCKS" if declared else "NO_BLOCKS"
-            )
-            self.__end_declare_blocks_pause()
+            if context is None or context == self._block_context:
+                self._block_reserved.clear()
+            try:
+                if context is None or self._block_live(context):
+                    self._finish_block_assignment(
+                        "SUBMIT_BLOCKS" if declared else "NO_BLOCKS", context)
+            finally:
+                if context is None or context == self._block_context:
+                    self.__end_declare_blocks_pause()
 
     # -- combat submit ---------------------------------------------------
     # MTGA needs two presses of the same bottom-right button: the first
@@ -18345,6 +18431,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
         declared_markers: list[str],
         submitted_markers: list[str],
     ) -> bool:
+        block_submit = "SubmitBlockersReq" in submitted_markers
+        block_plan_id = getattr(self, "_block_plan_id", None)
+        block_context = getattr(self, "_block_context", None)
+
         def press(kind: str = "") -> bool:
             """One press, logged as it happens.
 
@@ -18357,6 +18447,13 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             """
             if self._suppress_selections or self._stop_requested:
                 return False
+            # Only blocking submissions yield to blocker recovery. The shared
+            # attack submission sequence keeps its existing behavior.
+            if block_submit:
+                if self._block_submission_blocked() or block_plan_id != getattr(self, "_block_plan_id", None):
+                    return False
+                if block_context is not None and not self._block_live(block_context):
+                    return False
             suffix = f"_{kind}" if kind else ""
             bot_logger.log_click(target[0], target[1], f"{label}{suffix}")
             self.input.move_abs(target[0], target[1])
@@ -18418,10 +18515,14 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             )
         return False
 
-    def __click_combat_submit_button(self, label: str) -> None:
+    def __click_combat_submit_button(self, label: str, *, context=None, plan_id=None) -> None:
         """Press the bottom-right combat button ("No Blocks" / "Submit Blocks")."""
         try:
-            if self._suppress_selections or self._stop_requested:
+            if plan_id is not None and plan_id != self._block_plan_id:
+                return
+            if context is not None and not self._block_live(context):
+                return
+            if self._suppress_selections or self._stop_requested or self._block_submission_blocked():
                 return
             target, source = self._map_abs_point_to_arena(
                 self.main_br_button_coordinates,
@@ -18481,15 +18582,20 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                         seat_ids = message.get("systemSeatIds") or []
                         if self.__system_seat_id is None or self.__system_seat_id in seat_ids:
                             ours = True
-                            # MTGA hands us the full legal blocker->attacker graph
-                            # here, so no blocking restriction (flying, menace,
-                            # "can't block") ever has to be worked out by us.
+                            # Individual pairings do not encode minimum blocker
+                            # counts. Publish warnings even during an active worker.
+                            self._observe_block_request(message)
                             req = message.get("declareBlockersReq", {}) or {}
                             legal_blockers.extend(req.get("blockers", []) or [])
                     if messages and not ours:
                         return
                 except Exception:
                     pass
+            if self._block_submission_blocked():
+                self._schedule_block_recovery()
+                return
+            if self._block_execution_lock.locked() or self._block_recovery_scheduled:
+                return
             now = time.time()
             if now - self.__last_declare_blockers_ts < 2.0:
                 return
@@ -18545,6 +18651,7 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             self._write_declare_block_debug_bundle(shadow=shadow, executing=bool(assignments))
 
             if assignments:
+                self._block_reserved = {b for b, _ in assignments}
                 bot_logger.log_info(
                     "DeclareBlockersReq: declaring {} block(s): {}".format(
                         len(assignments),
@@ -18560,7 +18667,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
                 # inside the 0.8s gap, and a flag set inside the Timer would be
                 # set too late to stop it.
                 self.__begin_declare_blocks_pause()
-                self._input_timer(0.8, self.__execute_blocks, args=(assignments,)).start()
+                self._input_timer(
+                    0.8, self.__execute_blocks, args=(assignments,),
+                    kwargs={"context": self._block_context, "plan_id": self._block_plan_id},
+                ).start()
                 return
 
             bot_logger.log_info("DeclareBlockersReq: declaring NO blocks.")
@@ -18570,7 +18680,10 @@ class Controller(AbilityActivationMixin, GroupRecoveryMixin, PopupRecoveryMixin,
             )
             if end_pause_on_no_blocks:
                 self.__end_declare_blocks_pause()
-            self._input_timer(0.8, self.__click_combat_submit_button, args=("NO_BLOCKS",)).start()
+            self._input_timer(
+                0.8, self.__click_combat_submit_button, args=("NO_BLOCKS",),
+                kwargs={"context": self._block_context, "plan_id": self._block_plan_id},
+            ).start()
         except Exception as e:
             if end_pause_on_no_blocks:
                 self.__end_declare_blocks_pause()

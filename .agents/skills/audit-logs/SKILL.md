@@ -15,6 +15,22 @@ Use this skill when the user explicitly invokes `$audit-logs`. Report findings i
 
 Keep the final audit concise with evidence links. If an artefact has been rotated away, say what is unavailable instead of reporting a clean zero. Temporary soak signals may disappear after their bugs are fixed; the audit must continue to work from persistent match records and ordinary logs.
 
+### Stall-only concede statistics
+
+The label **Confirmed bot concedes** and the corresponding counts, attempts,
+rates, per-account tables, and previous-session comparisons refer only to
+concedes caused by stalls (`STALL_CONCEDE`, supported by watchdog/incident
+evidence). Confirm each against a lost match and a concede game-result reason.
+Count each confirmed game once, even when its concede sequence was retried.
+
+Exclude configured game-duration limits (`TIMEOUT_CONCEDE` / `MATCH_TIMEOUT`)
+from these statistics. Report them separately as **Duration-limit concedes**,
+distinguishing attempts from confirmed losses. A long game or a generic concede
+result alone does not establish a stall. Keep unknown causes unresolved rather
+than assigning them to stalls. Continue using all completed matches as the
+denominator for win rate and the stall-only concede rate; duration-limit losses
+remain losses in overall match results.
+
 ### Game-length distribution
 
 Include a table of completed games where the bot did not concede, with columns
@@ -26,8 +42,10 @@ divided by all included games; win rate is wins divided by games in that group.
 
 Use match-record `duration_sec`, excluding queues and account switches. Exclude
 unknown/incomplete results and missing, nonpositive, or invalid durations.
-Exclude confirmed bot-concedes and, conservatively, games with unresolved bot
-concede attempts or incident bundles; report those exclusion counts separately.
+For this distribution, exclude bot-concedes of every cause, including
+duration-limit concedes, and, conservatively, games with unresolved bot concede
+attempts or incident bundles. Report exclusions separately for confirmed stall
+concedes, confirmed duration-limit concedes, and unresolved attempts/incidents.
 Correlate incidents to games rather than counting repeated attempts as games.
 Opponent concessions remain included. When history is partial, label the table
 as best effort and note that unrecognised bot-concedes may remain. Do not treat
@@ -60,12 +78,18 @@ old attribution. Check and report errors in both `csv` and `matches_csv`.
 `--no-csv` disables both writes; `--matches-csv <path>` overrides the game CSV.
 
 The CSV stores one row per session, with UTC date/timestamps, completed-match
-counts, wins/losses, win rate, confirmed concede counts/attempts and concede rate.
+counts, wins/losses, win rate, and stall-only confirmed concede counts/attempts
+and concede rate. The fields `confirmed_concedes`, `concede_attempts`, and
+`concede_rate` exclude duration-limit concedes. An unresolved duration-limit
+outcome alone does not make the stall-only rate unavailable.
 Rates are fractions from 0 to 1; use completed matches as the denominator.
 Running sessions are provisional. Missing or partial history and unresolved
 concede evidence leave the rate blank, never an assumed zero. Repeat audits
 update the same session instead of appending duplicates. A previously available
-concede rate is preserved after log rotation when the denominator is unchanged.
+stall-only concede rate is preserved after log rotation when the denominator is
+unchanged. Recompute previously mixed-cause CSV values from retained evidence;
+if causes cannot be separated, leave the rate blank rather than preserving a
+mixed-cause value.
 Historical start/end timestamps fall back to first/last recorded match times.
 Do not substitute screenshot completion outcomes for confirmed concede evidence.
 
@@ -94,10 +118,41 @@ selection, and shutdown scheduling. Link its example lines in the audit. Treat
 zero as "not observed in retained history," not as a failure or proof the
 feature never ran. It cannot verify static UI appearance or deck win rate.
 
+The checker also covers preferred deck decisions, confirmed deck submissions,
+Starter deck reuse, mulligan keep/tuck events and recovery, confirmed versus
+unconfirmed end-screen dismissal, reward-click attempts, Free Forge approvals
+and safety exceptions, battlefield fallback selection, sacrifice-option clicks,
+watchdog/concede incidents, account switching, and notification delivery errors.
+These are event counts, not feature pass/fail results or unique match counts.
+Corroborate behavior against snapshots, GRE evidence, and the normal summary.
+Use the checker's `manual_checks` for features ordinary logs cannot establish.
+
+Report `changed_feature_checks` for the pending blocker recovery, pile choice,
+and stack ordering cancellation changes. Keep attempts separate from outcomes;
+review blocker snapshots and GRE acknowledgments, pile closure evidence, and
+click records around ordering cancellation. Shared group recovery errors may
+belong to Scry/Surveil. Include rope/stuck-action counts as context, not proof
+that these changes caused them. Unexercised paths remain untested.
+
+Before an overnight run, the user or setup task may run the checker with
+`--arm`. This saves `runtime/analysis/temporary-feature-soak.json` with the start
+epoch, branch, commit, and working-tree status; it does not launch the bot.
+Normal checker invocation automatically reads that marker and includes all
+sessions after its boundary. Report the saved revision and actual coverage;
+restart the app after code changes to load them. Do not re-arm during an audit.
+The marker survives restarts but does not preserve rotated logs. A first retained
+timestamp after the marker can mean delayed startup or missing history; do not
+claim complete coverage from it. `coverage: unavailable` (exit 2) means no dated
+history in the selected window, even if older logs exist. `--since <Unix epoch>`
+or `--all-history` explicitly overrides the marker when auditing another run.
+Do not use an old marker to claim that a different selected session was tested.
+
 ### Permanent concede incidents
 
 Inspect the summary's `concede_incidents` and matching `runtime/concedes/` bundles
-for both stall and inactivity-timer concede sequences. Images are masked,
+for stall, inactivity-timer, and game-duration-limit concede sequences. Classify
+the cause from the incident reason and matching log events before aggregating;
+only stall concedes enter the Confirmed bot concedes statistics. Images are masked,
 window-only JPEGs; `incident.json` remains useful when capture failed. Only the
 newest 30 incidents are retained. Correlate session/match IDs, attempts, capture
 status and final outcome with match records and game-result evidence. A

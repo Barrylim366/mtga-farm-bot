@@ -1,5 +1,9 @@
 # Burning Lotus Bot
 
+Single-pile choices (such as Curator of Destinies) click a visible **Choose** button without evaluating the cards. Normal gameplay pauses until the choice advances or the buttons visibly disappear. Failed attempts are bounded and remain subject to the existing stall watchdog.
+
+Trigger ordering stops when Arena starts targeting an ability from that ordering request. The obsolete worker checks for cancellation during hover scans and before submitting, so it yields to the new target prompt. Input already sent cannot be withdrawn.
+
 Startup reward recovery requires Claim text, preventing orange Play and Submit Deck buttons from being mistaken for rewards.
 Pending startup/login rerolls are retried before an account switch, including accounts that already met their farming target.
 Account login and repeated Home transitions preserve the queue worker; leaving a match still cancels that match's pending input.
@@ -465,7 +469,13 @@ Finding the **Starter Deck Duel** banner no longer depends on it being near the 
 Combat blocking is enabled by default and can be disabled with `MTGA_COMBAT_BLOCKS=0`. The bot consumes
 Arena's legal blocker graph, takes profitable blocks first, and only sacrifices
 creatures when needed to survive lethal damage. Trample damage is included in
-that survival calculation. Removal targeting also prices Ward before committing:
+that survival calculation. If Arena reports insufficient blockers, the bot adds
+the cheapest unused creature allowed to block that attacker, even if the trade
+is unfavorable. If none is available or the assignment fails, it clicks **Cancel
+Blocks**, confirms all assignments were cleared, then submits **No Blocks**.
+Recovery is bounded and recorded in decision snapshots; an unconfirmed
+cancellation saves a debug bundle and leaves the existing stall watchdog in charge.
+Removal targeting also prices Ward before committing:
 colored Ward symbols require matching untapped mana sources, and creatures used
 for Convoke are not incorrectly counted as mana available for Ward.
 
@@ -791,9 +801,34 @@ includes the cursor position and number of hover events seen before stopping.
 
 Unsupported casts are counted once per card name per match even if the decision
 loop considers the same card repeatedly. Stall concessions, target scans, and
-quest reroll outcomes remain available in ordinary history logs. Temporary soak
-recorders and their dedicated tests have been removed; regression tests for the
-recovery behavior remain.
+quest reroll outcomes remain available in ordinary history logs. Regression
+tests for the recovery behavior remain.
+
+For a temporary overnight feature soak, run
+`.venv\Scripts\python.exe tools/temporary_feature_soak_audit.py --arm` before
+starting the bot (use `.venv/bin/python` on macOS/Linux). This marks the run's
+start and current branch/revision in the gitignored runtime directory. Restart
+the bot app after code changes, then start it with your intended settings.
+Afterward, `$audit-logs` runs the checker automatically using the saved boundary.
+It reports retained evidence for deck selection/reuse, mulligans, rewards,
+Free Forge, recovery, long-game concedes, quest policy, and shutdown scheduling,
+with source lines and explicit manual checks. Unexercised features are reported
+as not observed; event counts alone do not establish correct gameplay. No extra
+process runs overnight and log rotation can remove evidence. `MTGA_RUNTIME_DIR`
+and `--runtime-dir` are supported; use the same directory for setup and audit.
+The marker stays active until re-armed; `--since <Unix epoch>` or `--all-history`
+overrides it for a different audit window. Remove the marker to disable it.
+
+The temporary checker also covers the pending blocker recovery, pile choice,
+and stack ordering cancellation changes in `changed_feature_checks`. It separates
+extra-blocker and Cancel attempts, pile arming/clicks/closure, and ordering
+cancellation from recovery errors, unsupported choices, and ordering timeouts.
+Shared group recovery errors can also come from Scry/Surveil. Rope and stuck-action
+events are counted for comparison with the normal match audit. These checks mark
+missing encounters as **not exercised** and observed errors as **needs review**;
+they never infer a pass from event counts. Check snapshots, click records and GRE
+acknowledgments for outcomes. To inspect the report directly after the run:
+`.venv\Scripts\python.exe tools/temporary_feature_soak_audit.py`.
 
 ### Concede screenshots
 
