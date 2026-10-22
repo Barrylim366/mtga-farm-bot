@@ -274,6 +274,19 @@ class PostMatchHomeDipBypassTests(_ThrowawayControllerBase):
         self.c._last_valid_quest_active_incomplete = 1
         self.assertTrue(self.c._has_active_incomplete_daily_quests())
 
+    def test_has_active_incomplete_quests_true_when_quest_count_unconfirmed_fresh(self):
+        self.c._only_grind_preferred_deck = False
+        self.c._last_valid_quest_active_incomplete = 0
+        self.c._quest_count_confirmed_fresh = False
+        self.assertTrue(self.c._has_active_incomplete_daily_quests())
+
+    def test_has_active_incomplete_quests_true_when_no_valid_quest_block(self):
+        self.c._only_grind_preferred_deck = False
+        self.c._last_valid_quest_active_incomplete = None
+        self.c._cached_quests = []
+        self.c._quest_count_confirmed_fresh = True
+        self.assertTrue(self.c._has_active_incomplete_daily_quests())
+
     def test_start_game_does_not_dip_home_when_no_active_incomplete_quests(self):
         self.c._last_valid_quest_active_incomplete = 0
         self.c._quest_count_confirmed_fresh = True
