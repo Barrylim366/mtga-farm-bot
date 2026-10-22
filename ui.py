@@ -41,6 +41,17 @@ def _apply_forge_engine(controller, config_manager) -> bool:
     """
     getter = getattr(config_manager, "get_forge_engine_enabled", None)
     enabled = bool(getter()) if callable(getter) else False
+    free_getter = getattr(config_manager, "get_free_forge_enabled", None)
+    if callable(free_getter):
+        os.environ["MTGA_FORGE_FREE"] = "on" if free_getter() else "off"
+    else:
+        try:
+            from notifications import NotificationManager
+            cfg = NotificationManager.get_instance().get_config()
+            if "free_forge" in cfg:
+                os.environ["MTGA_FORGE_FREE"] = "on" if cfg["free_forge"] else "off"
+        except Exception:
+            pass
     try:
         return ForgeEngine.apply(
             controller,
@@ -970,7 +981,10 @@ class CalibrationWindow(tk.Toplevel):
             "hand_scan_p2",
             "assign_damage_done",
             "log_out_btn",
-            "log_out_ok_btn"
+            "log_out_ok_btn",
+            "mulligan_centre",
+            "library",
+            "mulligan_done"
         ]
         self._divider_item = self._canvas.create_line(0, 0, 0, 0, fill=c["border"], width=max(1, self._s(2)))
         self._divider_glow_item = self._canvas.create_line(0, 0, 0, 0, fill="#A96673", width=1)
@@ -1583,6 +1597,10 @@ class ConfigManager:
             # Forge's rules engine and AI choose the plays (ForgeEngine/).
             # Default enabled when Forge is installed on disk.
             "forge_engine_enabled": True,
+            "free_forge": False,
+            "preferred_starter_deck": "",
+            "preferred_historic_deck": "",
+            "only_grind_preferred_deck": False,
             # How much of the game shows through the game overlay's background, in %.
             "game_overlay_bg_transparency": 25,
             # Estimated gold credited per match won in the "Current Session"
@@ -1602,6 +1620,9 @@ class ConfigManager:
                 "attack_all": {"x": 1755, "y": 944},
                 "opponent_avatar": {"x": 1286, "y": 216},
                 "assign_damage_done": {"x": 1280, "y": 720},
+                "mulligan_centre": {"x": 835, "y": 562},
+                "library": {"x": 556, "y": 578},
+                "mulligan_done": {"x": 956, "y": 868},
                 # Hand row only, not the full window width -- see the note at
                 # Controller.hand_scan_p1 for why the edges are dangerous.
                 "hand_scan_points": {
@@ -1833,6 +1854,27 @@ class ConfigManager:
         self.config["auto_concede_stalled_matches"] = bool(enabled)
         self._save_config()
 
+    def get_preferred_starter_deck(self) -> str:
+        return str(self.config.get("preferred_starter_deck", "") or "").strip()
+
+    def set_preferred_starter_deck(self, deck: str) -> None:
+        self.config["preferred_starter_deck"] = str(deck or "").strip()
+        self._save_config()
+
+    def get_preferred_historic_deck(self) -> str:
+        return str(self.config.get("preferred_historic_deck", "") or "").strip()
+
+    def set_preferred_historic_deck(self, deck: str) -> None:
+        self.config["preferred_historic_deck"] = str(deck or "").strip()
+        self._save_config()
+
+    def get_only_grind_preferred_deck(self) -> bool:
+        return bool(self.config.get("only_grind_preferred_deck", False))
+
+    def set_only_grind_preferred_deck(self, enabled: bool) -> None:
+        self.config["only_grind_preferred_deck"] = bool(enabled)
+        self._save_config()
+
     def get_game_overlay_bg_transparency(self) -> int:
         """Percent (0-100) of the game that shows through the overlay's background."""
         try:
@@ -1863,6 +1905,25 @@ class ConfigManager:
     def set_forge_engine_enabled(self, enabled: bool) -> None:
         self.config["forge_engine_enabled"] = bool(enabled)
         self._save_config()
+
+    def get_free_forge_enabled(self) -> bool:
+        if "free_forge" in self.config:
+            return bool(self.config["free_forge"])
+        try:
+            from notifications import NotificationManager
+            return bool(NotificationManager.get_instance().get_config().get("free_forge", False))
+        except Exception:
+            return False
+
+    def set_free_forge_enabled(self, enabled: bool) -> None:
+        self.config["free_forge"] = bool(enabled)
+        self._save_config()
+        try:
+            from notifications import NotificationManager
+            NotificationManager.get_instance().save_config({"free_forge": bool(enabled)})
+        except Exception:
+            pass
+        os.environ["MTGA_FORGE_FREE"] = "on" if enabled else "off"
 
     def get_gold_per_win(self) -> int:
         try:
@@ -4320,6 +4381,7 @@ class MTGBotUI(tk.Tk):
     def _start_bot(self):
         if self.bot_running:
             return
+        self._session_start_time = time.time() 
 
         # Retry the arena setup check for a few seconds: MTGA's game-start /
         # turn-start animations transiently distort the in-game anchor (observed
@@ -4555,6 +4617,9 @@ class MTGBotUI(tk.Tk):
             gold_per_win = self.config_manager.get_gold_per_win()
             account_switch_enabled = self.config_manager.get_account_switch_enabled()
             auto_concede_stalled_matches = self.config_manager.get_auto_concede_stalled_matches()
+            preferred_starter_deck = self.config_manager.get_preferred_starter_deck()
+            preferred_historic_deck = self.config_manager.get_preferred_historic_deck()
+            only_grind_preferred_deck = self.config_manager.get_only_grind_preferred_deck()
             bot_logger.log_info(
                 "UI start: init controller log_path={} screen_bounds={} input_backend={} account_switch_minutes={} game_mode={}".format(
                     log_path,
@@ -4575,7 +4640,10 @@ class MTGBotUI(tk.Tk):
                                    game_mode=game_mode,
                                    gold_per_win=gold_per_win,
                                    account_switch_enabled=account_switch_enabled,
-                                   auto_concede_stalled_matches=auto_concede_stalled_matches)
+                                   auto_concede_stalled_matches=auto_concede_stalled_matches,
+                                   preferred_starter_deck=preferred_starter_deck,
+                                   preferred_historic_deck=preferred_historic_deck,
+                                   only_grind_preferred_deck=only_grind_preferred_deck)
             self._publish_controller(controller)
             # Follow the controller's startup phases from here on. game.start()
             # below already reads the quests (clicking Home) and checks the
@@ -4795,6 +4863,7 @@ class MTGBotUI(tk.Tk):
             pass
 
     def _stop_bot(self):
+        was_running = self.bot_running
         self.bot_running = False
 
         if self.game:
@@ -4803,6 +4872,14 @@ class MTGBotUI(tk.Tk):
             except:
                 pass
             self.game = None
+    
+        if was_running and getattr(self, "_session_start_time", None):
+            try:
+                self._send_session_summary_to_discord()
+            except Exception as e:
+                print(f"Error sending summary: {e}")
+            finally:
+                self._session_start_time = None 
 
         self._stop_session_watchdog()
         if hasattr(self, "_stop_mouse_listener") and self._stop_mouse_listener:
@@ -4816,13 +4893,68 @@ class MTGBotUI(tk.Tk):
         with self._controller_lock:
             self._controller = None
 
+    def _send_session_summary_to_discord(self):
+        runtime_seconds = time.time() - self._session_start_time
+        runtime_hours = int(runtime_seconds // 3600)
+        runtime_minutes = int((runtime_seconds % 3600) // 60)
+
+        wins = self.session_wins
+        games = self.session_games
+        winrate = (wins / games * 100) if games > 0 else 0
+
+        total_gold = 0
+        try:
+            status = runtime_status.read_status() or {}
+            gold_dict = status.get("gold_farmed", {})
+            if isinstance(gold_dict, dict):
+                total_gold = sum(int(v or 0) for v in gold_dict.values())
+        except Exception:
+            pass
+
+        message_stop_bot = (
+            f"**Session Ended!**\n"
+            f"**Runtime:** {runtime_hours}h {runtime_minutes}m\n"
+            f"**Gold farmed:** {total_gold}\n"
+            f"**Winrate:** {winrate:.1f}% ({wins} Wins / {games} Games)"
+        )
+
+        from notifications import NotificationManager
+        nm = NotificationManager.get_instance()
+        
+        nm.send("Burning Lotus Bot", message_stop_bot, 0x3498DB)
+
     def _publish_controller(self, controller) -> None:
         """Publish a controller and reconcile settings atomically with toggles."""
         with self._controller_lock:
             self._controller = controller
             enabled = self.config_manager.get_auto_concede_stalled_matches()
             controller.set_auto_concede_stalled_matches(enabled)
+            if hasattr(controller, "set_deck_preferences"):
+                controller.set_deck_preferences(
+                    preferred_starter_deck=self.config_manager.get_preferred_starter_deck(),
+                    preferred_historic_deck=self.config_manager.get_preferred_historic_deck(),
+                    only_grind_preferred_deck=self.config_manager.get_only_grind_preferred_deck(),
+                )
             _apply_forge_engine(controller, self.config_manager)
+
+    def _set_deck_preferences(
+        self,
+        preferred_starter: str,
+        preferred_historic: str,
+        only_grind: bool,
+    ) -> None:
+        """Persist and update live deck preferences on running controller."""
+        with self._controller_lock:
+            self.config_manager.set_preferred_starter_deck(preferred_starter)
+            self.config_manager.set_preferred_historic_deck(preferred_historic)
+            self.config_manager.set_only_grind_preferred_deck(only_grind)
+            controller = self._controller
+            if controller is not None and hasattr(controller, "set_deck_preferences"):
+                controller.set_deck_preferences(
+                    preferred_starter_deck=preferred_starter,
+                    preferred_historic_deck=preferred_historic,
+                    only_grind_preferred_deck=only_grind,
+                )
 
     def _set_forge_engine_enabled(self, enabled: bool) -> bool:
         """Persist and apply "Enable Forge Engine" as one operation."""
@@ -5515,6 +5647,12 @@ class SettingsWindow(tk.Toplevel):
             style_name="Secondary.TButton",
         )
         self._create_settings_canvas_button(
+            "decks",
+            "Deck Selection",
+            self._open_deck_selection_window,
+            style_name="Secondary.TButton",
+        )
+        self._create_settings_canvas_button(
             "enhancements",
             "Enhancements",
             self._open_enhancements_window,
@@ -5745,6 +5883,16 @@ class SettingsWindow(tk.Toplevel):
     def _open_bot_behavior_window(self):
         self._open_replacement_subwindow(
             lambda xy: BotBehaviorWindow(
+                self,
+                self._config_manager,
+                spawn_xy=xy,
+                on_close=self._restore_after_subwindow_close,
+            )
+        )
+
+    def _open_deck_selection_window(self):
+        self._open_replacement_subwindow(
+            lambda xy: DeckSelectionWindow(
                 self,
                 self._config_manager,
                 spawn_xy=xy,
@@ -6199,27 +6347,221 @@ class BotBehaviorWindow(_FireSubWindow):
         self._set_forge_status(self._forge_status_text())
 
 
+class DeckSelectionWindow(_FireSubWindow):
+    """Deck preferences subwindow.
+
+    Allows picking preferred decks for Starter Deck Duel and Historic modes
+    when no quests are active, or forcing exclusive play of the preferred deck
+    via the 'Only grind preferred deck' toggle.
+    """
+
+    _TITLE = "Deck Selection"
+    _WIDTH = 460
+    _HEIGHT = 440
+
+    _STARTER_DECKS = [
+        ("", "None (Auto / WB Fallback)"),
+        ("WU", "WU - Arcane Aerialists"),
+        ("WG", "WG - Cat Attack"),
+        ("UB", "UB - Graveyard Gifts"),
+        ("UG", "UG - Learn from the Land"),
+        ("WR", "WR - Might of the Legion"),
+        ("BG", "BG - Morbid Machinations"),
+        ("RG", "RG - Path of Power"),
+        ("BR", "BR - Reckless Raid"),
+        ("WB", "WB - Vampiric Hunger"),
+        ("UR", "UR - Wondrous Wizardry"),
+    ]
+
+    def _init_state(self) -> None:
+        self._setup_styles()
+        pref_starter = self._config_manager.get_preferred_starter_deck()
+        starter_display = "None (Auto / WB Fallback)"
+        if pref_starter:
+            pref_upper = pref_starter.upper()
+            for code, label in self._STARTER_DECKS:
+                if code and (code == pref_upper or code in pref_upper or pref_starter.lower() in label.lower()):
+                    starter_display = label
+                    break
+            else:
+                starter_display = pref_starter
+        self._starter_var = tk.StringVar(value=starter_display)
+
+        pref_historic = self._config_manager.get_preferred_historic_deck()
+        self._historic_var = tk.StringVar(value=pref_historic or "None (Auto / Fallback)")
+
+        self._only_grind_var = tk.BooleanVar(
+            value=bool(self._config_manager.get_only_grind_preferred_deck())
+        )
+
+    def _setup_styles(self) -> None:
+        c = self._theme
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(
+            "DeckSelect.TCombobox",
+            fieldbackground="#3D130E",
+            background="#3D130E",
+            foreground=c["text"],
+            bordercolor="#4B628A",
+            lightcolor="#3D130E",
+            darkcolor="#3D130E",
+            arrowcolor=c["text"],
+            borderwidth=1,
+            padding=3,
+        )
+        style.map(
+            "DeckSelect.TCombobox",
+            fieldbackground=[("readonly", "#3D130E"), ("active", "#4A1A14")],
+            background=[("readonly", "#3D130E"), ("active", "#4A1A14")],
+            foreground=[("readonly", c["text"]), ("active", "#FFFFFF")],
+        )
+
+    @staticmethod
+    def _scan_historic_decks() -> list[str]:
+        decks = set()
+        accounts_dir = _app_path("Accounts")
+        if os.path.isdir(accounts_dir):
+            for root, _dirs, files in os.walk(accounts_dir):
+                for f in files:
+                    lower = f.lower()
+                    if lower.endswith((".png", ".jpg", ".jpeg")) and not lower.endswith(".sel.png"):
+                        decks.add(f)
+        return sorted(decks, key=lambda x: x.lower())
+
+    def _build_ui(self) -> None:
+        c = self._theme
+        cv = self._canvas
+        text_width = 380
+
+        # Panel 1: Starter Deck Duel
+        self._create_panel(16, 14, 428, 96)
+        cv.create_text(28, 22, text="Starter Deck Preference", fill=c["text"],
+                       font=("Segoe UI", 12, "bold"), anchor="nw")
+        cv.create_text(28, 44, text="Played when no quests are active (or in Only Grind mode):",
+                       fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+
+        starter_labels = [label for _code, label in self._STARTER_DECKS]
+        self._starter_combo = ttk.Combobox(
+            self,
+            textvariable=self._starter_var,
+            values=starter_labels,
+            state="readonly",
+            style="DeckSelect.TCombobox",
+            height=8,
+        )
+        cv.create_window(28, 68, width=400, height=28, window=self._starter_combo, anchor="nw")
+
+        # Panel 2: Historic Queue
+        self._create_panel(16, 118, 428, 96)
+        cv.create_text(28, 126, text="Historic Deck Preference", fill=c["text"],
+                       font=("Segoe UI", 12, "bold"), anchor="nw")
+        cv.create_text(28, 148, text="Played when no quests are active (deck thumbnail or colors):",
+                       fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+
+        scanned = self._scan_historic_decks()
+        historic_choices = ["None (Auto / Fallback)"] + scanned
+        self._historic_combo = ttk.Combobox(
+            self,
+            textvariable=self._historic_var,
+            values=historic_choices,
+            style="DeckSelect.TCombobox",
+            height=8,
+        )
+        cv.create_window(28, 172, width=400, height=28, window=self._historic_combo, anchor="nw")
+
+        # Panel 3: Grind Policy
+        self._create_panel(16, 222, 428, 138)
+        cv.create_text(28, 230, text="Grind Policy", fill=c["text"],
+                       font=("Segoe UI", 12, "bold"), anchor="nw")
+        self._create_toggle(
+            "only_grind",
+            254,
+            "Only grind preferred deck (ignore quests)",
+            self._only_grind_var,
+            self._toggle_only_grind,
+        )
+        cv.create_text(
+            54,
+            276,
+            width=text_width,
+            fill=c["text_muted"],
+            font=("Segoe UI", 9),
+            anchor="nw",
+            text="When ticked, the bot skips quest decks and exclusively plays the selected "
+                 "preferred deck. When unticked (default), it finishes daily quests first, "
+                 "then automatically switches to your preferred deck.",
+        )
+
+        # Bottom buttons
+        self._create_button("save", "Save & Close", 296, 376, 148, 42, self._save_and_close)
+
+    def _toggle_only_grind(self) -> None:
+        self._only_grind_var.set(not self._only_grind_var.get())
+        self._refresh_toggle("only_grind")
+
+    def _save_and_close(self) -> None:
+        raw_starter = self._starter_var.get().strip()
+        pref_starter = ""
+        if raw_starter and not raw_starter.startswith("None"):
+            for code, label in self._STARTER_DECKS:
+                if code and raw_starter == label:
+                    pref_starter = code
+                    break
+            else:
+                pref_starter = raw_starter
+
+        raw_historic = self._historic_var.get().strip()
+        pref_historic = ""
+        if raw_historic and not raw_historic.startswith("None"):
+            pref_historic = raw_historic
+
+        only_grind = bool(self._only_grind_var.get())
+
+        app = getattr(self._parent, "master", None)
+        setter = getattr(app, "_set_deck_preferences", None)
+        if callable(setter):
+            setter(pref_starter, pref_historic, only_grind)
+        else:
+            self._config_manager.set_preferred_starter_deck(pref_starter)
+            self._config_manager.set_preferred_historic_deck(pref_historic)
+            self._config_manager.set_only_grind_preferred_deck(only_grind)
+
+        self.destroy()
+
+
+
 class EnhancementsWindow(_FireSubWindow):
-    """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, and Anti-Detection."""
+    """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, Anti-Detection, and Free Forge."""
 
     _TITLE = "Enhancements & Alerts"
-    _HEIGHT = 630
+    _HEIGHT = 580
 
     def _init_state(self) -> None:
         from notifications import NotificationManager
-        from low_power import LowPowerManager
         nm = NotificationManager.get_instance()
-        lp = LowPowerManager.get_instance()
         self._cfg = nm.get_config() if hasattr(nm, "get_config") else getattr(nm, "_config", {})
         self._discord_url = tk.StringVar(value=self._cfg.get("discord_webhook_url", ""))
         self._telegram_token = tk.StringVar(value=self._cfg.get("telegram_bot_token", ""))
         self._telegram_chat_id = tk.StringVar(value=self._cfg.get("telegram_chat_id", ""))
         self._webhooks_enabled = tk.BooleanVar(value=bool(self._cfg.get("enabled", True)))
-        self._low_power_enabled = tk.BooleanVar(value=bool(lp.enabled))
         self._human_mouse_enabled = tk.BooleanVar(value=bool(self._cfg.get("human_mouse", True)))
-        self._selective_attack_enabled = tk.BooleanVar(
-            value=bool(self._cfg.get("selective_attack", True) and os.environ.get("MTGA_SELECTIVE_ATTACK") != "0")
-        )
+
+        initial_free_forge = False
+        if hasattr(self._config_manager, "get_free_forge_enabled"):
+            initial_free_forge = bool(self._config_manager.get_free_forge_enabled())
+        else:
+            forge_free_env = os.environ.get("MTGA_FORGE_FREE", "").strip().lower()
+            if forge_free_env in ("1", "true", "yes", "on"):
+                initial_free_forge = True
+            elif forge_free_env in ("0", "false", "no", "off"):
+                initial_free_forge = False
+            else:
+                initial_free_forge = bool(self._cfg.get("free_forge", False))
+        self._free_forge_enabled = tk.BooleanVar(value=initial_free_forge)
 
     def _build_ui(self) -> None:
         c = self._theme
@@ -6251,28 +6593,22 @@ class EnhancementsWindow(_FireSubWindow):
         self._create_button("save_test", "Save & Test Alert", 30, 210, 160, 36, self._save_and_test)
         self._status_text_item = cv.create_text(205, 228, text="", fill=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
 
-        # Panel 2: Anti-Detection & Combat Optimization
-        self._create_panel(16, 285, 428, 250)
-        cv.create_text(28, 295, text="Anti-Detection & Optimization", fill=c["text"],
+        # Panel 2: Anti-Detection & Engine Optimization
+        self._create_panel(16, 285, 428, 200)
+        cv.create_text(28, 295, text="Anti-Detection & Engine Optimization", fill=c["text"],
                        font=("Segoe UI", 13, "bold"), anchor="nw")
         self._create_toggle("human_mouse", 330, "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
                             self._toggle_human_mouse)
         cv.create_text(54, 350, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
                        text="Generates natural curved paths with micro-jitter and smooth velocity.")
 
-        self._create_toggle("low_power", 385, "Low-Power / Overnight Mode", self._low_power_enabled,
-                            self._toggle_low_power)
-        cv.create_text(54, 405, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Paces idle checks to reduce overnight CPU/GPU temperatures and fan noise.")
+        self._create_toggle("free_forge", 390, "Free Forge: Autonomous Casting (experimental)", self._free_forge_enabled,
+                            self._toggle_free_forge)
+        cv.create_text(54, 410, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
+                       text="Allows Forge AI to cast legal spells autonomously without requiring base AI double-approval. (Experimental)")
 
-        self._create_toggle("selective_attack", 440, "Smart Selective Attacking (CombatLogic)", self._selective_attack_enabled,
-                            self._toggle_selective_attack)
-        cv.create_text(54, 460, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Prevents suicidal swings into enemy blockers; calculates lethal and safety.")
-
-        self._create_button("snap", "Snap MTGA 16:9", 24, 555, 130, 40, self._snap_window)
-        self._create_button("session_stats", "Session Stats", 164, 555, 130, 40, self._open_session_stats)
-        self._create_button("back", "Back", 304, 555, 130, 40, self.destroy)
+        self._create_button("snap", "Snap MTGA 16:9", 35, 505, 185, 42, self._snap_window)
+        self._create_button("back", "Back", 240, 505, 185, 42, self.destroy)
 
     def _toggle_webhooks(self):
         self._webhooks_enabled.set(not self._webhooks_enabled.get())
@@ -6284,37 +6620,30 @@ class EnhancementsWindow(_FireSubWindow):
         self._refresh_toggle("human_mouse")
         self._save_config_now()
 
-    def _toggle_low_power(self):
-        self._low_power_enabled.set(not self._low_power_enabled.get())
-        self._refresh_toggle("low_power")
-        from low_power import LowPowerManager
-        LowPowerManager.get_instance().set_enabled(self._low_power_enabled.get())
+    def _toggle_free_forge(self):
+        val = not self._free_forge_enabled.get()
+        self._free_forge_enabled.set(val)
+        self._refresh_toggle("free_forge")
+        os.environ["MTGA_FORGE_FREE"] = "on" if val else "off"
+        if hasattr(self._config_manager, "set_free_forge_enabled"):
+            self._config_manager.set_free_forge_enabled(val)
         self._save_config_now()
-
-    def _toggle_selective_attack(self):
-        self._selective_attack_enabled.set(not self._selective_attack_enabled.get())
-        self._refresh_toggle("selective_attack")
-        os.environ["MTGA_SELECTIVE_ATTACK"] = "1" if self._selective_attack_enabled.get() else "0"
-        self._save_config_now()
-
-    def _open_session_stats(self):
-        if hasattr(self.master, "_open_current_session"):
-            self.master._open_current_session()
-        else:
-            self._canvas.itemconfigure(self._status_text_item, text="Session stats active in main window")
 
     def _save_config_now(self):
         from notifications import NotificationManager
         nm = NotificationManager.get_instance()
+        val = bool(self._free_forge_enabled.get())
         nm.save_config({
             "discord_webhook_url": self._discord_url.get().strip(),
             "telegram_bot_token": self._telegram_token.get().strip(),
             "telegram_chat_id": self._telegram_chat_id.get().strip(),
             "enabled": bool(self._webhooks_enabled.get()),
             "human_mouse": bool(self._human_mouse_enabled.get()),
-            "low_power_mode": bool(self._low_power_enabled.get()),
-            "selective_attack": bool(self._selective_attack_enabled.get()),
+            "free_forge": val,
         })
+        os.environ["MTGA_FORGE_FREE"] = "on" if val else "off"
+        if hasattr(self._config_manager, "set_free_forge_enabled"):
+            self._config_manager.set_free_forge_enabled(val)
 
     def _save_and_test(self):
         self._save_config_now()
