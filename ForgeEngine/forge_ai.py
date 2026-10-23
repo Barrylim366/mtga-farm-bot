@@ -25,8 +25,11 @@ class ForgeAI(AIKernel):
         if callable(reset):
             reset()
 
-    def generate_keep(self, card_list) -> bool:
-        return self.base.generate_keep(card_list)
+    def generate_keep(self, card_list, mulligan_count: int = 0) -> bool:
+        try:
+            return self.base.generate_keep(card_list, mulligan_count=mulligan_count)
+        except TypeError:
+            return self.base.generate_keep(card_list)
 
     def generate_move(self, game_state, inst_id_grp_id_dict):
         own = self.base.generate_move(game_state, inst_id_grp_id_dict)

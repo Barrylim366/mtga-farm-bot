@@ -309,6 +309,11 @@ def is_sacrifice_fodder(grp_id) -> bool:
 # offline DB.
 _SAC_PROTECTED_GRPIDS = {
     93837,  # Perforating Artist
+    67690, 69455, 93447, 93848,  # Ajani's Pridemate
+    70069, 93652,                # Twinblade Paladin
+    93833,                       # Fiendish Panda
+    93717,                       # Cat Collector
+    93741,                       # Vanguard Seraph
 }
 
 
@@ -321,7 +326,15 @@ def is_protected_from_sacrifice(grp_id) -> bool:
         grp_id = int(grp_id)
     except Exception:
         return False
-    return grp_id in _SAC_PROTECTED_GRPIDS
+    if grp_id in _SAC_PROTECTED_GRPIDS:
+        return True
+    try:
+        from AI.Utilities import LifegainLogic
+        if LifegainLogic.is_lifegain_payoff(grp_id):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _creature_keywords(creature: dict) -> set[str]:

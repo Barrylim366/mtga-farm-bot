@@ -1,5 +1,7 @@
 # Burning Lotus Bot
 
+Version **1.10.0** adds preferred Starter and Historic decks, an option to play only your preferred deck, experimental Free Forge casting, improved London mulligans, and automatic match-end dismissal and reward collection in Starter Deck Duels and Historic.
+
 Startup reward recovery requires Claim text, preventing orange Play and Submit Deck buttons from being mistaken for rewards.
 Pending startup/login rerolls are retried before an account switch, including accounts that already met their farming target.
 <img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
@@ -487,7 +489,7 @@ Scroll **Mouse Wheel down** at any time to stop the bot immediately.
 
 **Settings → Bot Behavior → "Enable Forge Engine (experimental)"** hands the
 choice of plays to [Forge](https://github.com/Card-Forge/forge), the open-source
-MTG rules engine and AI. Off by default.
+MTG rules engine and AI. Enabled by default when Forge is installed in `runtime/forge/`.
 
 At each decision, the current Arena position is rebuilt inside Forge and Forge's
 AI is asked what it would do. The bot then carries that out with its own clicks.
@@ -549,13 +551,14 @@ The advisor (`forge_advisor/`) is adapted from
 ### Intelligent London Mulligan & Gameplay Enhancements
 
 - **London Mulligan Engine (`AI/Utilities/MulliganLogic.py`)**: Evaluates opening hands based on land-to-spell ratios, mana color alignment (ensures lands produce colors matching spells in hand), early curve castability (Turns 1-3 plays), and automatically selects optimal cards (excess lands or high-CMC spells) to tuck under the London Mulligan rule.
-- **Smart Selective Attacking (`Controller/MTGAController/Controller.py`)**: Integrates `CombatLogic.choose_attackers()` to evaluate lethal swings and per-creature safety instead of blindly swinging all creatures. Prevents suicidal attacks into superior blockers while preserving defensive lifegain guards. Configurable via `MTGA_SELECTIVE_ATTACK` / **Settings → Enhancements**.
+- **Free Forge Autonomous Casting (experimental) (`ForgeEngine/bridge.py`)**: Allows Forge AI to cast legal spells autonomously without requiring base AI double-approval, while safely validating against legend rules and unsupported actions. Configurable via `MTGA_FORGE_FREE` / **Settings → Enhancements**.
+- **Deck Selection & Preferred Deck Grinding (`Controller/MTGAController/Controller.py`)**: Select preferred Starter and Historic decks, or exclusively grind a single deck across all queues via **Settings → Deck Selection**.
+- **Auto Match-End & Rewards Dismissal (`Controller/MTGAController/Controller.py`)**: Automatically dismisses Victory/Defeat end screens and claims match, quest, event, and daily win rewards in Starter Deck Duels and Historic queues.
 - **Threat-Prioritized Counterspells (`AI/Utilities/CounterLogic.py`)**: Scores opponent spells on the stack by threat level (Planeswalkers > Creature bombs > Spells) and CMC, ensuring counterspells target high-impact threats rather than low-value cantrips.
 - **Lethal Face-Burn Priority & Landfall Sequencing (`AI/DummyAI.py`)**: Checks for lethal direct damage before creature removal to immediately close games when face lethal is reached; sequences landfall creatures before land drops to capture triggers.
 - **Anti-Detection Bezier Mouse (`Controller/Utilities/input_controller.py`)**: Generates natural, human-like cubic Bezier mouse curves with smooth acceleration, micro-jitter, and randomized pre-click pauses to prevent behavioral detection.
 - **Per-Monitor DPI v2 & Window Snapping (`vision/window_locator.py`)**: Enables Windows Per-Monitor DPI Awareness v2 to eliminate coordinate drift across scaled monitors, with 16:9 window snapping support.
 - **Discord & Telegram Notifications (`notifications.py`)**: Non-blocking background dispatcher delivering live alerts for match results (victory/defeat with duration), rolling win-rate summaries every 10 games, completed daily quests, and account switches. Configurable in **Settings → Enhancements**.
-- **Low-Power / Overnight Mode (`low_power.py`)**: Paces vision template checks and idle polling loops to reduce CPU/GPU temperatures and power consumption during overnight farming sessions.
 - **Starter Deck Duel Matcher (`AI/Utilities/StarterDeckMatcher.py`)**: Parses active daily quest color requirements and selects the optimal two-color Starter Deck to maximize quest progress, with optional JSON configuration override.
 
 ## Architecture

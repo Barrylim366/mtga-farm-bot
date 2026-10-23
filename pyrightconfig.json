@@ -2,7 +2,8 @@
   "include": [
     "AI",
     "Game.py",
-    "Controller/Utilities/GameState.py"
+    "Controller/Utilities/GameState.py",
+    "ForgeEngine"
   ],
   "exclude": [
     "**/__pycache__"
