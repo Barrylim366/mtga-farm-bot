@@ -232,7 +232,7 @@ class ArenaTracker:
 
     def my_actions(self) -> list[dict]:
         """What we may do right now: the pending request's list, else the state's."""
-        if self.pending_type == "GREMessageType_ActionsAvailableReq" and self.pending is not None:
+        if self.pending_is_current("GREMessageType_ActionsAvailableReq") and self.pending is not None:
             return list((self.pending.get("actionsAvailableReq") or {}).get("actions") or [])
         out = []
         for wrapper in self.actions:

@@ -13,8 +13,12 @@ class SelectiveAttackTests(unittest.TestCase):
         self.controller = make_controller()
         self.addCleanup(cleanup, self.controller)
 
-    def test_selective_attack_enabled_by_default(self):
+    def test_selective_attack_disabled_by_default(self):
         with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(self.controller._Controller__combat_selective_attack_enabled())
+
+    def test_selective_attack_enabled_by_env(self):
+        with mock.patch.dict(os.environ, {"MTGA_SELECTIVE_ATTACK": "1"}):
             self.assertTrue(self.controller._Controller__combat_selective_attack_enabled())
 
     def test_selective_attack_disabled_by_env(self):

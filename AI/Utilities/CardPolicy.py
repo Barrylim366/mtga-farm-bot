@@ -97,3 +97,42 @@ def is_unsupported_to_cast(grp_id) -> bool:
     result = any(pattern.search(t) for pattern in _UNSUPPORTED_PATTERNS)
     _unsupported_memo[grp_id] = result
     return result
+
+
+def is_unsupported_to_cast_local(grp_id) -> tuple[bool, bool]:
+    """Offline check for unsupported card policies using ONLY local card data.
+
+    Returns:
+        (is_unsupported, has_sufficient_data):
+        - (is_unsupported_bool, True) if local card info / oracle text is present and verified.
+        - (True, False) if card data is missing, empty, or cannot be verified (fails closed).
+    """
+    if grp_id is None:
+        return True, False
+    try:
+        grp_id = int(grp_id)
+    except Exception:
+        return True, False
+    if grp_id in UNSUPPORTED_GRP_IDS or grp_id in STRATEGIC_SKIP_GRP_IDS:
+        return True, True
+    if grp_id in SUPPORTED_CHOOSER_GRP_IDS:
+        return False, True
+    try:
+        card_info = CardInfo.get_card_info_local(grp_id)
+    except Exception:
+        return True, False
+    if not card_info or not isinstance(card_info, dict):
+        return True, False
+    raw_text = card_info.get("oracleText")
+    if raw_text is None:
+        raw_text = card_info.get("text")
+    if raw_text is None:
+        # Missing rules text cannot be verified offline -> fail closed
+        return True, False
+    text = str(raw_text)
+    t = text.replace("\n", " ")
+    result = any(pattern.search(t) for pattern in _UNSUPPORTED_PATTERNS)
+    return result, True
+
+
+

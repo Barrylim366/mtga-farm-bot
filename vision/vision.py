@@ -25,11 +25,6 @@ try:
 except Exception:  # pragma: no cover - optional dependency at runtime
     mss = None
 
-try:
-    from low_power import sleep_throttled
-except Exception:
-    def sleep_throttled(base_seconds: float) -> None:
-        time.sleep(base_seconds)
 
 
 # One screen capture at a time, process-wide.
@@ -213,7 +208,7 @@ class VisionEngine:
             self.begin_tick()
             if self.assert_template(region, template_path, threshold=threshold):
                 return True
-            sleep_throttled(max(0.05, float(poll_sec)))
+            time.sleep(max(0.05, float(poll_sec)))
         return False
 
     def _grab_full_frame(self) -> np.ndarray | None:

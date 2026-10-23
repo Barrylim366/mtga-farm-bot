@@ -74,7 +74,7 @@ def creature_keywords(creature: dict) -> set[str]:
     kws = {str(k).lower() for k in (info.get("keywords") or [])}
     oracle = str(info.get("oracleText") or "").lower()
     for kw in ("indestructible", "deathtouch", "first strike", "double strike",
-               "trample", "vigilance"):
+               "trample", "vigilance", "flying", "menace", "lifelink", "reach", "defender"):
         if kw in oracle:
             kws.add(kw)
     return kws
@@ -96,9 +96,9 @@ def is_tapped(creature: dict) -> bool:
 def creature_value(creature: dict) -> int:
     """Rough "how much do we mind losing this" score.
 
-    Mana value dominates (it is the closest thing to card quality we can read
-    offline) with the body as a tiebreak. Only ever compared against another
-    creature's score, so the absolute scale does not matter.
+    Mana value, body stats, and evasion/keywords are factored in.
+    Only ever compared against another creature's score, so the absolute
+    scale does not matter.
     """
     try:
         info = CardInfo.get_card_info_local(creature.get("grpId")) or {}
@@ -109,7 +109,26 @@ def creature_value(creature: dict) -> int:
         cmc = CardInfo.calculate_cmc(info.get("manaCost") or "")
     except Exception:
         cmc = 0
-    return cmc * 2 + power(creature) + RemovalLogic._stat(creature.get("toughness"))
+
+    kws = creature_keywords(creature)
+    bonus = 0
+    if "flying" in kws:
+        bonus += 2
+    if "menace" in kws:
+        bonus += 1
+    if "deathtouch" in kws:
+        bonus += 2
+    if "lifelink" in kws:
+        bonus += 1
+    if "indestructible" in kws:
+        bonus += 4
+    if "double strike" in kws:
+        bonus += 3
+    elif "first strike" in kws:
+        bonus += 1
+
+    return cmc * 2 + power(creature) + RemovalLogic._stat(creature.get("toughness")) + bonus
+
 
 
 def our_creatures(
@@ -441,6 +460,7 @@ def choose_attackers(
     my_life: int | None,
     opp_life: int | None,
     live_instance_ids: set[int] | None = None,
+    untapped_enemies_only: bool | None = None,
 ) -> dict:
     """Pick attackers from MTGA's own list of creatures that may attack.
 
@@ -530,7 +550,19 @@ def choose_attackers(
     # opponent's turn starts can block; a non-vigilant attacker is tapped and
     # cannot. (Our permanents untap in OUR untap step, not theirs.)
     ours = our_creatures(game_objects, my_seat, live_instance_ids)
-    enemy_powers = sorted((power(e) for e in enemies), reverse=True)
+    if untapped_enemies_only is None:
+        try:
+            import feature_flags
+            untapped_enemies_only = feature_flags.lifeguard_untapped_only_enabled()
+        except Exception:
+            untapped_enemies_only = False
+
+    target_pool = untapped_enemies if untapped_enemies_only else enemies
+    attacking_enemies = [
+        e for e in target_pool
+        if power(e) > 0 and "defender" not in creature_keywords(e)
+    ]
+    enemy_powers = sorted((power(e) for e in attacking_enemies), reverse=True)
     counter_attack = sum(enemy_powers)
 
     def _defender_count(chosen: list[int]) -> int:
