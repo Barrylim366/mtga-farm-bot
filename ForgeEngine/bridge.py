@@ -70,6 +70,7 @@ class Config:
     targets: str = "abilities"
     scry: str = "on"
     timeout: float = 4.0
+    free_forge: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -96,6 +97,7 @@ class Config:
             targets=_env("MTGA_FORGE_TARGETS", "abilities"),
             scry=_env("MTGA_FORGE_SCRY", "on"),
             timeout=timeout,
+            free_forge=_env("MTGA_FORGE_FREE", "off") in _ON,
         )
 
     def off(self) -> bool:
@@ -348,9 +350,11 @@ class Bridge:
         types = obj.get("cardTypes") or []
         wanted = (
             decision.get("action") == "activate"
-            or config.targets == "all"
+            or config.targets in ("all", "abilities", "spells")
             or "CardType_Artifact" in types
             or "CardType_Enchantment" in types
+            or "CardType_Instant" in types
+            or "CardType_Sorcery" in types
         )
         if wanted:
             self.intent = Intent(
@@ -382,6 +386,33 @@ class Bridge:
                 intent.grp_id is not None and intent.grp_id in (source.get("grpId"), source.get("objectSourceGrpId"))
             )
             return intent if same else None
+
+    @staticmethod
+    def _free_forge_safe(instance_id: int, game_state, ids: dict, me, offered) -> bool:
+        """Fail closed: approve only a known, supported, offered, non-duplicate-legend card."""
+        grp_id = ids.get(instance_id)
+        if grp_id is None or instance_id not in offered:
+            return False
+        try:
+            import AI.Utilities.CardPolicy as CardPolicy
+            from AI.Utilities import LegendRule, RemovalLogic
+            is_unsupported, has_data = CardPolicy.is_unsupported_to_cast_local(grp_id)
+            if not has_data or is_unsupported:
+                return False
+            full_state = game_state.get_full_state() or {}
+            bf_ids = RemovalLogic.battlefield_zone_ids(full_state)
+            live_ids = RemovalLogic.battlefield_instance_ids(full_state, bf_ids)
+            is_dupe_legend = LegendRule.duplicate_legend_in_play(
+                cast_instance_id=instance_id,
+                game_objects=full_state.get("gameObjects", []) or [],
+                my_seat=me,
+                battlefield_zone_ids=bf_ids,
+                live_instance_ids=live_ids,
+            ) is not None
+            return not is_dupe_legend
+        except Exception as e:
+            bot_logger.log_info(f"Free Forge safety check exception for grp_id={grp_id}: {e}")
+            return False
 
     # -- main phase -----------------------------------------------------------
 
@@ -426,8 +457,8 @@ class Bridge:
                 or ours.get("turnNumber") != turn_info.get("turnNumber")
                 or not tracker.stack_is_empty()
             ):
-                # The log has moved on from the state the bot decides on, or
-                # something is on the stack.
+                return base
+            if self.cards is None:
                 return base
             position = snapshot.build_state(tracker, self.cards)
             if position is None:
@@ -467,9 +498,17 @@ class Bridge:
                 note = "nothing to choose from"
             elif action in ("play", "cast"):
                 instance_id = decision.get("id")
+                if not isinstance(instance_id, int):
+                    return base
                 wanted = {"cast": [instance_id]}
                 if base == wanted or bot_generate(filtered_state(game_state, instance_id), ids) == wanted:
                     chosen_move = wanted
+                elif config.free_forge:
+                    if self._free_forge_safe(instance_id, game_state, ids, me, offered):
+                        chosen_move = wanted
+                        note = "approved by Forge (free forge; legal in Arena and safe)"
+                    else:
+                        note = "bot would not cast that card; keeping the bot's move"
                 else:
                     note = "bot would not cast that card; keeping the bot's move"
             elif action == "activate":
@@ -507,6 +546,7 @@ class Bridge:
             )
             self.record({
                 "kind": "main", "turn": turn_info.get("turnNumber"), "phase": position.get("phase"),
+                "offered": list(offered.keys()),
                 "forge": decision, "bot": base, "final": played, "note": note,
                 "diag": {k: v for k, v in diag.items() if v},
             })
@@ -558,6 +598,8 @@ class Bridge:
             phase = snapshot.forge_phase(ours)
             if phase is None or phase.startswith("MAIN"):
                 return base
+            if self.cards is None:
+                return base
             position = snapshot.build_state(tracker, self.cards)
             if position is None:
                 return base
@@ -578,9 +620,17 @@ class Bridge:
             note = ""
             if wants == "cast":
                 instance_id = decision.get("id")
+                if not isinstance(instance_id, int):
+                    return base
                 wanted = {"cast": [instance_id]}
                 if bot_generate(filtered_state(game_state, instance_id, me), ids) == wanted:
                     chosen_move = wanted
+                elif config.free_forge:
+                    if self._free_forge_safe(instance_id, game_state, ids, me, offered):
+                        chosen_move = wanted
+                        note = "approved by Forge (free forge; instant-speed legal in Arena and safe)"
+                    else:
+                        note = "bot would not cast that card"
                 else:
                     note = "bot would not cast that card"
             elif wants == "activate":
@@ -606,6 +656,7 @@ class Bridge:
             )
             self.record({
                 "kind": "instant", "turn": turn_info.get("turnNumber"), "phase": phase,
+                "offered": list(offered),
                 "forge": decision, "bot": base, "final": played, "note": note,
             })
             return played
@@ -622,6 +673,8 @@ class Bridge:
             if not tracker.in_sync or (
                 tracker.my_seat is not None and tracker.turn_info.get("activePlayer") == tracker.my_seat
             ):
+                return None
+            if self.cards is None:
                 return None
             position = snapshot.build_state(tracker, self.cards)
             if position is None:
@@ -678,6 +731,8 @@ class Bridge:
                 return None
             legal = snapshot.attack_request(self.tracker)
             if not legal:
+                return None
+            if self.cards is None:
                 return None
             position = snapshot.build_state(self.tracker, self.cards)
             if position is None:

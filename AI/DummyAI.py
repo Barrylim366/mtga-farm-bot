@@ -41,6 +41,27 @@ class DummyAI(AIKernel):
         self.__unknown_mana_diagnostics.clear()
         self._unknown_mana_sources.clear()
         self.__unsupported_cast_logged.clear()
+
+        # Prune memoization caches to prevent memory creep in long sessions
+        try:
+            from AI.Utilities import RemovalLogic, LifegainLogic, FightLogic, CounterLogic, CardPolicy
+            if len(RemovalLogic._removal_profile_memo) > 500:
+                RemovalLogic._removal_profile_memo.clear()
+            if len(RemovalLogic._self_buff_memo) > 500:
+                RemovalLogic._self_buff_memo.clear()
+            if len(LifegainLogic._payoff_memo) > 500:
+                LifegainLogic._payoff_memo.clear()
+            if len(LifegainLogic._enabler_memo) > 500:
+                LifegainLogic._enabler_memo.clear()
+            if len(FightLogic._fight_profile_memo) > 500:
+                FightLogic._fight_profile_memo.clear()
+            if len(CounterLogic._counter_profile_memo) > 500:
+                CounterLogic._counter_profile_memo.clear()
+            if len(CardPolicy._unsupported_memo) > 500:
+                CardPolicy._unsupported_memo.clear()
+        except Exception:
+            pass
+
         self._debug("AI state reset complete")
 
     def _debug(self, message):
@@ -259,7 +280,7 @@ class DummyAI(AIKernel):
         return remaining_sources >= generic_needed
 
     def _choose_land_to_play(self, action_list, inst_id_grp_id_dict, available_colors, total_mana, sources):
-        """Choose a land that maximizes post-land castability for creatures."""
+        """Choose a land that maximizes post-land castability for all spells in hand."""
         land_actions = []
         for action_wrapper in action_list:
             action = action_wrapper.get('action', {})
@@ -269,7 +290,7 @@ class DummyAI(AIKernel):
         if not land_actions:
             return None
 
-        creature_actions = []
+        spell_actions = []
         for action_wrapper in action_list:
             action = action_wrapper.get('action', {})
             if action.get('actionType') != 'ActionType_Cast':
@@ -279,9 +300,7 @@ class DummyAI(AIKernel):
             card_info = CardInfo.get_card_info(grp_id)
             if not card_info:
                 continue
-            if 'Creature' not in card_info.get('types', []):
-                continue
-            creature_actions.append((instance_id, action.get('manaCost', []), card_info))
+            spell_actions.append((instance_id, action.get('manaCost', []), card_info))
 
         def _score_land(action):
             instance_id = action.get('instanceId')
@@ -294,7 +313,7 @@ class DummyAI(AIKernel):
             sim_sources = list(sources) + [set(produced_colors)] if produced_colors else list(sources)
 
             castable = []
-            for _, mana_cost, card_info in creature_actions:
+            for _, mana_cost, card_info in spell_actions:
                 if self._can_cast_with_mana_cost(mana_cost, sim_colors, sim_total_mana, sim_sources):
                     mana_cost_str = card_info.get('manaCost', '')
                     cmc = CardInfo.calculate_cmc(mana_cost_str)
@@ -330,7 +349,11 @@ class DummyAI(AIKernel):
             action_type = action.get('actionType', '')
             if not action_type:
                 continue
-            if "Target" in action_type and "Attack" not in action_type and "Combat" not in action_type:
+            if (
+                action_type.startswith("ActionType_")
+                and "Target" in action_type
+                and not any(k in action_type for k in ("Attack", "Combat", "Block"))
+            ):
                 return True
         return False
 
@@ -577,15 +600,25 @@ class DummyAI(AIKernel):
         )
         return chosen, score
 
-    def generate_keep(self, card_list) -> bool:
-        try:
-            from AI.Utilities.MulliganLogic import evaluate_opening_hand
-            keep, reason = evaluate_opening_hand(card_list)
-            self._debug(f"generate_keep: {reason} -> keep={keep}")
-            return bool(keep)
-        except Exception as e:
-            self._debug(f"generate_keep fallback: {e}")
+    def generate_keep(self, card_list, mulligan_count: int = 0) -> bool:
+        if not card_list:
             return True
+        try:
+            import feature_flags
+            active = feature_flags.active_mulligan_enabled()
+        except Exception:
+            active = True
+
+        if active:
+            try:
+                from AI.Utilities.MulliganLogic import evaluate_opening_hand
+                keep, reason = evaluate_opening_hand(card_list, mulligan_count=mulligan_count)
+                self._debug(f"generate_keep: {reason} -> keep={keep} (mulligan_count={mulligan_count})")
+                return bool(keep)
+            except Exception as e:
+                self._debug(f"generate_keep fallback: {e}")
+                return True
+        return True
 
     def __new_turn_check(self, current_game_state: 'GameStateSecondary'):
         """Check if it's a new turn and reset land played flag"""
@@ -804,6 +837,35 @@ class DummyAI(AIKernel):
                         self._debug("Attack target selection required - targeting opponent player")
                         move = {'select_target': [-1]}
                         return move
+                    # Evaluate smart combat decision via CombatLogic
+                    try:
+                        from AI.Utilities import CombatLogic
+                        legal_attackers = [
+                            a.get('action', {}) for a in action_list
+                            if a.get('action', {}).get('actionType') == 'ActionType_DeclareAttackers'
+                            or 'Attack' in a.get('action', {}).get('actionType', '')
+                        ]
+                        full_state = game_state.get_full_state() or {}
+                        game_objects = full_state.get("gameObjects", [])
+                        players = full_state.get("players", []) or []
+                        my_life = None
+                        opp_life = None
+                        for p in players:
+                            if p.get("systemSeatNumber") == my_seat:
+                                my_life = p.get("lifeTotal")
+                            else:
+                                opp_life = p.get("lifeTotal")
+                        if legal_attackers and game_objects:
+                            attack_decision = CombatLogic.choose_attackers(
+                                legal_attackers, game_objects, my_seat, my_life, opp_life
+                            )
+                            self._debug(
+                                f"Smart attack decision: {attack_decision.get('reason')} "
+                                f"(attackers={attack_decision.get('attackers')}, hold_back={attack_decision.get('hold_back')})"
+                            )
+                    except Exception as e:
+                        self._debug(f"Smart attack evaluation note: {e}")
+
                     self._debug("Combat phase - declaring all attackers")
                     move = {'all_attack': []}
                     return move

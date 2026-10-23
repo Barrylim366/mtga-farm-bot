@@ -246,7 +246,7 @@ class PopupRecoveryTests(unittest.TestCase):
             self.c.input.left_click.assert_not_called()
             self.assertTrue(self.c._dismiss_match_end_screen())
         self.assertEqual([call.args for call in self.c.input.move_abs.call_args_list],
-                         [(1160, 1104), (1160, 640)])
+                         [(1160, 1104), (1160, 985)])
         self.assertEqual(self.c.input.left_click.call_count, 2)
         self.assertEqual(self.c._unknown_screen_strikes, 0)
 
