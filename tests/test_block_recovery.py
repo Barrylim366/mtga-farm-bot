@@ -68,6 +68,20 @@ class BlockRecoveryTest(unittest.TestCase):
     def finish(self):
         self.c._finish_block_assignment("SUBMIT_BLOCKS")
 
+    def test_selection_wrapper_passes_guard_into_physical_scan(self):
+        from Controller.MTGAController.Controller import Controller
+        guard = lambda: False
+        scanner = mock.Mock(return_value=False)
+        with mock.patch.object(self.c, "_get_battlefield_scan_points_mapped", return_value=((0, 0), (1, 1))), \
+                mock.patch.object(self.c, "_Controller__select_object_in_region", scanner):
+            self.assertFalse(Controller.select_battlefield_permanent(self.c, 280, still_active=guard))
+        self.assertIs(scanner.call_args.kwargs["still_active"], guard)
+        self.c._write_hand_select_debug_bundle = mock.Mock()
+        with mock.patch.object(self.c, "_get_opponent_battlefield_scan_points_mapped", return_value=((0, 0), (1, 1))), \
+                mock.patch.object(self.c, "_Controller__select_object_in_region", scanner):
+            self.assertFalse(Controller.select_opponent_battlefield_permanent(self.c, 305, still_active=guard))
+        self.assertIs(scanner.call_args.kwargs["still_active"], guard)
+
     def test_incident_adds_hawk_instead_of_more_expensive_nighthawk(self):
         self.c.select_attacking_creature.side_effect = lambda *a, **k: self.assign(280)
         self.finish()
@@ -84,6 +98,58 @@ class BlockRecoveryTest(unittest.TestCase):
         self.c.select_attacking_creature.side_effect = click
         self.finish()
         self.assertEqual([c.args[0] for c in self.c.select_battlefield_permanent.call_args_list], [280, 310])
+        self.c._Controller__click_combat_submit_button.assert_called_once_with("SUBMIT_BLOCKS")
+
+    def test_warning_cleared_while_scanning_does_not_cancel_valid_blocks(self):
+        def scan(*args, **kwargs):
+            self.assign(310)
+            self.assertFalse(kwargs["still_active"]())
+            return False
+        self.c.select_battlefield_permanent.side_effect = scan
+        self.finish()
+        self.c.select_attacking_creature.assert_not_called()
+        self.c.input.tap_escape.assert_not_called()
+        self.c._click_image_in_scaled_arena_region.assert_not_called()
+        self.c._Controller__click_combat_submit_button.assert_called_once_with("SUBMIT_BLOCKS")
+
+    def test_already_accepted_extra_blocker_is_never_selected_again(self):
+        def scan(*args, **kwargs):
+            self.assign(280)
+            self.assertFalse(kwargs["still_active"]())
+            return True
+        self.c.select_battlefield_permanent.side_effect = scan
+        self.finish()
+        self.c.select_attacking_creature.assert_not_called()
+        self.c._click_image_in_scaled_arena_region.assert_not_called()
+        self.c._Controller__click_combat_submit_button.assert_called_once_with("SUBMIT_BLOCKS")
+
+    def test_warning_cleared_during_attacker_scan_is_not_a_selection_failure(self):
+        def scan(*args, **kwargs):
+            self.assign(310)
+            self.assertFalse(kwargs["still_active"]())
+            return False
+        self.c.select_attacking_creature.side_effect = scan
+        self.finish()
+        self.c.input.tap_escape.assert_not_called()
+        self.c._click_image_in_scaled_arena_region.assert_not_called()
+        self.c._Controller__click_combat_submit_button.assert_called_once_with("SUBMIT_BLOCKS")
+
+    def test_late_acceptance_before_cancel_prevents_cancel_click(self):
+        self.c._block_reserved = {280, 310}
+        def locate(*args, **kwargs):
+            self.assign(280)
+            self.assertFalse(kwargs["action_guard"]())
+            return False
+        self.c._click_image_in_scaled_arena_region.side_effect = locate
+        self.finish()
+        self.assertFalse(self.c._block_failed)
+        self.c._Controller__click_combat_submit_button.assert_called_once_with("SUBMIT_BLOCKS")
+
+    def test_accepted_blocks_before_recovery_starts_need_no_repair(self):
+        self.assign(280)
+        self.finish()
+        self.c.select_battlefield_permanent.assert_not_called()
+        self.c._click_image_in_scaled_arena_region.assert_not_called()
         self.c._Controller__click_combat_submit_button.assert_called_once_with("SUBMIT_BLOCKS")
 
     def test_reserved_and_assigned_creatures_are_not_reused(self):

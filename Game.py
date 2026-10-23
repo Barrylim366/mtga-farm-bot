@@ -159,6 +159,7 @@ class Game:
         # live state). Used only to report match duration in the [MATCH_END]
         # marker; None until a game is under way.
         self._match_started_ts: float | None = None
+        self._match_account_context = None
         # Optional callback (no args -> path string or "") the UI can supply to
         # ask the user to locate their MTGA install when auto-detection in
         # _refresh_card_data() fails. Without card data the bot has no removal/
@@ -258,6 +259,10 @@ class Game:
             self._match_started_ts = time.time()
             self._duration_started = time.monotonic()
             self._duration_match_id = self.controller.get_current_match_id()
+            try:
+                self._match_account_context = self.controller.capture_match_account(self._duration_match_id)
+            except Exception:
+                self._match_account_context = None
             self._duration_concede_claimed = False
             self._reschedule_duration_timer()
 
@@ -397,7 +402,21 @@ class Game:
                 duration_sec = max(0.0, time.time() - self._match_started_ts)
             else:
                 duration_sec = 0.0
-            bot_logger.log_match_end(result, self.last_logged_turn, duration_sec)
+            identity = getattr(self, "_match_account_context", None)
+            if (isinstance(identity, dict) and key and key.startswith("id:")
+                    and identity.get("match_id") != key[3:]):
+                identity = None
+            # An unresolved start may acquire fresh authentication later. A
+            # known identity is never replaced by the next account's UI label.
+            if not isinstance(identity, dict) or not identity.get("account"):
+                try:
+                    match_id = key[3:] if key and key.startswith("id:") else None
+                    identity = self.controller.capture_match_account(match_id)
+                except Exception:
+                    identity = None
+            if not isinstance(identity, dict):
+                identity = {"match_id": None, "account": None, "source": "unknown"}
+            bot_logger.log_match_end(result, self.last_logged_turn, duration_sec, identity=identity)
             try:
                 from notifications import NotificationManager
                 NotificationManager.get_instance().notify_match_result(
@@ -448,6 +467,7 @@ class Game:
             self.starting_hand_logged = False
             self._last_action_delay_turn = -1
             self._match_started_ts = None
+            self._match_account_context = None
 
         # Reset AI state
         if hasattr(self.ai, 'reset'):

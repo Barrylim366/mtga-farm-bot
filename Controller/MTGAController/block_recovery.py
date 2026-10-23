@@ -150,6 +150,11 @@ class BlockRecoveryMixin:
         self._Controller__record_decision("blockers", move, data)
 
     def _cancel_invalid_blocks(self, context, reason):
+        def needed():
+            return (self._block_live(context)
+                    and bool(self._block_warnings(self._block_request)))
+        if not needed():
+            return False
         self._block_recovery_record("cancel_blocks", {"reason": reason})
         if not self._block_live(context):
             return False
@@ -159,14 +164,18 @@ class BlockRecoveryMixin:
         clicked = self._click_image_in_scaled_arena_region(
             "Buttons/cancel_blocks.png", "CANCEL_BLOCKS",
             rel_region=(1500, 780, 420, 150), confidence=0.55, timeout=1.5,
-            action_guard=lambda: self._block_live(context),
+            action_guard=needed,
         )
         if clicked and self._wait_block_request(
                 revision, lambda req: not self._block_selected(req)
                 and not self._block_warnings(req), context,
                 deadline - time.monotonic()):
             self._block_reserved.clear()
+            bot_logger.log_info("BLOCK_RECOVERY_CANCEL_ACKNOWLEDGED: assignments cleared")
             return True
+        if not clicked and not needed():
+            bot_logger.log_info("BLOCK_RECOVERY_OBSOLETE: warning cleared before Cancel")
+            return False
         if self._block_live(context):
             self._block_failed = True
             bot_logger.log_error("BLOCK_RECOVERY_FAILED: cancellation not confirmed; leaving to watchdog")
@@ -200,29 +209,59 @@ class BlockRecoveryMixin:
                               and b["blockerInstanceId"] in board]
                 if candidates:
                     blocker = min(candidates, key=lambda b: (CombatLogic.creature_value(board[b]), b))
+                    def needed():
+                        # Read the live request, not the snapshot which chose this
+                        # candidate. Normal assignment may still be acknowledged.
+                        with self._block_condition:
+                            latest = self._block_request
+                            return (self._block_live(context)
+                                    and attacker in self._block_warnings(latest)
+                                    and not any(b == blocker for b, _ in self._block_selected(latest))
+                                    and any(b.get("blockerInstanceId") == blocker
+                                            and attacker in b.get("attackerInstanceIds", [])
+                                            for b in latest.get("blockers", [])))
+                    if not needed():
+                        continue
                     attempted.add(blocker)
                     self._block_recovery_record("add_blocker", {"blocker": blocker, "attacker": attacker})
                     if self.select_battlefield_permanent(
-                            blocker, max_scan_sec=min(3.5, max(0, deadline - time.monotonic()))):
+                            blocker, max_scan_sec=min(3.5, max(0, deadline - time.monotonic())),
+                            still_active=needed):
                         if not self._block_live(context):
                             return None
+                        if not needed():
+                            bot_logger.log_info("BLOCK_RECOVERY_OBSOLETE: assignment changed during selection")
+                            continue
                         if self.select_attacking_creature(
-                                attacker, max_scan_sec=min(3.5, max(0, deadline - time.monotonic()))):
+                                attacker, max_scan_sec=min(3.5, max(0, deadline - time.monotonic())),
+                                still_active=needed):
                             if self._wait_block_request(
-                                    revision, lambda req: (blocker, attacker) in self._block_selected(req),
+                                    revision, lambda req: (blocker, attacker) in self._block_selected(req)
+                                    or attacker not in self._block_warnings(req),
                                     context, min(2.0, max(0, deadline - time.monotonic()))):
+                                bot_logger.log_info("BLOCK_RECOVERY_ASSIGNMENT_ACKNOWLEDGED: fresh request advanced")
                                 continue
                             reason = "extra assignment not confirmed"
                         else:
+                            if not needed():
+                                continue
                             # Drop the half-selection before looking for Cancel Blocks.
                             if self._block_live(context):
                                 self.input.tap_escape()
                             reason = "attacker selection failed"
                     else:
+                        if not needed():
+                            continue
                         reason = "blocker selection failed"
             else:
                 reason = "recovery budget exhausted"
-            return "NO_BLOCKS" if self._cancel_invalid_blocks(context, reason) else None
+            if not self._block_warnings(self._block_request):
+                return "SUBMIT_BLOCKS"
+            if self._cancel_invalid_blocks(context, reason):
+                return "NO_BLOCKS"
+            if self._block_live(context) and not self._block_warnings(self._block_request):
+                return "SUBMIT_BLOCKS"
+            return None
         return None
 
     def _finish_block_assignment(self, label, context=None):

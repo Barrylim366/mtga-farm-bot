@@ -813,6 +813,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # account (first sighting) so the delta accumulates across revisits; kept
         # across account switches; reset only on a fresh bot start.
         self._account_initial_gold: dict[str, int] = {}
+        self._account_identity_source = "unknown"
+        self._startup_identity_reconciled = False
+        self._match_account_contexts: dict[str, dict] = {}
+        self._match_account_boundaries: dict[str, int] = {}
         # Throttle for the wide log read used to find the startup account's login
         # screenName when it has scrolled past the normal quests tail.
         self._last_login_wide_scan_ts = 0.0
@@ -3015,6 +3019,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         screen = self._canonical_screen_name(screen or label) or label
         self._current_account_screen_name = screen
         self._current_account_pinned = True
+        self._current_account_pin_seeded = seeded
+        self._account_identity_source = "unknown" if seeded else "manual"
         self._pin_log_offset = 0 if seeded else self._get_log_size(self._log_path)
         self._pin_reconcile_ts = 0.0
         if self._resolved_alias_for_screen(screen) is None:
@@ -3075,9 +3081,12 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 if owner and "#" not in owner and self._screen_name_base_is_ambiguous(owner):
                     return
             if not owner or self._same_account(owner, self._current_account_screen_name):
+                if owner:
+                    self._account_identity_source = "login"
                 return
             self._forget_starter_deck("account identity changed")
             self._current_account_screen_name = owner
+            self._account_identity_source = "login"
             # Whatever the log says now supersedes the credential-derived name
             # (the user can switch account in MTGA by hand), so stop protecting it.
             self._identity_from_config = False
@@ -3149,7 +3158,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         b = self._account_identity_key(screen_b)
         return bool(a) and a == b
 
-    def _reconcile_pin_with_login(self) -> None:
+    def _reconcile_pin_with_login(self, *, force: bool = False) -> None:
         """Correct a manual pin that no longer matches the account actually logged
         in. The login event (authenticateResponse.screenName) is the authoritative
         record of who is logged in; when it names a DIFFERENT configured account
@@ -3161,7 +3170,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         if not self._log_path:
             return
         now = time.time()
-        if now - self._pin_reconcile_ts < 15.0:
+        if not force and now - self._pin_reconcile_ts < 15.0:
             return
         self._pin_reconcile_ts = now
         try:
@@ -3171,6 +3180,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         if not owner:
             return
         if self._same_account(owner, self._current_account_screen_name):
+            if getattr(self, "_current_account_pin_seeded", False):
+                self._account_identity_source = "login"
             return
         if pos < self._pin_log_offset:
             # A login that predates the pin -> exactly what the pin overrides.
@@ -3193,6 +3204,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         )
         self._current_account_pinned = False
         self._current_account_screen_name = self._canonical_screen_name(owner) or owner
+        self._account_identity_source = "login"
         self._register_current_account_for_gold()
 
     def _latch_identity_from_switch_target(self, account: dict) -> bool:
@@ -3229,6 +3241,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             return False
         label = str(account.get("name", "")).strip() or screen
         self._current_account_screen_name = screen
+        self._account_identity_source = "switch_target"
         self._identity_from_config = True
         # A manual pin is the user overriding the identity by hand; our own login
         # supersedes it, since we just changed which account is actually signed in.
@@ -3282,6 +3295,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             if "#" not in owner and self._screen_name_base_is_ambiguous(owner):
                 return False
             self._current_account_screen_name = owner
+            self._account_identity_source = "login"
             self._register_current_account_for_gold()
             bot_logger.log_info(
                 "Account identity latched from login: '{}' (alias '{}').".format(
@@ -3420,11 +3434,102 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             })
         return view
 
+    def _canonical_account_identity(self, screen: str | None) -> str | None:
+        """One bookkeeping key per configured account; never merge different tags."""
+        screen = self._canonical_screen_name(screen)
+        if not screen or screen == "(current account)":
+            return None
+        matches = self._configured_accounts_with_base(screen)
+        if "#" not in screen and len(matches) > 1:
+            return None
+        for account in matches:
+            configured = self._canonical_screen_name(account.get("screen_name") or account.get("name"))
+            if configured.casefold() == screen.casefold() and "#" in configured:
+                return configured
+        if "#" not in screen and len(matches) == 1:
+            configured = self._canonical_screen_name(matches[0].get("screen_name") or matches[0].get("name"))
+            if "#" in configured:
+                return configured
+            # Legacy configurations may also omit the tag. Upgrade a bare key
+            # only when the observed full identities agree on exactly one tag.
+            known = [self._current_account_screen_name]
+            known.extend(self._account_initial_gold)
+            known.extend(self._screenname_to_alias)
+            tagged = {value.casefold(): value for value in known if value and "#" in value
+                      and self._screen_name_base(value).casefold() == self._screen_name_base(screen).casefold()}
+            if len(tagged) > 1:
+                return None
+            return next(iter(tagged.values()), configured)
+        # Unknown fully tagged accounts stay distinct, including from a bare
+        # legacy config. Do not turn a friendly alias into an identity key.
+        return next((key for key in self._account_initial_gold if key.casefold() == screen.casefold()), screen)
+
+    def _normalise_gold_account_keys(self) -> None:
+        """Fold known spellings using first observation order, never summed gains."""
+        baselines = self._account_initial_gold
+        farmed = self._gold_farmed_by_account
+        grouped = {}
+        for old, baseline in list(baselines.items()):
+            key = self._canonical_account_identity(old)
+            if key:
+                grouped.setdefault(key, []).append((old, baseline))
+        for key, entries in grouped.items():
+            if len(entries) == 1 and entries[0][0] == key:
+                continue
+            # Dict insertion order records when baselines were first observed.
+            # The current fresh inventory sample will recalculate the gain;
+            # until then preserve the first row's measured gain, not an estimate.
+            first, baseline = entries[0]
+            gain = farmed.get(first, 0)
+            for old, _ in entries:
+                baselines.pop(old, None)
+                farmed.pop(old, None)
+                self._last_gold_below_baseline.pop(old, None)
+            baselines[key] = baseline
+            farmed[key] = gain
+            bot_logger.log_info(f"GOLD_IDENTITY_MERGED: account={key!r} baseline={baseline} aliases={[old for old, _ in entries]!r}")
+        for old in list(farmed):
+            key = self._canonical_account_identity(old)
+            if key and old != key and old not in baselines:
+                farmed.setdefault(key, farmed[old])
+                farmed.pop(old, None)
+
+    def capture_match_account(self, match_id: str | None) -> dict:
+        """Freeze identity with the match, independently of the result poll's UI."""
+        if not match_id:
+            return {"match_id": None, "account": None, "source": "unknown"}
+        contexts = self._match_account_contexts
+        existing = contexts.get(match_id)
+        if existing and existing["account"]:
+            return dict(existing)
+        boundary = int(self._quests_valid_from_offset or 0)
+        if existing and self._match_account_boundaries.get(match_id) != boundary:
+            # An unresolved outgoing game must not inherit a later switch's
+            # authenticated identity when its result is delivered late.
+            return dict(existing)
+        if self._current_account_pinned:
+            self._reconcile_pin_with_login(force=True)
+        else:
+            self._latch_account_screen_name_from(self._read_log_tail(self._log_path, max_bytes=8_000_000))
+        source = self._account_identity_source
+        account = self._canonical_account_identity(self._current_account_screen_name) if source != "unknown" else None
+        context = {"match_id": match_id, "account": account, "source": source if account else "unknown"}
+        if context != existing:
+            contexts[match_id] = context
+            self._match_account_boundaries[match_id] = boundary
+            # Keep only a small per-process window; historical evidence is logged.
+            while len(contexts) > 40:
+                oldest = next(iter(contexts))
+                contexts.pop(oldest)
+                self._match_account_boundaries.pop(oldest, None)
+            bot_logger.log_info("[MATCH_IDENTITY] " + json.dumps(context, ensure_ascii=True))
+        return dict(context)
+
     def _current_account_key(self) -> str:
         """Label used to attribute farmed gold. The MTGA screenName is the only
         identity the log exposes for every account (initial + switched-in); fall
         back to a generic label until it is latched from the first quests block."""
-        return self._current_account_screen_name or "(current account)"
+        return self._canonical_account_identity(self._current_account_screen_name) or "(current account)"
 
     def _publish_gold_farmed(self) -> None:
         try:
@@ -3706,6 +3811,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         """Ensure the current account has a (0-gold) row as soon as its screenName
         is known, map it to its configured alias when we can, and fold in any gold
         credited before it was latched (a win that landed under the fallback key)."""
+        self._normalise_gold_account_keys()
         key = self._current_account_key()
         if key != "(current account)" and self._mapped_alias_for_screen(key) is None:
             # Exact config match first: it is a fact. _pending_switch_alias is only
@@ -3807,6 +3913,9 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         gold = self._read_latest_inventory_gold()
         if gold is None:
             return
+        if getattr(self, "_account_identity_source", "unknown") == "unknown" and getattr(self, "_current_account_pin_seeded", False):
+            return
+        self._normalise_gold_account_keys()
         key = self._current_account_key()
         if key == "(current account)":
             return
@@ -7040,6 +7149,13 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         session is starting' an explicit act of the start path, instead of a side
         effect buried in a quest helper -- and makes it a no-op to call twice."""
         self._stop_requested = False
+        if not getattr(self, "_startup_identity_reconciled", False):
+            self._startup_identity_reconciled = True
+            if self._current_account_pinned:
+                self._reconcile_pin_with_login(force=True)
+            else:
+                self._latch_account_screen_name_from(
+                    self._read_log_tail(self._log_path, max_bytes=8_000_000))
         self._start_popup_recovery()
         # Nothing is known about what the user (or a previous session) left
         # selected in MTGA, so the first Historic queue of a session must
@@ -9593,7 +9709,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             bot_logger.set_hover_logging(False)
 
     def select_battlefield_permanent(self, card_id: int, clicks: int = 1,
-                                     *, max_scan_sec: float = 7.5) -> bool:
+                                     *, max_scan_sec: float = 7.5,
+                                     still_active: Callable[[], bool] | None = None) -> bool:
         """Select a permanent on our battlefield by scanning the lower arena region for matching hover objectId."""
         bot_logger.set_hover_logging(True)
         scan_p1, scan_p2 = self._get_battlefield_scan_points_mapped(force_reacquire=True)
@@ -9606,8 +9723,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 clicks=clicks,
                 label="BATTLEFIELD_ITEM",
                 max_scan_sec=max_scan_sec,
+                still_active=still_active,
             ):
                 return True
+            if still_active is not None and not still_active():
+                return False
             current_pos = self.input.position()
             self._write_hand_select_debug_bundle(
                 reason="battlefield_select_failed",
@@ -9782,7 +9902,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         return p1, p2
 
     def select_attacking_creature(self, card_id: int, clicks: int = 1,
-                                 *, max_scan_sec: float | None = None) -> bool:
+                                 *, max_scan_sec: float | None = None,
+                                 still_active: Callable[[], bool] | None = None) -> bool:
         """Select an attacking creature during Step_DeclareBlock.
 
         This is just the opponent's row, and that is the finding rather than an
@@ -9791,13 +9912,14 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         (see the note on the scan regions in __init__). Scanning the opponent
         row is therefore both correct and cheaper than a region of our own.
         """
-        if max_scan_sec is None:
+        if max_scan_sec is None and still_active is None:
             return self.select_opponent_battlefield_permanent(card_id, clicks=clicks)
         return self.select_opponent_battlefield_permanent(
-            card_id, clicks=clicks, max_scan_sec=max_scan_sec)
+            card_id, clicks=clicks, max_scan_sec=max_scan_sec, still_active=still_active)
 
     def select_opponent_battlefield_permanent(self, card_id: int, clicks: int = 1,
-                                             *, max_scan_sec: float | None = None) -> bool:
+                                             *, max_scan_sec: float | None = None,
+                                             still_active: Callable[[], bool] | None = None) -> bool:
         """Select an opponent's permanent by hover-scanning the upper arena band
         for the matching objectId. Mirror of select_battlefield_permanent.
 
@@ -9816,8 +9938,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 label="OPP_BATTLEFIELD_ITEM",
                 max_scan_sec=(self._OPPONENT_BATTLEFIELD_SCAN_TIMEOUT
                               if max_scan_sec is None else max_scan_sec),
+                still_active=still_active,
             ):
                 return True
+            if still_active is not None and not still_active():
+                return False
             bot_logger.log_error(
                 f"Opponent battlefield select failed for card_id={card_id} "
                 f"(scan {scan_p1}->{scan_p2}); region may need calibration."
@@ -12793,6 +12918,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # identity via its own login, so auto-detection should resume.
         self._current_account_screen_name = None
         self._current_account_pinned = False
+        self._account_identity_source = "unknown"
         # The incoming account's identity has not been established yet; the login
         # further down sets it from that account's own credentials.
         self._identity_from_config = False

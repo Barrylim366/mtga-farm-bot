@@ -1,5 +1,19 @@
 # Burning Lotus Bot
 
+Blocking recovery rechecks Arena's current assignments while scanning and before
+clicking. If an ordinary block has already cleared the warning, recovery keeps
+those blocks instead of selecting the creature again or cancelling them.
+
+Ability confirmation recognises both **Activate Ability** and **Sacrifice Food**.
+Cancel recovery accepts either interface, while activation still requires a fresh
+game acknowledgment; a click alone does not prove payment or resolution.
+
+Gold tracking resolves unambiguous bare and tagged account names to one account,
+preserving its first session balance. Restored account labels are checked against
+login evidence at startup. New match records carry the account identity captured
+for that game, so a later account switch cannot relabel its result. Unresolved
+identities remain unknown; older records retain their legacy attribution.
+
 Single-pile choices (such as Curator of Destinies) click a visible **Choose** button without evaluating the cards. Normal gameplay pauses until the choice advances or the buttons visibly disappear. Failed attempts are bounded and remain subject to the existing stall watchdog.
 
 Trigger ordering stops when Arena starts targeting an ability from that ordering request. The obsolete worker checks for cancellation during hover scans and before submitting, so it yields to the new target prompt. Input already sent cannot be withdrawn.

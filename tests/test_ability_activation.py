@@ -213,13 +213,23 @@ class AbilityControlTest(unittest.TestCase):
 
     def test_cancel_requires_activation_label_and_cancel_text(self):
         c = self.make_controller()
-        for hits in ([None], [(640, 330), None]):
+        for hits in ([None, None], [(640, 330), None]):
             c._locate_image_center_in_scaled_arena_region.side_effect = hits
             self.assertFalse(c.click_ability_control("cancel", action_guard=lambda: True))
         c._click_abs.assert_not_called()
         c._locate_image_center_in_scaled_arena_region.side_effect = [(640, 330), (1180, 635)]
         self.assertTrue(c.click_ability_control("cancel", action_guard=lambda: True))
         c._click_abs.assert_called_once_with(1180, 635, "ABILITY_CANCEL")
+
+    def test_food_confirmation_and_cancel_use_food_label(self):
+        c = self.make_controller()
+        c._locate_image_center_in_scaled_arena_region.side_effect = [None, (1200, 565)]
+        self.assertTrue(c.click_ability_control("activate", action_guard=lambda: True))
+        c._click_abs.assert_called_once_with(1200, 565, "ABILITY_ACTIVATE_SACRIFICE_FOOD")
+        c._click_abs.reset_mock()
+        c._locate_image_center_in_scaled_arena_region.side_effect = [None, (1200, 565), (1480, 795)]
+        self.assertTrue(c.click_ability_control("cancel", action_guard=lambda: True))
+        c._click_abs.assert_called_once_with(1480, 795, "ABILITY_CANCEL")
 
     def test_busy_input_sends_no_click(self):
         c = self.make_controller()
@@ -233,6 +243,7 @@ class AbilityControlTest(unittest.TestCase):
         from vision.vision import VisionEngine
         fixtures = Path(__file__).parent / "fixtures"
         for filename, present in (("ability-activation.jpg", True),
+                                  ("food-activation.png", True),
                                   ("ability-activation-dismissed.jpg", False)):
             original = cv2.imread(str(fixtures / filename))
             self.assertIsNotNone(original)
@@ -253,6 +264,21 @@ class AbilityControlTest(unittest.TestCase):
                         hit = c._locate_ability_control(control)
                         self.assertEqual(hit is not None, present, control)
                         if hit:
-                            expected = (427, 327) if control == "activate" else (1184, 634)
+                            if filename == "food-activation.png":
+                                expected = (979, 453) if control == "activate" else (1184, 634)
+                            else:
+                                expected = (427, 327) if control == "activate" else (1184, 634)
                             self.assertAlmostEqual(hit[0] / width * 1280, expected[0], delta=4)
                             self.assertAlmostEqual(hit[1] / height * 720, expected[1], delta=4)
+                        # Exercise recognition through the guarded click path too:
+                        # Cancel must accept Food's confirmation as activation UI.
+                        c._click_abs.reset_mock()
+                        self.assertEqual(c.click_ability_control(
+                            control, action_guard=lambda: True), present)
+                        if present:
+                            label = ("ABILITY_ACTIVATE_SACRIFICE_FOOD"
+                                     if filename == "food-activation.png" and control == "activate"
+                                     else f"ABILITY_{control.upper()}")
+                            c._click_abs.assert_called_once_with(*hit, label)
+                        else:
+                            c._click_abs.assert_not_called()

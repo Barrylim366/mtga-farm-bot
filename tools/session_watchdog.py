@@ -369,6 +369,9 @@ def _write_match_record(state: dict, session_id: str, match: dict, status: dict)
     aliases = status.get("account_aliases")
     if account and isinstance(aliases, dict):
         account = str(aliases.get(account) or account).strip()
+    identity = match_state.pop("identity", None)
+    if isinstance(identity, dict):
+        account = identity.get("account") or None
     record = {
         "schema_version": 2,
         "session_id": session_id,
@@ -384,6 +387,10 @@ def _write_match_record(state: dict, session_id: str, match: dict, status: dict)
         "game_mode": str(status.get("mode") or ""),
         "alerts": dict(match_state.get("alerts") or {}),
     }
+    record["account_identity_source"] = identity.get("source", "unknown") if isinstance(identity, dict) else "legacy_status"
+    if isinstance(identity, dict):
+        record["schema_version"] = 3
+        record["match_id"] = identity.get("match_id")
     session_dir = _records_session_dir(state, session_id)
     out = session_dir / f"match-{index:04d}.json"
     try:
@@ -412,6 +419,13 @@ def _process_new_lines(state: dict, session_id: str, text: str, status: dict) ->
     last_alert = state.setdefault("last_alert", {})
     now = time.time()
     for line in text.splitlines():
+        if "[MATCH_IDENTITY] " in line:
+            try:
+                identity = json.loads(line.split("[MATCH_IDENTITY] ", 1)[1])
+                if isinstance(identity, dict):
+                    match_state["identity"] = identity
+            except (ValueError, TypeError):
+                pass
         label = _classify_line(line)
         if label:
             # Count every occurrence for the per-match tally.

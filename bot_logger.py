@@ -3,6 +3,7 @@ Centralized bot logging - logs all parsed player.log data with timestamps
 """
 from datetime import datetime
 import os
+import json
 from pathlib import Path
 import threading
 from runtime_paths import ensure_runtime_subdir, runtime_file
@@ -349,7 +350,7 @@ def log_actions_available(actions: list):
         _write_lines('a', lines)
 
 
-def log_match_end(result: str, turns: int, duration_sec: float):
+def log_match_end(result: str, turns: int, duration_sec: float, *, identity: dict | None = None):
     """Emit a single structured match-end marker.
 
     Written to bot.log (and thus to the persistent history.log copied by
@@ -368,9 +369,12 @@ def log_match_end(result: str, turns: int, duration_sec: float):
             duration_val = float(duration_sec)
         except Exception:
             duration_val = 0.0
+        identity_lines = []
+        if identity is not None:
+            identity_lines.append(f"[{_timestamp()}] [MATCH_IDENTITY] " + json.dumps(identity, ensure_ascii=True) + "\n")
         _write_lines(
             'a',
-            [
+            identity_lines + [
                 f"[{_timestamp()}] [MATCH_END] result={safe_result} "
                 f"turns={turns_val} duration_sec={duration_val:.2f}\n"
             ],

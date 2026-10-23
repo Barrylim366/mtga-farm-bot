@@ -17,6 +17,7 @@ import threading
 import time as time_module
 import types
 import unittest
+from unittest.mock import Mock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -72,6 +73,28 @@ def make_game(match_id: str | None = "match-1") -> Game:
 
 
 class MatchEndIdempotencyTests(unittest.TestCase):
+    def test_result_uses_account_captured_at_start_even_after_label_changes(self):
+        game = make_game()
+        identity = {"match_id": "match-1", "account": "ulfara#70487", "source": "login"}
+        game.controller.capture_match_account = Mock(return_value=identity)
+        game._mark_match_started()
+        game.controller.capture_match_account.return_value = {
+            "match_id": "match-1", "account": "ChristmasIsland#32386", "source": "switch_target"}
+        with patch("bot_logger.log_match_end") as end:
+            self.assertTrue(game.on_match_end(True))
+        self.assertEqual(end.call_args.kwargs["identity"], identity)
+        game.controller.capture_match_account.assert_called_once_with("match-1")
+
+    def test_match_ending_before_start_does_not_reuse_previous_match_identity(self):
+        game = make_game("match-2")
+        game._match_account_context = {
+            "match_id": "match-1", "account": "ulfara#70487", "source": "login"}
+        identity = {"match_id": "match-2", "account": None, "source": "unknown"}
+        game.controller.capture_match_account = Mock(return_value=identity)
+        with patch("bot_logger.log_match_end") as end:
+            self.assertTrue(game.on_match_end(False))
+        self.assertEqual(end.call_args.kwargs["identity"], identity)
+
     def test_first_signal_is_claimed_and_duplicates_are_not(self):
         game = make_game()
         game._mark_match_started()

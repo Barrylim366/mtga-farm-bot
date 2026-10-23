@@ -17,23 +17,35 @@ class AbilityActivationMixin:
             if not acquired or not action_guard():
                 return False
             # A Cancel elsewhere in Arena is not evidence of our activation UI.
+            # Food's "Sacrifice Food" confirmation must qualify here too, or
+            # failure to recognise it would prevent both activation and recovery.
             if control == "cancel" and self._locate_ability_control("activate") is None:
                 return False
             point = self._locate_ability_control(control)
             if point is None or not action_guard():
                 return False
-            self._click_abs(*point, f"ABILITY_{control.upper()}")
+            label = f"ABILITY_{control.upper()}"
+            if control == "activate" and getattr(self, "_last_ability_activation_control", "") == "sacrifice_food":
+                label = "ABILITY_ACTIVATE_SACRIFICE_FOOD"
+            self._click_abs(*point, label)
             return True
 
     def _locate_ability_control(self, control):
         # Templates are in the same 1920x1080 reference frame as the matcher.
         # The confirmation floats above the source; Cancel is bottom-right.
         region = (0, 180, 1920, 600) if control == "activate" else (1500, 810, 420, 240)
-        return self._locate_image_center_in_scaled_arena_region(
-            f"Buttons/ability_{control}.png", f"ABILITY_{control.upper()}",
-            rel_region=region, confidence=0.88, timeout=0.1, use_direct=False,
-            scales=(0.9, 1.0, 1.1),
-        )
+        variants = ("activate", "sacrifice_food") if control == "activate" else (control,)
+        for variant in variants:
+            point = self._locate_image_center_in_scaled_arena_region(
+                f"Buttons/ability_{variant}.png", f"ABILITY_{variant.upper()}",
+                rel_region=region, confidence=0.88, timeout=0.1, use_direct=False,
+                scales=(0.9, 1.0, 1.1),
+            )
+            if point is not None:
+                if control == "activate":
+                    self._last_ability_activation_control = variant
+                return point
+        return None
 
     def write_ability_activation_debug(self, context):
         """Preserve failure evidence before attempting to dismiss the interface."""
