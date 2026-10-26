@@ -826,31 +826,9 @@ loop considers the same card repeatedly. Stall concessions, target scans, and
 quest reroll outcomes remain available in ordinary history logs. Regression
 tests for the recovery behavior remain.
 
-For a temporary overnight feature soak, run
-`.venv\Scripts\python.exe tools/temporary_feature_soak_audit.py --arm` before
-starting the bot (use `.venv/bin/python` on macOS/Linux). This marks the run's
-start and current branch/revision in the gitignored runtime directory. Restart
-the bot app after code changes, then start it with your intended settings.
-Afterward, `$audit-logs` runs the checker automatically using the saved boundary.
-It reports retained evidence for deck selection/reuse, mulligans, rewards,
-Free Forge, recovery, long-game concedes, quest policy, and shutdown scheduling,
-with source lines and explicit manual checks. Unexercised features are reported
-as not observed; event counts alone do not establish correct gameplay. No extra
-process runs overnight and log rotation can remove evidence. `MTGA_RUNTIME_DIR`
-and `--runtime-dir` are supported; use the same directory for setup and audit.
-The marker stays active until re-armed; `--since <Unix epoch>` or `--all-history`
-overrides it for a different audit window. Remove the marker to disable it.
-
-The temporary checker also covers the pending blocker recovery, pile choice,
-and stack ordering cancellation changes in `changed_feature_checks`. It separates
-extra-blocker and Cancel attempts, pile arming/clicks/closure, and ordering
-cancellation from recovery errors, unsupported choices, and ordering timeouts.
-Shared group recovery errors can also come from Scry/Surveil. Rope and stuck-action
-events are counted for comparison with the normal match audit. These checks mark
-missing encounters as **not exercised** and observed errors as **needs review**;
-they never infer a pass from event counts. Check snapshots, click records and GRE
-acknowledgments for outcomes. To inspect the report directly after the run:
-`.venv\Scripts\python.exe tools/temporary_feature_soak_audit.py`.
+The temporary overnight feature checker and its tests are archived on branch
+`archive/temporary-soak-tests-2026-10-26`. Session audits use the permanent
+match records, ordinary history logs, and retained debug artefacts.
 
 ### Concede screenshots
 

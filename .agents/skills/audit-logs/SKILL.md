@@ -5,7 +5,7 @@ description: Audit a Burning Lotus bot session from local runtime records, Gold 
 
 # Audit bot logs
 
-Use this skill when the user explicitly invokes `$audit-logs`. Report findings in chat and maintain the local, gitignored `audit-history.csv` and `audit-matches.csv` as authorized by the user. Do not modify bot code, records, or temporary soak diagnostics as part of the audit.
+Use this skill when the user explicitly invokes `$audit-logs`. Report findings in chat and maintain the local, gitignored `audit-history.csv` and `audit-matches.csv` as authorized by the user. Do not modify bot code or records as part of the audit.
 
 1. Read repository `CLAUDE.md` and `.claude/skills/debug-artefacts/SKILL.md`. Never read `credentials.json`. Start with `runtime/records/`, relevant `runtime/debug/` bundles, and `runtime/status.json`; then inspect focused lines in `runtime/analysis/history.log*` and `alerts.log`. Respect `MTGA_RUNTIME_DIR`.
 2. Run `.venv\Scripts\python.exe .agents\skills\audit-logs\scripts\summarize.py` on Windows (or `.venv/bin/python` elsewhere). It returns a JSON index for the latest session and previous session and upserts the selected session into `audit-history.csv` in the project root. Use `--session <session-id-prefix>` when the user names another run. Treat its account labels and concede candidates as leads to verify in source artefacts. Check the output's `csv.updated` and report any CSV error. Use `--no-csv` only when a read-only audit is explicitly requested; `--csv <path>` selects an alternate destination.
@@ -13,7 +13,7 @@ Use this skill when the user explicitly invokes `$audit-logs`. Report findings i
 4. Report measured Gold balance gain by account and in total. This is the bot's observed increase from each account's first Gold balance, not gross rewards. For the current session, prefer `status.json` when its session ID matches; otherwise use baseline/farmed events in history. Merge aliases only when their identity is unambiguous, and never add two aliases of one account. Flag late first balances, missing log coverage, and uncertain attribution. Compute overall Gold/hour only when both Gold and full start/end times are known: total measured Gold / whole-session wall-clock hours, including queues and switches. A running session's rate is provisional. Do not estimate Gold from wins or use summed match time.
 5. Show overall and best-effort per-account match results, win rate, and concede evidence. Compare the previous session with counts and denominators; show a Gold or Gold/hour change only when both sessions have sound data. Prioritize all critical incidents and the most repeated failures, including concede priority context, quest reroll freshness/outcome, and opponent creature target scans. Link to exact records, log lines, screenshots, or cursor/hover bundles. Label each cause as confirmed, likely, or unresolved; do not infer a fix from an alert alone.
 
-Keep the final audit concise with evidence links. If an artefact has been rotated away, say what is unavailable instead of reporting a clean zero. Temporary soak signals may disappear after their bugs are fixed; the audit must continue to work from persistent match records and ordinary logs.
+Keep the final audit concise with evidence links. If an artefact has been rotated away, say what is unavailable instead of reporting a clean zero. Use persistent match records and ordinary logs when diagnostic bundles no longer remain.
 
 ### Stall-only concede statistics
 
@@ -108,44 +108,6 @@ counted as `ability_activation_timeout` in match records, independent of concede
 or match result. A timeout can be followed by a late acknowledgment; do not count
 these observations as separate failed abilities. Log event counts cover retained
 history only; report rotated evidence as missing, never as zero successes.
-
-For the temporary overnight feature soak, also run
-`.venv/Scripts/python.exe tools/temporary_feature_soak_audit.py` on Windows
-(or `.venv/bin/python tools/temporary_feature_soak_audit.py` elsewhere). It is
-read-only and reports retained log evidence for long-game concede attempts,
-Reconnect clicks, ability activation, the 750-gold quest policy, win-deck
-selection, and shutdown scheduling. Link its example lines in the audit. Treat
-zero as "not observed in retained history," not as a failure or proof the
-feature never ran. It cannot verify static UI appearance or deck win rate.
-
-The checker also covers preferred deck decisions, confirmed deck submissions,
-Starter deck reuse, mulligan keep/tuck events and recovery, confirmed versus
-unconfirmed end-screen dismissal, reward-click attempts, Free Forge approvals
-and safety exceptions, battlefield fallback selection, sacrifice-option clicks,
-watchdog/concede incidents, account switching, and notification delivery errors.
-These are event counts, not feature pass/fail results or unique match counts.
-Corroborate behavior against snapshots, GRE evidence, and the normal summary.
-Use the checker's `manual_checks` for features ordinary logs cannot establish.
-
-Report `changed_feature_checks` for the pending blocker recovery, pile choice,
-and stack ordering cancellation changes. Keep attempts separate from outcomes;
-review blocker snapshots and GRE acknowledgments, pile closure evidence, and
-click records around ordering cancellation. Shared group recovery errors may
-belong to Scry/Surveil. Include rope/stuck-action counts as context, not proof
-that these changes caused them. Unexercised paths remain untested.
-
-Before an overnight run, the user or setup task may run the checker with
-`--arm`. This saves `runtime/analysis/temporary-feature-soak.json` with the start
-epoch, branch, commit, and working-tree status; it does not launch the bot.
-Normal checker invocation automatically reads that marker and includes all
-sessions after its boundary. Report the saved revision and actual coverage;
-restart the app after code changes to load them. Do not re-arm during an audit.
-The marker survives restarts but does not preserve rotated logs. A first retained
-timestamp after the marker can mean delayed startup or missing history; do not
-claim complete coverage from it. `coverage: unavailable` (exit 2) means no dated
-history in the selected window, even if older logs exist. `--since <Unix epoch>`
-or `--all-history` explicitly overrides the marker when auditing another run.
-Do not use an old marker to claim that a different selected session was tested.
 
 ### Permanent concede incidents
 
