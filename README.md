@@ -7,6 +7,10 @@ those blocks instead of selecting the creature again or cancelling them.
 Ability confirmation recognises both **Activate Ability** and **Sacrifice Food**.
 Cancel recovery accepts either interface, while activation still requires a fresh
 game acknowledgment; a click alone does not prove payment or resolution.
+Food activation remembers matching ability-creation messages even when the ability
+resolves before the next check, preventing false timeouts and unnecessary Cancel
+recovery. This acknowledgment confirms activation started, not that it resolved;
+source selection still uses one click without an automatic retry.
 
 Gold tracking resolves unambiguous bare and tagged account names to one account,
 preserving its first session balance. Restored account labels are checked against
@@ -63,7 +67,9 @@ Seasonal rewards and other overlays showing **Claim Rewards** or **Click to Cont
 
 Login notifications are also recognised from Player.log rather than the screen alone. MTGA wraps them in `BEGIN home page notification flow` / `END home page notification flow`; a BEGIN with no END, scene change or reload after it means one is still on screen. When that is the case and no text template matches, recovery (after the same five-second persistence wait) clicks the bottom-right button position, where all of them put their button: **Claim**, the **Continue** of "New Season Placement", and a set promo's **Get Started!**. The "[Click to Continue]" pages also accept that click. This was added after a season rollover stranded the bot on "New Season Placement": its "[Click to Continue]" sits on a darker backdrop that scored 0.64 against the text template, below the 0.70 threshold. Verified live on 2026-10-10 across an account switch: Claim, Placement and the Reality Fracture promo were cleared in turn, MTGA logged the END, and the bot went on to its quest reroll on Home. In that run **Get Started!** closed the notification flow without opening the Store; if it ever navigates instead, the resulting scene change ends the flow and normal Home navigation takes over.
 
-Reward recovery runs before quest reroll and Home navigation. While a verified popup is waiting to be handled, reroll and deck navigation pause. Text checks include buttons that say only **Claim**. If text recognition misses, recovery waits for a later observation; it never falls back to the generic orange Claim-button shape. After three consecutive unrecognized-screen checks, Starter navigation uses a Continue-position click, followed by a centre click only if a fresh check still reports an unrecognized screen in the same Arena window. A recognized page, a popup, changed or invalid geometry, or a failed check prevents the centre click. Claim, Claim Rewards, Click to Continue and Reconnect text take priority over generic clicks. The fallback rechecks that matchmaking/gameplay has not started before sending input, rejects unsupported or off-screen window geometry, and sends no clicks if window focusing fails on Windows.
+The post-match **Did you have fun in the match?** survey is handled by matching and clicking its **happy face**. The same popup checks look for Claim/Continue controls and the happy face, including while dismissing the match result. Immediate post-match handling clicks a detected face without the background recovery delay; if the survey appears later, background recovery catches it after five seconds without progress. Happy-face matching uses a 0.97 threshold to distinguish it from the sad face. Reconnect retains priority over the survey, and the survey takes priority over Continue text behind it.
+
+Reward recovery runs before quest reroll and Home navigation. While a verified popup is waiting to be handled, reroll and deck navigation pause. Text checks include buttons that say only **Claim**. If text recognition misses, recovery waits for a later observation; it never falls back to the generic orange Claim-button shape. After three consecutive unrecognized-screen checks, Starter navigation uses a Continue-position click, followed by a centre click only if a fresh check still reports an unrecognized screen in the same Arena window. A recognized page, a popup, changed or invalid geometry, or a failed check prevents the centre click. Claim, Claim Rewards, Click to Continue, the happy face and Reconnect take priority over generic clicks. The fallback rechecks that matchmaking/gameplay has not started before sending input, rejects unsupported or off-screen window geometry, and sends no clicks if window focusing fails on Windows.
 
 During cost payment, the bot looks for **Auto Pay** if Submit is unavailable. If another selection is still using the controller, payment retries for up to 16 seconds while the same payment prompt remains active. Normal play stays paused until the game acknowledges advancement after payment.
 
@@ -851,6 +857,8 @@ under `runtime/concedes/` (or `MTGA_RUNTIME_DIR/concedes/`). Each incident conta
 up to two `attempt-N.jpg` images and `incident.json` with the reason, session/match
 IDs, attempt and capture status, and final sequence outcome. The newest 30
 incidents are retained independently of other debug bundles.
+Configured game-duration-limit concedes do not create incident folders, screenshots,
+or metadata files; their attempts and results remain in the ordinary logs and match records.
 
 Images contain only the verified Arena client area, with solid masks over both
 player-name areas. They fit within 1280×720, preserve aspect ratio, and use JPEG

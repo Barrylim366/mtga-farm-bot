@@ -139,12 +139,95 @@ class PopupRecoveryTests(unittest.TestCase):
     def test_text_assets_and_thresholds(self):
         targets = self.c._POPUP_TARGETS
         self.assertEqual(targets[0][1], "POPUP_RECONNECT")
-        self.assertEqual(targets[1][1], "POPUP_CLAIM_REWARDS")
-        self.assertEqual(targets[2][1], "POPUP_CLAIM")
-        self.assertEqual(targets[3][3], 0.70)
-        self.assertGreater(targets[1][3], targets[3][3])
+        self.assertEqual(targets[1][1], "POPUP_HAPPY_FACE")
+        by_label = {label: threshold for _, label, _, threshold in targets}
+        self.assertEqual(by_label["POPUP_CONTINUE"], 0.70)
+        self.assertGreater(by_label["POPUP_CLAIM_REWARDS"], by_label["POPUP_CONTINUE"])
         for filename, *_ in targets:
             self.assertTrue(os.path.exists(os.path.join(self.c._buttons_dir(), filename)))
+
+    @unittest.skipIf(cv2 is None, "OpenCV unavailable")
+    def test_recorded_survey_matches_happy_face_at_scaled_window_coordinates(self):
+        frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "fun_survey.png"))
+        self.assertIsNotNone(frame)
+        self.c._ensure_arena_region = Mock(return_value=None)
+        for width, height in ((1920, 1080), (1280, 720)):
+            with self.subTest(size=(width, height)):
+                arena = (200, 100, width, height)
+                self.c._arena_region_provider._last_detection_result = ArenaDetectionResult(
+                    False, arena, "anchor_not_found", "survey hides anchors",
+                )
+                self.c._popup_vision.capture = Mock(return_value=cv2.resize(frame, (width, height)))
+                candidate = Controller._find_blocking_popup(self.c)
+                self.assertIsNotNone(candidate)
+                self.assertEqual(candidate[0], "POPUP_HAPPY_FACE")
+                self.assertEqual(candidate[2], arena)
+                self.assertAlmostEqual(candidate[1][0], 200 + 689 * width / 1266, delta=3)
+                self.assertAlmostEqual(candidate[1][1], 100 + 384 * height / 719, delta=3)
+
+    @unittest.skipIf(cv2 is None, "OpenCV unavailable")
+    def test_sad_face_alone_and_empty_screen_do_not_match(self):
+        import numpy as np
+        frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "fun_survey.png"))
+        self.assertIsNotNone(frame)
+        frame[340:430, 645:735] = 0  # Remove happy; leave sad and all survey text.
+        self.c._ensure_arena_region = Mock(return_value=(0, 0, 1920, 1080))
+        for width, height in ((1920, 1080), (1280, 720)):
+            arena = (0, 0, width, height)
+            self.c._ensure_arena_region.return_value = arena
+            self.c._popup_vision.capture = Mock(return_value=cv2.resize(frame, (width, height)))
+            candidate = Controller._find_blocking_popup(self.c)
+            # The screenshot also contains valid Continue text near the bottom.
+            self.assertTrue(candidate is None or candidate[0] != "POPUP_HAPPY_FACE")
+        self.c._popup_vision.capture = Mock(return_value=np.zeros((720, 1280, 3), dtype=np.uint8))
+        self.assertIsNone(Controller._find_blocking_popup(self.c))
+
+    @unittest.skipIf(cv2 is None, "OpenCV unavailable")
+    def test_survey_takes_priority_over_continue_but_not_disconnect(self):
+        frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "fun_survey.png"))
+        self.assertIsNotNone(frame)
+        frame = cv2.resize(frame, (1920, 1080))
+        continued = cv2.imread(os.path.join(self.c._buttons_dir(), "click_to_continue_text.png"))
+        h, w = continued.shape[:2]
+        frame[1044:1044 + h, 840:840 + w] = continued
+        self.c._ensure_arena_region = Mock(return_value=(0, 0, 1920, 1080))
+        self.c._popup_vision.capture = Mock(return_value=frame)
+        self.assertEqual(Controller._find_blocking_popup(self.c)[0], "POPUP_HAPPY_FACE")
+        disconnected = cv2.imread(os.path.join(self.c._buttons_dir(), "disconnected_text.png"))
+        h, w = disconnected.shape[:2]
+        frame[400:400 + h, 300:300 + w] = disconnected
+        # A disconnect message blocks survey clicks even without its Reconnect button.
+        self.assertIsNone(Controller._find_blocking_popup(self.c))
+        self.assertTrue(self.c._popup_modal_present)
+
+    def test_happy_face_background_wait_and_click(self):
+        self.c._find_blocking_popup.return_value = (
+            "POPUP_HAPPY_FACE", (1045, 577), (0, 0, 1920, 1080),
+        )
+        self.arm()
+        self.clock.return_value = 104.99
+        self.assertFalse(self.c._recover_blocking_popup())
+        self.c._click_abs.assert_not_called()
+        self.clock.return_value = 105.0
+        self.assertTrue(self.c._recover_blocking_popup())
+        self.c._click_abs.assert_called_once_with(1045, 577, "POPUP_HAPPY_FACE")
+
+    def test_happy_face_respects_stop_disappearance_and_input_ownership(self):
+        happy = ("POPUP_HAPPY_FACE", (1045, 577), (0, 0, 1920, 1080))
+        self.c._find_blocking_popup.return_value = happy
+        self.arm()
+        self.c.input._exclusive = True
+        self.c.input._owner_ident = -1
+        self.assertFalse(self.c._recover_blocking_popup())
+        self.c._click_abs.assert_not_called()
+        self.c.input._exclusive = False
+        self.c._find_blocking_popup.side_effect = [happy, None]
+        self.assertFalse(self.c._recover_blocking_popup())
+        self.c._click_abs.assert_not_called()
+        self.c._find_blocking_popup.side_effect = None
+        self.c._stop_requested = True
+        self.assertFalse(self.c._recover_blocking_popup())
+        self.c._click_abs.assert_not_called()
 
     def test_reconnect_waits_fifteen_seconds_and_retries_only_after_another_wait(self):
         self.c._find_blocking_popup.return_value = (

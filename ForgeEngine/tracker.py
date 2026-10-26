@@ -51,6 +51,7 @@ class ArenaTracker:
         self._reset_game()
 
     def _reset_game(self) -> None:
+        self._activation_observer: dict | None = None
         self.zones: dict[int, dict] = {}
         self.objects: dict[int, dict] = {}
         self.players: dict[int, dict] = {}
@@ -94,7 +95,12 @@ class ArenaTracker:
         if kind in GSM_TYPES:
             state = message.get("gameStateMessage")
             if state:
+                watch = self._activation_observer
                 self._apply_state(state)
+                if (watch is not None and self._activation_observer is None
+                        and watch["match_id"] == self.game_info.get("matchID")):
+                    self._activation_observer = watch
+                self._observe_activation(message, state)
             return
         if kind in REQUEST_TYPES:
             if self.my_seat is None and only_seat is not None:
@@ -142,6 +148,68 @@ class ArenaTracker:
         self.actions = list(gsm.get("actions") or [])
 
     # -- queries --------------------------------------------------------------
+
+    def begin_activation_observation(self, sources: set, ability_id: int) -> dict:
+        """Watch only new evidence received after this attempt was armed."""
+        watch = {
+            "match_id": self.game_info.get("matchID"), "sources": set(sources),
+            "ability_id": ability_id, "seat": self.my_seat,
+            "existing": set(self.objects), "created": {}, "objects": {},
+            "evidence": None, "armed_message": self.messages_seen,
+            "armed_state": self.game_state_id,
+        }
+        self._activation_observer = watch
+        return watch
+
+    def end_activation_observation(self, watch: dict) -> None:
+        if self._activation_observer is watch:
+            self._activation_observer = None
+
+    def activation_evidence(self, watch: dict) -> dict | None:
+        if (self._activation_observer is not watch
+                or watch["match_id"] != self.game_info.get("matchID")):
+            return None
+        evidence = watch["evidence"]
+        return dict(evidence) if evidence else None
+
+    def _observe_activation(self, message: dict, state: dict) -> None:
+        watch = self._activation_observer
+        if watch is None:
+            return
+        if watch["match_id"] != self.game_info.get("matchID"):
+            self._activation_observer = None
+            return
+        if watch["evidence"] is not None:
+            return
+        state_id = _as_int(state.get("gameStateId"))
+        if (state_id is not None and watch["armed_state"] is not None
+                and state_id <= watch["armed_state"]):
+            return
+        for annotation in state.get("annotations") or []:
+            if ("AnnotationType_AbilityInstanceCreated" in (annotation.get("type") or [])
+                    and annotation.get("affectorId") in watch["sources"]):
+                for instance_id in annotation.get("affectedIds") or []:
+                    if instance_id not in watch["existing"]:
+                        watch["created"][instance_id] = annotation["affectorId"]
+        for obj in state.get("gameObjects") or []:
+            instance_id = obj.get("instanceId")
+            if (instance_id not in watch["existing"]
+                    and obj.get("type") == "GameObjectType_Ability"):
+                watch["objects"][instance_id] = dict(obj)
+        for instance_id, obj in watch["objects"].items():
+            source = obj.get("parentId", watch["created"].get(instance_id))
+            if (source in watch["sources"] and obj.get("grpId") == watch["ability_id"]
+                    and obj.get("controllerSeatId") == watch["seat"]):
+                watch["evidence"] = {
+                    "kind": "source_ability_created", "source_id": source,
+                    "ability_id": watch["ability_id"], "instance_id": instance_id,
+                    "msg_id": message.get("msgId"), "game_state_id": state.get("gameStateId"),
+                }
+                return
+        # One attempt lasts seconds; cap unmatched split-message evidence.
+        for key in ("created", "objects"):
+            while len(watch[key]) > 128:
+                watch[key].pop(next(iter(watch[key])))
 
     def pending_is_current(self, kind: str) -> bool:
         """True while the GRE still waits for our answer to a request of this kind.

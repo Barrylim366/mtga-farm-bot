@@ -1,5 +1,6 @@
 """Activation handshake and offline visual regressions for the Marshal stall."""
 from contextlib import nullcontext
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -53,7 +54,77 @@ class AbilityHandshakeTest(unittest.TestCase):
         self.tracker.zones[27]["objectInstanceIds"].append(instance_id)
         self.tracker.objects[instance_id] = {
             "instanceId": instance_id, "parentId": parent, "type": "GameObjectType_Ability",
+            "grpId": 21730, "controllerSeatId": ME,
         }
+
+    def ability_messages(self, parent=290, grp=21730, seat=ME):
+        # Minimal shape from Food's AbilityInstanceCreated GRE messages. The
+        # following diff removes the ability before the next handshake check.
+        return [{
+            "type": "GREMessageType_GameStateMessage", "msgId": 101,
+            "gameStateMessage": {
+                "type": "GameStateType_Diff", "gameStateId": 11,
+                "gameObjects": [{"instanceId": 500, "parentId": parent,
+                                 "grpId": grp, "controllerSeatId": seat,
+                                 "type": "GameObjectType_Ability"}],
+                "annotations": [{"type": ["AnnotationType_AbilityInstanceCreated"],
+                                 "affectorId": parent, "affectedIds": [500]}],
+            },
+        }, {
+            "type": "GREMessageType_GameStateMessage", "msgId": 102,
+            "gameStateMessage": {"type": "GameStateType_Diff", "gameStateId": 12,
+                                 "diffDeletedInstanceIds": [500]},
+        }]
+
+    def feed_batch(self, messages):
+        self.tracker.feed_line(json.dumps({"greToClientEvent": {"greToClientMessages": messages}}))
+
+    def test_fast_food_activation_survives_creation_and_deletion_in_one_batch(self):
+        def confirm(control, *, action_guard):
+            self.assertTrue(action_guard())
+            self.feed_batch(self.ability_messages())
+            return True
+        self.controller.click_ability_control.side_effect = confirm
+        self.run_activation()
+        self.assertNotIn(500, self.tracker.objects)
+        self.bridge.ability_result.assert_called_once_with(290, True)
+        self.controller.click_ability_control.assert_called_once()
+        self.controller.select_battlefield_permanent.assert_called_once_with(290, 1)
+        self.controller.write_ability_activation_debug.assert_not_called()
+        self.assertIsNone(self.tracker._activation_observer)
+        self.assertTrue(any('source_ability_created' in line for line in self.logs))
+
+    def test_unrelated_batched_abilities_are_not_acknowledged(self):
+        for kwargs in ({"parent": 999}, {"grp": 123}, {"seat": OPP}):
+            with self.subTest(kwargs=kwargs):
+                self.setUp()
+                self.controller.select_battlefield_permanent.side_effect = (
+                    lambda *args: self.feed_batch(self.ability_messages(**kwargs)) or True)
+                self.run_activation()
+                self.bridge.ability_result.assert_called_once_with(290, False)
+
+    def test_evidence_during_failure_capture_prevents_recovery_call(self):
+        self.controller.write_ability_activation_debug.side_effect = (
+            lambda context: self.feed_batch(self.ability_messages()))
+        self.run_activation()
+        self.assertNotIn('cancel', [c.args[0] for c in self.controller.click_ability_control.call_args_list])
+        self.bridge.ability_result.assert_called_once_with(290, True)
+
+    def test_observer_cleanup_on_selection_exception(self):
+        self.controller.select_battlefield_permanent.side_effect = RuntimeError('selection failed')
+        with self.assertRaises(RuntimeError):
+            self.run_activation()
+        self.assertIsNone(self.tracker._activation_observer)
+        self.assertFalse(self.hooks._ability_busy.locked())
+
+    def test_observation_does_not_leak_into_next_attempt(self):
+        self.controller.select_battlefield_permanent.side_effect = (
+            lambda *args: self.feed_batch(self.ability_messages()) or True)
+        self.run_activation()
+        self.bridge.ability_result.reset_mock()
+        self.controller.select_battlefield_permanent.side_effect = None
+        self.run_activation()
+        self.bridge.ability_result.assert_called_once_with(290, False)
 
     def run_activation(self):
         with patch.object(hooks_module, "time", self.clock), \
@@ -193,6 +264,58 @@ class AbilityHandshakeTest(unittest.TestCase):
         self.run_activation()
         self.own.assert_called_once()
         self.controller.select_battlefield_permanent.assert_not_called()
+
+
+class ActivationObserverTest(unittest.TestCase):
+    setUp = AbilityHandshakeTest.setUp
+    stack = AbilityHandshakeTest.stack
+    ability_messages = AbilityHandshakeTest.ability_messages
+    feed_batch = AbilityHandshakeTest.feed_batch
+
+    def test_split_annotation_and_object_acknowledge_only_matching_ability(self):
+        for annotation_first in (True, False):
+            with self.subTest(annotation_first=annotation_first):
+                self.setUp()
+                watch = self.tracker.begin_activation_observation({290}, 21730)
+                creation = self.ability_messages()[0]
+                state = creation['gameStateMessage']
+                obj = state['gameObjects'][0]
+                del obj['parentId']  # Source must come from the separate annotation.
+                part = 'gameObjects' if annotation_first else 'annotations'
+                deferred = state.pop(part)
+                self.feed_batch([creation])
+                self.assertIsNone(self.tracker.activation_evidence(watch))
+                self.feed_batch([{
+                    'type': 'GREMessageType_GameStateMessage', 'msgId': 102,
+                    'gameStateMessage': {'type': 'GameStateType_Diff', 'gameStateId': 12,
+                                         part: deferred},
+                }])
+                self.assertEqual(self.tracker.activation_evidence(watch)['source_id'], 290)
+
+    def test_existing_ability_and_old_state_do_not_acknowledge(self):
+        for existing in (True, False):
+            with self.subTest(existing=existing):
+                self.setUp()
+                if existing:
+                    self.stack()
+                watch = self.tracker.begin_activation_observation({290}, 21730)
+                messages = self.ability_messages()
+                if not existing:
+                    messages[0]['gameStateMessage']['gameStateId'] = self.tracker.game_state_id
+                self.feed_batch(messages)
+                self.assertIsNone(self.tracker.activation_evidence(watch))
+
+    def test_match_change_invalidates_already_latched_evidence(self):
+        watch = self.tracker.begin_activation_observation({290}, 21730)
+        self.feed_batch(self.ability_messages())
+        self.assertIsNotNone(self.tracker.activation_evidence(watch))
+        self.tracker.feed_message({
+            'type': 'GREMessageType_GameStateMessage',
+            'gameStateMessage': {'type': 'GameStateType_Diff', 'gameStateId': 13,
+                                 'gameInfo': {'matchID': 'different'}},
+        })
+        self.assertIsNone(self.tracker.activation_evidence(watch))
+        self.assertIsNone(self.tracker._activation_observer)
 
 
 class AbilityControlTest(unittest.TestCase):

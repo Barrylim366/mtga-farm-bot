@@ -11396,7 +11396,9 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         tracker = getattr(self, "_Controller__decision_watchdog", None)
         if tracker is not None:
             runtime_status.update_status(decision_watchdog=tracker.describe())
-        incident = ConcedeIncident.create(label, expected_match_id)
+        # The configured game-length limit is routine, so it needs no debug bundle.
+        incident = (None if label == "TIMEOUT_CONCEDE" else
+                    ConcedeIncident.create(label, expected_match_id))
         self.__active_concede_incident = incident
         try:
             if self._stop_requested or self.__concede_completed_event.is_set():
@@ -11773,7 +11775,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         if not advanced:
             bot_logger.log_info("Match completed - dismissed end screen (unconfirmed; queue loop safety net will keep retrying)")
 
-        # Directly claim any post-match reward overlays (Claim, Continue, Level Up)
+        # Directly handle post-match reward overlays and the happy-face survey
         # without idling through the post-match delay or waiting for the queue loop.
         find_popup = getattr(self, "_find_blocking_popup", None)
         if callable(find_popup):
@@ -11783,8 +11785,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 popup = find_popup()
                 if popup is not None:
                     label, point, _arena = popup
-                    if label in ("POPUP_CLAIM", "POPUP_CLAIM_REWARDS", "POPUP_CLAIM_BTN", "POPUP_CONTINUE", "POPUP_NOTIFICATION_CONTINUE"):
-                        bot_logger.log_info(f"Post-match reward popup detected ({label}); clicking to claim at {point}.")
+                    if label in ("POPUP_CLAIM", "POPUP_CLAIM_REWARDS", "POPUP_CLAIM_BTN", "POPUP_CONTINUE", "POPUP_NOTIFICATION_CONTINUE", "POPUP_HAPPY_FACE"):
+                        bot_logger.log_info(f"Post-match popup detected ({label}); clicking target at {point}.")
                         self._click_abs(int(point[0]), int(point[1]), label)
                         time.sleep(1.2)
                     else:

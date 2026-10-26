@@ -480,6 +480,7 @@ class ForgeHooks:
             twins.add(card_id)
             return {
                 "offered": only_this_ability(card_id),
+                "ability_id": ability_id,
                 "twins": twins,
                 "name": bridge.name(card_id),
                 "match_id": tracker.game_info.get("matchID"),
@@ -496,26 +497,44 @@ class ForgeHooks:
             tracker = bridge.tracker
             if tracker.game_info.get("matchID") != situation["match_id"]:
                 return False
+            evidence = tracker.activation_evidence(situation["observer"])
+            if evidence:
+                situation["ack_evidence"] = evidence
+                return True
             if any(a.get("parentId") in situation["twins"]
+                   and a.get("grpId") == situation["ability_id"]
+                   and a.get("controllerSeatId") == tracker.my_seat
                    and a.get("instanceId") not in situation["stack_before"]
                    for a in tracker.abilities_on_stack()):
+                situation["ack_evidence"] = {"kind": "source_ability_on_stack"}
                 return True
             kind = tracker.pending_type
             pending = tracker.pending or {}
-            return (
+            started = (
                 kind in ("GREMessageType_PayCostsReq", "GREMessageType_SelectTargetsReq")
                 and tracker.pending_is_current(kind)
                 and tracker.my_seat in (pending.get("systemSeatIds") or [])
                 and json.dumps(pending, sort_keys=True) != situation["pending_before"]
             )
+            if started:
+                situation["ack_evidence"] = {
+                    "kind": kind, "msg_id": pending.get("msgId"),
+                    "game_state_id": pending.get("gameStateId"),
+                }
+            return started
 
     def activate_ability(self, controller, card_id: int, ability_id: int, own: Callable[[], None]) -> None:
         if not self._ability_busy.acquire(blocking=False):
             log(f"ability: concurrent activation skipped card={card_id} ability={ability_id}")
             return
         try:
+            self._activation_watch = None
             self._activate_ability(controller, card_id, ability_id, own)
         finally:
+            with self.bridge._lock:
+                if self._activation_watch is not None:
+                    self.bridge.tracker.end_activation_observation(self._activation_watch)
+                self._activation_watch = None
             self._ability_busy.release()
 
     def _activate_ability(self, controller, card_id: int, ability_id: int, own: Callable[[], None]) -> None:
@@ -545,7 +564,8 @@ class ForgeHooks:
         context = f"match_id={match_id} card={card_id} ability={ability_id}"
 
         def acknowledged(confirmed):
-            log(f"ABILITY_ACTIVATION_ACKNOWLEDGED: {context} confirmation_clicked={confirmed}")
+            evidence = json.dumps(situation.get("ack_evidence"), sort_keys=True)
+            log(f"ABILITY_ACTIVATION_ACKNOWLEDGED: {context} confirmation_clicked={confirmed} evidence={evidence}")
             self.bridge.ability_result(card_id, True)
 
         def allowed():
@@ -559,6 +579,18 @@ class ForgeHooks:
 
         if not allowed():
             return None
+        with self.bridge._lock:
+            # Drain old messages before arming; only subsequent evidence belongs
+            # to the source click below. The observer sees every message in a poll.
+            self.bridge.sync()
+            if (self.bridge.tracker.game_info.get("matchID") != match_id
+                    or self.bridge.tracker.turn_info.get("turnNumber") != situation["turn"]):
+                return None
+            situation["stack_before"] = set(self.bridge.tracker.objects)
+            self._activation_watch = self.bridge.tracker.begin_activation_observation(
+                situation["twins"], ability_id,
+            )
+            situation["observer"] = self._activation_watch
         if not controller.select_battlefield_permanent(card_id, 1):
             log(f"ability: {name}: not found on the battlefield; not used this turn")
             self.bridge.ability_result(card_id, False)
@@ -592,8 +624,20 @@ class ForgeHooks:
             "name": name, "confirmation_clicked": confirmed,
             "pending_before": situation["pending_before"],
             "pending_after": pending_after,
+            "activation_observer": {
+                "match_id": match_id, "source_ids": sorted(situation["twins"]),
+                "ability_id": ability_id,
+                "armed_message": situation["observer"]["armed_message"],
+                "armed_state": situation["observer"]["armed_state"],
+                "evidence": situation.get("ack_evidence"),
+            },
         })
         # Cancel only if the same local activation is still unacknowledged.
+        if not allowed():
+            return None
+        if self._started(situation):
+            acknowledged(confirmed)
+            return None
         cancelled = controller.click_ability_control(
             "cancel", action_guard=lambda: allowed() and not self._started(situation),
         )
