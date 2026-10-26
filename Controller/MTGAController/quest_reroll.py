@@ -58,7 +58,7 @@ def replacement_verified(before, after):
 
 
 class QuestRerollMixin:
-    _QUEST_REROLL_TIMEOUT = 10.0
+    _QUEST_REROLL_TIMEOUT = 18.0
     # One continuous daily-quest band in the normalized 1920x1080 frame.
     # Its right edge excludes daily/weekly win rewards.
     _QUEST_TILE_ROI = (50, 750, 860, 210)
@@ -290,10 +290,10 @@ class QuestRerollMixin:
         # Profile briefly removes the normal nav anchors during loading, so
         # allow reacquisition to settle before trying the Home click again.
         reached_home = False
-        for _ in range(3):
-            if deadline is not None and time.monotonic() + 4.0 >= deadline:
-                break
-            time.sleep(1.0)
+        for attempt in range(3):
+            # Profile briefly removes the normal nav anchors during loading, so
+            # allow transition to settle before the first Home click.
+            time.sleep(1.5 if attempt == 0 else 1.0)
             if not self._reroll_can_act():
                 return None
             try:
@@ -436,8 +436,15 @@ class QuestRerollMixin:
                 self._reroll_log("failed", "dialog still visible after Cancel; navigation blocked")
                 return False
         if not self._quest_reroll_home_visible():
-            self._reroll_log("failed", "Home not visible after dialog; navigation blocked")
-            return False
+            # Dialog is closed but Home is not currently active (e.g. stranded on Profile or other tab).
+            # Navigate to Home to recover.
+            try:
+                self._navigate_to_home()
+            except Exception:
+                pass
+            if not self._quest_reroll_home_visible():
+                self._reroll_log("failed", "Home not visible after dialog; navigation blocked")
+                return False
         self._quest_reroll_dialog_open = False
         return True
 

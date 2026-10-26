@@ -2580,8 +2580,64 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             time.sleep(0.25)
         return False
 
+    def _is_login_splash_button_visible(self) -> bool:
+        """True if MTGA's intermediate 'Register / Log In' splash screen button is visible."""
+        splash_btn_img = os.path.join(self._buttons_dir(), "login_splash_btn.png")
+        if not os.path.exists(splash_btn_img):
+            splash_btn_img = self._app_path("assets", "login_splash_btn.png")
+        if not os.path.exists(splash_btn_img):
+            return False
+        scales = [round(0.70 + 0.05 * i, 2) for i in range(13)]
+        return self._locate_image_center_in_scaled_arena_region(
+            splash_btn_img, "LOGIN_SPLASH_BTN", rel_region=None, confidence=0.75, timeout=1.0, scales=scales
+        ) is not None
+
+    def _handle_login_splash_if_visible(self) -> bool:
+        """If MTGA's intermediate 'Register / Log In' splash screen is visible,
+        click 'Log In' so the email/password credential form is displayed."""
+        splash_btn_img = os.path.join(self._buttons_dir(), "login_splash_btn.png")
+        if not os.path.exists(splash_btn_img):
+            splash_btn_img = self._app_path("assets", "login_splash_btn.png")
+        if not os.path.exists(splash_btn_img):
+            return False
+
+        scales = [round(0.70 + 0.05 * i, 2) for i in range(13)]
+        point = self._locate_image_center_in_scaled_arena_region(
+            splash_btn_img,
+            "LOGIN_SPLASH_BTN",
+            rel_region=None,
+            confidence=0.75,
+            timeout=2.0,
+            scales=scales,
+        )
+        if point is not None:
+            bot_logger.log_info(
+                f"Account switch: intermediate splash screen detected, clicking 'Log In' at {point}."
+            )
+            self._click_abs(int(point[0]), int(point[1]), "LOGIN_SPLASH_BTN")
+            time.sleep(2.5)
+            # Re-check in case the first click landed during a screen transition
+            point2 = self._locate_image_center_in_scaled_arena_region(
+                splash_btn_img,
+                "LOGIN_SPLASH_BTN",
+                rel_region=None,
+                confidence=0.75,
+                timeout=1.0,
+                scales=scales,
+            )
+            if point2 is not None:
+                bot_logger.log_info(
+                    f"Account switch: splash screen still visible, clicking 'Log In' again at {point2}."
+                )
+                self._click_abs(int(point2[0]), int(point2[1]), "LOGIN_SPLASH_BTN")
+                time.sleep(2.0)
+            if focus_mtga_window():
+                time.sleep(0.2)
+            return True
+        return False
+
     def _wait_for_logout_to_reach_login_screen(self, *, start_offset: int, timeout_sec: float = 8.0) -> bool:
-        return self._wait_for_playerlog_marker(
+        reached = self._wait_for_playerlog_marker(
             [
                 "Sending player back to Login screen.",
                 "ALT_Prefab.LoginPanelPrefab",
@@ -2591,6 +2647,12 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             timeout_sec=timeout_sec,
             label="LOGOUT_WAIT",
         )
+        if reached:
+            return True
+        if self._is_login_splash_button_visible():
+            bot_logger.log_info("LOGOUT_WAIT: login splash screen button detected on screen.")
+            return True
+        return False
 
     def _playerlog_contains_marker_since(self, markers: list[str], *, start_offset: int) -> bool:
         if not self._log_path or not markers:
@@ -6898,6 +6960,9 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             return False
         if self._last_valid_quest_active_incomplete == 0 and self._quest_count_confirmed_fresh:
             return False
+        if not self._quest_count_confirmed_fresh:
+            # Unknown or stale: only a fresh Home read can settle it.
+            return True
         if self._last_valid_quest_active_incomplete is not None:
             return self._last_valid_quest_active_incomplete > 0
         if self._cached_quests:
@@ -6906,7 +6971,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 if not (q.get("goal") and q.get("progress", 0) >= q.get("goal", 0))
             )
             return incomplete > 0
-        return False
+        return True
 
     @serialized_home_navigation
     def start_game_from_home_screen(self):
@@ -13371,11 +13436,17 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                     return
                 time.sleep(0.1)
 
+            # If MTGA's intermediate "Register / Log In" splash screen is visible,
+            # click "Log In" so the email/password credential form is displayed.
+            self._handle_login_splash_if_visible()
+
             bot_logger.log_info("Account switch: entering credentials.")
             runtime_status.clear_intentional_wait()
             if self._stop_requested:
                 bot_logger.log_info("Account switch aborted before typing: stop requested.")
                 return
+            if focus_mtga_window():
+                time.sleep(0.2)
             self.input.tap_delete()
             time.sleep(0.2)
             self.input.type_text(account.get("email", ""))

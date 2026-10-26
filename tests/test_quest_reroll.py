@@ -766,6 +766,17 @@ class VisionGuardTests(RerollCase):
         self.assertEqual(self.tags(), ["QUEST_REROLL_CANCEL"])
         self.assertFalse(c._quest_reroll_dialog_open)
 
+    def test_cleanup_recovers_to_home_when_stranded_on_other_tab(self):
+        c = self.c
+        c._quest_reroll_dialog_open = True
+        c._quest_reroll_dialog_visible.return_value = False
+        # Initially Home is not visible (e.g. stranded on Profile), but after _navigate_to_home it becomes visible
+        c._quest_reroll_home_visible.side_effect = [False, True]
+        c._navigate_to_home = Mock(return_value=True)
+        self.assertTrue(Controller._close_quest_reroll_dialog(c))
+        c._navigate_to_home.assert_called_once()
+        self.assertFalse(c._quest_reroll_dialog_open)
+
     def test_confirm_and_cancel_use_fixed_measured_points_after_dialog_check(self):
         c = self.c
         c._get_ui_action_arena_region = Mock(return_value=(100, 200, 1920, 1080))
