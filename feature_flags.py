@@ -24,9 +24,9 @@ def combat_blocks_enabled() -> bool:
 
 
 def combat_selective_attack_enabled() -> bool:
-    """Whether smart selective attacking via CombatLogic is enabled. Default True."""
+    """Whether smart selective attacking via CombatLogic is enabled. Default False."""
     val = os.environ.get("MTGA_SELECTIVE_ATTACK")
-    return is_truthy(val, default=True)
+    return is_truthy(val, default=False)
 
 
 def combat_shadow_enabled() -> bool:
@@ -51,3 +51,22 @@ def human_mouse_enabled() -> bool:
     """Whether humanized Bezier mouse curves are enabled. Default True."""
     val = os.environ.get("MTGA_HUMAN_MOUSE")
     return is_truthy(val, default=True)
+
+
+def active_mulligan_enabled() -> bool:
+    """Whether intelligent London Mulligan evaluation and tucking is enabled. Default True."""
+    val = os.environ.get("MTGA_ACTIVE_MULLIGAN")
+    return is_truthy(val, default=True)
+
+
+def lifeguard_untapped_only_enabled() -> bool:
+    """Whether the combat life guard strictly counts only untapped enemy creatures for counter-attack."""
+    val = os.environ.get("MTGA_LIFEGUARD_UNTAPPED_ONLY")
+    return is_truthy(val, default=True)
+
+
+def forge_free_reign_enabled() -> bool:
+    """Whether Forge is given free reign to cast legal offered cards without requiring DummyAI agreement (experimental)."""
+    val = os.environ.get("MTGA_FORGE_FREE")
+    return is_truthy(val, default=False)
+

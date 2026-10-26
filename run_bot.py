@@ -109,6 +109,47 @@ def _forge_engine_enabled(cfg_path: pathlib.Path | None) -> bool:
         return True
 
 
+def _load_runtime_deck_preferences(cfg_path: pathlib.Path | None) -> tuple[str, str, bool]:
+    """Load preferred deck settings from calibration_config.json."""
+    starter = ""
+    historic = ""
+    only_grind = False
+    try:
+        if cfg_path and cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            starter = str(cfg.get("preferred_starter_deck", "") or "")
+            historic = str(cfg.get("preferred_historic_deck", "") or "")
+            only_grind = bool(cfg.get("only_grind_preferred_deck", False))
+    except Exception:
+        pass
+    return starter, historic, only_grind
+
+
+def _free_forge_enabled(cfg_path: pathlib.Path | None) -> bool:
+    """Whether Free Forge autonomous casting is enabled."""
+    try:
+        from runtime_paths import runtime_file
+        n_path = runtime_file("config", "notifications.json")
+        if n_path.is_file():
+            with open(n_path, "r", encoding="utf-8") as f:
+                val = json.load(f).get("free_forge")
+                if val is not None:
+                    return bool(val)
+    except Exception:
+        pass
+    if cfg_path and cfg_path.is_file():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                val = json.load(f).get("free_forge")
+                if val is not None:
+                    return bool(val)
+        except Exception:
+            pass
+    env_val = os.environ.get("MTGA_FORGE_FREE", "").strip().lower()
+    return env_val in ("1", "true", "yes", "on")
+
+
 def main():
     print("Starting MTG AI Bot...")
 
@@ -144,6 +185,8 @@ def main():
     except Exception:
         click_targets = {}
 
+    pref_starter, pref_historic, only_grind = _load_runtime_deck_preferences(cfg_path)
+
     if not click_targets:
         # Match Controller.py internal fallbacks (1920-relative).
         click_targets = {
@@ -154,6 +197,9 @@ def main():
             "attack_all": {"x": 1755, "y": 944},
             "opponent_avatar": {"x": 1286, "y": 216},
             "assign_damage_done": {"x": 1280, "y": 720},
+            "mulligan_centre": {"x": 835, "y": 562},
+            "library": {"x": 556, "y": 578},
+            "mulligan_done": {"x": 956, "y": 868},
             # Hand row only, not the full window width -- see the note at
             # Controller.hand_scan_p1 for why the edges are dangerous.
             "hand_scan_points": {
@@ -177,6 +223,9 @@ def main():
             click_targets=click_targets,
             input_backend=input_backend,
             auto_concede_stalled_matches=auto_concede_stalled_matches,
+            preferred_starter_deck=pref_starter,
+            preferred_historic_deck=pref_historic,
+            only_grind_preferred_deck=only_grind,
         )
         
         # Setup graceful shutdown handlers early before starting background components
@@ -207,6 +256,13 @@ def main():
         except Exception:
             pass
 
+        if _free_forge_enabled(cfg_path):
+            os.environ["MTGA_FORGE_FREE"] = "on"
+            print("Free Forge: Autonomous Casting (experimental) enabled.")
+        else:
+            os.environ["MTGA_FORGE_FREE"] = "off"
+        os.environ["MTGA_SELECTIVE_ATTACK"] = "0"
+
         print("Initializing AI...")
         forge_enabled = _forge_engine_enabled(cfg_path)
         ai = ForgeEngine.make_ai(DummyAI(), lambda: forge_enabled)
@@ -220,9 +276,8 @@ def main():
         game.start()
 
         # Keep the script running
-        from low_power import sleep_throttled
         while True:
-            sleep_throttled(1)
+            time.sleep(1)
 
     except Exception as e:
         print(f"An error occurred: {e}")

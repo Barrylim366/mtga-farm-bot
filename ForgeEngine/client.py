@@ -46,9 +46,9 @@ def classpath() -> str:
 class AdvisorClient:
     """One advisor process. Thread-safe; requests are answered one at a time."""
 
-    def __init__(self, startup_timeout: float = 180.0, heap: str = "1g"):
+    def __init__(self, startup_timeout: float = 180.0, heap: str | None = None):
         self.startup_timeout = startup_timeout
-        self.heap = heap
+        self.heap = heap or os.environ.get("MTGA_FORGE_HEAP", "1g")
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._lines: queue.Queue | None = None
@@ -134,8 +134,9 @@ class AdvisorClient:
 
         def pump() -> None:
             try:
-                for raw in process.stdout:
-                    lines.put(raw.decode("utf-8", errors="replace"))
+                if process.stdout is not None:
+                    for raw in process.stdout:
+                        lines.put(raw.decode("utf-8", errors="replace"))
             except Exception:
                 pass
             lines.put(None)
@@ -165,12 +166,14 @@ class AdvisorClient:
     def close(self) -> None:
         with self._lock:
             if self._alive():
-                try:
-                    self._process.stdin.write(b'{"op":"quit"}\n')
-                    self._process.stdin.flush()
-                    self._process.wait(timeout=3)
-                except Exception:
-                    pass
+                proc = self._process
+                if proc is not None and proc.stdin is not None:
+                    try:
+                        proc.stdin.write(b'{"op":"quit"}\n')
+                        proc.stdin.flush()
+                        proc.wait(timeout=3)
+                    except Exception:
+                        pass
             self._kill()
 
     # -- requests -------------------------------------------------------------
@@ -184,9 +187,13 @@ class AdvisorClient:
             body = dict(payload)
             body["id"] = request_id
             body.setdefault("timeoutMs", int(timeout_sec * 1000))
+            proc = self._process
+            if proc is None or proc.stdin is None:
+                self._kill()
+                raise AdvisorError("advisor process or stdin is unavailable")
             try:
-                self._process.stdin.write((json.dumps(body) + "\n").encode("utf-8"))
-                self._process.stdin.flush()
+                proc.stdin.write((json.dumps(body) + "\n").encode("utf-8"))
+                proc.stdin.flush()
             except OSError as exc:
                 self._kill()
                 raise AdvisorError(f"advisor pipe closed: {exc}") from exc
