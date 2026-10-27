@@ -28,6 +28,11 @@ OPTIONAL_TARGET_EVENTS = (
 CONCEDE_INCIDENT_EVENTS = (
     "CONCEDE_INCIDENT_CREATED", "CONCEDE_INCIDENT_FINISHED", "CONCEDE_INCIDENT_FAILED",
 )
+ABILITY_ACTIVATION_EVENTS = (
+    "ABILITY_ACTIVATION_SELECTED", "ABILITY_ACTIVATION_CLICKED",
+    "ABILITY_ACTIVATION_ACKNOWLEDGED", "ABILITY_ACTIVATION_TIMEOUT",
+    "ABILITY_ACTIVATION_RECOVERY",
+)
 RELEVANT = (
     "Gold baseline for '", "Gold farmed (real): '", "SWITCH CHECK (account='",
     "Quest count confirmed fresh for '", "STALL_WATCHDOG_TRIGGERED",
@@ -36,6 +41,7 @@ RELEVANT = (
     "QUEST_REROLL_CONFIRM", "GOLD_BALANCE_BELOW_BASELINE",
     *OPTIONAL_TARGET_EVENTS,
     *CONCEDE_INCIDENT_EVENTS,
+    *ABILITY_ACTIVATION_EVENTS,
 )
 CRITICAL = {
     "stall_concede", "target_scan_timeout", "target_click_missed",
@@ -501,12 +507,13 @@ def summarize(folder: Path, records: list[dict], status: dict, runtime: Path) ->
         result = str(record.get("result") or "unknown").lower()
         totals[result] += 1
         match_start = float(record.get("ended_at_epoch") or 0) - float(record.get("duration_sec") or 0)
-        # New records carry the account captured by the watchdog at match end.
-        # Older records fall back to nearby account events for compatibility.
+        # Match-bound records explicitly preserve unknown ownership. Only legacy
+        # records may infer an absent account from nearby account events.
         explicit_account = str(record.get("account") or "").strip()
         prior = [name for at, name in account_events if at <= match_start]
         account = canonical(explicit_account, configured) if explicit_account else (
-            prior[-1] if prior else "unattributed"
+            prior[-1] if prior and record.get("account_identity_source") in (None, "legacy_status")
+            else "unattributed"
         )
         if configured and account not in configured:
             account = "unattributed"
@@ -583,6 +590,13 @@ def summarize(folder: Path, records: list[dict], status: dict, runtime: Path) ->
             "observed_event_counts": dict(Counter(event["kind"] for event in events
                                                    if event["kind"] in OPTIONAL_TARGET_EVENTS)),
             "events": [event for event in events if event["kind"] in OPTIONAL_TARGET_EVENTS],
+        },
+        "ability_activation": {
+            "history_available": bool(coverage),
+            "observed_event_counts": dict(Counter(event["kind"] for event in events
+                                                   if event["kind"] in ABILITY_ACTIVATION_EVENTS)),
+            "recorded_timeouts": alerts["ability_activation_timeout"],
+            "events": [event for event in events if event["kind"] in ABILITY_ACTIVATION_EVENTS],
         },
         "focused_events": [event for event in events if event["kind"] in (
             "OPP_BATTLEFIELD_ITEM_TIMEOUT", "Quest reroll: stale data", "Quest reroll: skipped",

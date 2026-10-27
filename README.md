@@ -2,8 +2,36 @@
 
 Version **1.10.0** adds preferred Starter and Historic decks, an option to play only your preferred deck, experimental Free Forge casting, improved London mulligans, and automatic match-end dismissal and reward collection in Starter Deck Duels and Historic.
 
+The **Session Stats** button in **Settings > Enhancements** opens the current
+session window.
+
+Blocking recovery rechecks Arena's current assignments while scanning and before
+clicking. If an ordinary block has already cleared the warning, recovery keeps
+those blocks instead of selecting the creature again or cancelling them.
+
+Ability confirmation recognises both **Activate Ability** and **Sacrifice Food**.
+Cancel recovery accepts either interface, while activation still requires a fresh
+game acknowledgment; a click alone does not prove payment or resolution.
+Food activation remembers matching ability-creation messages even when the ability
+resolves before the next check, preventing false timeouts and unnecessary Cancel
+recovery. This acknowledgment confirms activation started, not that it resolved;
+source selection still uses one click without an automatic retry.
+
+Gold tracking resolves unambiguous bare and tagged account names to one account,
+preserving its first session balance. Restored account labels are checked against
+login evidence at startup. New match records carry the account identity captured
+for that game, so a later account switch cannot relabel its result. Unresolved
+identities remain unknown; older records retain their legacy attribution.
+
+Single-pile choices (such as Curator of Destinies) click a visible **Choose** button without evaluating the cards. Normal gameplay pauses until the choice advances or the buttons visibly disappear. Failed attempts are bounded and remain subject to the existing stall watchdog.
+
+Trigger ordering stops when Arena starts targeting an ability from that ordering request. The obsolete worker checks for cancellation during hover scans and before submitting, so it yields to the new target prompt. Input already sent cannot be withdrawn.
+
 Startup reward recovery requires Claim text, preventing orange Play and Submit Deck buttons from being mistaken for rewards.
 Pending startup/login rerolls are retried before an account switch, including accounts that already met their farming target.
+Account login and repeated Home transitions preserve the queue worker; leaving a match still cancels that match's pending input.
+Post-match resets preserve delayed queueing and account switching. Cancelled input transactions release their reservation without unlocking newer work.
+Preferred decks also apply after the configured quest target is met. Starter deck reuse remains tied to the current account and a verified event page. Repeated mulligans preserve the configured match deadline.
 <img width="429" height="823" alt="githubscreen" src="https://github.com/user-attachments/assets/ac3ec57b-45de-4a22-aebe-0bcb3db90ae0" />
 
 Free, open-source Magic the Gathering Arena (MTGA) bot for automating daily quests, daily wins, and account switching. Burning Lotus runs on Windows, macOS, and Linux without code injection or subscriptions. Built in Python with a graphical UI, no command-line knowledge required.
@@ -40,17 +68,21 @@ Python dependencies are installed automatically by the launcher scripts:
 
 Keep the entire MTGA window visible while the bot is running. If the game is moved or resized to an unsupported/off-screen geometry mid-match, the bot now stops visual input instead of reusing obsolete coordinates and sweeping empty space for cards; restore a visible 16:9 window and let the next game-state update retry.
 
-Seasonal rewards and other overlays showing **Claim Rewards** or **Click to Continue** are recovered after five seconds without meaningful progress, including during startup and account login. Recovery checks the text even if the log still says matchmaking or gameplay, claims rewards first, and searches again before another click. When an overlay hides the normal navigation anchors, recovery searches within the freshly detected Arena window. A verified disconnect dialog takes priority over rewards behind it: after two minutes without progress, the bot clicks **Reconnect** and checks the screen again before any later action. Continue text uses a 0.70 matching threshold to tolerate its changing background; recovery respects Stop and existing input ownership.
+Seasonal rewards and other overlays showing **Claim Rewards** or **Click to Continue** are recovered after five seconds without meaningful progress, including during startup and account login. Recovery checks the text even if the log still says matchmaking or gameplay, claims rewards first, and searches again before another click. When an overlay hides the normal navigation anchors, recovery searches within the freshly detected Arena window. A verified disconnect dialog takes priority over rewards behind it: after 15 seconds without progress, the bot clicks **Reconnect** and checks the screen again before any later action. Continue text uses a 0.70 matching threshold to tolerate its changing background; recovery respects Stop and existing input ownership.
 
 Login notifications are also recognised from Player.log rather than the screen alone. MTGA wraps them in `BEGIN home page notification flow` / `END home page notification flow`; a BEGIN with no END, scene change or reload after it means one is still on screen. When that is the case and no text template matches, recovery (after the same five-second persistence wait) clicks the bottom-right button position, where all of them put their button: **Claim**, the **Continue** of "New Season Placement", and a set promo's **Get Started!**. The "[Click to Continue]" pages also accept that click. This was added after a season rollover stranded the bot on "New Season Placement": its "[Click to Continue]" sits on a darker backdrop that scored 0.64 against the text template, below the 0.70 threshold. Verified live on 2026-10-10 across an account switch: Claim, Placement and the Reality Fracture promo were cleared in turn, MTGA logged the END, and the bot went on to its quest reroll on Home. In that run **Get Started!** closed the notification flow without opening the Store; if it ever navigates instead, the resulting scene change ends the flow and normal Home navigation takes over.
 
-Reward recovery runs before quest reroll and Home navigation. While a verified popup is waiting to be handled, reroll and deck navigation pause. Text checks include buttons that say only **Claim**. If text recognition misses, recovery waits for a later observation; it never falls back to the generic orange Claim-button shape. After three consecutive unrecognized-screen checks, Starter navigation uses a Continue-position click, followed by a centre click only if a fresh check still reports an unrecognized screen in the same Arena window. A recognized page, a popup, changed or invalid geometry, or a failed check prevents the centre click. Claim, Claim Rewards, Click to Continue and Reconnect text take priority over generic clicks. The fallback rechecks that matchmaking/gameplay has not started before sending input, rejects unsupported or off-screen window geometry, and sends no clicks if window focusing fails on Windows.
+The post-match **Did you have fun in the match?** survey is handled by matching and clicking its **happy face**. The same popup checks look for Claim/Continue controls and the happy face, including while dismissing the match result. Immediate post-match handling clicks a detected face without the background recovery delay; if the survey appears later, background recovery catches it after five seconds without progress. Happy-face matching uses a 0.97 threshold to distinguish it from the sad face. Reconnect retains priority over the survey, and the survey takes priority over Continue text behind it.
+
+Reward recovery runs before quest reroll and Home navigation. While a verified popup is waiting to be handled, reroll and deck navigation pause. Text checks include buttons that say only **Claim**. If text recognition misses, recovery waits for a later observation; it never falls back to the generic orange Claim-button shape. After three consecutive unrecognized-screen checks, Starter navigation uses a Continue-position click, followed by a centre click only if a fresh check still reports an unrecognized screen in the same Arena window. A recognized page, a popup, changed or invalid geometry, or a failed check prevents the centre click. Claim, Claim Rewards, Click to Continue, the happy face and Reconnect take priority over generic clicks. The fallback rechecks that matchmaking/gameplay has not started before sending input, rejects unsupported or off-screen window geometry, and sends no clicks if window focusing fails on Windows.
 
 During cost payment, the bot looks for **Auto Pay** if Submit is unavailable. If another selection is still using the controller, payment retries for up to 16 seconds while the same payment prompt remains active. Normal play stays paused until the game acknowledges advancement after payment.
 
+For Forge-selected battlefield abilities, the bot clicks the visible **Activate Ability** control when Arena requires confirmation after selecting the permanent. It waits for a fresh payment/target request or a new ability on the stack, rather than treating the click as success. An unacknowledged activation saves an `ability-activation-*` debug bundle and attempts a visually verified Cancel before suppressing that permanent's ability for the rest of the turn. Overnight audits distinguish confirmation clicks from acknowledged activations, timeouts, and Cancel recovery, including games that never concede; timeouts are retained in per-match watchdog counts. This recovery still needs supervised in-game validation.
+
 Quest reroll searches for the 500 Gold label in one continuous daily-quest area (x=50–910, y=750–960 in the normalized 1920×1080 Arena window). This avoids clipping labels at internal search boundaries while leaving win rewards farther to the right outside the search. The existing matching threshold and brightness checks still apply.
 
-Scry and Surveil keep normal gameplay paused until their central overlay is confirmed closed in two settled observations. Done is located again for each of up to three attempts, with input ownership held across recognition and the press. Surveil's fixed-position fallback requires its visible heading. Missing captures never count as completion. Recovery requires successful window focusing on Windows; Linux and macOS verify the visible overlay without requiring the Windows focus helper. The stall watchdog identifies the pending prompt and allows one final recovery attempt with a five-second grace period before conceding; recovery attempts do not reset the original stall age.
+Scry and Surveil keep normal gameplay paused until their central overlay is confirmed closed in two settled observations. Done is located again for each of up to three attempts, with input ownership held across recognition and the press. Surveil's fixed-position fallback requires its visible heading. Missing captures never count as completion. Recovery requires successful window focusing on Windows; Linux and macOS verify the visible overlay without requiring the Windows focus helper. Recovery attempts do not reset the stall countdown; auto-concede starts at 30 seconds without confirmed progress.
 
 ## Quick Start
 
@@ -167,17 +199,44 @@ Cast retry protection now counts repeated moves within the same match and Arena 
 
 ## Configuration
 
+### Game-duration limit
+
+In **Settings > Bot Behavior**, set **Concede after (minutes)**.
+Press Enter or leave the field to save.
+The default is **10 minutes**; **0** disables the duration limit. This works
+independently of **Auto-concede stalled matches** and replaces the hidden
+20-minute timeout. `MTGA_MATCH_TIMEOUT_SEC` no longer overrides the limit.
+
+Time starts at the first mulligan decision (or when the bot recognizes a live
+game after attaching mid-game), excludes queueing, and includes opponent turns.
+Changes apply immediately using time already elapsed: shortening the limit below
+the game's current duration requests a concede, while 0 cancels the timeout.
+A concede already claimed by the controller may finish. Each new game starts a
+fresh timer. Command-line launches use the same saved setting.
+
 ### Auto-concede stalled matches
 
-When enabled in Settings, the bot can concede only after Arena has confirmed a
-live match and the same local decision state has remained unchanged for 30
-seconds. It never acts from stale post-match data or while Arena is in a menu.
-If Arena changes the local prompt while that 30-second deadline is firing, the
-bot starts a fresh deadline for the new prompt instead of silently losing the
-watchdog timer.
-If the Concede dialog cannot be completed after two attempts, normal play is
-resumed and that unchanged state is not retried until Arena reports real game
-progress.
+When enabled in Settings, the bot starts conceding after **30 seconds without
+confirmed progress on a decision Arena is waiting for it to complete**. This
+covers normal play, mulligans, attacks, blocks, targets, costs, and other choices.
+Requests addressed to the bot and Arena's local decision timers establish whose
+decision it is, even when the priority fields disagree. Waiting for the opponent
+does not count as a bot stall.
+
+Accepted partial progress, such as assigning another blocker or selecting another
+required target, restarts the countdown. Repeated clicks, duplicate requests,
+rejected submissions, and toggling previously selected choices do not. The
+countdown continues if Arena's log becomes silent. Before conceding, the bot
+checks the match identity and Arena's log state to confirm the same match remains
+active. Conceding does not require the settings gear (`assets/assert/settings_gear.png`).
+The gear appears throughout the client, in matches and
+menus. Its background changes between screens and can affect image matching;
+its presence does not establish that a match is being played.
+
+At 30 seconds, gameplay recovery stops and concession begins; focusing Arena and
+confirming the dialog take additional time. If two concede attempts fail, normal
+play resumes with a fresh 30-second countdown. If the mouse or keyboard backend
+itself hangs, the bot stops and displays an error.
 
 The 30-second deadline is checked and the concession is claimed as one
 indivisible step, so a prompt that changes (or the setting being switched off)
@@ -194,14 +253,11 @@ dropped rather than landing on whatever Arena is showing by then. The
 unconditional concede that follows an expired Arena turn timer is unaffected —
 it deliberately does not depend on a known match id.
 
-While a concede is running it holds sole ownership of mouse and keyboard, and
-a gameplay action that was authorised a moment earlier can no longer slip
-through: the permission check and the input itself are now a single step, so a
-claim waits for any action still in flight and the mouse is released only once
-that action has finished.
-If input remains busy, the claim stops waiting after one second and the bot
-retries the stall or emergency concede shortly afterward. It does not start
-the concede clicks without owning input.
+While a concede is running it holds sole ownership of mouse and keyboard. Old
+gameplay workers lose permission to click and remain cancelled after normal play
+resumes. An actual input operation already in flight gets up to five seconds to
+finish before the bot reports an input failure. Match changes and Stop cancel
+old decisions and pending clicks.
 
 ### Input backend
 
@@ -241,6 +297,8 @@ Accounts/
 
 Manage accounts via **Settings → Manage Accounts**. Set a switch timer and play order. When the timer expires and the bot is at a safe screen, it logs out, switches account, and resumes.
 
+The Manage Accounts dialog scales its text, fields and buttons together with the UI scale setting. Long account names and emails stay inside their table columns, and a scrollbar keeps all controls accessible on shorter screens.
+
 Each account has exactly one name: its **Arena Name**, the one Arena shows top-left (`Name#12345`). The `#digits` may be omitted when that visible name is unique among the configured accounts. If two accounts share the same visible name, every account in that group must use its complete `Name#digits`; otherwise Arena's log cannot identify which row is active and Manage Accounts rejects the configuration. It is not a label you choose — the Arena log identifies an account *only* by that name, never by email, so rotation order, per-account gold tracking and the Current/Next display all key off it. Arena Names must be unique; a row without one is rejected on save. Older versions had a second, free-text `Name` field beside it. Manage Accounts now shows such a row under its Arena Name, and pressing **Save Accounts** renames the account for good — the play order and a manual pin are carried across the rename, and the account keeps its folder. A row that never had an Arena Name shows the old label instead, which may not be the Arena one; Manage Accounts points those out when you open it.
 
 #### Current / Next account
@@ -275,11 +333,19 @@ Account switching can be toggled on/off live from the main window without restar
 - **Time**: switch every N minutes (configurable).
 - **Quests**: switch once the configured number of daily quests (measured *absolutely* — completed by the bot or by hand, whichever comes first) and/or daily wins seen this session are reached on that account. With **both** thresholds set the round runs as two passes over the accounts: first every account's daily quests are cleared, then the bot goes round again for the wins. Quests expire at the daily reset and wins do not, so the quests get banked everywhere before the open-ended win grinding starts — under the old rule (both criteria demanded before leaving an account) the last account's quests were only reached after hours of grinding on the first, and a session cut short in between never banked them at all. Wins earned during the quest pass count towards the win pass, so nothing is farmed twice. With only one threshold set there is a single pass and nothing changes. The current pass is in the `SWITCH CHECK` log line as `mode=quests/quests` or `mode=quests/wins`. Once every configured account has completed a round, the bot stops itself instead of cycling back to the first account, and says so in a pop-up so a normal finish isn't mistaken for a freeze. A round covers the accounts in your play order — not every folder under `Accounts/` — and an account whose switch failed is not counted as finished.
 
+**750-gold quests only (free a slot if full)** is an optional checkbox in Manage Accounts, off by default. It saves immediately and applies on the next Start, in **quests** mode with **Main** above zero. The bot still rerolls first and keeps the existing quest counting: Main 2 means leaving at most one unfinished quest, including any empty slots already present. With this option, it also finishes the quest pass early when only 500-gold quests remain and there is a free slot for tomorrow. If all three quests are 500 gold, it completes one to free a slot, even with Main 3. It prioritizes 750-gold quests across supported quest types.
+
+For **Main 2**, three 500s means completing one; three 750s means completing two; one 750 plus two 500s means completing the 750. Two 750s plus an empty slot means completing one, while two 500s plus an empty slot means skipping the quest pass. The configured win target still applies in the normal second pass. Matches can complete several quests together, and win farming may incidentally complete saved 500-gold quests; the bot checks its stopping target between matches.
+
 Rotation always continues from the account actually logged in, so it never wastes a switch logging back into the same account, and the order stays intact even after a failed switch.
 
 > Fixed in this version: in quests mode the bot could log straight back out of every account without playing a single match. MTGA only writes the quest list on Home, and if no fresh block arrives within the 30-second prime window the read falls back to the newest block already in the log — which is the *previous* session's, written after that session had cleared its quests, so it parses as "0 quests left". With the threshold at 3 ("clear them all") that reads as "this account is finished", and the bot switched again immediately. Measured on 2026-08-22: five accounts, ~30 seconds each, zero matches, heading straight for the end-of-round stop — which now also powers the PC off. The count is still read for deck colours and the UI, but the switch decision now needs proof that the block was logged past this session's (or this switch's) boundary; without it the bot keeps playing and keeps dipping to Home until MTGA logs a real one. `SWITCH CHECK` says `STALE - not this account's own read` while that is the case.
 
 #### Shut down the PC when the round is done
+
+**Max play time (hours)** in Manage Accounts limits the entire run across all accounts, including startup and account switching. It defaults to **0 (disabled)**. Both `0,1` and `0.1` mean six minutes. Click **Save** or press Enter to save; changes apply on the next Start, which resets the timer.
+
+Once the limit is reached, the bot finishes its current match (including one already matchmaking), stops, and schedules PC shutdown **regardless of the completion checkbox below**. It does not queue another match or switch accounts. Finishing the match can extend play beyond the limit. You then have **two minutes to cancel**: choose **Yes** in the “Cancel the shutdown?” popup, or run `shutdown /a` on Windows (`shutdown -c` on Linux). Cancelling leaves the bot stopped and the PC on. Manual Stop, errors, and closing the app cancel the run timer without scheduling shutdown. Normal round completion before the limit follows the existing checkbox.
 
 **Manage Accounts** has an opt-in checkbox, **Shut down PC when all accounts are done**, right below the switch settings it depends on. With it ticked, the end-of-round stop described above also powers the machine off — so an overnight run of every account ends with the PC off instead of idling at Home until morning.
 
@@ -371,9 +437,11 @@ So a Historic account needs a deck thumbnail for the colors its quests ask for. 
 
 > The post-login routine marks its own deck selection as verified only when it confirmed every step: state-asserted navigation, a configured thumbnail matching the quest, and the planned account's own folder. After the legacy image-only navigation fallback, a first-tile pick, or a deck taken from a different account's folder, the selection stays unverified and the first re-queue navigates and checks it again — that routine has already pressed Play and cannot re-inspect the screen, so it must not vouch for what it did not confirm.
 
-In Starter Deck Duel the deck is additionally re-checked before **every** queue, so when a quest completes mid-session the bot swaps to the colors of the next one instead of finishing the session on the deck it started with. The colors are resolved *after* that check (previously the just-completed quest's deck was replayed for one more match), and the bot verifies the deck chooser actually closed after submitting — a missed swap is now reported in `bot.log` instead of silently farming the wrong colors.
+In Starter Deck Duel the quest target is re-checked before **every** queue, so when a quest completes mid-session the bot swaps to the colors of the next one instead of finishing the session on the deck it started with. After successfully submitting a deck and verifying the event Play page, the bot remembers that deck for the current account and session. If the target stays the same and the Starter event Play page is confirmed, it skips opening the chooser and submitting the same deck again. Normal match resets and Home quest refreshes keep this memory; a new bot session, account switch, or uncertain selection clears it. Stop and restart the bot after manually changing the deck while it runs. The colors are resolved *after* the quest check (previously the just-completed quest's deck was replayed for one more match), and the bot verifies the deck chooser actually closed after submitting — a missed swap is now reported in `bot.log` instead of silently farming the wrong colors.
 
-When Arena confirms with a fresh quest list for the current account that all daily quests are complete, Starter Deck Duel selects the **WB (Vampiric Hunger)** deck for subsequent matches. On the account's recent deck statistics it had the highest observed win rate (32% across 1,673 matches). A stale or unreadable quest list does not trigger this fallback. Unfinished color-targeted quests still determine the deck first.
+After dismissing the match result screen, the bot waits **20 seconds** before resuming queue navigation or an account switch. The ten-second game-state reset runs within that pause. Home quest refreshes and existing reward-popup recovery remain in place.
+
+In quest/win mode with a win target, Starter Deck Duel selects **WB (Vampiric Hunger)** as soon as the configured quest target is met. A **0 quests / 6 wins** setting uses WB immediately, even with unfinished quests. Nonzero quest targets count quests already completed by the player and require a fresh quest list for the current account, using the same completion rule as account switching. Until that target is met, unfinished color-targeted quests determine the deck. Outside this win-farming rule, a fresh list confirming all daily quests are complete also selects WB. WB is the fixed win-farming choice based on previously measured statistics (32% across 1,673 matches), rather than a live ranking of decks.
 
 In the account-switch win pass, an account that already banked its configured wins during the quest pass skips post-login deck selection and queueing; the queue loop switches to the next account instead of starting an unnecessary WB match.
 
@@ -426,7 +494,13 @@ Finding the **Starter Deck Duel** banner no longer depends on it being near the 
 Combat blocking is enabled by default and can be disabled with `MTGA_COMBAT_BLOCKS=0`. The bot consumes
 Arena's legal blocker graph, takes profitable blocks first, and only sacrifices
 creatures when needed to survive lethal damage. Trample damage is included in
-that survival calculation. Removal targeting also prices Ward before committing:
+that survival calculation. If Arena reports insufficient blockers, the bot adds
+the cheapest unused creature allowed to block that attacker, even if the trade
+is unfavorable. If none is available or the assignment fails, it clicks **Cancel
+Blocks**, confirms all assignments were cleared, then submits **No Blocks**.
+Recovery is bounded and recorded in decision snapshots; an unconfirmed
+cancellation saves a debug bundle and leaves the existing stall watchdog in charge.
+Removal targeting also prices Ward before committing:
 colored Ward symbols require matching untapped mana sources, and creatures used
 for Convoke are not incorrectly counted as mana available for Ward.
 
@@ -483,7 +557,9 @@ Both decisions are also written to `runtime/logs/bot.log` as `COMBAT_SHADOW` lin
 
 ### Stopping the bot
 
-Scroll **Mouse Wheel down** at any time to stop the bot immediately.
+**Scroll the mouse wheel up or down** to
+stop the bot, even while Magic Arena has focus. This works across repeated
+Stop/Start sessions; restart the bot app after updating to load this fix.
 
 ### Forge Engine (experimental)
 
@@ -750,9 +826,12 @@ includes the cursor position and number of hover events seen before stopping.
 
 Unsupported casts are counted once per card name per match even if the decision
 loop considers the same card repeatedly. Stall concessions, target scans, and
-quest reroll outcomes remain available in ordinary history logs. Temporary soak
-recorders and their dedicated tests have been removed; regression tests for the
-recovery behavior remain.
+quest reroll outcomes remain available in ordinary history logs. Regression
+tests for the recovery behavior remain.
+
+The temporary overnight feature checker and its tests are archived on branch
+`archive/temporary-soak-tests-2026-10-26`. Session audits use the permanent
+match records, ordinary history logs, and retained debug artefacts.
 
 ### Concede screenshots
 
@@ -761,6 +840,8 @@ under `runtime/concedes/` (or `MTGA_RUNTIME_DIR/concedes/`). Each incident conta
 up to two `attempt-N.jpg` images and `incident.json` with the reason, session/match
 IDs, attempt and capture status, and final sequence outcome. The newest 30
 incidents are retained independently of other debug bundles.
+Configured game-duration-limit concedes do not create incident folders, screenshots,
+or metadata files; their attempts and results remain in the ordinary logs and match records.
 
 Images contain only the verified Arena client area, with solid masks over both
 player-name areas. They fit within 1280×720, preserve aspect ratio, and use JPEG

@@ -69,4 +69,3 @@ def forge_free_reign_enabled() -> bool:
     """Whether Forge is given free reign to cast legal offered cards without requiring DummyAI agreement (experimental)."""
     val = os.environ.get("MTGA_FORGE_FREE")
     return is_truthy(val, default=False)
-

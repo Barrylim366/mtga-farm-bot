@@ -12,6 +12,8 @@ import json
 import threading
 import overlay
 import runtime_status
+from bot_behavior import match_timeout_minutes as normalize_match_timeout
+from bot_behavior import DEFAULT_MAX_PLAY_HOURS, parse_max_play_hours
 import shutdown_scheduler
 import update_checker
 from version import __version__ as APP_VERSION
@@ -1585,15 +1587,18 @@ class ConfigManager:
             "account_switch_mode": "time",
             "account_switch_main_quests": 0,   # 0-3 main quests to complete
             "account_switch_daily_wins": 0,    # 0-15 daily wins to reach
+            "account_switch_750_only": False,
             # Opt-in: power the PC off once every configured account has hit
             # those two thresholds and the round ends by itself. Off by default
             # -- an unattended shutdown is the one action the user cannot undo
             # from the UI, so it only ever happens because they asked for it.
             # Quests mode only; time mode never completes a round.
             "shutdown_pc_when_round_complete": False,
+            "max_play_hours": DEFAULT_MAX_PLAY_HOURS,
             # Recovery policy. Enabled by default: it concedes only when Arena
             # has left a locally-owned decision context unchanged for 30 seconds.
             "auto_concede_stalled_matches": True,
+            "match_timeout_minutes": 10,
             # Forge's rules engine and AI choose the plays (ForgeEngine/).
             # Default enabled when Forge is installed on disk.
             "forge_engine_enabled": True,
@@ -1830,6 +1835,13 @@ class ConfigManager:
             value = 0
         return max(0, min(15, value))
 
+    def get_account_switch_750_only(self) -> bool:
+        return self.config.get("account_switch_750_only") is True
+
+    def set_account_switch_750_only(self, enabled: bool) -> None:
+        self.config["account_switch_750_only"] = bool(enabled)
+        self._save_config()
+
     def set_account_switch_daily_wins(self, count: int) -> None:
         try:
             value = int(count)
@@ -1843,9 +1855,37 @@ class ConfigManager:
         # hand-edited value must never be the reason a machine powers down.
         return self.config.get("shutdown_pc_when_round_complete") is True
 
+    def get_max_play_hours(self) -> float:
+        try:
+            return parse_max_play_hours(self.config.get("max_play_hours", DEFAULT_MAX_PLAY_HOURS))
+        except ValueError:
+            return 0.0
+
+    def set_max_play_hours(self, hours) -> None:
+        value = parse_max_play_hours(hours)
+        previous = self.config.get("max_play_hours", DEFAULT_MAX_PLAY_HOURS)
+        self.config["max_play_hours"] = value
+        try:
+            self._save_config()
+        except Exception:
+            self.config["max_play_hours"] = previous
+            raise
+
     def set_shutdown_pc_when_round_complete(self, enabled: bool) -> None:
         self.config["shutdown_pc_when_round_complete"] = bool(enabled)
         self._save_config()
+
+    def get_match_timeout_minutes(self) -> int:
+        return normalize_match_timeout(self.config.get("match_timeout_minutes"))
+
+    def set_match_timeout_minutes(self, minutes: int) -> None:
+        previous = self.config.get("match_timeout_minutes", 10)
+        self.config["match_timeout_minutes"] = normalize_match_timeout(minutes)
+        try:
+            self._save_config()
+        except Exception:
+            self.config["match_timeout_minutes"] = previous
+            raise
 
     def get_auto_concede_stalled_matches(self) -> bool:
         return self.config.get("auto_concede_stalled_matches") is True
@@ -2640,22 +2680,32 @@ class MTGBotUI(tk.Tk):
             pass
 
     def _setup_stop_hotkey(self):
-        # Global hotkey via pynput (mouse wheel).
+        # Keep the hook alive across Stop/Start. Hook callbacks must return
+        # promptly: calling Tk from a Windows hook can block and lose the hook.
+        self._stop_hotkey_requested = threading.Event()
         try:
             from pynput import mouse
-        except Exception:
-            mouse = None
 
-        if mouse:
-            try:
-                def _on_scroll(_x, _y, _dx, dy):
-                    if dy < 0:
-                        self.after(0, self._stop_bot)
-                self._stop_mouse_listener = mouse.Listener(on_scroll=_on_scroll)
-                self._stop_mouse_listener.daemon = True
-                self._stop_mouse_listener.start()
-            except Exception:
-                pass
+            def _on_scroll(_x, _y, _dx, dy):
+                if self.bot_running and dy:
+                    self._stop_hotkey_requested.set()
+
+            self._stop_mouse_listener = mouse.Listener(on_scroll=_on_scroll)
+            self._stop_mouse_listener.daemon = True
+            self._stop_mouse_listener.start()
+        except Exception as exc:
+            import bot_logger
+
+            bot_logger.log_error(f"Mouse-wheel stop hotkey unavailable: {exc}")
+            return
+        self.after(50, self._poll_stop_hotkey)
+
+    def _poll_stop_hotkey(self):
+        if self._stop_hotkey_requested.is_set():
+            self._stop_hotkey_requested.clear()
+            if self.bot_running:
+                self._stop_bot()
+        self.after(50, self._poll_stop_hotkey)
 
     def _pick_font_family(self):
         preferred = ["Segoe UI Variable", "Segoe UI", "Inter", "Arial"]
@@ -3764,7 +3814,8 @@ class MTGBotUI(tk.Tk):
             w = self.config_manager.get_account_switch_daily_wins()
         except Exception:
             m, w = 0, 0
-        return f"Account switch: on (quests: {m} main / {w} wins)"
+        policy = " / 750 only" if m > 0 and self.config_manager.get_account_switch_750_only() else ""
+        return f"Account switch: on (quests: {m} main / {w} wins{policy})"
 
     def _live_switch_disabled(self, controller) -> bool:
         """Mirror of _configured_switch_disabled but read from the LIVE, running
@@ -3796,7 +3847,8 @@ class MTGBotUI(tk.Tk):
             w = controller.get_account_switch_daily_wins()
         except Exception:
             m, w = 0, 0
-        return f"Account switch: on (quests: {m} main / {w} wins)"
+        policy = " / 750 only" if m > 0 and controller.get_account_switch_750_only() else ""
+        return f"Account switch: on (quests: {m} main / {w} wins{policy})"
 
     def _get_configured_switch_eta_text(self) -> str:
         if self._configured_switch_disabled():
@@ -4383,8 +4435,8 @@ class MTGBotUI(tk.Tk):
             return
 
         # Retry the arena setup check for a few seconds: MTGA's game-start /
-        # turn-start animations transiently distort the in-game anchor (observed
-        # ingame_anchor score ~0.71 vs 0.78 threshold during the opening swirl),
+        # turn-start animations transiently affect settings gear matching (observed
+        # settings gear score ~0.71 vs 0.78 threshold during the opening swirl),
         # which would otherwise abort Start if the user presses it while a match
         # animation is playing. The common case (anchors match immediately) still
         # returns on the first attempt with zero added delay. Runs via self.after
@@ -4404,6 +4456,10 @@ class MTGBotUI(tk.Tk):
             self._set_startup_loading(False)
             return
         self.bot_running = True
+        self._play_run_token = object()
+        hours = self.config_manager.get_max_play_hours()
+        self._play_deadline = time.monotonic() + hours * 3600 if hours else None
+        self._poll_play_time_limit(self._play_run_token)
         self._set_running_state(True)
         self._set_startup_loading(True, self._STARTUP_TEXT_CARDS)
 
@@ -4415,6 +4471,30 @@ class MTGBotUI(tk.Tk):
 
     def _check_arena_setup(self):
         self._run_arena_setup_check(show_success=True)
+
+    def _poll_play_time_limit(self, token):
+        if not self.bot_running or token is not self._play_run_token:
+            return
+        with self._controller_lock:
+            controller = self._controller
+        if controller is not None:
+            controller.check_play_time_limit()
+        self._play_limit_job = self.after(1000, lambda: self._poll_play_time_limit(token))
+
+    def _finish_controller_run(self, controller, token, reason):
+        """Ignore duplicate or retired-run callbacks before stopping or powering off."""
+        if not self.bot_running or token is not self._play_run_token:
+            return
+        with self._controller_lock:
+            if self._controller is not controller:
+                return
+        self._stop_bot()
+        if str(reason).startswith("Auto-concede failed:"):
+            messagebox.showerror("Bot stopped", str(reason), parent=self)
+        if reason == "play time limit reached":
+            self._announce_round_complete(time_limit=True)
+        elif "account" in str(reason or "").lower() and "complet" in str(reason or "").lower():
+            self._announce_round_complete()
 
     def _run_arena_setup_check_async(
         self, *, show_success: bool, attempts: int = 1, retry_delay: float = 1.0, on_done=None
@@ -4600,6 +4680,8 @@ class MTGBotUI(tk.Tk):
         return chosen
 
     def _run_bot(self):
+        token = self._play_run_token
+        deadline = self._play_deadline
         try:
             import bot_logger
             log_path = self.config_manager.get_log_path()
@@ -4610,6 +4692,7 @@ class MTGBotUI(tk.Tk):
             account_switch_mode = self.config_manager.get_account_switch_mode()
             account_switch_main_quests = self.config_manager.get_account_switch_main_quests()
             account_switch_daily_wins = self.config_manager.get_account_switch_daily_wins()
+            account_switch_750_only = self.config_manager.get_account_switch_750_only()
             account_cycle_index = self.config_manager.get_account_cycle_index()
             account_play_order = self.config_manager.get_account_play_order()
             game_mode = self.config_manager.get_game_mode()
@@ -4634,6 +4717,7 @@ class MTGBotUI(tk.Tk):
                                    account_switch_mode=account_switch_mode,
                                    account_switch_main_quests=account_switch_main_quests,
                                    account_switch_daily_wins=account_switch_daily_wins,
+                                   account_switch_750_only=account_switch_750_only,
                                    account_cycle_index=account_cycle_index,
                                    account_play_order=account_play_order,
                                    game_mode=game_mode,
@@ -4643,7 +4727,13 @@ class MTGBotUI(tk.Tk):
                                    preferred_starter_deck=preferred_starter_deck,
                                    preferred_historic_deck=preferred_historic_deck,
                                    only_grind_preferred_deck=only_grind_preferred_deck)
+            if not self.bot_running or token is not self._play_run_token:
+                return
+            controller.set_play_deadline(deadline)
             self._publish_controller(controller)
+            controller.set_stop_bot_callback(
+                lambda reason=None: self.after(
+                    0, lambda: self._finish_controller_run(controller, token, reason)))
             # Follow the controller's startup phases from here on. game.start()
             # below already reads the quests (clicking Home) and checks the
             # reroll, which takes ~40 s; polling only after it returned left the
@@ -4665,9 +4755,17 @@ class MTGBotUI(tk.Tk):
             # Forge is asked first while "Enable Forge Engine" is ticked; with
             # it unticked this is the bot's own DummyAI, unchanged.
             ai = ForgeEngine.make_ai(DummyAI(), self.config_manager.get_forge_engine_enabled)
-            self.game = Game(controller, ai, data_dir_prompt=self._resolve_mtga_data_dir)
+            with self._controller_lock:
+                if not self.bot_running or token is not self._play_run_token:
+                    return
+                game = Game(
+                    controller, ai, data_dir_prompt=self._resolve_mtga_data_dir,
+                    match_timeout_minutes=self.config_manager.get_match_timeout_minutes())
+                self.game = game
             bot_logger.log_info("UI start: game.start() begin")
-            self.game.start()
+            game.start()
+            if not self.bot_running or token is not self._play_run_token:
+                return
             bot_logger.log_info("UI start: game.start() completed")
             # The queue thread now navigates Arena for ~15-20 s before the first
             # match. The bar stays up for that, relabelled from status.json by the
@@ -4696,26 +4794,8 @@ class MTGBotUI(tk.Tk):
 
             controller.set_match_end_callback(_on_match_end)
 
-            # Let the controller stop the bot itself (e.g. once every configured
-            # account has finished its daily quests). Marshal onto the UI thread.
-            def _on_controller_stop(reason=None):
-                try:
-                    bot_logger.log_info(f"Controller requested bot stop ({reason}).")
-                except Exception:
-                    pass
-                self.after(0, self._stop_bot)
-                # Tell the user WHY it stopped when it's the end-of-round completion,
-                # so a normal finish isn't mistaken for a crash/freeze.
-                reason_s = str(reason or "").lower()
-                if "account" in reason_s and "complet" in reason_s:
-                    # Queued after the _stop_bot above, so the bot is already
-                    # down by the time a shutdown can be armed.
-                    self.after(0, self._announce_round_complete)
-
-            controller.set_stop_bot_callback(_on_controller_stop)
-
             # Keep running while bot is active
-            while self.bot_running:
+            while self.bot_running and token is self._play_run_token:
                 import time
                 time.sleep(1)
 
@@ -4726,52 +4806,52 @@ class MTGBotUI(tk.Tk):
                 bot_logger.log_error(f"UI start failed: {err_msg}")
             except Exception:
                 pass
-            self.after(0, lambda msg=err_msg: self._handle_bot_error(msg))
+            self.after(0, lambda msg=err_msg: self._handle_bot_error(msg)
+                       if token is self._play_run_token and self.bot_running else None)
 
-    def _announce_round_complete(self):
-        """Tell the user the rotation finished -- and power the PC off if asked.
-
-        Reached from exactly one place: the controller stopping itself because
-        every configured account has hit its quest and daily-win thresholds. A
-        manual Stop, a crash or a time-mode rotation never gets here, which is
-        what keeps the shutdown from firing on anything but a real finish.
-        """
+    def _announce_round_complete(self, *, time_limit=False):
+        """Announce a finished round or run deadline with a cancellable shutdown."""
         import bot_logger
 
+        title = "Play time limit reached" if time_limit else "Round complete"
         text = (
             "All configured accounts have finished their daily quests.\n\n"
             "The bot stopped because there are no more accounts to play."
         )
+        if time_limit:
+            text = "The maximum play time was reached.\n\nThe bot has stopped. Any match in progress was allowed to finish."
         try:
-            wants_shutdown = bool(
+            wants_shutdown = time_limit or bool(
                 self.config_manager.get_shutdown_pc_when_round_complete()
             )
         except Exception:
             wants_shutdown = False
         if not wants_shutdown:
-            messagebox.showinfo("Round complete", text, parent=self)
+            messagebox.showinfo(title, text, parent=self)
             return
         delay = shutdown_scheduler.DEFAULT_DELAY_SEC
         if not shutdown_scheduler.schedule_shutdown(
-            delay, comment="Burning Lotus: all accounts finished their dailies."
+            delay, comment=("Burning Lotus: maximum play time reached." if time_limit
+                            else "Burning Lotus: all accounts finished their dailies.")
         ):
             # Never silently swallow this: the user went to bed expecting the
             # machine to be off, and it will not be.
             bot_logger.log_error(
-                "ROUND_COMPLETE_SHUTDOWN_FAILED: could not schedule the shutdown."
+                ("PLAY_TIME_LIMIT_SHUTDOWN_FAILED" if time_limit else "ROUND_COMPLETE_SHUTDOWN_FAILED")
+                + ": could not schedule the shutdown."
             )
             messagebox.showwarning(
-                "Round complete",
+                title,
                 text + "\n\nThe automatic shutdown could NOT be started -- "
                 "please power the PC off yourself.",
                 parent=self,
             )
             return
         bot_logger.log_info(
-            f"Round complete: PC shutdown scheduled in {delay}s (opt-in setting)."
+            f"{title}: PC shutdown scheduled in {delay}s."
         )
         cancel = messagebox.askyesno(
-            "Round complete - shutting down",
+            title + " - shutting down",
             text
             + f"\n\nThis PC will shut down in {delay // 60} minutes.\n\n"
             "Cancel the shutdown?",
@@ -4863,6 +4943,11 @@ class MTGBotUI(tk.Tk):
 
     def _stop_bot(self):
         self.bot_running = False
+        self._play_run_token = None
+        job = self.__dict__.get("_play_limit_job")
+        if job is not None:
+            self.after_cancel(job)
+            self._play_limit_job = None
 
         if self.game:
             try:
@@ -4872,12 +4957,6 @@ class MTGBotUI(tk.Tk):
             self.game = None
 
         self._stop_session_watchdog()
-        if hasattr(self, "_stop_mouse_listener") and self._stop_mouse_listener:
-            try:
-                self._stop_mouse_listener.stop()
-            except Exception:
-                pass
-            self._stop_mouse_listener = None
         self._set_running_state(False)
         self._set_startup_loading(False)
         with self._controller_lock:
@@ -4924,6 +5003,14 @@ class MTGBotUI(tk.Tk):
             controller = self._controller
             if controller is not None or not persisted:
                 _apply_forge_engine(controller, self.config_manager)
+            return persisted
+
+    def _set_match_timeout_minutes(self, minutes: int) -> int:
+        with self._controller_lock:
+            self.config_manager.set_match_timeout_minutes(minutes)
+            persisted = self.config_manager.get_match_timeout_minutes()
+            if self.game is not None:
+                self.game.set_match_timeout_minutes(persisted)
             return persisted
 
     def _set_auto_concede_stalled_matches(self, enabled: bool) -> bool:
@@ -6157,6 +6244,7 @@ class BotBehaviorWindow(_FireSubWindow):
     """
 
     _TITLE = "Bot Behavior"
+    _HEIGHT = 580
 
     def _init_state(self) -> None:
         self._enabled = tk.BooleanVar(
@@ -6165,37 +6253,101 @@ class BotBehaviorWindow(_FireSubWindow):
         self._forge_enabled = tk.BooleanVar(
             value=bool(self._config_manager.get_forge_engine_enabled())
         )
+        self._timeout_minutes = tk.StringVar(
+            value=str(self._config_manager.get_match_timeout_minutes()))
+        self._timeout_status = tk.StringVar(value="")
+        self.protocol("WM_DELETE_WINDOW", self._close_behavior_window)
         self._forge_busy = False
 
     def _build_ui(self) -> None:
         c = self._theme
         cv = self._canvas
         text_width = 380
+        toggle_height = max(14, tkfont.Font(self, font=("Segoe UI", 10, "bold")).metrics("linespace"))
 
-        self._create_panel(16, 20, 428, 128)
-        cv.create_text(28, 30, text="Match recovery", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("concede", 66, "Auto-concede stalled matches", self._enabled,
+        def text(y, value, *, x=28, font=("Segoe UI", 9), width=text_width):
+            item = cv.create_text(x, y, text=value, width=width, fill=c["text"],
+                                  font=font, anchor="nw")
+            return cv.bbox(item)[3]
+
+        def panel(top, bottom):
+            # Draw behind content after measuring its actual font-scaled bounds.
+            self._create_panel(16, top, 428, bottom - top)
+            cv.tag_lower(cv.find_all()[-1])
+
+        top = 20
+        bottom = text(top + 12, "Match recovery", font=("Segoe UI", 13, "bold"))
+        toggle_y = bottom + 10
+        self._create_toggle("concede", toggle_y, "Auto-concede stalled matches", self._enabled,
                             self._toggle_auto_concede)
-        cv.create_text(54, 88, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Concede when Arena waits 30 seconds for bot input without game "
-                            "progress. Changes apply immediately.")
+        bottom = text(toggle_y + toggle_height + 8,
+                      "Concede when Arena waits 30 seconds for bot input without game progress.", x=54)
+        panel(top, bottom + 16)
 
-        self._create_panel(16, 162, 428, 178)
-        cv.create_text(28, 172, text="Decision engine", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("forge", 208, "Enable Forge Engine (experimental)", self._forge_enabled,
+        top = bottom + 30
+        bottom = text(top + 12, "Game duration", font=("Segoe UI", 13, "bold"))
+        row_y = bottom + 12
+        bottom = text(row_y, "Concede after (minutes)", font=("Segoe UI", 10), width=296)
+        entry = tk.Entry(self, textvariable=self._timeout_minutes,
+                         bg=c["entry_bg"], fg=c["text"], insertbackground=c["text"],
+                         font=("Segoe UI", 10))
+        row_height = max(bottom - row_y, entry.winfo_reqheight(), 30)
+        cv.create_window(336, row_y, width=92, height=row_height, window=entry, anchor="nw")
+        for event in ("<Return>", "<FocusOut>"):
+            entry.bind(event, lambda _event: self._apply_timeout_setting())
+        status_item = cv.create_text(28, row_y + row_height + 4, width=396,
+                                    fill=c["status"], font=("Segoe UI", 9), anchor="nw")
+        self._timeout_status.trace_add(
+            "write", lambda *_args: cv.itemconfigure(status_item, text=self._timeout_status.get()))
+        bottom = row_y + row_height + toggle_height + 12
+        panel(top, bottom)
+
+        top = bottom + 14
+        bottom = text(top + 12, "Decision engine", font=("Segoe UI", 13, "bold"))
+        toggle_y = bottom + 10
+        self._create_toggle("forge", toggle_y, "Enable Forge Engine (experimental)", self._forge_enabled,
                             self._toggle_forge)
-        cv.create_text(54, 230, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Forge's rules engine and AI choose lands, spells, abilities, attacks, "
-                            "blocks, targets and scry. Where Forge has no answer the bot decides as "
-                            "before. Needs a one-time download (Windows) and about 2 GB of RAM.")
+        bottom = text(toggle_y + toggle_height + 8,
+                      "Forge's rules engine and AI choose lands, spells, abilities, attacks, "
+                      "blocks, targets and scry. Where Forge has no answer the bot decides as "
+                      "before. Needs a one-time download (Windows) and about 2 GB of RAM.", x=54)
+        # Reserve enough space for the longest status, including after download.
+        status_height = 2 * toggle_height
         self._forge_status_item = cv.create_text(
-            54, 304, width=text_width, fill=c["status"], font=("Segoe UI", 9, "bold"), anchor="nw",
-            text=self._forge_status_text(),
-        )
+            54, bottom + 12, width=text_width, fill=c["status"], font=("Segoe UI", 9, "bold"),
+            anchor="nw", text=self._forge_status_text())
+        bottom += 12 + status_height + 16
+        panel(top, bottom)
 
-        self._create_button("back", "Back", 324, 358, 120, 40, self.destroy)
+        self._create_button("back", "Back", 324, bottom + 18, 120, 40, self._close_behavior_window)
+        height = bottom + 78
+        self.update_idletasks()
+        y = min(self.winfo_y(), max(0, self.winfo_screenheight() - height - 50))
+        self.geometry(f"{self._WIDTH}x{height}+{self.winfo_x()}+{y}")
+
+    def _close_behavior_window(self) -> None:
+        self._apply_timeout_setting()
+        self.destroy()
+
+    def _apply_timeout_setting(self) -> None:
+        text = self._timeout_minutes.get().strip()
+        if not text or not text.isascii() or not text.isdecimal():
+            self._timeout_status.set("Use a whole number, 0 or greater.")
+            return
+        try:
+            minutes = int(text)
+            app = getattr(self._parent, "master", None)
+            setter = getattr(app, "_set_match_timeout_minutes", None)
+            if callable(setter):
+                minutes = setter(minutes)
+            else:
+                self._config_manager.set_match_timeout_minutes(minutes)
+                minutes = self._config_manager.get_match_timeout_minutes()
+        except Exception:
+            self._timeout_status.set("Could not save. Please try again.")
+            return
+        self._timeout_minutes.set(str(minutes))
+        self._timeout_status.set("")
 
     def _toggle_auto_concede(self) -> None:
         self._enabled.set(not self._enabled.get())
@@ -6498,10 +6650,12 @@ class EnhancementsWindow(_FireSubWindow):
     """BurningBot Enhancements: Discord/Telegram webhooks, Low-Power mode, Anti-Detection, and Free Forge."""
 
     _TITLE = "Enhancements & Alerts"
-    _HEIGHT = 580
+    _WIDTH = 620
+    _HEIGHT = 780
 
     def _init_state(self) -> None:
         from notifications import NotificationManager
+        from low_power import LowPowerManager
         nm = NotificationManager.get_instance()
         self._cfg = nm.get_config() if hasattr(nm, "get_config") else getattr(nm, "_config", {})
         self._discord_url = tk.StringVar(value=self._cfg.get("discord_webhook_url", ""))
@@ -6509,6 +6663,9 @@ class EnhancementsWindow(_FireSubWindow):
         self._telegram_chat_id = tk.StringVar(value=self._cfg.get("telegram_chat_id", ""))
         self._webhooks_enabled = tk.BooleanVar(value=bool(self._cfg.get("enabled", True)))
         self._human_mouse_enabled = tk.BooleanVar(value=bool(self._cfg.get("human_mouse", True)))
+        self._low_power_enabled = tk.BooleanVar(value=bool(LowPowerManager.get_instance().enabled))
+        from feature_flags import combat_selective_attack_enabled
+        self._selective_attack_enabled = tk.BooleanVar(value=combat_selective_attack_enabled())
 
         initial_free_forge = False
         if hasattr(self._config_manager, "get_free_forge_enabled"):
@@ -6526,49 +6683,96 @@ class EnhancementsWindow(_FireSubWindow):
     def _build_ui(self) -> None:
         c = self._theme
         cv = self._canvas
-        text_width = 380
+        right = self._WIDTH - 30
+        content_width = right - 30
+        toggle_font = tkfont.Font(self, font=("Segoe UI", 10, "bold"))
+        button_font = tkfont.Font(self, font=("Segoe UI", 11, "bold"))
+        toggle_height = max(14, toggle_font.metrics("linespace"))
+        button_height = max(40, button_font.metrics("linespace") + 16)
 
-        # Panel 1: Discord & Telegram Notifications
-        self._create_panel(16, 20, 428, 250)
-        cv.create_text(28, 30, text="Discord & Telegram Alerts", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("webhooks", 62, "Enable Webhook Notifications", self._webhooks_enabled,
+        def text(y, value, *, x=30, width=content_width, heading=False):
+            item = cv.create_text(
+                x, y, text=value, width=width,
+                fill=c["text"] if heading else c["text_muted"],
+                font=("Segoe UI", 13, "bold") if heading else ("Segoe UI", 9), anchor="nw")
+            return cv.bbox(item)[3]
+
+        def panel(top, bottom):
+            self._create_panel(16, top, self._WIDTH - 32, bottom - top)
+            cv.tag_lower(cv.find_all()[-1])
+
+        def entry(variable, x, y, width, **kwargs):
+            widget = tk.Entry(self, textvariable=variable, bg=c["entry_bg"], fg=c["text"],
+                              insertbackground=c["text"], relief=tk.FLAT,
+                              font=("Segoe UI", 9), **kwargs)
+            height = max(30, widget.winfo_reqheight() + 6)
+            cv.create_window(x, y, width=width, height=height, window=widget, anchor="nw")
+            return widget, y + height
+
+        top = 20
+        bottom = text(top + 14, "Discord & Telegram Alerts", heading=True)
+        toggle_y = bottom + 12
+        self._create_toggle("webhooks", toggle_y, "Enable Webhook Notifications", self._webhooks_enabled,
                             self._toggle_webhooks)
+        bottom = text(toggle_y + toggle_height + 14, "Discord Webhook URL:")
+        self._discord_entry, bottom = entry(self._discord_url, 30, bottom + 8, content_width)
 
-        cv.create_text(30, 92, text="Discord Webhook URL:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        self._discord_entry = tk.Entry(self, textvariable=self._discord_url, bg=c["entry_bg"], fg=c["text"],
-                                       insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
-        cv.create_window(30, 114, width=390, height=24, window=self._discord_entry, anchor="nw")
+        row_y = bottom + 16
+        chat_x = right - 168
+        token_width = chat_x - 46
+        token_bottom = text(row_y, "Telegram Bot Token:", width=token_width)
+        chat_bottom = text(row_y, "Chat ID:", x=chat_x, width=168)
+        entry_y = max(token_bottom, chat_bottom) + 8
+        self._tg_token_entry, token_bottom = entry(
+            self._telegram_token, 30, entry_y, token_width, show="*")
+        self._tg_chat_entry, chat_bottom = entry(self._telegram_chat_id, chat_x, entry_y, 168)
+        button_y = max(token_bottom, chat_bottom) + 18
+        save_width = button_font.measure("Save & Test Alert") + 36
+        self._create_button("save_test", "Save & Test Alert", 30, button_y, save_width,
+                            button_height, self._save_and_test)
+        status_y = button_y + button_height + 10
+        self._status_text_item = cv.create_text(
+            30, status_y, text="", width=content_width, fill=c["accent"],
+            font=("Segoe UI", 9, "bold"), anchor="nw")
+        bottom = status_y + toggle_height + 14
+        panel(top, bottom)
 
-        cv.create_text(30, 146, text="Telegram Bot Token:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        self._tg_token_entry = tk.Entry(self, textvariable=self._telegram_token, bg=c["entry_bg"], fg=c["text"],
-                                        show="*", insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
-        cv.create_window(30, 168, width=250, height=24, window=self._tg_token_entry, anchor="nw")
+        top = bottom + 16
+        bottom = text(top + 14, "Anti-Detection & Optimization", heading=True)
+        options = (
+            ("human_mouse", "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
+             self._toggle_human_mouse,
+             "Natural curved mouse paths with slight jitter."),
+            ("low_power", "Low-Power / Overnight Mode", self._low_power_enabled,
+             self._toggle_low_power,
+             "Reduces idle CPU/GPU use, heat, and fan noise."),
+            ("free_forge", "Free Forge: Autonomous Casting (experimental)", self._free_forge_enabled,
+             self._toggle_free_forge,
+             "Allows Forge to cast supported spells without base AI approval."),
+            ("selective_attack", "Smart Selective Attacking (CombatLogic)", self._selective_attack_enabled,
+             self._toggle_selective_attack,
+             "Avoids unsafe attacks and checks for lethal."),
+        )
+        for name, label, variable, command, description in options:
+            toggle_y = bottom + 16
+            self._create_toggle(name, toggle_y, label, variable, command)
+            bottom = text(toggle_y + toggle_height + 8, description, x=54, width=right - 54)
+        bottom += 18
+        panel(top, bottom)
 
-        cv.create_text(290, 146, text="Chat ID:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        self._tg_chat_entry = tk.Entry(self, textvariable=self._telegram_chat_id, bg=c["entry_bg"], fg=c["text"],
-                                       insertbackground=c["text"], relief=tk.FLAT, font=("Segoe UI", 9))
-        cv.create_window(290, 168, width=130, height=24, window=self._tg_chat_entry, anchor="nw")
-
-        self._create_button("save_test", "Save & Test Alert", 30, 210, 160, 36, self._save_and_test)
-        self._status_text_item = cv.create_text(205, 228, text="", fill=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
-
-        # Panel 2: Anti-Detection & Engine Optimization
-        self._create_panel(16, 285, 428, 200)
-        cv.create_text(28, 295, text="Anti-Detection & Engine Optimization", fill=c["text"],
-                       font=("Segoe UI", 13, "bold"), anchor="nw")
-        self._create_toggle("human_mouse", 330, "Humanized Bezier Mouse Trajectories", self._human_mouse_enabled,
-                            self._toggle_human_mouse)
-        cv.create_text(54, 350, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Generates natural curved paths with micro-jitter and smooth velocity.")
-
-        self._create_toggle("free_forge", 390, "Free Forge: Autonomous Casting (experimental)", self._free_forge_enabled,
-                            self._toggle_free_forge)
-        cv.create_text(54, 410, width=text_width, fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw",
-                       text="Allows Forge AI to cast legal spells autonomously without requiring base AI double-approval. (Experimental)")
-
-        self._create_button("snap", "Snap MTGA 16:9", 35, 505, 185, 42, self._snap_window)
-        self._create_button("back", "Back", 240, 505, 185, 42, self.destroy)
+        # Measure the button captions too: point-sized fonts grow with Windows scaling.
+        buttons = (("snap", "Snap MTGA 16:9", self._snap_window),
+                   ("session_stats", "Session Stats", self._open_session_stats),
+                   ("back", "Back", self.destroy))
+        widths = [button_font.measure(label) + 30 for _, label, _ in buttons]
+        x = (self._WIDTH - sum(widths) - 24) // 2
+        for (name, label, command), width in zip(buttons, widths):
+            self._create_button(name, label, x, bottom + 20, width, button_height, command)
+            x += width + 12
+        height = bottom + button_height + 40
+        self.update_idletasks()
+        y = min(self.winfo_y(), max(0, self.winfo_screenheight() - height - 50))
+        self.geometry(f"{self._WIDTH}x{height}+{self.winfo_x()}+{y}")
 
     def _toggle_webhooks(self):
         self._webhooks_enabled.set(not self._webhooks_enabled.get())
@@ -6589,6 +6793,26 @@ class EnhancementsWindow(_FireSubWindow):
             self._config_manager.set_free_forge_enabled(val)
         self._save_config_now()
 
+    def _toggle_low_power(self):
+        self._low_power_enabled.set(not self._low_power_enabled.get())
+        self._refresh_toggle("low_power")
+        from low_power import LowPowerManager
+        LowPowerManager.get_instance().set_enabled(self._low_power_enabled.get())
+
+    def _toggle_selective_attack(self):
+        self._selective_attack_enabled.set(not self._selective_attack_enabled.get())
+        self._refresh_toggle("selective_attack")
+        os.environ["MTGA_SELECTIVE_ATTACK"] = "1" if self._selective_attack_enabled.get() else "0"
+        self._save_config_now()
+
+    def _open_session_stats(self):
+        app = getattr(self._parent, "master", None)
+        opener = getattr(app, "_open_current_session", None)
+        if callable(opener):
+            opener()
+        else:
+            self._canvas.itemconfigure(self._status_text_item, text="Session stats unavailable")
+
     def _save_config_now(self):
         from notifications import NotificationManager
         nm = NotificationManager.get_instance()
@@ -6599,6 +6823,8 @@ class EnhancementsWindow(_FireSubWindow):
             "telegram_chat_id": self._telegram_chat_id.get().strip(),
             "enabled": bool(self._webhooks_enabled.get()),
             "human_mouse": bool(self._human_mouse_enabled.get()),
+            "low_power_mode": bool(self._low_power_enabled.get()),
+            "selective_attack": bool(self._selective_attack_enabled.get()),
             "free_forge": val,
         })
         os.environ["MTGA_FORGE_FREE"] = "on" if val else "off"
@@ -7011,7 +7237,7 @@ class SwitchAccountWindow(tk.Toplevel):
         on_close=None,
     ):
         super().__init__(parent)
-        self._ui_scale = _get_ui_scale_from_widget(parent)
+        self._ui_scale = _get_ui_scale_from_widget(parent) * 1.5
         self._parent = parent
         self._config_manager = config_manager
         self._on_close_callback = on_close
@@ -7091,11 +7317,16 @@ class SwitchAccountWindow(tk.Toplevel):
         self._title_label = None
         self._accounts_title_label = None
         self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._canvas.configure(yscrollcommand=self._scrollbar.set)
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._canvas.bind("<Configure>", self._on_resize_manage_background)
         self._load_accounts_from_config()
         self._setup_styles()
         self._build_ui()
+        self._scale_manage_layout()
+        self.bind("<MouseWheel>", self._scroll_manage_content)
         self._canvas.bind("<Delete>", lambda _e: self._clear_selected_account_row())
         self._canvas.bind("<BackSpace>", lambda _e: self._clear_selected_account_row())
         self._load_manage_background_image()
@@ -7142,6 +7373,53 @@ class SwitchAccountWindow(tk.Toplevel):
 
     def _s(self, value: int | float) -> int:
         return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def _font(self, points: int, *styles):
+        # Canvas coordinates are pixels. Positive Tk font sizes are points and
+        # otherwise grow independently with Windows DPI, overlapping the layout.
+        # Keep the dialog geometry fixed while making its labels easier to read.
+        return ("Segoe UI", -self._s(points * 4 / 3 * 1.3), *styles)
+
+    def _scale_manage_layout(self):
+        cv = self._canvas
+        widths = {item: float(cv.itemcget(item, "width"))
+                  for item in cv.find_all() if cv.type(item) == "window"}
+        cv.scale("all", 0, 0, self._ui_scale, self._ui_scale)
+        # Native entries and comboboxes must use pixel bounds too; their default
+        # width is in characters and changes with the system font and DPI.
+        for item in cv.find_all():
+            if cv.type(item) != "window":
+                continue
+            widget = self.nametowidget(cv.itemcget(item, "window"))
+            widget.configure(font=self._font(9))
+            cv.itemconfigure(
+                item,
+                width=self._s(widths[item]),
+                height=self._s(24),
+            )
+            widget.bind("<FocusIn>", self._reveal_manage_field, add="+")
+        self._apply_content_minsize()
+
+    def _scroll_manage_content(self, event):
+        # Leave dropdown wheel handling to Tk while the popup is in use.
+        if isinstance(event.widget, ttk.Combobox):
+            return
+        self._canvas.yview_scroll(-int(event.delta / 120), "units")
+        return "break"
+
+    def _reveal_manage_field(self, event):
+        cv = self._canvas
+        for item in cv.find_all():
+            if cv.type(item) == "window" and cv.itemcget(item, "window") == str(event.widget):
+                bounds = cv.bbox(item)
+                top = cv.canvasy(0)
+                height = cv.winfo_height()
+                total = self._s(916)
+                if bounds[1] < top:
+                    cv.yview_moveto(max(0, bounds[1] - self._s(12)) / total)
+                elif bounds[3] > top + height:
+                    cv.yview_moveto((bounds[3] + self._s(12) - height) / total)
+                break
 
     def _load_accounts_from_config(self):
         existing = self._config_manager.get_managed_accounts()[: self._max_accounts]
@@ -7223,15 +7501,17 @@ class SwitchAccountWindow(tk.Toplevel):
         self._apply_content_minsize()
 
     def _apply_content_minsize(self):
-        _fit_window_to_canvas_content(
-            self,
-            self._canvas,
-            exclude_items={self._bg_canvas_item} if self._bg_canvas_item else None,
-            pad_x=18,
-            pad_y=20,
-            floor_w=460,
-            floor_h=820,
-        )
+        self._canvas.configure(scrollregion=(0, 0, self._s(460), self._s(916)))
+        width = self._s(460) + self._scrollbar.winfo_reqwidth()
+        height = min(self._s(916), max(240, self.winfo_screenheight() - 80))
+        self.minsize(width, min(height, self._s(560)))
+        if (self.winfo_width(), self.winfo_height()) != (width, height):
+            self.geometry(f"{width}x{height}")
+        if self.winfo_ismapped():
+            x = min(max(0, self.winfo_x()), max(0, self.winfo_screenwidth() - width))
+            y = min(max(0, self.winfo_y()), max(0, self.winfo_screenheight() - height - 40))
+            if (x, y) != (self.winfo_x(), self.winfo_y()):
+                self.geometry(f"+{x}+{y}")
 
     def _fit_window_to_content_width(self):
         try:
@@ -7261,7 +7541,7 @@ class SwitchAccountWindow(tk.Toplevel):
         if self._manage_bg_source_image is None:
             return
         width = max(2, self._canvas.winfo_width())
-        height = max(2, self._canvas.winfo_height())
+        height = max(2, self._s(916), self._canvas.winfo_height())
         try:
             fitted = ImageOps.fit(
                 self._manage_bg_source_image,
@@ -7352,7 +7632,7 @@ class SwitchAccountWindow(tk.Toplevel):
         return photo
 
     def _create_manage_group_panel(self, name: str, x: int, y: int, width: int, height: int):
-        panel_photo = self._render_manage_group_panel(width, height)
+        panel_photo = self._render_manage_group_panel(self._s(width), self._s(height))
         item = self._canvas.create_image(x, y, anchor="nw", image=panel_photo)
         self._group_panel_items[name] = item
 
@@ -7404,17 +7684,17 @@ class SwitchAccountWindow(tk.Toplevel):
         command,
         primary: bool,
     ):
-        skins = self._resolve_manage_button_skins(primary=primary, body_w=body_w, body_h=body_h)
+        skins = self._resolve_manage_button_skins(primary=primary, body_w=self._s(body_w), body_h=self._s(body_h))
         if not skins:
             return
         tag = f"manage_btn_{name}"
         bg_item = self._canvas.create_image(x, y, anchor="nw", image=skins["normal"], tags=(tag,))
         text_item = self._canvas.create_text(
-            x + (skins["normal"].width() // 2),
-            y + (skins["normal"].height() // 2) - 2,
+            x + (skins["normal"].width() / self._ui_scale / 2),
+            y + (skins["normal"].height() / self._ui_scale / 2) - 2,
             text=text,
             fill="#F2F6FF",
-            font=("Segoe UI", 11, "bold"),
+            font=self._font(11, "bold"),
             anchor="center",
             tags=(tag,),
         )
@@ -7503,7 +7783,7 @@ class SwitchAccountWindow(tk.Toplevel):
             bd=0,
             relief=tk.FLAT,
             highlightthickness=0,
-            font=("Segoe UI", 9),
+            font=self._font(9),
         )
         return entry
 
@@ -7525,10 +7805,38 @@ class SwitchAccountWindow(tk.Toplevel):
             highlightthickness=0,
             padx=8,
             pady=5,
-            font=("Segoe UI", 10, "bold"),
+            font=self._font(10, "bold"),
             cursor="hand2",
         )
         return btn
+
+    def _build_750_quest_toggle(self, y: int) -> None:
+        c = self._theme
+        cv = self._canvas
+        self.switch_750_only_var = tk.BooleanVar(
+            value=self._config_manager.get_account_switch_750_only()
+        )
+        box = cv.create_rectangle(
+            26, y, 40, y + 14, fill=c["entry_bg"], outline=c["widget_border"], width=1,
+        )
+        tick = cv.create_text(
+            33, y + 6, text="X", fill=c["text"], font=self._font(10, "bold"),
+            state="normal" if self.switch_750_only_var.get() else "hidden",
+        )
+        label = cv.create_text(
+            50, y - 1, text="750-gold quests only (ok to do one 500-gold quests if all three are 500)",
+            fill=c["text"], font=self._font(9), anchor="nw",
+        )
+
+        def toggle(_event=None):
+            self._config_manager.set_account_switch_750_only(not self.switch_750_only_var.get())
+            self.switch_750_only_var.set(self._config_manager.get_account_switch_750_only())
+            cv.itemconfigure(tick, state="normal" if self.switch_750_only_var.get() else "hidden")
+
+        for item in (box, tick, label):
+            cv.tag_bind(item, "<Button-1>", toggle)
+            cv.tag_bind(item, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
+            cv.tag_bind(item, "<Leave>", lambda _e: cv.configure(cursor=""))
 
     def _build_shutdown_toggle(self, y: int) -> None:
         """Canvas checkbox: power the PC off when the whole rotation is done.
@@ -7550,19 +7858,19 @@ class SwitchAccountWindow(tk.Toplevel):
         )
         self._shutdown_tick_item = cv.create_text(
             26 + box // 2, y + box // 2 - 1,
-            text="X", fill=c["text"], font=("Segoe UI", 10, "bold"), anchor="center",
+            text="X", fill=c["text"], font=self._font(10, "bold"), anchor="center",
         )
         self._shutdown_label_item = cv.create_text(
             50, y - 1,
             text="Shut down PC when all accounts are done",
-            fill=c["text"], font=("Segoe UI", 9), anchor="nw",
+            fill=c["text"], font=self._font(9), anchor="nw",
         )
         # Say plainly that this rides on quests mode -- in time mode the round
         # never ends, so the checkbox would look armed and never do anything.
         cv.create_text(
             26, y + 18,
             text="(quests mode only; a 2 min warning lets you cancel)",
-            fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw",
+            fill=c["text_muted"], font=self._font(8), anchor="nw",
         )
         for item in (self._shutdown_box_item, self._shutdown_tick_item, self._shutdown_label_item):
             cv.tag_bind(item, "<Button-1>", self._toggle_shutdown_when_round_complete)
@@ -7602,40 +7910,34 @@ class SwitchAccountWindow(tk.Toplevel):
         self._content = cv
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
-        # switch_block carries a third row (the shutdown opt-in), so it is 32px
-        # taller than the two-row version and everything below it moved down by
-        # the same 32. The window itself needs no change: _apply_content_minsize
-        # fits it to the canvas content, which still ends above the 820 floor.
-        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=126)
-        # The separate Alias row is gone (one Arena Name field now does both jobs),
-        # so accounts_block is back to its pre-Alias height and order_block back to
-        # its pre-Alias y -- the -30 that undoes the +30 that row cost.
-        self._create_manage_group_panel("accounts_block", x=16, y=168, width=428, height=410)
-        self._create_manage_group_panel("order_block", x=16, y=590, width=428, height=220)
+        # Leave space for the run-wide shutdown timer below the completion toggle.
+        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=212)
+        self._create_manage_group_panel("accounts_block", x=16, y=254, width=428, height=410)
+        self._create_manage_group_panel("order_block", x=16, y=676, width=428, height=220)
 
         # Row 1: switch trigger mode (time vs quests, mutually exclusive) + time.
-        cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
+        cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=self._font(10), anchor="nw")
         self.switch_mode_var = tk.StringVar(value=self._config_manager.get_account_switch_mode())
         mode_combo = ttk.Combobox(
             self, textvariable=self.switch_mode_var, values=["time", "quests"],
             state="readonly", width=8,
         )
         mode_combo.configure(style="ManageFire.TCombobox")
-        cv.create_window(104, 44, anchor="nw", window=mode_combo)
-        cv.create_text(206, 46, text="Time min:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_window(104, 44, anchor="nw", window=mode_combo, width=90)
+        cv.create_text(206, 46, text="Time min:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
         time_entry = self._make_entry(self, textvariable=self.switch_minutes_var, width=5)
-        cv.create_window(282, 44, anchor="nw", window=time_entry)
-        cv.create_text(360, 46, text="(0=off)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_window(282, 44, anchor="nw", window=time_entry, width=56)
+        cv.create_text(360, 46, text="(0=off)", fill=c["text_muted"], font=self._font(8), anchor="nw")
         # Row 2: quest-mode thresholds + save.
-        cv.create_text(26, 78, text="Main 0-3:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 78, text="Main 0-3:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_main_var = tk.StringVar(value=str(self._config_manager.get_account_switch_main_quests()))
         main_entry = self._make_entry(self, textvariable=self.switch_main_var, width=3)
-        cv.create_window(92, 76, anchor="nw", window=main_entry)
-        cv.create_text(150, 78, text="Wins 0-15:", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_window(92, 76, anchor="nw", window=main_entry, width=32)
+        cv.create_text(150, 78, text="Wins 0-15:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_daily_var = tk.StringVar(value=str(self._config_manager.get_account_switch_daily_wins()))
         daily_entry = self._make_entry(self, textvariable=self.switch_daily_var, width=3)
-        cv.create_window(226, 76, anchor="nw", window=daily_entry)
+        cv.create_window(226, 76, anchor="nw", window=daily_entry, width=32)
         for _e in (time_entry, main_entry, daily_entry):
             _e.bind("<Return>", lambda _ev: self._save_switch_settings())
         self._create_manage_canvas_button(
@@ -7651,23 +7953,32 @@ class SwitchAccountWindow(tk.Toplevel):
         # Row 3: what happens after the LAST account finishes. It belongs here
         # rather than in the general settings because it only ever fires on the
         # end of an account rotation, which is configured in this very block.
-        self._build_shutdown_toggle(y=106)
+        self._build_750_quest_toggle(y=106)
+        self._build_shutdown_toggle(y=134)
 
-        cv.create_text(26, 178, text="Accounts (max 10)", fill=c["text"], font=("Segoe UI", 13, "bold"), anchor="nw")
-        cv.create_text(26, 206, text="#", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(62, 206, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
-        cv.create_text(208, 206, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 174, text="Max play time (hours):", fill=c["text"], font=self._font(9), anchor="nw")
+        self.max_play_hours_var = tk.StringVar(value=format(self._config_manager.get_max_play_hours(), "g"))
+        limit_entry = self._make_entry(self, textvariable=self.max_play_hours_var, width=7)
+        cv.create_window(178, 172, anchor="nw", window=limit_entry, width=64)
+        limit_entry.bind("<Return>", lambda _e: self._save_switch_settings())
+        cv.create_text(250, 174, text="(0 = off; next run)", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_text(26, 204, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=self._font(8), anchor="nw")
+
+        cv.create_text(26, 264, text="Accounts (max 10)", fill=c["text"], font=self._font(13, "bold"), anchor="nw")
+        cv.create_text(26, 292, text="#", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(62, 292, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(208, 292, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
 
         self._table_rows = []
-        row_y_start = 226
+        row_y_start = 312
         row_step = 20
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
             tag = f"acct_row_{idx}"
-            bg_item = cv.create_rectangle(22, y - 2, 438, y + 16, fill=c["row_bg"], outline=c["table_border"], tags=(tag,))
-            idx_item = cv.create_text(30, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw", tags=(tag,))
-            name_item = cv.create_text(62, y, text="", fill=c["text"], font=("Segoe UI", 9, "bold"), anchor="nw", tags=(tag,))
-            email_item = cv.create_text(208, y, text="", fill=c["text"], font=("Segoe UI", 9), anchor="nw", tags=(tag,))
+            bg_item = cv.create_rectangle(22, y - 2, 438, y + 18, fill=c["row_bg"], outline=c["table_border"], tags=(tag,))
+            idx_item = cv.create_text(30, y, text=str(idx + 1), fill=c["text_muted"], font=self._font(9), anchor="nw", tags=(tag,))
+            name_item = cv.create_text(62, y, text="", fill=c["text"], font=self._font(9, "bold"), anchor="nw", tags=(tag,))
+            email_item = cv.create_text(208, y, text="", fill=c["text"], font=self._font(9), anchor="nw", tags=(tag,))
             self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item, "bg": bg_item})
             self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, row_idx=idx: self._select_account_row(row_idx))
             self._canvas.tag_bind(tag, "<Enter>", lambda _e: self._canvas.configure(cursor="hand2"))
@@ -7680,27 +7991,27 @@ class SwitchAccountWindow(tk.Toplevel):
         # that appeared nowhere in Arena. The Arena name is the only identity the
         # Player.log exposes, so it is the one that has to be right; the label is
         # now just the same string.
-        cv.create_text(26, 436, text="Arena Name", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 522, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
         name_entry = self._make_entry(self, textvariable=self.account_name_var, width=24)
         name_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 434, anchor="nw", window=name_entry)
-        cv.create_text(280, 436, text="(as shown in Arena)", fill=c["text_muted"], font=("Segoe UI", 8), anchor="nw")
+        cv.create_window(104, 520, anchor="nw", window=name_entry, width=168)
+        cv.create_text(280, 522, text="(as shown in Arena)", fill=c["text_muted"], font=self._font(8), anchor="nw")
 
-        cv.create_text(26, 466, text="Email", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 552, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
         email_entry = self._make_entry(self, textvariable=self.account_email_var, width=34)
         email_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 464, anchor="nw", window=email_entry)
+        cv.create_window(104, 550, anchor="nw", window=email_entry, width=318)
 
-        cv.create_text(26, 496, text="Password", fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+        cv.create_text(26, 582, text="Password", fill=c["text_muted"], font=self._font(9), anchor="nw")
         password_entry = self._make_entry(self, textvariable=self.account_pw_var, width=34, show="*")
         password_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 494, anchor="nw", window=password_entry)
+        cv.create_window(104, 580, anchor="nw", window=password_entry, width=318)
 
         self._create_manage_canvas_button(
             name="save_row",
             text="Save Row",
             x=26,
-            y=530,
+            y=616,
             body_w=104,
             body_h=30,
             command=self._save_selected_account,
@@ -7711,7 +8022,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="delete_row",
             text="Delete Row",
             x=134,
-            y=530,
+            y=616,
             body_w=104,
             body_h=30,
             command=self._clear_selected_account_row,
@@ -7722,15 +8033,15 @@ class SwitchAccountWindow(tk.Toplevel):
             name="save_accounts",
             text="Save Accounts",
             x=244,
-            y=530,
+            y=616,
             body_w=158,
             body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(26, 602, text="Account Play Order", fill=c["text"], font=("Segoe UI", 10), anchor="nw")
-        cv.create_line(22, 619, 438, 619, fill=c["table_border"], width=1)
+        cv.create_text(26, 688, text="Account Play Order", fill=c["text"], font=self._font(10), anchor="nw")
+        cv.create_line(22, 705, 438, 705, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
@@ -7740,8 +8051,8 @@ class SwitchAccountWindow(tk.Toplevel):
             col = idx // 5
             row = idx % 5
             lx, cx = col_x[col]
-            y = 626 + row * 24
-            cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=("Segoe UI", 9), anchor="nw")
+            y = 712 + row * 24
+            cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=self._font(9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
                 self,
@@ -7751,17 +8062,17 @@ class SwitchAccountWindow(tk.Toplevel):
                 width=11,
             )
             combo.configure(style="ManageFire.TCombobox")
-            cv.create_window(cx, y - 2, anchor="nw", window=combo)
+            cv.create_window(cx, y - 2, anchor="nw", window=combo, width=174)
             self._order_vars.append(var)
             self._order_combos.append(combo)
         # vertical divider between columns
-        cv.create_line(230, 622, 230, 748, fill=c["table_border"], width=1)
+        cv.create_line(230, 708, 230, 834, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
             x=26,
-            y=758,
+            y=844,
             body_w=140,
             body_h=34,
             command=self._save_account_play_order,
@@ -7771,18 +8082,27 @@ class SwitchAccountWindow(tk.Toplevel):
             name="close_bottom",
             text="Back",
             x=246,
-            y=758,
+            y=844,
             body_w=120,
             body_h=34,
             command=self.destroy,
             primary=False,
         )
 
-    def _truncate_text(self, text: str, max_len: int) -> str:
+    def _set_table_text(self, item: int, text: str, max_width: int):
+        # Measure the rendered canvas item so even platform font substitutions
+        # and rounding at fractional UI scales stay inside the column.
         value = text or ""
-        if len(value) <= max_len:
-            return value
-        return value[: max_len - 1] + "..."
+        self._canvas.itemconfigure(item, text=value)
+        bounds = self._canvas.bbox(item)
+        width = self._s(max_width)
+        if bounds and bounds[2] - bounds[0] > width:
+            while value:
+                value = value[:-1]
+                self._canvas.itemconfigure(item, text=value + "...")
+                bounds = self._canvas.bbox(item)
+                if bounds[2] - bounds[0] <= width:
+                    break
 
     def _refresh_accounts_table(self):
         c = self._theme
@@ -7795,10 +8115,10 @@ class SwitchAccountWindow(tk.Toplevel):
             self._canvas.itemconfigure(row_widgets["idx"], fill=c["accent"] if selected else c["text_muted"])
             name_fg = c["accent"] if selected else (c["text"] if account["name"] else c["text_muted"])
             email_fg = c["accent"] if selected else (c["text"] if account["email"] else c["text_muted"])
-            name_text = self._truncate_text(account["name"], 14) if account["name"] else "click to edit"
-            self._canvas.itemconfigure(row_widgets["name"], fill=name_fg, text=name_text)
-            email_text = self._truncate_text(account["email"], 22) if account["email"] else ""
-            self._canvas.itemconfigure(row_widgets["email"], fill=email_fg, text=email_text)
+            self._canvas.itemconfigure(row_widgets["name"], fill=name_fg)
+            self._set_table_text(row_widgets["name"], account["name"] or "click to edit", 136)
+            self._canvas.itemconfigure(row_widgets["email"], fill=email_fg)
+            self._set_table_text(row_widgets["email"], account["email"], 220)
 
     def _populate_details_fields(self):
         account = self._accounts_data[self._selected_account_idx]
@@ -7941,6 +8261,12 @@ class SwitchAccountWindow(tk.Toplevel):
         return renames
 
     def _save_switch_settings(self):
+        try:
+            self._config_manager.set_max_play_hours(self.max_play_hours_var.get())
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Max play time", str(exc), parent=self)
+            return
+        self.max_play_hours_var.set(format(self._config_manager.get_max_play_hours(), "g"))
         # Mode (time vs quests -- mutually exclusive).
         mode = (self.switch_mode_var.get() or "time").strip().lower()
         self._config_manager.set_account_switch_mode(mode)
@@ -7973,9 +8299,11 @@ class SwitchAccountWindow(tk.Toplevel):
                 pass
         if mode == "quests":
             detail = f"quests ({self.switch_main_var.get()} main + {self.switch_daily_var.get()} wins)"
+            if self._config_manager.get_account_switch_750_only():
+                detail += "; 750-gold quests only (free a slot if full; next run)"
         else:
             detail = f"time ({self.switch_minutes_var.get()} min)"
-        messagebox.showinfo("Saved", f"Account-switch settings saved: {detail}.")
+        messagebox.showinfo("Saved", f"Account-switch settings saved: {detail}.\nMax play time: {self.max_play_hours_var.get()} hours (0 = off; applies next run).")
 
     def _refresh_order_choices(self):
         names = []

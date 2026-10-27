@@ -37,6 +37,7 @@ def main() -> int:
     account_switch_mode = config_manager.get_account_switch_mode()
     account_switch_main_quests = config_manager.get_account_switch_main_quests()
     account_switch_daily_wins = config_manager.get_account_switch_daily_wins()
+    account_switch_750_only = config_manager.get_account_switch_750_only()
     account_cycle_index = config_manager.get_account_cycle_index()
     account_play_order = config_manager.get_account_play_order()
     game_mode = config_manager.get_game_mode()
@@ -64,6 +65,7 @@ def main() -> int:
         account_switch_mode=account_switch_mode,
         account_switch_main_quests=account_switch_main_quests,
         account_switch_daily_wins=account_switch_daily_wins,
+        account_switch_750_only=account_switch_750_only,
         account_cycle_index=account_cycle_index,
         account_play_order=account_play_order,
         game_mode=game_mode,

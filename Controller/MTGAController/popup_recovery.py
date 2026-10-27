@@ -1,4 +1,4 @@
-"""Recover persistent reward/continue overlays using their text, not button shape."""
+"""Recover blocking overlays using specific text and survey-face templates."""
 import json
 import os
 import threading
@@ -11,11 +11,13 @@ from vision.window_locator import focus_mtga_window
 
 class PopupRecoveryMixin:
     _POPUP_IDLE_SEC = 5.0
-    _RECONNECT_IDLE_SEC = 120.0
-    # Tight text captures from the reported seasonal-reward screen, normalized
-    # to 1920x1080. Claim's lettering distinguishes it from orange Play pills.
+    _RECONNECT_IDLE_SEC = 15.0
+    # Search regions are normalized to 1920x1080. Claim's lettering distinguishes
+    # it from orange Play pills; the survey uses its smiling face directly.
     _POPUP_TARGETS = (
         ("reconnect_text.png", "POPUP_RECONNECT", (600, 430, 720, 300), 0.85),
+        # Happy scores 0.994 on the supplied survey; sad alone scores 0.937.
+        ("happy_face.png", "POPUP_HAPPY_FACE", (720, 400, 480, 300), 0.97),
         ("claim_rewards_text.png", "POPUP_CLAIM_REWARDS", (1300, 850, 620, 230), 0.85),
         ("claim_text.png", "POPUP_CLAIM", (1300, 850, 620, 230), 0.85),
         ("click_to_continue_text.png", "POPUP_CONTINUE", (520, 940, 880, 140), 0.70),
@@ -61,7 +63,11 @@ class PopupRecoveryMixin:
             while not stop.wait(1.0):
                 if self._stop_requested:
                     return
-                self._recover_blocking_popup(stop_event=stop)
+                recover = self._recover_blocking_popup
+                worker_target = getattr(self.input, "worker_target", None)
+                if callable(worker_target):
+                    recover = worker_target(recover)
+                recover(stop_event=stop)
 
         self._popup_recovery_thread = threading.Thread(
             target=watch, name="popup-recovery", daemon=True,
@@ -86,7 +92,7 @@ class PopupRecoveryMixin:
         detection = self._arena_region_provider.last_detection_result
         # Seasonal rewards and disconnect modals hide every normal UI anchor.
         # The OS still supplies a fresh, visible client rectangle. Use that
-        # rectangle for text verification only, never stale cached geometry.
+        # rectangle for template verification only, never stale cached geometry.
         if detection is not None:
             if detection.code in {"window_wrong_size", "window_off_screen", "window_not_found"}:
                 return None
@@ -100,7 +106,7 @@ class PopupRecoveryMixin:
             return None
         image = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_LINEAR)
         # Text correlation also matches dimmed controls behind a modal. Detect
-        # the disconnect message first and block all reward clicks until it is
+        # the disconnect message first and block all other popup clicks until it is
         # gone, even if the Reconnect button itself cannot be recognized yet.
         disconnected = self._popup_vision.find_template(
             image[380:610, 300:1620],
@@ -151,7 +157,7 @@ class PopupRecoveryMixin:
                      or self._switch_owner_ident == threading.get_ident()))
 
     def _recover_blocking_popup(self, *, stop_event=None, block_navigation=False):
-        """Verified reward/continue clicks after 5s; Reconnect after 120s idle.
+        """Verified reward/continue/survey clicks after 5s; Reconnect after 15s idle.
 
         Also called by Home navigation so the thread owning login/quest work
         can clear its own overlay. Never steal that thread's UI or an input
@@ -206,7 +212,7 @@ class PopupRecoveryMixin:
                             return block_navigation
                         self._click_abs(*fresh[1], label)
                         self._popup_signature = None
-                        bot_logger.log_info(f"{label}: confirmed popup persisted for {idle_sec:.0f}s without progress; clicked text.")
+                        bot_logger.log_info(f"{label}: confirmed popup persisted for {idle_sec:.0f}s without progress; clicked target.")
                         return True
                 finally:
                     self._Controller__decision_exec_lock.release()

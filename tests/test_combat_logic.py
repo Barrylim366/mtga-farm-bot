@@ -463,4 +463,3 @@ class TestChooseAttackers(CombatLogicTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

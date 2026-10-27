@@ -26,6 +26,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import Mock, patch
 
@@ -81,9 +82,31 @@ class _ThrowawayControllerBase(unittest.TestCase):
         # Suppress physical actions and template matching
         self.c.input = Mock()
         self.c._click_abs = Mock()
+        self.c._locate_image_center_in_scaled_arena_region = Mock(return_value=None)
+        self.c._click_image_in_scaled_arena_region = Mock(return_value=False)
+        self.c._dismiss_reward_popup = Mock(return_value=False)
+        self.c._current_account_screen_name = "Player#11111"
+        self.c._starter_event_page_confirmed = Mock(return_value=True)
+        self.c._starter_template_visible = Mock(return_value=True)
+        timer = patch("Controller.MTGAController.Controller.threading.Timer")
+        timer.start()
+        self.addCleanup(timer.stop)
+        sleep = patch("Controller.MTGAController.Controller.time.sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
 
 
 class StarterDeckResolutionTests(_ThrowawayControllerBase):
+    def test_preferred_deck_after_configured_quest_target_with_other_quests_remaining(self):
+        self.c._preferred_starter_deck = "RG"
+        self.c._account_switch_mode = "quests"
+        self.c._account_switch_main_quests = 1
+        self.c._account_switch_daily_wins = 4
+        self.c._last_valid_quest_active_incomplete = 2
+        self.c._quest_count_confirmed_fresh = True
+        self.c._cached_active_colors = "UB"
+        self.assertEqual(self.c._resolve_starter_target_colors(), "RG")
+
     def test_default_mode_plays_quest_deck_when_quest_active(self):
         self.c._preferred_starter_deck = "RG"
         self.c._only_grind_preferred_deck = False
@@ -143,6 +166,20 @@ class StarterDeckResolutionTests(_ThrowawayControllerBase):
 
 
 class HistoricDeckResolutionTests(_ThrowawayControllerBase):
+    def test_preferred_deck_when_750_policy_preserves_remaining_500_quests(self):
+        self.c._preferred_historic_deck = "wins.png"
+        self.c._account_switch_mode = "quests"
+        self.c._account_switch_main_quests = 3
+        self.c._account_switch_750_only = True
+        self.c._last_valid_quest_active_incomplete = 2
+        self.c._quest_count_confirmed_fresh = True
+        self.c._cached_quests = [
+            {"gold": 500, "goal": 20, "progress": 0},
+            {"gold": 500, "goal": 30, "progress": 0},
+        ]
+        self.c._select_best_quest = Mock(side_effect=AssertionError("Quest target already met"))
+        self.assertEqual(self.c._quest_deck_target(), ("", "wins.png"))
+
     def test_default_mode_plays_quest_deck_when_quest_active(self):
         self.c._preferred_historic_deck = "mono_red.png"
         self.c._only_grind_preferred_deck = False
@@ -202,7 +239,7 @@ class HistoricDeckResolutionTests(_ThrowawayControllerBase):
 
 class StarterDeckChooserSkipTests(_ThrowawayControllerBase):
     def test_swap_skips_chooser_when_deck_already_selected(self):
-        self.c._selected_starter_deck = "RG"
+        self.c._starter_selected_deck = ("player#11111", "RG")
         self.c._starter_navigation_may_act = lambda: True
         self.c._choose_starter_deck_template = lambda colors: "assets/assert/starter_decks/RG.PNG"
         self.c._detect_starter_screen = lambda label: Controller._STARTER_SCREEN_PLAY
@@ -212,7 +249,8 @@ class StarterDeckChooserSkipTests(_ThrowawayControllerBase):
         self.c._open_starter_deck_chooser.assert_not_called()
 
     def test_swap_opens_chooser_when_deck_cached_but_not_on_play_screen(self):
-        self.c._selected_starter_deck = "RG"
+        self.c._starter_selected_deck = ("player#11111", "RG")
+        self.c._starter_event_page_confirmed.return_value = False
         self.c._starter_navigation_may_act = lambda: True
         self.c._choose_starter_deck_template = lambda colors: "assets/assert/starter_decks/RG.PNG"
         self.c._detect_starter_screen = lambda label: Controller._STARTER_SCREEN_START
@@ -220,10 +258,10 @@ class StarterDeckChooserSkipTests(_ThrowawayControllerBase):
 
         self.c._swap_starter_deck_for_quest("RG")
         self.c._open_starter_deck_chooser.assert_called_once()
-        self.assertIsNone(self.c._selected_starter_deck)
+        self.assertIsNone(self.c._starter_selected_deck)
 
     def test_swap_opens_chooser_when_different_deck_selected(self):
-        self.c._selected_starter_deck = "WB"
+        self.c._starter_selected_deck = ("player#11111", "WB")
         self.c._starter_navigation_may_act = lambda: True
         self.c._choose_starter_deck_template = lambda colors: "assets/assert/starter_decks/RG.PNG"
         self.c._open_starter_deck_chooser = Mock(return_value=False)
@@ -232,7 +270,7 @@ class StarterDeckChooserSkipTests(_ThrowawayControllerBase):
         self.c._open_starter_deck_chooser.assert_called_once()
 
     def test_submitting_deck_records_selection(self):
-        self.c._selected_starter_deck = None
+        self.c._starter_selected_deck = None
         self.c._starter_navigation_may_act = lambda: True
         self.c._choose_starter_deck_template = lambda colors: "assets/assert/starter_decks/RG.PNG"
         self.c._open_starter_deck_chooser = Mock(return_value=True)
@@ -241,12 +279,12 @@ class StarterDeckChooserSkipTests(_ThrowawayControllerBase):
         self.c._detect_starter_screen = lambda label: Controller._STARTER_SCREEN_PLAY
 
         self.c._swap_starter_deck_for_quest("RG")
-        self.assertEqual(self.c._selected_starter_deck, "RG")
+        self.assertEqual(self.c._starter_selected_deck, ("player#11111", "RG"))
 
-    def test_forget_selected_deck_clears_starter(self):
-        self.c._selected_starter_deck = "RG"
-        self.c._forget_selected_deck()
-        self.assertIsNone(self.c._selected_starter_deck)
+    def test_forget_starter_deck_clears_selection(self):
+        self.c._starter_selected_deck = ("player#11111", "RG")
+        self.c._forget_starter_deck("account logout/switch")
+        self.assertIsNone(self.c._starter_selected_deck)
 
 
 class PostMatchHomeDipBypassTests(_ThrowawayControllerBase):
@@ -317,6 +355,31 @@ class PostMatchHomeDipBypassTests(_ThrowawayControllerBase):
 
 
 class ConfigManagerDeckPreferencesTests(unittest.TestCase):
+    def test_enhancement_settings_preserve_existing_controls_with_free_forge(self):
+        window = types.SimpleNamespace(_config_manager=Mock())
+        window._config_manager.get_free_forge_enabled.return_value = True
+        notifications = Mock()
+        notifications.get_config.return_value = {}
+        low_power = Mock(enabled=True)
+
+        def variable(*, value):
+            return Mock(get=Mock(return_value=value))
+
+        with patch("ui.tk.StringVar", side_effect=variable), \
+             patch("ui.tk.BooleanVar", side_effect=variable), \
+             patch("notifications.NotificationManager.get_instance", return_value=notifications), \
+             patch("low_power.LowPowerManager.get_instance", return_value=low_power), \
+             patch.dict(os.environ, {"MTGA_SELECTIVE_ATTACK": "0", "MTGA_FORGE_FREE": "off"}):
+            ui.EnhancementsWindow._init_state(window)
+            ui.EnhancementsWindow._save_config_now(window)
+
+        saved = notifications.save_config.call_args.args[0]
+        self.assertTrue(saved["free_forge"])
+        self.assertTrue(saved["low_power_mode"])
+        self.assertFalse(saved["selective_attack"])
+        for method in ("_toggle_free_forge", "_toggle_low_power", "_toggle_selective_attack", "_open_session_stats"):
+            self.assertTrue(callable(getattr(ui.EnhancementsWindow, method)))
+
     def test_defaults(self):
         with tempfile.TemporaryDirectory(prefix="deck-cfg-") as directory:
             cfg_path = pathlib.Path(directory) / "calibration_config.json"

@@ -51,7 +51,8 @@ class ConcedeIncident:
             return None
 
     def __init__(self, reason, match_id):
-        session_id = runtime_status.read_status().get("session_id")
+        status = runtime_status.read_status()
+        session_id = status.get("session_id")
         self.root = ensure_runtime_subdir("concedes").resolve()
         self.path = self.root / (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f") + "-" + uuid.uuid4().hex[:8])
         with _LOCK:
@@ -62,6 +63,7 @@ class ConcedeIncident:
             "session_id": session_id,
             "match_id": match_id, "reason": reason, "attempt_count": 0,
             "attempts": [], "outcome": "in_progress",
+            "decision_watchdog": status.get("decision_watchdog"),
         }
         self._write()
         bot_logger.log_info(f"CONCEDE_INCIDENT_CREATED: path={self.path}")
