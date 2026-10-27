@@ -340,7 +340,7 @@ Rotation always continues from the account actually logged in, so it never waste
 
 #### Shut down the PC when the round is done
 
-**Max play time (hours)** in Manage Accounts limits the entire run across all accounts, including startup and account switching. It defaults to **3 hours**; **0 disables it**. Both `0,1` and `0.1` mean six minutes. Click **Save** or press Enter to save; changes apply on the next Start, which resets the timer.
+**Max play time (hours)** in Manage Accounts limits the entire run across all accounts, including startup and account switching. It defaults to **0 (disabled)**. Both `0,1` and `0.1` mean six minutes. Click **Save** or press Enter to save; changes apply on the next Start, which resets the timer.
 
 Once the limit is reached, the bot finishes its current match (including one already matchmaking), stops, and schedules PC shutdown **regardless of the completion checkbox below**. It does not queue another match or switch accounts. Finishing the match can extend play beyond the limit. You then have **two minutes to cancel**: choose **Yes** in the “Cancel the shutdown?” popup, or run `shutdown /a` on Windows (`shutdown -c` on Linux). Cancelling leaves the bot stopped and the PC on. Manual Stop, errors, and closing the app cancel the run timer without scheduling shutdown. Normal round completion before the limit follows the existing checkbox.
 

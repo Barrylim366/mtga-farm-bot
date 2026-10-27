@@ -27,7 +27,7 @@ class PlayTimeConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "config.json"
             config = ui.ConfigManager(config_path=path)
-            self.assertEqual(config.get_max_play_hours(), 3)
+            self.assertEqual(config.get_max_play_hours(), 0)
             config.set_max_play_hours("0,1")
             self.assertEqual(ui.ConfigManager(config_path=path).get_max_play_hours(), .1)
             with self.assertRaises(ValueError):

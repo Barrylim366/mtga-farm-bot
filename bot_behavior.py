@@ -3,7 +3,7 @@
 import math
 
 DEFAULT_MATCH_TIMEOUT_MINUTES = 10
-DEFAULT_MAX_PLAY_HOURS = 3.0
+DEFAULT_MAX_PLAY_HOURS = 0.0
 
 
 def parse_max_play_hours(value) -> float:
