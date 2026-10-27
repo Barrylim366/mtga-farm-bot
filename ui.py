@@ -6806,10 +6806,12 @@ class EnhancementsWindow(_FireSubWindow):
         self._save_config_now()
 
     def _open_session_stats(self):
-        if hasattr(self.master, "_open_current_session"):
-            self.master._open_current_session()
+        app = getattr(self._parent, "master", None)
+        opener = getattr(app, "_open_current_session", None)
+        if callable(opener):
+            opener()
         else:
-            self._canvas.itemconfigure(self._status_text_item, text="Session stats active in main window")
+            self._canvas.itemconfigure(self._status_text_item, text="Session stats unavailable")
 
     def _save_config_now(self):
         from notifications import NotificationManager

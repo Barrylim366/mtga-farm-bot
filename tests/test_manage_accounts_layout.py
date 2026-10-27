@@ -1,4 +1,5 @@
 """Exercise actual Tk geometry with dummy accounts; never capture the screen."""
+import re
 import tkinter as tk
 from types import MethodType
 import unittest
@@ -63,10 +64,14 @@ class ManageAccountsLayoutTest(unittest.TestCase):
                             bg = canvas.bbox(button["bg_item"])
                             self.assertGreaterEqual(text[0], bg[0])
                             self.assertLessEqual(text[2], bg[2])
-                        # A short display must keep the footer reachable.
+                        # Fit a short display and keep the footer reachable.
                         window.winfo_screenheight = lambda: 680
                         window._apply_content_minsize()
                         window.update_idletasks()
+                        geometry = window.geometry()
+                        height_match = re.match(r"\d+x(\d+)", geometry)
+                        self.assertIsNotNone(height_match, geometry)
+                        self.assertLessEqual(int(height_match.group(1)), 680, geometry)
                         canvas.yview_moveto(1)
                         footer = canvas.bbox(window._canvas_buttons["close_bottom"]["bg_item"])
                         self.assertLessEqual(footer[3], canvas.canvasy(canvas.winfo_height()))

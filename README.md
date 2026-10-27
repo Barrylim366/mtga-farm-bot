@@ -2,6 +2,9 @@
 
 Version **1.10.0** adds preferred Starter and Historic decks, an option to play only your preferred deck, experimental Free Forge casting, improved London mulligans, and automatic match-end dismissal and reward collection in Starter Deck Duels and Historic.
 
+The **Session Stats** button in **Settings > Enhancements** opens the current
+session window.
+
 Blocking recovery rechecks Arena's current assignments while scanning and before
 clicking. If an ordinary block has already cleared the warning, recovery keeps
 those blocks instead of selecting the creature again or cancelling them.
