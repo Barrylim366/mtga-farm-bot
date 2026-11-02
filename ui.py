@@ -7824,7 +7824,7 @@ class SwitchAccountWindow(tk.Toplevel):
             state="normal" if self.switch_750_only_var.get() else "hidden",
         )
         label = cv.create_text(
-            50, y - 1, text="750-gold quests only (ok to do one 500-gold quests if all three are 500)",
+            50, y - 1, text="750-gold quests only (one 500 if all three are 500)",
             fill=c["text"], font=self._font(9), anchor="nw",
         )
 
@@ -7964,21 +7964,24 @@ class SwitchAccountWindow(tk.Toplevel):
         cv.create_text(250, 174, text="(0 = off; next run)", fill=c["text_muted"], font=self._font(8), anchor="nw")
         cv.create_text(26, 204, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=self._font(8), anchor="nw")
 
-        cv.create_text(26, 264, text="Accounts (max 10)", fill=c["text"], font=self._font(13, "bold"), anchor="nw")
-        cv.create_text(26, 292, text="#", fill=c["text_muted"], font=self._font(9), anchor="nw")
-        cv.create_text(62, 292, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
-        cv.create_text(208, 292, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(26, 248, text="Accounts (max 10)", fill=c["text"], font=self._font(13, "bold"), anchor="nw")
+        cv.create_text(26, 276, text="#", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(62, 276, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(208, 276, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
 
         self._table_rows = []
-        row_y_start = 312
-        row_step = 20
+        # Segoe UI at _font(9) is ~21px tall, so a row needs 22px. Text is
+        # centred vertically; the last row ends at 516, above the details at 520.
+        row_y_start = 296
+        row_step = 22
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
+            mid = y + row_step // 2
             tag = f"acct_row_{idx}"
-            bg_item = cv.create_rectangle(22, y - 2, 438, y + 18, fill=c["row_bg"], outline=c["table_border"], tags=(tag,))
-            idx_item = cv.create_text(30, y, text=str(idx + 1), fill=c["text_muted"], font=self._font(9), anchor="nw", tags=(tag,))
-            name_item = cv.create_text(62, y, text="", fill=c["text"], font=self._font(9, "bold"), anchor="nw", tags=(tag,))
-            email_item = cv.create_text(208, y, text="", fill=c["text"], font=self._font(9), anchor="nw", tags=(tag,))
+            bg_item = cv.create_rectangle(22, y, 438, y + row_step, fill=c["row_bg"], outline=c["table_border"], tags=(tag,))
+            idx_item = cv.create_text(30, mid, text=str(idx + 1), fill=c["text_muted"], font=self._font(9), anchor="w", tags=(tag,))
+            name_item = cv.create_text(62, mid, text="", fill=c["text"], font=self._font(9, "bold"), anchor="w", tags=(tag,))
+            email_item = cv.create_text(208, mid, text="", fill=c["text"], font=self._font(9), anchor="w", tags=(tag,))
             self._table_rows.append({"idx": idx_item, "name": name_item, "email": email_item, "bg": bg_item})
             self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, row_idx=idx: self._select_account_row(row_idx))
             self._canvas.tag_bind(tag, "<Enter>", lambda _e: self._canvas.configure(cursor="hand2"))

@@ -65,10 +65,16 @@ class ManageAccountsLayoutTest(unittest.TestCase):
                             self.assertGreaterEqual(text[0], bg[0])
                             self.assertLessEqual(text[2], bg[2])
                         # Fit a short display and keep the footer reachable.
+                        # Windows applies geometry() to a withdrawn window only
+                        # once it is mapped, and mapping it could steal focus
+                        # from a running bot. Check the size that was requested.
                         window.winfo_screenheight = lambda: 680
+                        requested = []
+                        real_geometry = window.geometry
+                        window.geometry = lambda *a: (requested.extend(a), real_geometry(*a))[1]
                         window._apply_content_minsize()
                         window.update_idletasks()
-                        geometry = window.geometry()
+                        geometry = next((g for g in reversed(requested) if "x" in g), real_geometry())
                         height_match = re.match(r"\d+x(\d+)", geometry)
                         self.assertIsNotNone(height_match, geometry)
                         self.assertLessEqual(int(height_match.group(1)), 680, geometry)

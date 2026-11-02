@@ -515,6 +515,33 @@ class PopupRecoveryTests(unittest.TestCase):
             self.c._popup_vision.capture.assert_not_called()
 
     @unittest.skipIf(cv2 is None, "OpenCV unavailable")
+    def test_connection_lost_modal_offers_reconnect(self):
+        # Live capture 2026-10-30: "Connection Lost / You have lost your
+        # connection to the server." on the Starter Deck Duel page. Its text
+        # differs from the in-match disconnect message, which alone never
+        # gated the Reconnect click, so the bot sat on this modal for minutes.
+        frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "connection_lost.jpg"))
+        self.assertIsNotNone(frame)
+        self.c._ensure_arena_region = Mock(return_value=None)
+        for width, height in ((1920, 1080), (1280, 720)):
+            arena = (200, 100, width, height)
+            self.c._arena_region_provider._last_detection_result = ArenaDetectionResult(
+                False, arena, "anchor_not_found", "modal hides anchors",
+            )
+            self.c._popup_vision.capture = Mock(return_value=cv2.resize(frame, (width, height)))
+            candidate = Controller._find_blocking_popup(self.c)
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate[0], "POPUP_RECONNECT")
+            self.assertTrue(self.c._popup_modal_present)
+            self.assertLess(abs(candidate[1][0] - (200 + width / 2)), 5)
+            self.assertLess(abs(candidate[1][1] - (100 + 623 * height / 1080)), 5)
+        # Without its Reconnect button the message still blocks other popups.
+        frame[600:650, 840:1080] = 0
+        self.c._popup_vision.capture = Mock(return_value=cv2.resize(frame, (1280, 720)))
+        self.assertIsNone(Controller._find_blocking_popup(self.c))
+        self.assertTrue(self.c._popup_modal_present)
+
+    @unittest.skipIf(cv2 is None, "OpenCV unavailable")
     def test_disconnect_message_blocks_rewards_when_reconnect_button_is_missing(self):
         frame = cv2.imread(str(Path(__file__).parent / "fixtures" / "season_rewards_disconnected.jpg"))
         frame[565:626, 820:1100] = 0

@@ -22,6 +22,11 @@ class PopupRecoveryMixin:
         ("claim_text.png", "POPUP_CLAIM", (1300, 850, 620, 230), 0.85),
         ("click_to_continue_text.png", "POPUP_CONTINUE", (520, 940, 880, 140), 0.70),
     )
+    # Arena shows two disconnect modals with the same Reconnect button: the
+    # in-match "You have been disconnected..." one and the "Connection Lost /
+    # You have lost your connection to the server." one (menus and matches,
+    # measured 2026-10-30). Either message gates the Reconnect click.
+    _DISCONNECT_TEXTS = ("disconnected_text.png", "connection_lost_text.png")
     _POPUP_SCALES = tuple(round(0.45 + 0.05 * i, 2) for i in range(32))
     # Home's login notifications (season rewards, "New Season Placement", ...)
     # are bracketed in Player.log. A BEGIN with no END after it means one is
@@ -108,11 +113,14 @@ class PopupRecoveryMixin:
         # Text correlation also matches dimmed controls behind a modal. Detect
         # the disconnect message first and block all other popup clicks until it is
         # gone, even if the Reconnect button itself cannot be recognized yet.
-        disconnected = self._popup_vision.find_template(
-            image[380:610, 300:1620],
-            os.path.join(self._buttons_dir(), "disconnected_text.png"),
-            threshold=0.85, scales=self._POPUP_SCALES,
-        ) is not None
+        disconnected = any(
+            self._popup_vision.find_template(
+                image[380:610, 300:1620],
+                os.path.join(self._buttons_dir(), name),
+                threshold=0.85, scales=self._POPUP_SCALES,
+            ) is not None
+            for name in self._DISCONNECT_TEXTS
+        )
         self._popup_modal_present = disconnected
         for filename, label, roi, confidence in self._POPUP_TARGETS:
             if disconnected != (label == "POPUP_RECONNECT"):
