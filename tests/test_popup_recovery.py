@@ -482,10 +482,34 @@ class PopupRecoveryTests(unittest.TestCase):
         self.c._click_abs.assert_called_once_with(1700, 1000, "POPUP_CLAIM")
 
     def test_navigation_yields_to_a_competing_popup_probe(self):
+        self.c._POPUP_NAV_LOCK_WAIT_SEC = 0.05
         with self.c._popup_recovery_lock:
             self.assertTrue(self.c._dismiss_reward_popup())
         self.c._find_blocking_popup.assert_not_called()
         self.c._click_abs.assert_not_called()
+
+    def test_navigation_waits_out_the_watchers_probe(self):
+        # 2026-11-02: the watcher holds the lock ~1.6 s of every ~2.6 s, so a
+        # non-blocking try made Home navigation give up silently. Navigation
+        # must wait for the probe and then run its own.
+        import threading
+        self.c._find_blocking_popup.return_value = None
+        self.c._popup_recovery_lock.acquire()
+        releaser = threading.Timer(0.1, self.c._popup_recovery_lock.release)
+        releaser.start()
+        try:
+            self.assertFalse(self.c._dismiss_reward_popup())
+        finally:
+            releaser.join()
+        self.c._find_blocking_popup.assert_called_once()
+        self.c._click_abs.assert_not_called()
+
+    def test_watcher_never_waits_for_the_lock(self):
+        import threading
+        self.c._POPUP_NAV_LOCK_WAIT_SEC = 5.0
+        with self.c._popup_recovery_lock:
+            self.assertFalse(self.c._recover_blocking_popup(stop_event=threading.Event()))
+        self.c._find_blocking_popup.assert_not_called()
 
     @unittest.skipIf(cv2 is None, "OpenCV unavailable")
     def test_recorded_disconnect_blocks_dimmed_rewards_without_navigation_anchors(self):

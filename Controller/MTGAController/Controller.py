@@ -4305,6 +4305,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         if dismiss_popups and self._dismiss_reward_popup():
             # Let the claimed/continued/reconnected screen settle before Home
             # navigation. The next probe must observe the resulting screen.
+            bot_logger.log_info("GO_HOME: popup handling owns the screen; not clicking Home this pass.")
             return False
         arena = self._ensure_arena_region(force_reacquire=False)
         if arena is None:
@@ -4321,6 +4322,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         if arena is None:
             arena = self._get_ui_action_arena_region(force_reacquire=False, label="GO_HOME")
         if arena is None:
+            bot_logger.log_info("GO_HOME: no arena region; not clicking Home.")
             return False
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
         self._click_abs(int(point[0]), int(point[1]), "GO_HOME")
@@ -5920,6 +5922,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             self._starter_dead_end_bundle_ts = now
             self._write_nav_debug_bundle(f"starter_dead_end: {reason}")
         if not self._starter_navigation_may_act():
+            bot_logger.log_info("STARTER_DEAD_END: navigation may not act (match starting or stop); not going Home.")
             return
         if self._options_overlay_visible():
             bot_logger.log_info("STARTER_DEAD_END: Options overlay is open; closing it.")

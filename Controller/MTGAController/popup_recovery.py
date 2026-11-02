@@ -12,6 +12,8 @@ from vision.window_locator import focus_mtga_window
 class PopupRecoveryMixin:
     _POPUP_IDLE_SEC = 5.0
     _RECONNECT_IDLE_SEC = 15.0
+    # How long navigation waits for the watcher's in-flight probe (~1.6 s).
+    _POPUP_NAV_LOCK_WAIT_SEC = 4.0
     # Search regions are normalized to 1920x1080. Claim's lettering distinguishes
     # it from orange Play pills; the survey uses its smiling face directly.
     _POPUP_TARGETS = (
@@ -176,9 +178,18 @@ class PopupRecoveryMixin:
 
         if not may_act():
             return False
-        if not self._popup_recovery_lock.acquire(False):
-            # A competing recovery probe may be inspecting an overlay. Menu
-            # navigation must yield rather than race that probe with a click.
+        # Navigation waits for a competing probe to finish rather than yielding
+        # at once. The watcher scans for ~1.6 s every 1 s, so it holds this lock
+        # most of the time, and a non-blocking try made Home navigation give up
+        # silently on most attempts: on 2026-11-02 the starter dead-end recovery
+        # never clicked Home in 4 tries and the bot sat on the event page. The
+        # probe below runs again under our own ownership, so waiting cannot race
+        # the watcher's click.
+        wait = self._POPUP_NAV_LOCK_WAIT_SEC if block_navigation and stop_event is None else 0
+        if not (self._popup_recovery_lock.acquire(timeout=wait) if wait > 0
+                else self._popup_recovery_lock.acquire(False)):
+            if block_navigation:
+                bot_logger.log_info("Popup recovery: another popup probe is still running; navigation yields.")
             return block_navigation
         try:
             candidate = self._find_blocking_popup()
