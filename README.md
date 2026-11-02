@@ -1,6 +1,6 @@
 # Burning Lotus Bot
 
-Version **1.11.0** adds a configurable game-duration limit, conceding stuck matches after 30 seconds, activated abilities and Food sacrifice, single-pile choices, block recovery, automatic Reconnect and post-match survey handling, a 750-gold quest option, remembered Starter decks, a play-time limit, and stopping the bot with the mouse wheel.
+Version **1.12.0** plays Reckless Raid, the Starter deck with the most removal, for creature-kill quests (Fatal Push, Tragic Slip), and no longer stalls on the Starter Deck Duel page after an event win. Version 1.11.0 added a configurable game-duration limit, conceding stuck matches after 30 seconds, activated abilities and Food sacrifice, single-pile choices, block recovery, automatic Reconnect and post-match survey handling, a 750-gold quest option, remembered Starter decks, a play-time limit, and stopping the bot with the mouse wheel.
 
 The **Session Stats** button in **Settings > Enhancements** opens the current
 session window.
