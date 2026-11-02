@@ -11,15 +11,17 @@ request payload:
   * `DeclareAttackersReq.attackers[].attackerInstanceId` is exactly the set of
     creatures that may attack (summoning sickness, tapped, "can't attack" and
     attack costs are already applied).
-  * `DeclareBlockersReq.blockers[]` is the full legal blocker->attacker graph
+  * `DeclareBlockersReq.blockers[]` lists allowed individual blocker->attacker pairs
     (`{"blockerInstanceId": 313, "attackerInstanceIds": [287], "maxAttackers": 1}`),
-    so flying / menace / "can't be blocked" never have to be reasoned about here.
+    so flying / "can't be blocked" need not be inferred here. This does not
+    validate a complete assignment: minimum blocker counts such as menace are
+    handled by the controller's recovery from Arena's block warnings.
 
 What phase 1 deliberately does NOT do (documented so the gaps are known rather
 than discovered in a match):
 
-  * one blocker per attacker and one attacker per blocker -- multi-blocks pull in
-    the AssignDamageReq flow, which is a separate piece of machinery;
+  * initial selection uses one blocker per attacker and one attacker per blocker;
+    the controller may add blockers in response to an insufficient-blockers warning;
   * keywords are the *printed* ones from the local card DB, so a keyword granted
     by another permanent or an aura is invisible here;
   * no reasoning about combat tricks the opponent may be holding.

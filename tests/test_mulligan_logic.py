@@ -346,7 +346,3 @@ class DummyAIIntegrationTests(unittest.TestCase):
         # Verify NO dragging occurred on retry, only the Done click
         self.assertEqual(ctrl.input.left_down.call_count, 0)
         self.assertEqual(ctrl.input.left_click.call_count, 1)
-
-
-
-

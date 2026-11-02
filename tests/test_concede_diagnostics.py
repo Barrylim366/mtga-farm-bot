@@ -191,6 +191,18 @@ class ConcedeIntegrationTests(unittest.TestCase):
                 incident.finish.assert_called_once_with("attempts_exhausted")
                 c.input.release_exclusive.assert_called_once()
 
+    def test_duration_limit_concedes_without_creating_or_capturing_an_incident(self):
+        c = self.controller()
+        with patch("Controller.MTGAController.Controller.ConcedeIncident.create") as create, \
+             patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True), \
+             patch("Controller.MTGAController.Controller.time.sleep"), \
+             patch("Controller.MTGAController.Controller.runtime_status"):
+            c._Controller__run_claimed_concede_sequence("TIMEOUT_CONCEDE")
+        create.assert_not_called()
+        c._vision.capture.assert_not_called()
+        self.assertEqual(c._Controller__click_concede_and_confirm.call_count, 2)
+        c.input.release_exclusive.assert_called_once()
+
     def test_stop_and_match_change_finalize_without_capture(self):
         for stop in (False, True):
             c = self.controller()

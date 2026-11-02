@@ -209,7 +209,9 @@ class StuckQueueProbeTest(unittest.TestCase):
         import inspect
 
         src = inspect.getsource(Controller.dismiss_end_screen)
-        self.assertIn("_note_match_finished", src)
+        self.assertIn("_dismiss_end_screen_and_record", src)
+        recording_src = inspect.getsource(Controller._dismiss_end_screen_and_record)
+        self.assertIn("_note_match_finished", recording_src)
 
     def test_the_post_match_hold_cannot_outlast_the_stall_threshold(self):
         """The reset above only closes the gap while the hold is shorter than the

@@ -50,7 +50,10 @@ _ANCHOR_SPECS: tuple[dict[str, Any], ...] = (
     {"name": "my_decks_anchor.png", "roi": (0, 0, 960, 320), "threshold": 0.78},
     {"name": "store_anchor.png", "roi": (0, 0, 960, 320), "threshold": 0.78},
     {"name": "options_anchor.png", "roi": (320, 0, 1280, 460), "threshold": 0.78},
-    {"name": "ingame_anchor.png", "roi": (0, 0, 1920, 360), "threshold": 0.78},
+    # This settings gear appears throughout Arena, in matches and
+    # menus. Background differences can affect matching. It helps validate the
+    # Arena window, but does not identify an active match.
+    {"name": "settings_gear.png", "roi": (0, 0, 1920, 360), "threshold": 0.78},
     {"name": "attack_all.png", "roi": (1120, 700, 760, 320), "threshold": 0.80},
 )
 

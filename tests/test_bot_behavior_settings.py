@@ -93,13 +93,13 @@ class CliBotBehaviorConfigTest(unittest.TestCase):
             return run_bot._load_runtime_bot_config(path)
 
     def test_legacy_config_without_key_keeps_enabled_default(self):
-        _targets, enabled = self._load({"click_targets": {"concede": {"x": 1, "y": 2}}})
+        _targets, enabled, _minutes = self._load({"click_targets": {"concede": {"x": 1, "y": 2}}})
         self.assertTrue(enabled)
 
     def test_explicit_boolean_values_are_honored(self):
         for configured in (False, True):
             with self.subTest(configured=configured):
-                _targets, enabled = self._load({"auto_concede_stalled_matches": configured})
+                _targets, enabled, _minutes = self._load({"auto_concede_stalled_matches": configured})
                 self.assertIs(enabled, configured)
 
 

@@ -203,6 +203,10 @@ class GroupRecoveryTest(unittest.TestCase):
             "timers": [], "gameObjects": [], "players": [{"systemSeatNumber": 1}],
             "annotations": [], "actions": [], "zones": [],
         })
+        c._Controller__decision_watchdog.observe_requests(
+            json.loads(group_line("GroupingContext_Surveil")), "match-1", 1,
+            c.updated_game_state.get_turn_info(),
+        )
         c._Controller__invoke_decision_callback = mock.Mock()
         c.reset_inactivity_timer = mock.Mock()
         c._click_abs = mock.Mock()
@@ -225,7 +229,7 @@ class GroupRecoveryTest(unittest.TestCase):
         self.assertFalse(c._Controller__safe_to_redrive_decision())
         c._Controller__invoke_decision_callback.assert_not_called()
         c._click_abs.assert_called_once_with(960, 925, "GROUP_DONE")
-        self.assertEqual(c._Controller__local_stall_signature()[0], "surveil")
+        self.assertEqual(c._Controller__local_stall_signature()[0], "group")
 
     def test_retry_then_two_confirmations_resume_without_fresh_state(self):
         c = self._open_surveillance()
@@ -261,11 +265,6 @@ class GroupRecoveryTest(unittest.TestCase):
         self.assertEqual(c._Controller__local_stall_signature(), baseline)
         c.reset_inactivity_timer.assert_not_called()
         self.assertIsNone(c._Controller__group_resume_timer)
-        with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer):
-            self.assertTrue(c._group_watchdog_recovery())
-            self.assertFalse(c._group_watchdog_recovery())
-        self._check_group(("open", (960, 925), None, {}))
-        self.assertEqual(c._click_abs.call_count, 4)
 
     def test_match_change_during_observation_prevents_click(self):
         c = self._open_surveillance()
@@ -339,7 +338,7 @@ class GroupRecoveryTest(unittest.TestCase):
                 self.assertFalse(c._group_prompt_blocks_gameplay())
                 c._Controller__invoke_decision_callback.assert_called_once_with("group/scry resume")
 
-    def test_watchdog_defers_once_without_resetting_original_deadline(self):
+    def test_watchdog_claims_concession_at_deadline_without_group_grace(self):
         c = self._open_surveillance()
         c._Controller__auto_concede_stalled_matches = True
         c._Controller__stall_context_started_at = 60.0
@@ -352,13 +351,11 @@ class GroupRecoveryTest(unittest.TestCase):
         with mock.patch("Controller.MTGAController.Controller.threading.Timer", _FakeTimer), \
              mock.patch("Controller.MTGAController.Controller.time.monotonic", return_value=100.0):
             c._Controller__attempt_stall_concede(1, signature, 60.0, "match-1")
-            c._Controller__claim_concession.assert_not_called()
+            c._Controller__claim_concession.assert_called_once_with("stalled_local_context")
             c._Controller__arm_stall_watchdog_timer.assert_called_once_with(
-                1, signature, 60.0, "match-1", 5.0
+                1, signature, 60.0, "match-1", 1.0
             )
             self.assertEqual(c._Controller__stall_context_started_at, 60.0)
-            c._Controller__attempt_stall_concede(1, signature, 60.0, "match-1")
-            c._Controller__claim_concession.assert_called_once_with("stalled_local_context")
 
     def test_stale_resume_does_not_clear_new_prompt_timer(self):
         c = self._open_surveillance()

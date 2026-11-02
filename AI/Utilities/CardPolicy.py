@@ -133,6 +133,3 @@ def is_unsupported_to_cast_local(grp_id) -> tuple[bool, bool]:
     t = text.replace("\n", " ")
     result = any(pattern.search(t) for pattern in _UNSUPPORTED_PATTERNS)
     return result, True
-
-
-

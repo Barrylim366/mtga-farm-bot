@@ -16,6 +16,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from Controller.MTGAController.Controller import Controller
+from state.state_machine import BotState
+from vision.window_locator import ArenaDetectionResult
 
 
 class DismissEndScreenTests(unittest.TestCase):
@@ -47,6 +49,7 @@ class DismissEndScreenTests(unittest.TestCase):
         self.c._locate_image_center = Mock(return_value=None)
         self.c._locate_image_center_in_rescaled_region = Mock(return_value=None)
         self.c._locate_image_center_in_scaled_arena_region = Mock(return_value=None)
+        self.c._click_image_in_scaled_arena_region = Mock(return_value=False)
 
     @patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True)
     def test_single_click_dismiss_stops_immediately_and_never_clicks_banners(self, _mock_focus):
@@ -110,7 +113,26 @@ class DismissEndScreenTests(unittest.TestCase):
         # Should click the reward popup via _click_abs
         self.c._click_abs.assert_called_once_with(960, 800, "POPUP_CLAIM")
 
+    @patch("Controller.MTGAController.Controller.time.sleep")
+    @patch("Controller.MTGAController.Controller.focus_mtga_window", return_value=True)
+    def test_survey_during_dismissal_advances_to_immediate_click_then_claim(self, _focus, _sleep):
+        happy = ("POPUP_HAPPY_FACE", (1045, 577), (0, 0, 1920, 1080))
+        claim = ("POPUP_CLAIM_REWARDS", (1700, 1000), (0, 0, 1920, 1080))
+        self.c._arena_region_provider.detect = Mock(return_value=ArenaDetectionResult(
+            False, (0, 0, 1920, 1080), "anchor_not_found", "survey hides anchors",
+        ))
+        self.c._get_state_from_log = Mock(return_value=BotState.IN_GAME)
+        # First search is the result-screen-cleared check, then immediate handling.
+        self.c._find_blocking_popup = Mock(side_effect=[happy, happy, claim, None])
+
+        self.c.dismiss_end_screen()
+
+        self.assertEqual(self.c.input.left_click.call_count, 1)
+        self.assertEqual([c.args for c in self.c._click_abs.call_args_list], [
+            (1045, 577, "POPUP_HAPPY_FACE"),
+            (1700, 1000, "POPUP_CLAIM_REWARDS"),
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
-

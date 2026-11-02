@@ -57,6 +57,7 @@ def reset_status(*, log_path: str | None = None) -> dict[str, Any]:
         "turn_info": {},
         "local_system_seat_id": None,
         "last_recovery_reason": "",
+        "decision_watchdog": {"decision": None, "evidence": None, "reason": "idle", "age_sec": None},
         "my_timer_running": False,
         "my_timer_type": "",
         "my_timer_remaining_sec": None,
