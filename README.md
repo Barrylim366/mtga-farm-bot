@@ -1,6 +1,6 @@
 # Burning Lotus Bot
 
-Version **1.10.0** adds preferred Starter and Historic decks, an option to play only your preferred deck, experimental Free Forge casting, improved London mulligans, and automatic match-end dismissal and reward collection in Starter Deck Duels and Historic.
+Version **1.11.0** adds a configurable game-duration limit, conceding stuck matches after 30 seconds, activated abilities and Food sacrifice, single-pile choices, block recovery, automatic Reconnect and post-match survey handling, a 750-gold quest option, remembered Starter decks, a play-time limit, and stopping the bot with the mouse wheel.
 
 The **Session Stats** button in **Settings > Enhancements** opens the current
 session window.
