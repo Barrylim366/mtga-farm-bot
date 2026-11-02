@@ -97,7 +97,8 @@ class Quest750PolicyTests(RerollCase):
 
     def test_non_color_750_quest_takes_priority_over_color_500(self):
         for kind, historic, starter in [
-            ("Fatal_Push", ("", "B.png"), "B"),
+            # Starter plays the removal deck (Reckless Raid) for the kill quest.
+            ("Fatal_Push", ("", "B.png"), "BR"),
             ("Raiding_Party", ("", "C.png"), "C"),
             ("Creature", ("C", None), ""),
         ]:

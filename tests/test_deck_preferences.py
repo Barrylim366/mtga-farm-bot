@@ -164,6 +164,54 @@ class StarterDeckResolutionTests(_ThrowawayControllerBase):
         colors = self.c._resolve_starter_target_colors()
         self.assertEqual(colors, "WU", "Blank preferred deck in only-grind mode falls back cleanly")
 
+    def _fatal_push(self, progress):
+        return {"id": "q1", "name": "Fatal Push", "colors": "", "gold": 750,
+                "progress": progress, "goal": 25}
+
+    def test_open_kill_quest_selects_removal_deck(self):
+        # 2026-11-02: with only Fatal Push open the bot kept UG (2 removal) all
+        # afternoon, because the cache path never reached the fatal_push mapping.
+        self.c._preferred_starter_deck = "RG"
+        self.c._cached_quests = [self._fatal_push(9)]
+        self.c._cached_active_colors = ""
+        self.c._last_valid_quest_active_incomplete = 1
+        self.assertEqual(self.c._resolve_starter_target_colors(), "BR")
+
+    def test_finished_kill_quest_does_not_force_removal_deck(self):
+        self.c._preferred_starter_deck = ""
+        self.c._cached_quests = [self._fatal_push(25)]
+        self.c._cached_active_colors = ""
+        self.c._last_valid_quest_active_incomplete = 1
+        self.c._select_best_quest = lambda: None
+        self.assertEqual(self.c._resolve_starter_target_colors(), "")
+
+    def test_guild_quest_colors_beat_kill_quest(self):
+        self.c._cached_quests = [self._fatal_push(9),
+                                 {"id": "q2", "name": "Dimir Cutpurse", "colors": "UB", "progress": 0, "goal": 20}]
+        self.c._cached_active_colors = "UB"
+        self.c._last_valid_quest_active_incomplete = 2
+        self.assertEqual(self.c._resolve_starter_target_colors(), "UB")
+
+    def test_live_parse_fatal_push_selects_removal_deck(self):
+        self.c._cached_quests = []
+        self.c._select_best_quest = lambda: {"type": "forced_file", "file": "B.png", "reason": "fatal_push"}
+        self.assertEqual(self.c._resolve_starter_target_colors(), "BR")
+
+    def test_tragic_slip_is_a_kill_quest_too(self):
+        # MTGA: Quest_Tragic_Slip_Text == Quest_Fatal_Push_Text ==
+        # "Kill {quantity} of your opponent's creatures."
+        self.c._cached_quests = [{"id": "q3", "name": "Tragic Slip", "colors": "",
+                                  "gold": 500, "progress": 3, "goal": 15}]
+        self.c._cached_active_colors = ""
+        self.assertEqual(self.c._resolve_starter_target_colors(), "BR")
+        self.c._cached_quests = []
+        self.c._extract_latest_quests = lambda: [{"questId": "q3", "locKey": "Quests/Quest_Tragic_Slip",
+                                                  "goal": 15, "endingProgress": 3}]
+        self.assertEqual(self.c._resolve_starter_target_colors(), "BR")
+
+    def test_removal_deck_maps_to_reckless_raid_template(self):
+        self.assertTrue(self.c._choose_starter_deck_template("BR").upper().endswith("BR.PNG"))
+
 
 class HistoricDeckResolutionTests(_ThrowawayControllerBase):
     def test_preferred_deck_when_750_policy_preserves_remaining_500_quests(self):

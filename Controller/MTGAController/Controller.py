@@ -3443,6 +3443,9 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             return top
         if self._has_quest_loc_key(quests, "quest_fatal_push"):
             return {"type": "forced_file", "file": "B.png", "reason": "fatal_push"}
+        if self._has_quest_loc_key(quests, "quest_tragic_slip"):
+            # Same objective as Fatal Push: "Kill N of your opponent's creatures."
+            return {"type": "forced_file", "file": "B.png", "reason": "tragic_slip"}
         if self._has_quest_loc_key(quests, "quest_raiding_party"):
             return {"type": "forced_file", "file": "C.png", "reason": "raiding_party"}
         if self._has_creature_quest(quests):
@@ -5519,6 +5522,32 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 return code
         return ""
 
+    # Quests whose objective is "Kill {quantity} of your opponent's creatures.",
+    # by display name (the cached quest view keeps the name, not the locKey).
+    # Checked against MTGA's own localization table (Quests/Quest_*_Text) on
+    # 2026-11-02: these two are the only kill quests.
+    _STARTER_KILL_QUEST_NAMES = frozenset({"fatal push", "tragic slip"})
+    _STARTER_KILL_QUEST_REASONS = frozenset({"fatal_push", "tragic_slip"})
+    # Reckless Raid (BR): counted from data/starter_decks.json on 2026-11-02, it
+    # has 7 removal spells (3 Abrade, 2 Burst Lightning, 2 Hero's Downfall) plus
+    # 3 deathtouch creatures (Perforating Artist). Next best: Graveyard Gifts (UB),
+    # 7 removal + 4 conditional deathtouch, and Wondrous Wizardry (UR), 8 burn
+    # spells. The old "B" mapping resolved to Vampiric Hunger (WB, 4 removal), and
+    # it never ran on Starter anyway: with a quest cache and no guild target the
+    # bot kept whatever deck it had (UG, 2 removal, a whole afternoon on
+    # 2026-11-02).
+    _STARTER_KILL_QUEST_DECK = "BR"
+
+    def _starter_kill_quest_open(self) -> bool:
+        for quest in self._cached_quests or []:
+            name = str(quest.get("name") or "").strip().casefold()
+            if name not in self._STARTER_KILL_QUEST_NAMES:
+                continue
+            goal = int(quest.get("goal") or 0)
+            if not goal or int(quest.get("progress") or 0) < goal:
+                return True
+        return False
+
     def _resolve_starter_target_colors(self) -> str:
         """Colors of the deck that best advances the current top quest.
 
@@ -5554,6 +5583,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             bot_logger.log_info("Starter: all daily quests complete; selecting WB fallback deck.")
             return "WB"
 
+        if self._cached_quests and not self._cached_active_colors and self._starter_kill_quest_open():
+            bot_logger.log_info(
+                f"Starter: open creature-kill quest; selecting {self._STARTER_KILL_QUEST_DECK} removal deck."
+            )
+            return self._STARTER_KILL_QUEST_DECK
         if self._cached_quests:
             if self._cached_active_colors:
                 bot_logger.log_info(
@@ -5587,6 +5621,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 f"gold={quest.get('gold', 0)}."
             )
             return colors
+        if qtype == "forced_file" and quest.get("reason") in self._STARTER_KILL_QUEST_REASONS:
+            bot_logger.log_info(
+                f"Starter: open creature-kill quest; selecting {self._STARTER_KILL_QUEST_DECK} removal deck."
+            )
+            return self._STARTER_KILL_QUEST_DECK
         if qtype == "forced_file":
             # Single-letter file (e.g. B.png): use its color letters and let the
             # chooser pick the best two-color deck that contains them.
