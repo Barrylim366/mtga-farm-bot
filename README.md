@@ -368,6 +368,18 @@ If the logout never reaches the login screen three times in a row — usually a 
 
 > **Known issue:** in quests mode, if a switch becomes due while the bot is on the Starter Deck Duel event page (`game_mode = starter`), the logout sequence can fail to open the Options menu and misclick into the event page instead of logging out. Time-mode switching from Home is unaffected. A fix (navigate to Home before attempting logout) is planned as a follow-up. This is separate from the calibration fix above and still open.
 
+### Account Manager
+
+**Account Manager** in the main window — the button sits between Account Switch and Settings — lists every configured account with its **Gems**, **Gold**, **Draft Tokens**, **Mythic WC** and **Rare WC** — the two wild-card columns shortened from the full names so the numbers fit. It works with the bot **stopped**: it reads `Player.log` and does not start the bot, look at the screen or sign anything in.
+
+Accounts are listed alphabetically by the name shown, which is the account's Arena name without its `#digits`: the discriminator only separates two accounts with the same visible name, and this list is for reading (and, later, for picking an account by hand). Click a column header to sort by it: the first click puts the largest figure on top, the next reverses it, and the header marks the column and direction with an arrow. The **Account** header sorts A–Z then Z–A. A row with no reading always stays at the bottom, because a missing balance is not a zero. The window is dressed like its siblings — the main window's background art, the translucent red card with the orange rim that Current Session and the overlay use, and a skin button — rather than as a plain table. It also keeps a floor of its own at 100% UI scale: a reduced scale is fine for short bold button labels, but it squeezes six columns of numbers into type nobody can read. It only goes below that if the screen itself cannot fit the table.
+
+The figures are the ones Arena last wrote for that account, so they are as fresh as that account's last visit to Arena's Home screen. An account with no balance in the current or previous log shows `--` rather than a guess, and **Refresh** re-reads the files after you have switched account by hand.
+
+Balances in the log do not name their account. Searching backwards for the newest entry — which is all the running bot ever needs for its own account — would fill every row with whichever account played last, so the window instead walks the log forwards and books each balance against the login that precedes it. `Player-prev.log` is read before `Player.log`, which keeps the balances of accounts that have not signed in since Arena last restarted.
+
+Arena writes the same account's name two ways: with its discriminator (`Name#12345`) on the login record, often without it on the match-server handshake. Those two spellings are merged into one row, keeping whichever reading came later in the log, so an account does not appear twice with one copy holding a stale balance. Where two configured accounts share a visible name and differ only by discriminator, nothing is merged and the exact spelling decides the row.
+
 ### Gold Tracking
 
 The bot reads each account's real Gold balance from MTGA's own logs and tracks the delta (current balance minus the balance first seen this session) per account — no estimate. Open **Current Session** from the main window to see gold farmed per account (labeled with your account names), alongside games/wins for the session.

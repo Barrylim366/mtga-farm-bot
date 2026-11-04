@@ -10,6 +10,7 @@ import time
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
 import json
 import threading
+import account_balances
 import overlay
 import runtime_status
 from bot_behavior import match_timeout_minutes as normalize_match_timeout
@@ -2325,7 +2326,9 @@ class MTGBotUI(tk.Tk):
     # button stack, the status/queue/account info panel, the three daily-quest
     # rows and the footer without clipping.
     _MAIN_BASE_W = 460
-    _MAIN_BASE_H = 1140
+    # 1201, not 1140: the Account Manager added a seventh button to the stack,
+    # which needs its skin height (48) plus the button gap (13).
+    _MAIN_BASE_H = 1201
     # Extra room reserved at the bottom for the global topmost toggle.
     _MAIN_EXTRA_H = 134
     # Screen height the window cannot use: its own y origin plus a taskbar and
@@ -2361,6 +2364,9 @@ class MTGBotUI(tk.Tk):
         self._last_settings_xy: tuple[int, int] | None = None
         self.ui_settings_window = None
         self.current_session_window = None
+        # Kept on the instance so the window survives and a second click reuses
+        # it instead of stacking another copy.
+        self.account_manager_window = None
         self._controller = None
         self._game_overlay = None
         # Settings -> Game Overlay is open: show the panel even while stopped.
@@ -2599,7 +2605,7 @@ class MTGBotUI(tk.Tk):
     def apply_window_topmost_mode(self, enabled: bool) -> None:
         enabled_flag = bool(enabled)
         _apply_window_topmost(self, enabled_flag)
-        for window in (self.settings_window, self.ui_settings_window, self.current_session_window):
+        for window in (self.settings_window, self.ui_settings_window, self.current_session_window, self.account_manager_window):
             if window is None:
                 continue
             try:
@@ -2614,7 +2620,7 @@ class MTGBotUI(tk.Tk):
         should_reopen_ui_settings = bool(reopen_ui_settings and was_settings_open)
 
         # Close subwindows so they are recreated with the new scale.
-        for attr in ("ui_settings_window", "settings_window", "current_session_window"):
+        for attr in ("ui_settings_window", "settings_window", "current_session_window", "account_manager_window"):
             window = getattr(self, attr, None)
             if window is None:
                 continue
@@ -3477,6 +3483,7 @@ class MTGBotUI(tk.Tk):
         self._create_canvas_menu_button("current_session", "Current Session", "Secondary.TButton", self._open_current_session, enabled=True)
         self._create_canvas_menu_button("change_queue", "Change Queue", "Secondary.TButton", self._toggle_queue_mode, enabled=True)
         self._create_canvas_menu_button("account_switch", "Account Switch", "Secondary.TButton", self._toggle_account_switch, enabled=True)
+        self._create_canvas_menu_button("account_manager", "Account Manager", "Secondary.TButton", self._open_account_manager, enabled=True)
         self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
         # Says what the bot is doing right now, in the title's molten-gold look
@@ -5066,6 +5073,30 @@ class MTGBotUI(tk.Tk):
         if self.current_session_window and self.current_session_window.winfo_exists():
             self.current_session_window.update_stats(self.session_games, self.session_wins, self._switch_eta_text)
 
+    def _open_account_manager(self):
+        """Open the balance table, or bring the existing one back to the front.
+
+        The window reads Player.log itself, so it opens with the bot stopped and
+        needs no Controller.
+        """
+        if self.account_manager_window and self.account_manager_window.winfo_exists():
+            try:
+                self.account_manager_window.lift()
+                self.account_manager_window.focus_force()
+            except Exception:
+                pass
+            return
+        gap_px = int(self.winfo_fpixels("5m"))
+        self.update_idletasks()
+        target_x = int(self.winfo_x())
+        target_y = int(self.winfo_rooty() + self.winfo_height() + gap_px)
+        self.account_manager_window = AccountManagerWindow(
+            self,
+            self.config_manager,
+            spawn_xy=(target_x, target_y),
+        )
+        self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
+
     def _open_settings(self):
         if self.settings_window and self.settings_window.winfo_exists():
             self.settings_window.lift()
@@ -5536,6 +5567,543 @@ class CurrentSessionWindow(tk.Toplevel):
         switch_line = switch_eta_text if switch_eta_text is not None else "Account switch: off"
         self._canvas.itemconfigure(self._stats_text_item, text=f"{switch_line}\nGames played: {games}\nWin: {wins}")
         self._layout_scene()
+
+
+class AccountManagerWindow(tk.Toplevel):
+    """What every configured account owns, read from Player.log alone.
+
+    Deliberately independent of the bot: account_balances walks the log file, so
+    this answers "what does each account hold" with the bot stopped and MTGA
+    closed. The account list comes from ConfigManager.get_managed_accounts(),
+    the sanctioned path to the account folders -- this window never opens
+    credentials.json itself.
+
+    The balances are as fresh as the log: an account that has not signed in
+    since Player.log last rotated shows a dash, not a guess.
+    """
+
+    # Shortened from the full field names ("Mythic Wild Cards") so that six
+    # columns fit without truncating the numbers. The second member is a floor
+    # for the measured width, the fourth the account_balances field the column
+    # shows -- so column order and parser order cannot drift apart.
+    COLUMNS = (
+        ("Account", 200, "w", None),
+        ("Gems", 96, "e", "gems"),
+        ("Gold", 112, "e", "gold"),
+        ("Draft Tokens", 134, "e", "draft_tokens"),
+        ("Mythic WC", 118, "e", "mythic_wildcards"),
+        ("Rare WC", 110, "e", "rare_wildcards"),
+    )
+    _MARGIN = 30
+    _ROWS_TOP = 140
+    _ROW_STEP = 40
+    _MAX_ROWS = 10
+    _NO_VALUE = "--"
+    # The table keeps its own size if the bot's UI scale is turned down; short
+    # bold labels survive that, six columns of numbers do not.
+    _MIN_UI_SCALE = 1.0
+    # Header key for the name column; the others are account_balances fields.
+    _ACCOUNT_SORT = "account"
+    # Space between a column's right edge and the next header's start. Without
+    # it, right-aligned headers touch: "Draft TokensMythic WC".
+    _COLUMN_GAP = 22
+
+    def __init__(
+        self,
+        parent,
+        config_manager: ConfigManager,
+        spawn_xy: tuple[int, int] | None = None,
+    ):
+        super().__init__(parent)
+        # This window keeps a readability floor instead of following the bot's
+        # UI scale all the way down. On a 768 px-high screen the main window is
+        # squeezed to ~0.5, which puts this table at 6 px type: the chrome can
+        # shrink because its labels are short and bold, six columns of numbers
+        # cannot. The geometry below then clamps it back inside the screen.
+        self._ui_scale = max(self._MIN_UI_SCALE, _get_ui_scale_from_widget(parent))
+        self._config_manager = config_manager
+        # The bot's own dressing, not a neutral table palette: the same
+        # translucent red cards, orange rims and gold lettering as the
+        # Current Session window and the overlay.
+        self._theme = {
+            "bg": "#0F1115",
+            "title": "#FF9318",
+            "name": "#FFB841",
+            "value": "#F7E5B1",
+            "text_muted": "#B8A9AE",
+            "panel_fill": (50, 10, 2, 210),
+            "panel_outline": (255, 147, 24),
+            "band": (72, 17, 5),
+        }
+        self.title("Account Manager")
+        self._col_widths = self._measure_columns()
+        width = self._s(self._MARGIN * 2) + sum(self._col_widths)
+        # Still no room on a narrow screen? Take the window down as far as the
+        # screen needs, never further than it must.
+        usable_width = max(320, int(self.winfo_screenwidth()) - self._s(24))
+        if width > usable_width:
+            self._ui_scale = max(0.5, self._ui_scale * (usable_width / float(width)))
+            self._col_widths = self._measure_columns()
+            width = self._s(self._MARGIN * 2) + sum(self._col_widths)
+        # The table is sized to the accounts that exist, not to the maximum of
+        # ten: a three-account setup otherwise opens with half the window empty.
+        rows = max(1, min(self._MAX_ROWS, len(self._load_accounts())))
+        self._rows_bottom = self._s(self._ROWS_TOP + rows * self._ROW_STEP)
+        # Card, footer line and a full-width skin button below it.
+        height = self._rows_bottom + self._s(156)
+        self._win_width = width
+        parent.update_idletasks()
+        if spawn_xy is not None:
+            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+        else:
+            gap_px = int(parent.winfo_fpixels("5m"))
+            x = parent.winfo_x()
+            y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        x = min(max(0, x), max(0, self.winfo_screenwidth() - width))
+        y = min(max(0, y), max(0, self.winfo_screenheight() - height))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.resizable(False, False)
+        self.configure(bg=self._theme["bg"])
+        _apply_submenu_theme(self)
+        _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
+
+        self._row_items: list[int] = []
+        self._table_rows: list[dict] = []
+        # No column chosen yet: the list stays alphabetical. Clicking a header
+        # sorts by it, largest first, and clicking the same one again reverses.
+        self._sort_column: str | None = None
+        self._sort_descending = True
+        self._header_items: dict[str, int] = {}
+        self._bg_source_image = None
+        self._bg_photo = None
+        self._bg_item = None
+        self._panel_photo = None
+        self._panel_size = (0, 0)
+        self._refresh_btn = None
+        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._load_background_image()
+        self._build_chrome()
+        self._create_refresh_button()
+        self._canvas.bind("<Configure>", lambda _e: self._refresh_background())
+        for delay in (40, 160, 420):
+            self.after(delay, self._refresh_background)
+        # Reading a 130 MB log in the Tk thread would delay the first paint, so
+        # the window opens empty and fills a moment later.
+        self.after(10, self._refresh)
+
+    # --- the bot's own look -----------------------------------------------
+
+    def _load_background_image(self):
+        """The main window's background art, as the other sub-windows use it."""
+        for path in (_image_path("background"), _image_path("background.png")):
+            if not os.path.exists(path):
+                continue
+            try:
+                with Image.open(path) as image:
+                    self._bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _refresh_background(self):
+        if self._bg_source_image is None:
+            return
+        width = max(2, self._canvas.winfo_width())
+        height = max(2, self._canvas.winfo_height())
+        try:
+            fitted = ImageOps.fit(
+                self._bg_source_image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._bg_photo = ImageTk.PhotoImage(fitted)
+            if self._bg_item is None:
+                self._bg_item = self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+            else:
+                self._canvas.coords(self._bg_item, 0, 0)
+                self._canvas.itemconfigure(self._bg_item, image=self._bg_photo)
+            self._canvas.tag_lower(self._bg_item)
+        except Exception:
+            pass
+
+    def _render_panel(self):
+        """The translucent red card with an orange rim, as the bot's panels are."""
+        width = max(2, self._panel_right - self._panel_left)
+        height = max(2, self._panel_bottom - self._panel_top)
+        if self._panel_photo is not None and self._panel_size == (width, height):
+            return
+        panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(panel)
+        draw.rectangle(
+            (0, 0, width - 1, height - 1),
+            fill=self._theme["panel_fill"],
+            outline=self._theme["panel_outline"] + (255,),
+            width=max(2, self._s(3)),
+        )
+        self._panel_photo = ImageTk.PhotoImage(panel)
+        self._panel_size = (width, height)
+        self._canvas.coords(self._panel_item, self._panel_left, self._panel_top)
+        self._canvas.itemconfigure(self._panel_item, image=self._panel_photo, state="normal")
+        self._canvas.tag_lower(self._panel_item, self._footer_item)
+
+    def _create_refresh_button(self):
+        """A skin button like the bot's own, so the window matches its siblings."""
+        parent_ui = getattr(self, "master", None)
+        skins_all = getattr(parent_ui, "_button_skins", {}) or {}
+        skins = skins_all.get("Secondary.TButton")
+        if skins is None and skins_all:
+            skins = next(iter(skins_all.values()))
+        if not skins:
+            # No main window to borrow skins from (unit tests, previews): a plain
+            # themed button keeps the window usable instead of shipping a gap.
+            _apply_submenu_theme(self)
+            self._refresh_fallback = ttk.Button(
+                self, text="Refresh", style="Submenu.TButton", command=self._refresh,
+            )
+            self._refresh_fallback.place(
+                relx=0.5, y=self._rows_bottom + self._s(84), anchor="n",
+            )
+            return
+
+        width = int(skins["normal"].width())
+        height = int(skins["normal"].height())
+        centre_x = self._win_width // 2
+        top = self._rows_bottom + self._s(84)
+        tag = "account_manager_refresh_btn"
+        bg_item = self._canvas.create_image(centre_x, top, anchor="n", image=skins["normal"], tags=(tag,))
+        text_item = self._canvas.create_text(
+            centre_x, top + height // 2, text="Refresh", fill="#F2F6FF",
+            font=self._font(13, "bold"), anchor="center", tags=(tag,),
+        )
+        self._refresh_btn = {
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "hover": False,
+            "pressed": False,
+            "enabled": True,
+        }
+        self._canvas.tag_bind(tag, "<Enter>", self._on_refresh_enter)
+        self._canvas.tag_bind(tag, "<Leave>", self._on_refresh_leave)
+        self._canvas.tag_bind(tag, "<ButtonPress-1>", self._on_refresh_press)
+        self._canvas.tag_bind(tag, "<ButtonRelease-1>", self._on_refresh_release)
+        self._refresh_refresh_button_state()
+
+    def _refresh_refresh_button_state(self):
+        btn = self._refresh_btn
+        if not btn:
+            return
+        if btn["pressed"]:
+            state_key, text_color = "pressed", "#FFFFFF"
+        elif btn["hover"]:
+            state_key, text_color = "hover", "#FFFFFF"
+        else:
+            state_key, text_color = "normal", "#F2F6FF"
+        self._canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
+        self._canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _on_refresh_enter(self, _event=None):
+        if not self._refresh_btn:
+            return
+        self._canvas.configure(cursor="hand2")
+        self._refresh_btn["hover"] = True
+        self._refresh_refresh_button_state()
+
+    def _on_refresh_leave(self, _event=None):
+        if not self._refresh_btn:
+            return
+        self._canvas.configure(cursor="")
+        self._refresh_btn["hover"] = False
+        self._refresh_btn["pressed"] = False
+        self._refresh_refresh_button_state()
+
+    def _on_refresh_press(self, _event=None):
+        if not self._refresh_btn:
+            return
+        self._refresh_btn["pressed"] = True
+        self._refresh_refresh_button_state()
+
+    def _on_refresh_release(self, _event=None):
+        btn = self._refresh_btn
+        if not btn:
+            return
+        fire = bool(btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_refresh_button_state()
+        if fire:
+            self._refresh()
+
+    # --- scaling helpers --------------------------------------------------
+
+    def _s(self, value: int | float) -> int:
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def _font(self, points: int, *styles):
+        # Canvas coordinates are pixels. Positive Tk font sizes are points and
+        # would grow independently of the layout with system DPI.
+        return ("Segoe UI", -self._s(points * 4 / 3 * 1.3), *styles)
+
+    # --- static chrome ----------------------------------------------------
+
+    def _measure_columns(self) -> list[int]:
+        """Column widths in pixels: the bold header plus a gap, never below its floor.
+
+        Measured rather than hardcoded because the header widths follow the font
+        and the DPI, and a column too narrow for its own header makes two
+        right-aligned headers touch.
+        """
+        header_font = tkfont.Font(font=self._font(12, "bold"))
+        gap = self._s(self._COLUMN_GAP)
+        widths = []
+        for title, floor, _anchor, _field in self.COLUMNS:
+            widths.append(max(self._s(floor), header_font.measure(title) + gap))
+        return widths
+
+    def _column_edges(self) -> list[tuple[int, int, str]]:
+        edges = []
+        x = self._s(self._MARGIN)
+        for width, (_title, _floor, anchor, _field) in zip(self._col_widths, self.COLUMNS):
+            edges.append((x, x + width, anchor))
+            x += width
+        return edges
+
+    def _build_chrome(self) -> None:
+        c = self._theme
+        self._canvas.create_text(
+            self._s(self._MARGIN), self._s(20), text="Account Manager",
+            fill=c["title"], font=self._font(22, "bold"), anchor="nw",
+        )
+        self._canvas.create_text(
+            self._s(self._MARGIN), self._s(58),
+            text="Balances read from Player.log. The bot does not need to be running.",
+            fill=c["text_muted"], font=self._font(12), anchor="nw",
+        )
+        edges = self._column_edges()
+        # The card the table sits on, drawn before its text so the text lands on
+        # top of it. Sized to the rows, so a two-account setup gets a small card.
+        self._panel_left = self._s(self._MARGIN) - self._s(10)
+        self._panel_right = edges[-1][1] + self._s(10)
+        self._panel_top = self._s(100)
+        self._panel_bottom = self._rows_bottom + self._s(64)
+        self._panel_item = self._canvas.create_image(0, 0, anchor="nw")
+        self._footer_item = self._canvas.create_text(
+            self._s(self._MARGIN), self._rows_bottom + self._s(30),
+            text="Reading Player.log...",
+            fill=c["text_muted"], font=self._font(12), anchor="nw",
+            width=self._panel_right - self._s(self._MARGIN) - self._s(20),
+        )
+        for (title, _w, anchor, field), (left, right, _a) in zip(self.COLUMNS, edges):
+            key = self._ACCOUNT_SORT if field is None else field
+            tag = f"acct_hdr_{key}"
+            self._header_items[key] = self._canvas.create_text(
+                left if anchor == "w" else right, self._s(116),
+                text=title, fill=c["title"], font=self._font(12, "bold"),
+                anchor="w" if anchor == "w" else "e", tags=(tag,),
+            )
+            self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, k=key: self._on_header_click(k))
+            self._canvas.tag_bind(tag, "<Enter>", lambda _e: self._canvas.configure(cursor="hand2"))
+            self._canvas.tag_bind(tag, "<Leave>", lambda _e: self._canvas.configure(cursor=""))
+        self._canvas.create_line(
+            self._s(self._MARGIN), self._s(132), edges[-1][1], self._s(132),
+            fill="#8A3B12",
+        )
+        self._render_panel()
+        self._refresh_headers()
+
+    def _refresh_headers(self) -> None:
+        """Show which column is sorting and which way, on the header itself."""
+        for title, _w, _anchor, field in self.COLUMNS:
+            key = self._ACCOUNT_SORT if field is None else field
+            item = self._header_items.get(key)
+            if item is None:
+                continue
+            if key != self._sort_column:
+                self._canvas.itemconfigure(item, text=title)
+            else:
+                self._canvas.itemconfigure(item, text=title + ("  ▼" if self._sort_descending else "  ▲"))
+
+    def _on_header_click(self, key: str) -> None:
+        """First click on a column sorts it largest-first, the next reverses it."""
+        if key == self._sort_column:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_column = key
+            self._sort_descending = True
+        self._refresh()
+
+    # --- data -------------------------------------------------------------
+
+    def _load_accounts(self) -> list[dict]:
+        try:
+            accounts = self._config_manager.get_managed_accounts() or []
+        except Exception:
+            return []
+        accounts = [acc for acc in accounts if isinstance(acc, dict)]
+        # Alphabetical by what the table actually shows: the stored label can
+        # differ from the Arena name on display (a rename, or a row saved before
+        # the two were merged), and sorting on that label would then look unsorted.
+        accounts.sort(key=lambda acc: self._account_label(acc).casefold())
+        return accounts
+
+    @staticmethod
+    def _account_label(account: dict) -> str:
+        """The row's name as shown: the Arena name, without its `#digits`.
+
+        The discriminator is for telling two accounts apart, not for a list the
+        user reads, so it never reaches the table.
+        """
+        return account_balances.display_name(
+            str(account.get("screen_name", "")) or str(account.get("name", ""))
+        )
+
+    def _log_path(self) -> str:
+        """The configured Player.log, falling back to auto-detection."""
+        try:
+            configured = str(self._config_manager.get_log_path() or "").strip()
+        except Exception:
+            configured = ""
+        if configured:
+            return configured
+        try:
+            return str(self._config_manager.detect_player_log_path() or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _balance_for(balances: dict[str, dict], account: dict) -> dict | None:
+        # The Arena name is the only identity the log carries; the credentials
+        # name is the fallback for a row saved before the two were merged.
+        return account_balances.find_balance(
+            balances,
+            str(account.get("screen_name", "")),
+            str(account.get("name", "")),
+        )
+
+    def _fitted(self, text: str, max_px: int, font) -> str:
+        """Truncate to the column, so a long name cannot push into the numbers."""
+        if tkfont.Font(font=font).measure(text) <= max_px:
+            return text
+        while text and tkfont.Font(font=font).measure(text + "...") > max_px:
+            text = text[:-1]
+        return (text + "...") if text else "..."
+
+    def _refresh(self) -> None:
+        accounts = self._load_accounts()
+        log_path = self._log_path()
+        balances: dict[str, dict] = {}
+        note = ""
+        if not accounts:
+            note = "No accounts configured yet. Add them under Settings, Manage Accounts."
+        elif not log_path:
+            note = "Player.log not found. Pick it under Settings."
+        else:
+            try:
+                balances = account_balances.read_balances(
+                    account_balances.player_log_paths(log_path)
+                )
+            except Exception as exc:
+                # An unreadable log must not take the window down with it.
+                note = f"Could not read Player.log: {exc}"
+        self._render(accounts, balances)
+        if not note:
+            found = sum(1 for acc in accounts if self._balance_for(balances, acc) is not None)
+            note = "{} of {} accounts found in {} (read at {})".format(
+                found,
+                len(accounts),
+                os.path.basename(log_path),
+                datetime.now().strftime("%H:%M:%S"),
+            )
+        self._canvas.itemconfigure(self._footer_item, text=note)
+        self._refresh_headers()
+
+    @staticmethod
+    def _sort_accounts(accounts, balances, column, descending, label_of, balance_of):
+        """Rows in display order for one column; accounts with no figure sort last.
+
+        `label_of` and `balance_of` are passed in so this stays a pure function
+        (the window's own helpers need an instance, the tests do not).
+        """
+        if not column:
+            return sorted(accounts, key=lambda account: label_of(account).casefold())
+        if column == AccountManagerWindow._ACCOUNT_SORT:
+            return sorted(
+                accounts, key=lambda account: label_of(account).casefold(), reverse=descending
+            )
+
+        def value(account):
+            balance = balance_of(account)
+            return None if balance is None else int(balance.get(column, 0))
+
+        known = [account for account in accounts if value(account) is not None]
+        unknown = [account for account in accounts if value(account) is None]
+        known.sort(key=value, reverse=descending)
+        # A row with no reading stays at the bottom in both directions: it is
+        # missing data, not a zero, and must not head a "smallest first" list.
+        return known + unknown
+
+    def _render(self, accounts: list[dict], balances: dict[str, dict]) -> None:
+        accounts = self._sort_accounts(
+            accounts,
+            balances,
+            self._sort_column,
+            self._sort_descending,
+            self._account_label,
+            lambda account: self._balance_for(balances, account),
+        )
+        for item in self._row_items:
+            self._canvas.delete(item)
+        self._row_items = []
+        # Kept for the layout test: one dict per row, with the item ids of the
+        # row band and each cell.
+        self._table_rows: list[dict] = []
+        edges = self._column_edges()
+        row_right = edges[-1][1]
+        row_left = self._s(self._MARGIN)
+
+        if not accounts:
+            return
+
+        name_font = self._font(15)
+        value_font = self._font(15)
+        name_width = edges[0][1] - edges[0][0] - self._s(8)
+        for idx, account in enumerate(accounts[: self._MAX_ROWS]):
+            top = self._s(self._ROWS_TOP + idx * self._ROW_STEP)
+            bottom = top + self._s(self._ROW_STEP)
+            mid = (top + bottom) // 2
+            band = None
+            if idx % 2:
+                band = self._canvas.create_rectangle(
+                    row_left, top, row_right, bottom,
+                    fill="#3A0D03", outline="",
+                )
+                self._row_items.append(band)
+            label = self._account_label(account)
+            balance = self._balance_for(balances, account)
+            row = {
+                "band": band,
+                "top": top,
+                "bottom": bottom,
+                "name": self._canvas.create_text(
+                    edges[0][0], mid,
+                    text=self._fitted(label, name_width, name_font),
+                    fill=self._theme["name"], font=name_font, anchor="w",
+                ),
+                "cells": {},
+            }
+            self._row_items.append(row["name"])
+            for (_title, _w, _anchor, field), (_left, right, _a) in zip(self.COLUMNS[1:], edges[1:]):
+                value = self._NO_VALUE
+                if balance is not None and field:
+                    value = f"{int(balance.get(field, 0)):,}"
+                item = self._canvas.create_text(
+                    right, mid, text=value, fill=self._theme["value"],
+                    font=value_font, anchor="e",
+                )
+                row["cells"][field] = item
+                self._row_items.append(item)
+            self._table_rows.append(row)
 
 
 class SettingsWindow(tk.Toplevel):
