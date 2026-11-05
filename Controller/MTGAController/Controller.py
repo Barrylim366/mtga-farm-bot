@@ -41,8 +41,10 @@ from vision.vision import VisionEngine
 from vision.window_locator import (
     ArenaRegionProvider,
     _describe_foreground_window,
+    arena_integrity_problem,
     focus_mtga_window,
 )
+import account_login
 import bot_logger
 import debug_recorder
 from concede_diagnostics import ConcedeIncident
@@ -93,6 +95,28 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     # up reading and just plays, rather than dipping to Home forever.
     _HOME_QUEST_CHECK_MAX_ATTEMPTS = 3
     _POST_LOGIN_HOME_READY_TIMEOUT = 20.0
+    # Manual login (Account Manager's per-account Log In button, bot stopped) --
+    # see sign_in_for_manual_play. All bounded: the button runs on a worker thread
+    # behind a window that must not hang for ever on a broken logout.
+    _MANUAL_LOGOUT_ATTEMPTS = 2
+    # How long the login screen may take to appear after the Log Out confirmation.
+    # Measured on this client: 18.4 s from the OK click to the
+    # "ALT_Prefab.LoginPanelPrefab" record, and the account switch's own wait is
+    # 40 s for the same reason. The first manual version used 12 s, declared a
+    # successful logout failed, and its retry walked the client out of the
+    # credentials form -- see _manual_logout_for_manual_login.
+    _MANUAL_LOGOUT_WAIT_SEC = 40.0
+    # How many times one logout attempt may press ESC before giving up on it.
+    _MANUAL_OPTIONS_ESC_ROUNDS = 2
+    # Every successful ESC -> Log Out image match in the live 86 MB log landed
+    # 7.2-7.5 s after the ESC, on the LAST pass of the switch's 2.5 s budget (the
+    # overlay only becomes matchable ~4.5 s after the key). A manual attempt that
+    # stops a fraction earlier finds nothing, which looks identical to a key that
+    # was never delivered -- so the manual path buys ~4 passes instead of two.
+    _MANUAL_LOG_OUT_IMAGE_TIMEOUT = 8.0
+    _MANUAL_LOGIN_CONFIRM_TIMEOUT = 45.0
+    _MANUAL_LOGIN_SCREEN_TIMEOUT_SEC = 12.0
+    _MANUAL_LOGIN_PROBE_DELAY_SEC = 1.5
     _STALL_CONCEDE_MAX_ATTEMPTS = 2
     _READY_TARGET_SUBMIT_MAX_ATTEMPTS = 3
     _TARGET_SUBMIT_LOCK_WAIT_SEC = 8.0
@@ -13642,64 +13666,90 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             except Exception:
                 pass
 
-    def _run_mapped_logout_sequence(self) -> None:
+    def _run_mapped_logout_sequence(
+        self,
+        *,
+        allow_coordinate_fallback: bool = True,
+        verify_options: bool = False,
+        log_out_timeout: float = 2.5,
+        allow_verified_coordinate_log_out: bool = False,
+    ) -> bool:
+        """Open Options with ESC and click Log Out + its confirm.
+
+        `allow_coordinate_fallback` is the account switch's long-standing
+        behaviour: click the calibrated Log Out coordinates when the image match
+        fails. It is right there -- a stale click is recoverable on a screen the
+        bot is about to leave anyway -- but wrong for a login the user asked for
+        by hand, where the same miss just clicks into empty Home space (the
+        reason the 2026-11-05 session disabled it). With it off, nothing is
+        clicked when the Log Out button cannot be found.
+
+        The three manual-login options (all off by default, so the account
+        switch is untouched):
+
+        * `verify_options` asks the screen whether ESC really opened the Options
+          overlay, and presses ESC once more when it did not. The switch cannot
+          afford that -- it has to keep moving -- but a login the user asked for
+          can, and a swallowed key then becomes a retry instead of a mystery.
+        * `log_out_timeout` is the image search's budget. Measured from the live
+          86 MB log: every successful ESC -> Log Out match lands 7.2-7.5 s after
+          the ESC, i.e. ~5 s into a search whose default 2.5 s budget only buys
+          two passes. The first manual attempt in this copy ended its search at
+          7.7 s, one pass short of the evidence, so the budget is raised when the
+          caller can wait.
+        * `allow_verified_coordinate_log_out` clicks the calibrated Log Out point
+          when the image match fails BUT the Options overlay has been positively
+          verified on screen. That is not the blind coordinate click the brief
+          warns about: the point is the same one the image match reports when it
+          works (arena-relative (959, 667)), and it is only used on a menu whose
+          identity has just been confirmed.
+
+        Returns True when the Log Out button was actually clicked.
+        """
         bot_logger.log_info("Account switch: using built-in macOS-style logout sequence.")
         # ESC is a keyboard event -> it only reaches MTGA if MTGA has focus. When a
         # switch is due right at startup (before any in-game click has focused the
         # window), the launcher UI/terminal still holds focus, so the ESC is lost
         # and the Options menu never opens -> logout fails on Home. Focus MTGA first.
-        if focus_mtga_window():
-            bot_logger.log_info("Account switch: focused MTGA window before logout ESC.")
-            time.sleep(0.3)
-        bot_logger.log_info("Account switch: pressing ESC to open options menu.")
-        self.input.tap_escape()
-        time.sleep(1.0)
-        last_scene = self._get_last_scene_name()
-        bot_logger.log_info(f"Account switch: last scene before fallback logout = {last_scene or 'unknown'}.")
-        if last_scene == "Store":
-            bot_logger.log_info("Account switch: Store scene detected; pressing ESC again for options menu.")
-            self.input.tap_escape()
-            time.sleep(1.0)
-        else:
-            time.sleep(1.0)
+        #
+        # The manual path may press it twice: measured in the live 86 MB log, the
+        # Options overlay only becomes matchable ~4.5 s after the ESC, and every
+        # one of the ten successful switches found it on the LAST pass of the
+        # switch's 2.5 s search budget. So a manual attempt that ends a fraction
+        # of a second earlier finds nothing and looks exactly like a key that was
+        # never delivered. `verify_options` gives each press its own, longer,
+        # search, and only presses ESC again once the screen has confirmed that
+        # nothing opened -- never toggling a menu that is merely still fading in.
+        esc_rounds = self._MANUAL_OPTIONS_ESC_ROUNDS if verify_options else 1
+        logout_point = None
+        for esc_round in range(1, esc_rounds + 1):
+            if self._stop_requested:
+                return False
+            if verify_options and self._manual_login_options_visible():
+                bot_logger.log_info("Account switch: Options menu is already open; not pressing ESC.")
+            else:
+                self._press_esc_for_options()
+            logout_point = self._locate_log_out_button(
+                timeout=log_out_timeout if verify_options else 2.5,
+                scales=self._log_out_search_scales(),
+            )
+            if logout_point is not None or not verify_options:
+                break
+            if self._manual_login_options_visible():
+                # The menu is up; the template is what failed, and the verified
+                # coordinate click below handles it.
+                break
+            if esc_round < esc_rounds:
+                bot_logger.log_info(
+                    f"Manual login: ESC {esc_round}/{esc_rounds} opened nothing; pressing it again."
+                )
 
-        # Click "Log Out" (a centered text link on the Options screen). Image match
-        # is PRIMARY: the hardcoded/legacy coords do not match the current Options
-        # layout (the link is centered, not bottom-right), and clicking the wrong
-        # spot first used to dismiss the menu before the image fallback ran. Only
-        # fall back to coords if the template can't be found.
-        # The match MUST be scale-tolerant. With rel_region=None the search region
-        # is the arena itself and the "rescaled" pass normalizes to 1920x1080, so
-        # on a 1920-wide client nothing is rescaled at all and only scale 1.0 is
-        # ever tried. Measured against a live 1920x1080 Options overlay, the
-        # template scores 0.549 at 1.0 and 0.950 at 1.10 -- so the search could
-        # never match, and every attempt fell through to the coords below.
-        # That is not theoretical: across the whole recorded history the image
-        # match hit once (on a 2048x1152 client, 2026-07-28) and produced the only
-        # successful logout, while the coordinate fallback ran 11 times and
-        # produced none.
-        # Range chosen from the two known data points rather than by feel. The
-        # search region is normalized to 1920x1080, and MTGA renders this overlay
-        # at a roughly CONSTANT pixel size instead of scaling it with the window,
-        # so the apparent size in that space goes as 1920/W and the scale needed is
-        # about 1.10 * 1920 / W. That fits both observations: 1.10 measured on a
-        # native 1920 client, and ~1.03 for the 2048x1152 client where the one
-        # historical success matched at 1.0. Across the 16:9 widths MTGA is run at
-        # that means 1.65 (1280) down to 0.55 (3840), so a narrow band silently
-        # excludes whole resolutions -- 0.70..1.50 would still have failed for
-        # 1280, 1366, 3200 and 3840. 0.45..2.00 covers ~1050..4700 px wide windows.
-        logout_img = os.path.join(self._buttons_dir(), "log_out_btn.png")
-        logout_scales = [round(0.45 + 0.05 * i, 2) for i in range(32)]  # 0.45 .. 2.00
-        logout_point = self._locate_image_center_in_scaled_arena_region(
-            logout_img, "LOG_OUT_BTN_IMG", rel_region=None,
-            confidence=0.80, timeout=2.5, scales=logout_scales,
-        )
         if logout_point is not None:
             bot_logger.log_info(
                 f"Account switch: LOG_OUT_BTN located by image at {logout_point}; clicking."
             )
             self._click_abs(int(logout_point[0]), int(logout_point[1]), "LOG_OUT_BTN")
-        else:
+        elif allow_coordinate_fallback:
             log_out_target, log_out_source = self._resolve_target_from_queue_anchor_rebase(
                 config_key="log_out_btn",
                 raw_point=self.log_out_btn_coors,
@@ -13714,6 +13764,32 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             self._click_abs(int(log_out_target[0]), int(log_out_target[1]), "LOG_OUT_BTN")
             time.sleep(0.15)
             self._click_abs(int(log_out_target[0]), int(log_out_target[1]), "LOG_OUT_BTN")
+        elif (
+            allow_verified_coordinate_log_out
+            and self._manual_login_options_visible()
+            and self._log_out_coordinate_is_calibrated()
+        ):
+            # The menu itself is confirmed on screen, so its centred Log Out link
+            # is not a blind guess: the calibrated point (959, 667 in the
+            # 1920x1080 frame) is the exact arena-relative position the image
+            # match itself reports when it works, measured here as absolute
+            # (1581, 733) on 2026-11-04/05.
+            log_out_target, log_out_source = self._map_abs_point_to_arena(
+                self.log_out_btn_coors, label="LOG_OUT_BTN_VERIFIED"
+            )
+            bot_logger.log_info(
+                "Account switch: LOG_OUT_BTN image match failed but the Options overlay is "
+                "verified on screen; clicking its measured link at {} (source={}).".format(
+                    log_out_target, log_out_source,
+                )
+            )
+            self._click_abs(int(log_out_target[0]), int(log_out_target[1]), "LOG_OUT_BTN_VERIFIED")
+        else:
+            bot_logger.log_error(
+                "Account switch: LOG_OUT_BTN image match failed and the coordinate fallback is "
+                "disabled on this path; nothing was clicked."
+            )
+            return False
         # Let the confirm dialog ("Would you like to log out of your account?")
         # animate in.
         time.sleep(1.0)
@@ -13736,6 +13812,71 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         time.sleep(0.4)
         self._click_abs(int(ok_target[0]), int(ok_target[1]), "LOG_OUT_OK")
         time.sleep(0.5)
+        return True
+
+    def _press_esc_for_options(self) -> None:
+        """The switch's ESC block, verbatim: focus, one tap, a second for Store."""
+        if focus_mtga_window():
+            bot_logger.log_info("Account switch: focused MTGA window before logout ESC.")
+            time.sleep(0.3)
+        bot_logger.log_info("Account switch: pressing ESC to open options menu.")
+        self.input.tap_escape()
+        time.sleep(1.0)
+        last_scene = self._get_last_scene_name()
+        bot_logger.log_info(f"Account switch: last scene before fallback logout = {last_scene or 'unknown'}.")
+        if last_scene == "Store":
+            bot_logger.log_info("Account switch: Store scene detected; pressing ESC again for options menu.")
+            self.input.tap_escape()
+            time.sleep(1.0)
+        else:
+            time.sleep(1.0)
+
+    @staticmethod
+    def _log_out_search_scales() -> list[float]:
+        """Template scales for the Options overlay's Log Out link.
+
+        The match MUST be scale-tolerant. With rel_region=None the search region
+        is the arena itself and the "rescaled" pass normalizes to 1920x1080, so
+        on a 1920-wide client nothing is rescaled at all and only scale 1.0 is
+        ever tried. Measured against a live 1920x1080 Options overlay, the
+        template scores 0.549 at 1.0 and 0.950 at 1.10 -- so the search could
+        never match, and every attempt fell through to the coordinates.
+
+        Range chosen from the two known data points rather than by feel. MTGA
+        renders this overlay at a roughly CONSTANT pixel size instead of scaling
+        it with the window, so the apparent size in normalized space goes as
+        1920/W and the scale needed is about 1.10 * 1920 / W. That fits both
+        observations: 1.10 on a native 1920 client, and ~1.03 for the 2048x1152
+        client where the one historical success matched at 1.0. Across the 16:9
+        widths MTGA is run at that means 1.65 (1280) down to 0.55 (3840), so a
+        narrow band silently excludes whole resolutions -- 0.70..1.50 would still
+        have failed for 1280, 1366, 3200 and 3840. 0.45..2.00 covers ~1050..4700
+        px wide windows.
+        """
+        return [round(0.45 + 0.05 * i, 2) for i in range(32)]  # 0.45 .. 2.00
+
+    def _log_out_coordinate_is_calibrated(self) -> bool:
+        """True when the calibrated Log Out point applies to this client width.
+
+        (959, 667) in the 1920x1080 frame is where the live 1920-wide client puts
+        the link. MTGA draws the Options overlay at a roughly constant pixel size
+        rather than scaling it with the window, so on another width that point is
+        not the link -- there only the scale-tolerant image search is right.
+        """
+        arena = getattr(self, "_arena_region", None) or getattr(self, "_last_good_arena_region", None)
+        if not arena:
+            return False
+        return abs(int(arena[2]) - 1920) <= 4
+
+    def _locate_log_out_button(
+        self, *, timeout: float, scales: list[float] | None = None
+    ) -> tuple[int, int] | None:
+        """Where the Options overlay's Log Out link is, or None."""
+        logout_img = os.path.join(self._buttons_dir(), "log_out_btn.png")
+        return self._locate_image_center_in_scaled_arena_region(
+            logout_img, "LOG_OUT_BTN_IMG", rel_region=None,
+            confidence=0.80, timeout=timeout, scales=scales or self._log_out_search_scales(),
+        )
 
     def run_mapped_logout_sequence_for_test(self) -> bool:
         """Run only the built-in macOS-style logout sequence (no account/login steps)."""
@@ -13749,6 +13890,593 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         except Exception as e:
             bot_logger.log_error(f"Built-in logout test sequence failed: {e}")
             return False
+
+    # --- manual login: the Account Manager's per-account Log In ------------
+    #
+    # This is the bot's OWN account switch, not a second login implementation:
+    # focus -> ESC -> Log Out by image -> confirm -> the typed credentials are the
+    # same calls _run_mapped_logout_sequence and _perform_owned_account_switch
+    # make, in the same order, through the same input backend. What it does NOT
+    # do is the part after the login (reroll, deck selection, queueing): the
+    # human plays, so there is nothing to queue.
+    #
+    # The one thing added is the thing the automated switch gets for free: the
+    # bot is always ON HOME when it switches, so its plain ESC is sent to a
+    # screen measured to open Options. A cold start can find Arena anywhere --
+    # the Starter Deck Duel event page is the documented screen where this ESC is
+    # swallowed (README, "Known issue") -- which is exactly how the 2026-11-05
+    # manual attempt delivered a key that did nothing. So Home is entered and
+    # verified first, and a logout that does not land is retried instead of
+    # believed.
+
+    def sign_in_for_manual_play(
+        self, account: dict, *, on_status: Callable[[str], None] | None = None
+    ) -> tuple[bool, str]:
+        """Sign `account` into Arena so a person can play on it by hand.
+
+        Runs with the bot stopped, from the Account Manager's Log In button. The
+        account switch's own logout and credential sequence is re-used verbatim;
+        if the account is already the one signed in, nothing is done. Returns
+        (ok, message), where the message is written for the user, and reports
+        progress through `on_status` (which the caller may use to update the
+        window).
+        """
+        if not isinstance(account, dict) or not account:
+            return False, "That row has no account details."
+        label = str(account.get("name", "")).strip() or str(account.get("folder", "")).strip()
+        if not label:
+            return False, "That account has no name."
+        if not self.validate_account_credentials(account):
+            return False, (
+                f"'{label}' has no e-mail and password saved; add them under Manage Accounts."
+            )
+        if self._stop_requested:
+            return False, "The login was cancelled."
+        # One failure bundle per sign-in, and it is reset here rather than in
+        # __init__ so a second attempt from the window gets its own evidence.
+        self._manual_login_bundle_done = False
+        self._manual_login_bundle_dir = None
+
+        def say(text: str) -> None:
+            bot_logger.log_info(f"Manual login: {text}")
+            if on_status is not None:
+                try:
+                    on_status(text)
+                except Exception:
+                    pass
+
+        try:
+            state = self._get_state_from_log()
+        except Exception:
+            state = BotState.UNKNOWN
+        if state in (BotState.IN_GAME, BotState.FIND_MATCH):
+            return False, (
+                "Arena is in a match; finish or concede it, then press Log In again."
+            )
+
+        say(f"checking Arena before signing in as '{label}'.")
+        # UIPI drops this process's input into a more privileged Arena without any
+        # error, so an integrity mismatch is reported instead of attempted. See
+        # arena_integrity_problem() for the measurement behind it.
+        integrity_problem = arena_integrity_problem()
+        if integrity_problem:
+            bot_logger.log_error(f"Manual login: {integrity_problem}")
+            return False, integrity_problem
+        focused, focus_reason = self._focus_arena_for_manual_login()
+        if not focused:
+            return False, focus_reason
+
+        kind, detail = self._manual_login_screen_kind()
+        if kind == "stopped":
+            return False, "The login was cancelled."
+        if kind == "unavailable":
+            return False, detail or "MTG Arena's window could not be used."
+        if kind == "unknown":
+            return False, (
+                "Arena is not showing a screen the bot can read; bring it to the front on Home "
+                "and try again."
+            )
+
+        if kind == "menu":
+            already = self._manual_login_current_account_name()
+            # Only a configured Arena name can prove "already signed in"; without
+            # one there is nothing to compare the log's name against, so the
+            # (safe, slower) logout/login round trip happens instead.
+            expected = str(account.get("screen_name", "")).strip()
+            if already and expected and account_login.same_account(already, expected):
+                self.set_current_account_manual(label)
+                self._publish_account_switch_status()
+                message = f"{label} is already signed in. Arena is ready to play."
+                bot_logger.log_info("Manual login: " + message)
+                return True, message
+            say("logging the current account out.")
+            logged_out, reason = self._manual_logout_for_manual_login(say=say)
+            if not logged_out:
+                return False, reason
+            settle_sec = self._login_delete_delay_sec
+        else:
+            settle_sec = 0.8
+
+        say(f"typing the credentials for '{label}'.")
+        return self._submit_manual_login(account, label=label, settle_sec=settle_sec, say=say)
+
+    def _manual_login_wait(self, seconds: float) -> bool:
+        """Sleep in short slices so a cancelled login stops promptly."""
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < deadline:
+            if self._stop_requested:
+                return False
+            time.sleep(0.1)
+        return not self._stop_requested
+
+    def _focus_arena_for_manual_login(self) -> tuple[bool, str]:
+        """Raise Arena and confirm it really took the foreground.
+
+        focus_mtga_window() returns True unconditionally (its own FOCUS_MTGA_
+        NOT_FOREGROUND diagnostic is the only evidence), so the return value
+        proves nothing. The 2026-11-05 manual path could not explain a key that
+        was delivered and still never reached Unity; the window that actually
+        owned the foreground is the fact that distinguishes the two, so it is
+        asked for here rather than assumed.
+        """
+        if not focus_mtga_window():
+            return False, (
+                "MTG Arena's window was not found; open Arena in a windowed 16:9 window and try again."
+            )
+        time.sleep(0.3)
+        info = _describe_foreground_window()
+        if info.get("is_mtga") is False:
+            # Windows refuses a foreground steal from a process that is not in
+            # front. The click on Log In should have made ours the foreground
+            # process, so one more ask usually lands.
+            time.sleep(0.5)
+            focus_mtga_window()
+            time.sleep(0.5)
+            info = _describe_foreground_window()
+        bot_logger.log_info(
+            "Manual login: foreground after focus: title={!r}, is_mtga={}.".format(
+                info.get("title") or "", info.get("is_mtga")
+            )
+        )
+        if info.get("is_mtga") is False:
+            return False, (
+                "Windows did not bring MTG Arena to the front; click Arena once, then try again."
+            )
+        return True, ""
+
+    def _manual_login_current_account_name(self) -> str | None:
+        """The newest account name in the log, or None when it cannot be read."""
+        try:
+            tail = self._read_log_tail(self._log_path, max_bytes=2_000_000)
+            name = self._find_latest_login_screenname(tail)
+            return self._canonical_screen_name(name) if name else None
+        except Exception:
+            return None
+
+    def _manual_login_screen_kind(self) -> tuple[str, str]:
+        """What Arena is showing: ('menu'|'login'|'unknown'|'unavailable'|'stopped', detail).
+
+        The anchors are the bot's own test for a menu screen. The login panel is
+        the one full screen with no anchor at all, so it is proved positively --
+        by its own splash button or by MTGA's LoginPanelPrefab record -- never by
+        the absence of anchors, which a loading frame or an announcement popup
+        also produces.
+        """
+        deadline = time.monotonic() + self._MANUAL_LOGIN_SCREEN_TIMEOUT_SEC
+        popup_cleared = False
+        while True:
+            if self._stop_requested:
+                return "stopped", ""
+            detection = self._arena_region_provider.detect(write_debug_on_fail=False)
+            if detection is not None and detection.ok and detection.region is not None:
+                self._arena_region = tuple(int(v) for v in detection.region)
+                self._remember_arena_region(self._arena_region)
+                if detection.matched_anchor == "options_anchor.png":
+                    # A menu screen, but one whose ESC would only close it and
+                    # leave the logout sequence clicking at nothing.
+                    bot_logger.log_info("Manual login: Options menu is open; closing it.")
+                    self.input.tap_escape()
+                    time.sleep(0.9)
+                return "menu", ""
+            code = getattr(detection, "code", "") or ""
+            if code != "anchor_not_found":
+                # No window, an unsupported window size, off-screen, or mixed
+                # scaling: geometry the bot will not click in, so no typing either.
+                bot_logger.log_error(f"Manual login: Arena window unusable ({code or 'unknown'}).")
+                return "unavailable", str(getattr(detection, "message", "") or "")
+            # The window is there; the screen is not one the anchors know. The
+            # log decides whether that is the login panel -- cheap, and the
+            # answer that means "type, there is nothing to log out of".
+            at_login = account_login.client_is_at_login_screen(
+                self._read_log_tail(self._log_path, max_bytes=account_login.LOGIN_SCREEN_TAIL_BYTES)
+            )
+            if at_login is True:
+                bot_logger.log_info(
+                    "Manual login: the newest log record is the login panel, not a signed-in account."
+                )
+                return "login", ""
+            # Logged in, but no anchor: a full-screen announcement or a
+            # disconnect modal is covering the screen. Clear ONE recognized
+            # popup and look again. Deliberately not attempted when the log says
+            # the login panel is up: there is nothing to clear there, and a
+            # template miss must not click around a screen the bot cannot read.
+            if at_login is False and not popup_cleared:
+                popup_cleared = True
+                if self._clear_manual_login_popup():
+                    continue
+            if self._manual_login_splash_point() is not None:
+                return "login", ""
+            if time.monotonic() >= deadline:
+                return "unknown", ""
+            time.sleep(self._MANUAL_LOGIN_PROBE_DELAY_SEC)
+
+    def _clear_manual_login_popup(self) -> bool:
+        """Click one blocking popup the bot already recognizes, if one is up.
+
+        The same templates and thresholds the popup watcher uses, but the click
+        happens here, once, instead of from a background thread: a manual login
+        must not leave a watcher clicking around the game while the user plays.
+        Returns True when a popup was clicked.
+        """
+        try:
+            candidate = self._find_blocking_popup()
+        except Exception as exc:
+            bot_logger.log_error(f"Manual login: popup probe failed: {exc}")
+            return False
+        if candidate is None:
+            return False
+        label, point, _arena = candidate
+        bot_logger.log_info(f"Manual login: clearing the {label} overlay at {point} before login.")
+        focus_mtga_window()
+        time.sleep(0.2)
+        self._click_abs(int(point[0]), int(point[1]), label)
+        time.sleep(1.0)
+        return True
+
+    def _manual_login_splash_point(self, *, timeout: float = 1.0) -> tuple[int, int] | None:
+        """Where MTGA's "Register / Log In" splash button is, or None.
+
+        Searched on the whole screen on purpose: that splash is shown before the
+        client has any Arena anchor, so there is no arena rectangle to search --
+        the one place a full-screen search is the correct thing to do.
+
+        The confidence is deliberately high. Measured 2026-11-05: at 0.75 the
+        login screen's own artwork produced a match at (1583, 1028) -- the bottom
+        right, nowhere near the splash's centred button -- and clicking it would
+        be a blind click on a screen the bot cannot read. Callers must also pass
+        the point through _manual_login_point_is_central().
+        """
+        splash = os.path.join(self._buttons_dir(), "login_splash_btn.png")
+        if not os.path.exists(splash):
+            splash = self._app_path("assets", "login_splash_btn.png")
+        if not os.path.exists(splash):
+            return None
+        try:
+            frame = self._vision.capture(None)
+            if frame is None or getattr(frame, "size", 0) == 0:
+                return None
+            height, width = frame.shape[:2]
+            width, height = max(1, int(width)), max(1, int(height))
+            scales = [round(0.70 + 0.05 * i, 2) for i in range(13)]
+            return self._locate_image_center_in_rescaled_region(
+                splash,
+                "MANUAL_LOGIN_SPLASH",
+                region=(0, 0, width, height),
+                normalized_size=(width, height),
+                confidence=0.85,
+                timeout=timeout,
+                scales=scales,
+            )
+        except Exception as exc:
+            bot_logger.log_error(f"Manual login: splash probe failed: {exc}")
+            return None
+
+    def _manual_login_point_is_central(self, point) -> bool:
+        """True when `point` is near the middle of the Arena client.
+
+        The splash's "Log In" button is centred; anything else that matches the
+        template is screen artwork. Without a known client rectangle there is
+        nothing to compare against, so the point is accepted.
+        """
+        try:
+            arena = getattr(self, "_arena_region", None) or getattr(self, "_last_good_arena_region", None)
+            if not arena:
+                return True
+            ax, ay, aw, ah = (int(v) for v in arena)
+            centre_x = ax + aw / 2.0
+            centre_y = ay + ah / 2.0
+            return (
+                abs(int(point[0]) - centre_x) <= aw * 0.30
+                and abs(int(point[1]) - centre_y) <= ah * 0.30
+            )
+        except Exception:
+            return False
+
+    def _manual_login_warm_home(self) -> bool:
+        """Click Home and prove the click landed, before any menu key is sent.
+
+        Two things are proved at once: the screen is the one where the bot's
+        plain ESC is measured to open Options, and clicks are reaching Arena
+        rather than another window. Never fatal -- the logout is still attempted
+        and retried -- but a miss is reported, because it is the one failure the
+        user can fix by moving the bot's own window.
+        """
+        for _ in range(2):
+            if self._stop_requested:
+                return False
+            if self._navigate_to_home():
+                return True
+            time.sleep(0.8)
+        bot_logger.log_info(
+            "Manual login: Home not verified (Home tab not clicked, or Arena covered); "
+            "attempting the logout from the current screen anyway."
+        )
+        return False
+
+    def _manual_logout_for_manual_login(
+        self, *, say: Callable[[str], None]
+    ) -> tuple[bool, str]:
+        """Log the current account out with the account switch's own sequence.
+
+        A successful Log Out click is never retried. Once it lands the account is
+        gone and the only thing left is the screen transition, which this client
+        takes ~18-19 s to write to Player.log (measured against the working bot;
+        the switch itself allows 40 s for exactly that). The 2026-11-05 13:52 run
+        gave up after 12 s, then the retry clicked Home and pressed ESC again --
+        on the login screen -- which walked the client out of its credentials form
+        and onto the "Register / Log In" splash. That is what "ESC too many times"
+        was: a retry of a logout that had already succeeded.
+
+        A retry only happens when NOTHING was clicked (the ESC was swallowed, or
+        the Options menu had no Log Out link), and only while the client is still
+        on a menu screen.
+        """
+        for attempt in range(1, self._MANUAL_LOGOUT_ATTEMPTS + 1):
+            if self._stop_requested:
+                return False, "The login was cancelled."
+            if attempt > 1:
+                # Nothing was clicked last time. Only retry from a screen where a
+                # logout makes sense; if the client is on the login screen the
+                # logout did happen after all.
+                kind, _detail = self._manual_login_screen_kind()
+                if kind == "login":
+                    bot_logger.log_info("Manual login: already on the login screen; no retry needed.")
+                    return True, ""
+                if kind != "menu":
+                    return False, (
+                        "Arena is not on a menu screen any more; open its Home screen and try again."
+                    )
+                say(f"retrying the logout (attempt {attempt} of {self._MANUAL_LOGOUT_ATTEMPTS}).")
+            self._manual_login_warm_home()
+            before = self._manual_login_frame()
+            offset = self._get_log_size(self._log_path)
+            clicked = self._run_mapped_logout_sequence(
+                allow_coordinate_fallback=False,
+                verify_options=True,
+                log_out_timeout=self._MANUAL_LOG_OUT_IMAGE_TIMEOUT,
+                allow_verified_coordinate_log_out=True,
+            )
+            if clicked:
+                if self._manual_login_wait_for_logout(start_offset=offset):
+                    bot_logger.log_info(f"Manual login: logged out (attempt {attempt}).")
+                    return True, ""
+                if self._stop_requested:
+                    return False, "The login was cancelled."
+                bot_logger.log_error(
+                    "Manual login: Log Out was clicked but the login screen did not appear within "
+                    f"{self._MANUAL_LOGOUT_WAIT_SEC:.0f}s."
+                )
+                self._write_manual_login_bundle(
+                    "logout-clicked-no-login-screen",
+                    before=before,
+                    extra={"log_out_clicked": True},
+                )
+                return False, (
+                    "Arena was logged out but its login screen did not appear in time. "
+                    "Wait for Arena's login form, then press Log In again. "
+                    "Screenshots were saved under runtime/debug."
+                )
+            if self._stop_requested:
+                return False, "The login was cancelled."
+            visible = self._manual_login_options_visible()
+            bot_logger.log_error(
+                "Manual login: logout attempt {}/{} could not use the Options menu "
+                "(options_open={}).".format(attempt, self._MANUAL_LOGOUT_ATTEMPTS, visible)
+            )
+            self._write_manual_login_bundle(
+                f"logout-not-clicked-{attempt}",
+                before=before,
+                extra={"options_overlay_visible": visible},
+            )
+            # Leave a half-opened Options menu closed before the retry.
+            try:
+                for _ in range(2):
+                    if not self._manual_login_options_visible():
+                        break
+                    self.input.tap_escape()
+                    time.sleep(0.9)
+            except Exception:
+                pass
+        return False, (
+            "MTG Arena never opened its Options menu when the bot pressed ESC, so nothing was "
+            "clicked. Click once inside the Arena window, then press Log In again. "
+            "Screenshots were saved under runtime/debug for the next fix."
+        )
+
+    def _manual_login_options_visible(self) -> bool:
+        try:
+            return bool(self._options_overlay_visible())
+        except Exception:
+            return False
+
+    def _manual_login_frame(self):
+        """One full-screen frame now, for the failure bundle's "before" shot."""
+        try:
+            self._vision.begin_tick()
+            return self._vision.capture(None)
+        except Exception:
+            return None
+
+    def _write_manual_login_bundle(self, reason: str, *, before=None, extra: dict | None = None) -> None:
+        """Screenshots and state for a failed manual login. At most once per login.
+
+        The 2026-11-05 lesson taken literally: capture the screen right before and
+        after the ESC. One such pair settles what no amount of log reading can --
+        whether the menu was there and the search missed it, or the key never
+        arrived -- and the whole failed session could have been avoided by it.
+        """
+        if getattr(self, "_manual_login_bundle_done", False):
+            return
+        self._manual_login_bundle_done = True
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        try:
+            debug_dir = Path(bot_logger.ensure_debug_dir(f"manual-login-{stamp}"))
+        except Exception:
+            return
+        # Handed to the window so its failure dialog can name the folder.
+        self._manual_login_bundle_dir = str(debug_dir)
+        payload = {
+            "reason": reason,
+            "arena_region": getattr(self, "_arena_region", None),
+            "last_good_arena_region": getattr(self, "_last_good_arena_region", None),
+            "options_overlay_visible": self._manual_login_options_visible(),
+            "foreground": _describe_foreground_window(),
+            "last_scene": self._get_last_scene_name(),
+            "state": str(self._get_state_from_log()),
+            "log_path": self._log_path,
+        }
+        if extra:
+            payload.update(extra)
+        try:
+            with open(debug_dir / "state.json", "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except Exception:
+            pass
+        try:
+            with open(debug_dir / "log_tail.txt", "w", encoding="utf-8") as handle:
+                handle.write(self._read_log_tail(self._log_path, max_bytes=150000) or "")
+        except Exception:
+            pass
+        try:
+            self._vision.begin_tick()
+            if self._arena_region:
+                self._vision.save_image(
+                    self._vision.capture(self._arena_region),
+                    str(debug_dir / "arena_region.png"),
+                )
+            self._vision.save_image(self._vision.capture(None), str(debug_dir / "full_screen.jpg"))
+            if before is not None:
+                self._vision.save_image(before, str(debug_dir / "before_full_screen.jpg"))
+        except Exception:
+            pass
+        bot_logger.log_error(f"Manual login debug bundle saved: {debug_dir}")
+
+    def _manual_login_wait_for_logout(self, *, start_offset: int) -> bool:
+        """Did the logout reach the login screen? Log markers first, splash second."""
+        if self._wait_for_logout_to_reach_login_screen(
+            start_offset=start_offset, timeout_sec=self._MANUAL_LOGOUT_WAIT_SEC
+        ):
+            return True
+        # The splash screen is written to the screen, not always to the log, and
+        # _is_login_splash_button_visible() has no arena rectangle to search on a
+        # login screen. One full-screen look settles it.
+        return self._manual_login_splash_point() is not None
+
+    def _submit_manual_login(
+        self,
+        account: dict,
+        *,
+        label: str,
+        settle_sec: float,
+        say: Callable[[str], None],
+    ) -> tuple[bool, str]:
+        """Type the account's credentials and wait for Arena to confirm them.
+
+        The input sequence is the account switch's, call for call and wait for
+        wait, so a login by hand behaves exactly like the logins the bot already
+        performs. Everything after it is the one difference: no reroll, no deck
+        selection, no queue.
+        """
+        if settle_sec > 0 and not self._manual_login_wait(settle_sec):
+            return False, "The login was cancelled."
+        splash = self._manual_login_splash_point()
+        if splash is not None and self._manual_login_point_is_central(splash):
+            bot_logger.log_info(f"Manual login: clicking the 'Log In' splash at {splash}.")
+            self._click_abs(int(splash[0]), int(splash[1]), "MANUAL_LOGIN_SPLASH")
+            time.sleep(2.5)
+        elif splash is not None:
+            # A splash-button match far from the middle of the client is a false
+            # positive on the login screen's artwork; clicking it would be a blind
+            # click on a screen the bot cannot read.
+            bot_logger.log_info(
+                f"Manual login: ignoring a splash-button match at {splash} (outside the centre)."
+            )
+        if focus_mtga_window():
+            time.sleep(0.2)
+        login_offset = self._get_log_size(self._log_path)
+        self.input.tap_delete()
+        time.sleep(0.2)
+        self.input.type_text(str(account.get("email", "")))
+        time.sleep(0.2)
+        self.input.tap_tab()
+        time.sleep(0.2)
+        self.input.type_text(str(account.get("pw", "")))
+        time.sleep(0.2)
+        bot_logger.log_info("Manual login: submitting the credentials with Enter.")
+        self.input.tap_enter()
+        try:
+            # The same latch the switch uses: we typed these credentials, so we
+            # know who is signing in. The log's handshake can still name the
+            # OUTGOING account at this point.
+            self._latch_identity_from_switch_target(account)
+        except Exception as exc:
+            bot_logger.log_error(f"Manual login: could not latch the identity (continuing): {exc}")
+        say("waiting for Arena to confirm the sign-in.")
+        confirmed = self._wait_for_playerlog_marker(
+            ["Logged in successfully", "MainNav load in"],
+            start_offset=login_offset,
+            timeout_sec=self._MANUAL_LOGIN_CONFIRM_TIMEOUT,
+            label="MANUAL_LOGIN",
+        )
+        if not confirmed:
+            bot_logger.log_error("Manual login: Arena did not confirm the sign-in.")
+            self._write_manual_login_bundle("login-not-confirmed")
+            return False, (
+                "Arena did not confirm the login. If the e-mail or password went into the "
+                "wrong field, click the e-mail field in Arena and press Log In again."
+            )
+        arrived = None
+        try:
+            arrived = self._find_latest_login_screenname(
+                self._read_log_since(
+                    self._log_path,
+                    start_offset=login_offset,
+                    max_bytes=2_000_000,
+                    prefer_newest=True,
+                )
+            )
+        except Exception:
+            arrived = None
+        # Only check the name when the row actually configures one: a row saved
+        # before the Arena name became part of Manage Accounts has nothing to
+        # compare against, and a missing name is not evidence of a wrong login.
+        expected = str(account.get("screen_name", "")).strip()
+        if arrived and expected and not account_login.same_account(arrived, expected):
+            bot_logger.log_error(
+                "Manual login: Arena signed in as '{}', not the requested '{}'.".format(
+                    arrived, expected
+                )
+            )
+            return False, (
+                "Arena signed in as {}, not {}. Check this row's Arena name under "
+                "Manage Accounts.".format(account_login.display_name(arrived), expected)
+            )
+        shown = account_login.display_name(arrived) if arrived else label
+        self.set_current_account_manual(label)
+        self._publish_account_switch_status()
+        message = f"{shown} is signed in. Arena is ready to play."
+        bot_logger.log_info("Manual login: " + message)
+        return True, message
 
     def _resolve_account_play_order(self, accounts: list[dict]) -> list[int]:
         if not self._account_play_order:

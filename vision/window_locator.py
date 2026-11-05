@@ -1062,6 +1062,107 @@ def run_arena_setup_check(
     return provider.detect(write_debug_on_fail=write_debug_on_fail)
 
 
+_INTEGRITY_RANKS = {"Low": 1, "Medium": 2, "High": 3, "System": 4}
+
+
+def process_integrity_level(pid: int | None) -> str | None:
+    """'Low', 'Medium', 'High' or 'System' for a process, or None if unreadable.
+
+    Windows decides whether one process may drive another's window by integrity
+    level (UIPI), so this is the fact behind "the bot does nothing at all".
+    """
+    if os.name != "nt" or not pid:
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        advapi32 = ctypes.windll.advapi32
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            token = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(handle, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                return None
+            try:
+                advapi32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+                advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+                advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+                advapi32.GetSidSubAuthority.restype = ctypes.POINTER(ctypes.c_ulong)
+                size = wintypes.DWORD(0)
+                advapi32.GetTokenInformation(token, 25, None, 0, ctypes.byref(size))  # IntegrityLevel
+                if size.value <= 0:
+                    return None
+                buffer = ctypes.create_string_buffer(size.value)
+                if not advapi32.GetTokenInformation(token, 25, buffer, size, ctypes.byref(size)):
+                    return None
+                # TOKEN_MANDATORY_LABEL starts with SID_AND_ATTRIBUTES: a PSID.
+                sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p)).contents.value
+                if not sid:
+                    return None
+                count = int(advapi32.GetSidSubAuthorityCount(sid).contents.value)
+                if count <= 0:
+                    return None
+                rid = int(advapi32.GetSidSubAuthority(sid, count - 1).contents.value)
+                return {0x1000: "Low", 0x2000: "Medium", 0x3000: "High", 0x4000: "System"}.get(rid)
+            finally:
+                kernel32.CloseHandle(token)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
+def mtga_window_process_id(expected_size: tuple[int, int] = (1920, 1080)) -> int | None:
+    """The pid that owns the MTGA window this bot would drive, or None."""
+    if os.name != "nt":
+        return None
+    try:
+        selected = _pick_best_windows_candidate(
+            _list_mtga_window_rects_windows(), expected_size
+        )
+        if selected is None:
+            return None
+        hwnd = int(selected.get("hwnd") or 0)
+        if hwnd <= 0:
+            return None
+        pid = wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+        return int(pid.value) or None
+    except Exception:
+        return None
+
+
+def arena_integrity_problem() -> str | None:
+    """Why Windows would discard this process's input to Arena, or None.
+
+    UIPI silently drops injected clicks and keys sent from a lower-integrity
+    process to a higher-integrity window: SendInput still reports success, the
+    cursor still moves, the window is still "foreground", and the game simply
+    never reacts. Measured 2026-11-05: a copy of the bot whose folder carried a
+    "Low" mandatory label ran at Low against a Medium Arena and could not click
+    anything at all, which looked exactly like a broken login sequence.
+
+    Returns the user-facing explanation when our level is below Arena's, else
+    None. Unreadable levels return None: guessing here would block a working
+    bot.
+    """
+    if os.name != "nt":
+        return None
+    ours = process_integrity_level(os.getpid())
+    game_pid = mtga_window_process_id()
+    game = process_integrity_level(game_pid) if game_pid else None
+    if not ours or not game:
+        return None
+    if _INTEGRITY_RANKS.get(ours, 2) < _INTEGRITY_RANKS.get(game, 2):
+        return (
+            f"MTG Arena is running at {game} integrity but Burning Lotus at {ours}, so Windows "
+            "discards the bot's clicks and keys; start Burning Lotus the same way Arena was "
+            "started (as administrator if Arena is elevated). A copy of the bot in a folder "
+            "marked 'Low' integrity behaves the same way, even when started normally."
+        )
+    return None
+
+
 def _abs_region(base_region: tuple[int, int, int, int], rel_region: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
     bx, by, bw, bh = [int(v) for v in base_region]
     rx, ry, rw, rh = [int(v) for v in rel_region]
