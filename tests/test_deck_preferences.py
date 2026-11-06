@@ -97,15 +97,23 @@ class _ThrowawayControllerBase(unittest.TestCase):
 
 
 class StarterDeckResolutionTests(_ThrowawayControllerBase):
-    def test_preferred_deck_after_configured_quest_target_with_other_quests_remaining(self):
+    def test_open_quest_colors_win_even_after_the_configured_quest_target(self):
+        """1.11.0 returned the preferred deck here ("even if other quests remain
+        open"), so an account holding one open quest farmed wins on the wrong
+        colours and never played that quest. The deck follows the open quest.
+
+        2026-11-06, reported against 1.13.0: a UR quest sat at 0/30 while the bot
+        queued Vampiric Hunger (WB) match after match.
+        """
         self.c._preferred_starter_deck = "RG"
         self.c._account_switch_mode = "quests"
         self.c._account_switch_main_quests = 1
         self.c._account_switch_daily_wins = 4
         self.c._last_valid_quest_active_incomplete = 2
         self.c._quest_count_confirmed_fresh = True
-        self.c._cached_active_colors = "UB"
-        self.assertEqual(self.c._resolve_starter_target_colors(), "RG")
+        self.c._cached_quests = [{"type": "guild", "guild": "Izzet", "goal": 30, "progress": 0}]
+        self.c._cached_active_colors = "UR"
+        self.assertEqual(self.c._resolve_starter_target_colors(), "UR")
 
     def test_default_mode_plays_quest_deck_when_quest_active(self):
         self.c._preferred_starter_deck = "RG"

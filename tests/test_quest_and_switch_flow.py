@@ -168,7 +168,9 @@ class QuestReadGateTests(_QuestLogTestBase):
 class QuestTargetSelectionTests(_QuestLogTestBase):
     """The colors the starter-deck swap is driven with."""
 
-    def test_zero_quest_win_target_uses_wb_with_open_or_unknown_quests(self):
+    def test_zero_quest_target_keeps_following_the_open_quest(self):
+        """0 quests / 6 wins still win-farms on WB while nothing is known, but an
+        open colour quest decides the deck (1.11.0 kept WB even with one open)."""
         c = self.controller
         c._account_switch_mode = "quests"
         c._account_switch_main_quests = 0
@@ -177,7 +179,7 @@ class QuestTargetSelectionTests(_QuestLogTestBase):
         self.append(quests_block(SIMIC))
         c.refresh_quests_cache()
         self.assertEqual(c._cached_active_colors, "UG")
-        self.assertEqual(c._resolve_starter_target_colors(), "WB")
+        self.assertEqual(c._resolve_starter_target_colors(), "UG")
 
     def test_win_deck_uses_same_absolute_quest_target_as_switching(self):
         c = self.controller
@@ -195,7 +197,10 @@ class QuestTargetSelectionTests(_QuestLogTestBase):
                         c._quest_count_confirmed_fresh = fresh
                         met = fresh and remaining <= 3 - target
                         self.assertEqual(c._main_quest_target_met(), met)
-                        self.assertEqual(c._resolve_starter_target_colors(), "WB" if met else "UG")
+                        # The switch still moves on at the target, but the deck
+                        # follows the open quest: WB only once none is left.
+                        expected_deck = "WB" if (fresh and remaining == 0) else "UG"
+                        self.assertEqual(c._resolve_starter_target_colors(), expected_deck)
                         c._switch_phase = "quests"
                         self.assertEqual(c._account_switch_due(), met)
                         # Choosing WB must not finish the account before its wins.

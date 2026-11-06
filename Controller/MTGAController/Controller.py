@@ -5579,8 +5579,18 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         matches) so we don't re-parse the player.log on every queue cycle; falls
         back to a live parse if the cache is empty.
         If only_grind_preferred_deck is enabled, plays the preferred starter deck.
-        When daily quests are complete, automatically switches to the preferred
-        starter deck (or falls back to WB).
+        While any daily quest is still open its colours decide the deck; the
+        preferred starter deck (or WB) is used once the fresh list says every
+        quest is complete, and for the win-farming pass when there is no colour
+        quest left to play.
+
+        1.11.0 put the win-farming branch in front of the quest colours: as soon
+        as the quest *target* was met it returned the preferred deck "even if
+        other quests remain open" (see tests/test_deck_preferences.py). With the
+        default target of one quest that meant an account holding a single open
+        quest never played that quest's colours at all -- it farmed wins on WB and
+        left the quest untouched. Account switching still moves on after the
+        configured quests and wins; the deck follows an open colour quest again.
         """
         preferred = self._normalize_starter_deck_code(self._preferred_starter_deck)
         if self._only_grind_preferred_deck and preferred:
@@ -5589,14 +5599,23 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             )
             return preferred
 
-        if (self._account_switch_mode == "quests"
-                and self._account_switch_daily_wins > 0
-                and self._main_quest_target_met()):
+        # Win-farming deck, but only when there is no open colour-targeted quest
+        # left to play. 1.11.0 took this branch as soon as the quest *target* was
+        # met, "even if other quests remain open" (its own words), so an account
+        # holding one open quest farmed wins on the wrong colours and never played
+        # it. With a colour target open, its colours win instead.
+        if (
+            self._account_switch_mode == "quests"
+            and self._account_switch_daily_wins > 0
+            and self._main_quest_target_met()
+            and not self._cached_active_colors
+        ):
             target = preferred or "WB"
             bot_logger.log_info(
-                f"Starter: configured quest target met; selecting {target} win-farming deck."
+                f"Starter: quest target met and no colour quest to play; selecting {target} win-farming deck."
             )
             return target
+
         if (self._last_valid_quest_active_incomplete == 0
                 and self._quest_count_confirmed_fresh):
             if preferred:
