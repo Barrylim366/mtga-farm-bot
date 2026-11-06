@@ -3492,6 +3492,7 @@ class MTGBotUI(tk.Tk):
         self._create_canvas_menu_button("current_session", "Current Session", "Secondary.TButton", self._open_current_session, enabled=True)
         self._create_canvas_menu_button("change_queue", "Change Queue", "Secondary.TButton", self._toggle_queue_mode, enabled=True)
         self._create_canvas_menu_button("account_switch", "Account Switch", "Secondary.TButton", self._toggle_account_switch, enabled=True)
+        self._create_canvas_menu_button("skip_account", "Skip To Next Account", "Secondary.TButton", self._skip_to_next_account, enabled=False)
         self._create_canvas_menu_button("account_manager", "Account Manager", "Secondary.TButton", self._open_account_manager, enabled=True)
         self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
@@ -3788,14 +3789,36 @@ class MTGBotUI(tk.Tk):
             self._set_canvas_menu_button_enabled("stop", True)
             # Queue can't change mid-run (would desync navigation).
             self._set_canvas_menu_button_enabled("change_queue", False)
+            # Manual "go to the next account" only makes sense while it runs.
+            self._set_canvas_menu_button_enabled("skip_account", True)
             self._set_status("Status: Running", running=True)
             return
 
         self._set_canvas_menu_button_enabled("start", True)
         self._set_canvas_menu_button_enabled("stop", False)
         self._set_canvas_menu_button_enabled("change_queue", True)
+        self._set_canvas_menu_button_enabled("skip_account", False)
         self._set_status("Status: Stopped", running=False)
         self._switch_eta_text = self._get_configured_switch_eta_text()
+
+    def _skip_to_next_account(self) -> None:
+        """Ask the bot to move to the next account once this match is over."""
+        controller = getattr(self, "_controller", None)
+        if controller is None or not self.bot_running:
+            return
+        try:
+            accepted = bool(controller.request_skip_to_next_account())
+        except Exception as exc:
+            accepted = False
+            try:
+                import bot_logger
+                bot_logger.log_error(f"Skip to next account failed: {exc}")
+            except Exception:
+                pass
+        if accepted:
+            self._set_status("Status: Next account after this match", running=True)
+        else:
+            self._set_status("Status: Not now (a switch is already running)", running=True)
 
     def _configured_switch_disabled(self) -> bool:
         """Whether account switching is effectively OFF for the configured mode.

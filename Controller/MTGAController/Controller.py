@@ -46,6 +46,7 @@ from vision.window_locator import (
 )
 import account_login
 import bot_logger
+import daily_progress
 import debug_recorder
 from concede_diagnostics import ConcedeIncident
 import runtime_status
@@ -693,6 +694,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # two-phase round below revisits each account, and without this an account
         # would have to earn its wins twice.
         self._session_wins_by_account: dict[str, int] = {}
+        # Manual "Skip To Next Account" (main window button). The queue loop asks
+        # _account_switch_due() between matches, so a request made mid-game waits
+        # for the game to finish instead of abandoning it.
+        self._skip_to_next_account_requested = False
         # Which half of a two-phase round we are in: "quests" or "wins".
         #
         # Only meaningful when BOTH thresholds are configured. The criteria are
@@ -3743,6 +3748,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             runtime_status.update_status(
                 current_account=current or "",
                 next_account=nxt or "",
+                # Today's tally for this account, so the overlay/window can show it
+                # and a restart picks it up from disk instead of starting at zero.
+                daily_wins=self._wins_seen_for_current_account(),
+                daily_quests=self._quests_completed_today(),
             )
         except Exception:
             pass
@@ -4064,6 +4073,14 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             1 for v in view
             if not (v.get("goal") and v.get("progress", 0) >= v.get("goal", 0))
         )
+        # Count the quests that closed since the last look, on disk, so the day's
+        # tally survives a restart the same way the wins do.
+        try:
+            key = self._current_account_key()
+            if key:
+                daily_progress.observe_open_quests(key, self._last_valid_quest_active_incomplete)
+        except Exception:
+            pass
         # ...but only a block written past the session/switch boundary proves the
         # count belongs to THIS account's turn. Sticky once earned: from then on
         # the boundary is behind us, so the ordinary between-match tail reads are
@@ -7321,6 +7338,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # quests that the daily reset has meanwhile handed out again.
         self._switch_phase = "quests"
         self._session_wins_by_account = {}
+        # The day's wins and quests live on disk (daily_progress) and survive this
+        # reset by design; a manual skip does not, so a Start after it waits for
+        # the button to be pressed again.
+        self._skip_to_next_account_requested = False
         # Floor for the gold-balance read. The log tail still holds the balances
         # of whichever accounts the PREVIOUS session rotated through, and an
         # InventoryInfo entry does not say who it belongs to -- taking one of
@@ -11955,9 +11976,15 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 self._session_wins_by_account[key] = (
                     self._session_wins_by_account.get(key, 0) + 1
                 )
+                # And on disk for the rest of the DAY: restarting the bot must not
+                # make the account earn its configured wins again (2026-11-06).
+                try:
+                    daily_progress.record_win(key)
+                except Exception:
+                    pass
             bot_logger.log_info(
-                f"Daily win counted: {self._daily_wins_this_account} win(s) this account "
-                f"({self._wins_seen_for_current_account()} this session)."
+                f"Daily win counted: {self._daily_wins_this_account} win(s) this visit, "
+                f"{self._wins_seen_for_current_account()} today for this account."
             )
         # Refresh farmed gold from the real balance after every match, so the
         # outgoing account's value is current when a switch fires next. The reward
@@ -12479,23 +12506,77 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         return bool(self._account_switch_750_only)
 
     def _wins_seen_for_current_account(self) -> int:
-        """Wins this account has earned under the bot THIS SESSION.
+        """Wins this account has earned TODAY, across restarts of the bot.
 
         Not just this visit: the two-phase round comes back to every account for
         its wins, and _daily_wins_this_account is zeroed on each switch, so wins
         banked in the quest pass would otherwise have to be earned all over
-        again. Falls back to the per-visit counter when the account has no
-        identity to key on.
+        again. The day's total is kept on disk (daily_progress), because a
+        restart used to wipe the session counter and make the account earn its
+        configured wins a second time. Falls back to the per-visit counter when
+        the account has no identity to key on.
         """
         key = self._current_account_key()
         if not key:
             return self._daily_wins_this_account
+        try:
+            from_disk = daily_progress.wins(key)
+        except Exception:
+            from_disk = 0
         return max(
             self._daily_wins_this_account,
             int(self._session_wins_by_account.get(key, 0)),
+            int(from_disk),
         )
 
+    def _quests_completed_today(self) -> int:
+        """Quests finished today on this account (recorded from the open count)."""
+        key = self._current_account_key()
+        if not key:
+            return 0
+        try:
+            return daily_progress.quests_completed(key)
+        except Exception:
+            return 0
+
+    def request_skip_to_next_account(self) -> bool:
+        """Manual "Skip To Next Account": switch once the current match is over.
+
+        The switch itself only ever runs between matches -- the queue loop asks
+        _account_switch_due() before queueing again -- so a request made during a
+        game is honoured when that game ends, not by conceding it. Returns whether
+        the request was accepted (False while a switch is already running).
+        """
+        if self._stop_requested or self._account_switch_in_progress:
+            return False
+        self._skip_to_next_account_requested = True
+        bot_logger.log_info(
+            "Skip to next account requested; the switch runs after the current match."
+        )
+        return True
+
+    def _switch_giveup_active(self) -> bool:
+        """True once repeated failed switches must stop further attempts."""
+        if not (
+            self._max_failed_switch_attempts
+            and self._failed_switch_attempts >= self._max_failed_switch_attempts
+        ):
+            return False
+        if not self._failed_switch_giveup_logged:
+            self._failed_switch_giveup_logged = True
+            bot_logger.log_error(
+                "Account switching disabled for this session: {} consecutive failed "
+                "switch attempts (logout never reached the login screen). Check the "
+                "Log Out / confirm button calibration. The bot keeps playing on the "
+                "current account.".format(self._failed_switch_attempts)
+            )
+        return True
+
     def _account_switch_due(self) -> bool:
+        # An explicit skip bypasses the toggle and the thresholds; the user asked.
+        # The give-up guard still applies: a logout that cannot work would loop.
+        if self._skip_to_next_account_requested:
+            return not self._switch_giveup_active()
         # Master switch off -> never switch, whatever the thresholds/accounts are.
         if not self._account_switch_enabled:
             return False
@@ -12504,18 +12585,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # layout). Applies to both modes: retrying a logout that cannot work just
         # burns the session in a click loop, so keep playing on this account
         # instead. Cleared by any confirmed switch.
-        if (
-            self._max_failed_switch_attempts
-            and self._failed_switch_attempts >= self._max_failed_switch_attempts
-        ):
-            if not self._failed_switch_giveup_logged:
-                self._failed_switch_giveup_logged = True
-                bot_logger.log_error(
-                    "Account switching disabled for this session: {} consecutive failed "
-                    "switch attempts (logout never reached the login screen). Check the "
-                    "Log Out / confirm button calibration. The bot keeps playing on the "
-                    "current account.".format(self._failed_switch_attempts)
-                )
+        if self._switch_giveup_active():
             return False
         # Quest mode: switch once BOTH criteria are met. Main quests are measured
         # ABSOLUTELY (done by bot OR human). Daily wins are counted only for what
@@ -13619,6 +13689,9 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 if not self._stop_requested:
                     # Reset switch timer before queueing so we don't immediately mark as due.
                     self._last_account_switch_ts = time.time()
+                    if self._skip_to_next_account_requested:
+                        self._skip_to_next_account_requested = False
+                        bot_logger.log_info("Skip to next account: switched, request cleared.")
                     # Mark the switch complete AND no longer pending before queueing:
                     # start_queueing would otherwise be ignored, and the loop it
                     # starts reads `pending` on its first tick -- with the switch
