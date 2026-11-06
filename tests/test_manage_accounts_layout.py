@@ -20,6 +20,7 @@ class _Config:
     def get_account_switch_750_only(self): return False
     def get_shutdown_pc_when_round_complete(self): return False
     def get_max_play_hours(self): return 3
+    def get_daily_reset_utc_hour(self): return 9
 
 
 class ManageAccountsLayoutTest(unittest.TestCase):

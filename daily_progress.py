@@ -39,19 +39,54 @@ FILENAME = "daily_progress.json"
 RESET_UTC_HOUR = 9
 _PLACEHOLDER_KEYS = {"", "(current account)"}
 _LOCK = threading.Lock()
+_reset_hour = RESET_UTC_HOUR
+
+
+def configure(reset_utc_hour: int | None = None) -> int:
+    """Set the reset hour used for the day key; returns the value in force.
+
+    The app calls this from its saved setting at startup and whenever the user
+    changes it. Out-of-range junk keeps the current value rather than moving the
+    boundary somewhere nonsensical.
+    """
+    global _reset_hour
+    if reset_utc_hour is not None:
+        try:
+            hour = int(reset_utc_hour)
+        except (TypeError, ValueError):
+            hour = None
+        if hour is not None and 0 <= hour <= 23:
+            _reset_hour = hour
+    return _reset_hour
+
+
+def reset_hour() -> int:
+    return _reset_hour
 
 
 def day_key(when: datetime | None = None) -> str:
     """The Arena day `when` belongs to, as YYYY-MM-DD.
 
-    08:59 UTC still belongs to the previous day; 09:00 UTC starts the new one.
-    A naive datetime is taken as UTC.
+    With the default 09:00 UTC reset, 08:59 UTC still belongs to the previous
+    day and 09:00 UTC starts the new one. A naive datetime is taken as UTC.
     """
     moment = when if when is not None else datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
-    shifted = moment.astimezone(timezone.utc) - timedelta(hours=RESET_UTC_HOUR)
+    shifted = moment.astimezone(timezone.utc) - timedelta(hours=_reset_hour)
     return shifted.strftime("%Y-%m-%d")
+
+
+def day_start_epoch(when: datetime | None = None) -> float:
+    """UTC epoch of the most recent reset: the instant today's Arena day began."""
+    moment = when if when is not None else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    start = moment.replace(hour=_reset_hour, minute=0, second=0, microsecond=0)
+    if start > moment:
+        start -= timedelta(days=1)
+    return start.timestamp()
 
 
 def _today() -> str:
@@ -124,6 +159,31 @@ def record_win(account: str) -> int:
         entry["wins"] = int(entry.get("wins") or 0) + 1
         _write(data)
         return entry["wins"]
+
+
+def seed_wins(account: str, total: int) -> int:
+    """Raise today's win count to at least `total`; returns the value kept.
+
+    Used at startup with the day's wins read from Player.log. Only ever raises:
+    a game the bot counted itself must not be wiped by a log read that missed
+    it (an unreadable or freshly rotated log, say).
+    """
+    key = _usable(account)
+    if not key:
+        return 0
+    try:
+        wanted = max(0, int(total))
+    except (TypeError, ValueError):
+        return 0
+    with _LOCK:
+        data = _read()
+        entry = _entry(data, key)
+        current = int(entry.get("wins") or 0)
+        if wanted > current:
+            entry["wins"] = wanted
+            _write(data)
+            return wanted
+        return current
 
 
 def quests_completed(account: str) -> int:

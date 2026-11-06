@@ -18,6 +18,7 @@ from bot_behavior import match_timeout_minutes as normalize_match_timeout
 from bot_behavior import DEFAULT_MAX_PLAY_HOURS, parse_max_play_hours
 import shutdown_scheduler
 import update_checker
+import daily_progress
 from version import __version__ as APP_VERSION
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
 from runtime_paths import runtime_file
@@ -1594,6 +1595,10 @@ class ConfigManager:
             "account_switch_mode": "time",
             "account_switch_main_quests": 0,   # 0-3 main quests to complete
             "account_switch_daily_wins": 0,    # 0-15 daily wins to reach
+            # Arena resets at a fixed 09:00 UTC, not at local midnight: 10pm in
+            # Auckland during NZDT, 4am in New York. The day's quest and win
+            # counters roll over then, for every player at the same instant.
+            "daily_reset_utc_hour": 9,
             "account_switch_750_only": False,
             # Opt-in: power the PC off once every configured account has hit
             # those two thresholds and the round ends by itself. Off by default
@@ -1847,6 +1852,25 @@ class ConfigManager:
 
     def set_account_switch_750_only(self, enabled: bool) -> None:
         self.config["account_switch_750_only"] = bool(enabled)
+        self._save_config()
+
+    def get_daily_reset_utc_hour(self) -> int:
+        """UTC hour of Arena's daily reset (default 9): the day-counter boundary."""
+        try:
+            value = int(self.config.get("daily_reset_utc_hour", 9))
+        except (TypeError, ValueError):
+            value = 9
+        return max(0, min(23, value))
+
+    def set_daily_reset_utc_hour(self, hour: int) -> None:
+        try:
+            value = int(hour)
+        except (TypeError, ValueError):
+            return
+        value = max(0, min(23, value))
+        if self.config.get("daily_reset_utc_hour") == value:
+            return
+        self.config["daily_reset_utc_hour"] = value
         self._save_config()
 
     def set_account_switch_daily_wins(self, count: int) -> None:
@@ -2346,6 +2370,9 @@ class MTGBotUI(tk.Tk):
 
         self._controller_lock = threading.RLock()
         self.config_manager = ConfigManager()
+        # Arena's daily reset decides which day the quest/win counters belong to,
+        # so set it before anything reads daily_progress.
+        daily_progress.configure(self.config_manager.get_daily_reset_utc_hour())
         if not self._ensure_player_log_path_configured():
             self.after(0, self.destroy)
             return
@@ -4793,7 +4820,8 @@ class MTGBotUI(tk.Tk):
                                    auto_concede_stalled_matches=auto_concede_stalled_matches,
                                    preferred_starter_deck=preferred_starter_deck,
                                    preferred_historic_deck=preferred_historic_deck,
-                                   only_grind_preferred_deck=only_grind_preferred_deck)
+                                   only_grind_preferred_deck=only_grind_preferred_deck,
+                                   daily_reset_utc_hour=self.config_manager.get_daily_reset_utc_hour())
             if not self.bot_running or token is not self._play_run_token:
                 return
             controller.set_play_deadline(deadline)
@@ -9048,7 +9076,15 @@ class SwitchAccountWindow(tk.Toplevel):
         cv.create_window(178, 172, anchor="nw", window=limit_entry, width=64)
         limit_entry.bind("<Return>", lambda _e: self._save_switch_settings())
         cv.create_text(250, 174, text="(0 = off; next run)", fill=c["text_muted"], font=self._font(8), anchor="nw")
-        cv.create_text(26, 204, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        # Arena's daily reset decides which "day" the quest/win counters belong
+        # to; it is a fixed UTC instant (09:00 by default), not local midnight.
+        cv.create_text(26, 204, text="Daily reset (UTC hour):", fill=c["text"], font=self._font(9), anchor="nw")
+        self.daily_reset_var = tk.StringVar(value=str(self._config_manager.get_daily_reset_utc_hour()))
+        reset_entry = self._make_entry(self, textvariable=self.daily_reset_var, width=3)
+        cv.create_window(178, 202, anchor="nw", window=reset_entry, width=40)
+        reset_entry.bind("<Return>", lambda _e: self._save_switch_settings())
+        cv.create_text(226, 204, text="(0-23; Arena resets at 9 UTC)", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_text(26, 226, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=self._font(8), anchor="nw")
 
         cv.create_text(26, 248, text="Accounts (max 10)", fill=c["text"], font=self._font(13, "bold"), anchor="nw")
         cv.create_text(26, 276, text="#", fill=c["text_muted"], font=self._font(9), anchor="nw")
@@ -9386,12 +9422,23 @@ class SwitchAccountWindow(tk.Toplevel):
                 self._config_manager.set_account_switch_daily_wins(dw)
             except ValueError:
                 pass
+        # Arena's daily reset hour (0-23 UTC); applies to the day counters now.
+        raw_r = (getattr(self, "daily_reset_var", None).get() if getattr(self, "daily_reset_var", None) else "").strip()
+        if raw_r != "":
+            try:
+                hour = max(0, min(23, int(raw_r)))
+                self.daily_reset_var.set(str(hour))
+                self._config_manager.set_daily_reset_utc_hour(hour)
+                daily_progress.configure(hour)
+            except ValueError:
+                pass
         if mode == "quests":
             detail = f"quests ({self.switch_main_var.get()} main + {self.switch_daily_var.get()} wins)"
             if self._config_manager.get_account_switch_750_only():
                 detail += "; 750-gold quests only (free a slot if full; next run)"
         else:
             detail = f"time ({self.switch_minutes_var.get()} min)"
+        detail += f"; daily reset {self._config_manager.get_daily_reset_utc_hour()}:00 UTC"
         messagebox.showinfo("Saved", f"Account-switch settings saved: {detail}.\nMax play time: {self.max_play_hours_var.get()} hours (0 = off; applies next run).")
 
     def _refresh_order_choices(self):

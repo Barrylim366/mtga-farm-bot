@@ -48,6 +48,7 @@ import account_login
 import bot_logger
 import daily_progress
 import debug_recorder
+import win_tally
 from concede_diagnostics import ConcedeIncident
 import runtime_status
 from decision_watchdog import DecisionWatchdog
@@ -137,6 +138,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         account_switch_mode: str | None = None,
         account_switch_main_quests: int | None = None,
         account_switch_daily_wins: int | None = None,
+        daily_reset_utc_hour: int | None = None,
         account_cycle_index: int | None = None,
         account_play_order: list[str] | None = None,
         game_mode: str | None = None,
@@ -682,6 +684,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._account_switch_enabled = bool(account_switch_enabled)
         self._account_switch_main_quests = max(0, min(3, int(account_switch_main_quests or 0)))
         self._account_switch_daily_wins = max(0, min(15, int(account_switch_daily_wins or 0)))
+        # Arena's daily reset (UTC hour) decides which "day" the quest and win
+        # counters belong to; 09:00 UTC is the game's own reset.
+        self._daily_reset_utc_hour = daily_progress.configure(daily_reset_utc_hour)
+        self._daily_wins_seeded_keys: set[str] = set()
         self._account_switch_750_only = bool(account_switch_750_only)
         # Quest-mode tracking: a local win counter (the bot knows every match
         # result). Wins are tracked for stats/gold only -- the switch decision is
@@ -12505,6 +12511,40 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     def get_account_switch_750_only(self) -> bool:
         return bool(self._account_switch_750_only)
 
+    def set_daily_reset_utc_hour(self, hour: int) -> int:
+        """Live change of the reset hour (Settings); returns the value in force."""
+        self._daily_reset_utc_hour = daily_progress.configure(hour)
+        return self._daily_reset_utc_hour
+
+    def _seed_daily_wins_for_current_account(self) -> None:
+        """Fill today's win count for the current account from Player.log.
+
+        The bot used to trust only the matches it played itself, so an account
+        whose wins were earned by hand before Start looked untouched and was
+        farmed for the full target again. Every completed match is in the log
+        with its players, winning team and timestamp, so the tally can be seeded
+        on the way in. Only the current account is scanned (no account-folder
+        read here), once per session per account, and the stored count is only
+        ever raised.
+        """
+        key = self._current_account_key()
+        if not key or key.startswith("("):
+            return
+        if key in self._daily_wins_seeded_keys:
+            return
+        self._daily_wins_seeded_keys.add(key)
+        try:
+            if daily_progress.wins(key) > 0:
+                return
+            wins = win_tally.wins_today_by_account(self._log_path, [key]).get(key, 0)
+            if wins:
+                daily_progress.seed_wins(key, wins)
+                bot_logger.log_info(
+                    f"Daily wins seeded from Player.log for '{key}': {wins} since the last reset."
+                )
+        except Exception as exc:
+            bot_logger.log_error(f"Daily wins seeding failed: {exc}")
+
     def _wins_seen_for_current_account(self) -> int:
         """Wins this account has earned TODAY, across restarts of the bot.
 
@@ -13008,6 +13048,12 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
 
     def _queue_spam_loop(self) -> None:
         while not self._stop_queue_spam:
+            # Before the first decision of this visit: seed today's wins from the
+            # log, so an account whose wins were won by hand before Start is
+            # switched past instead of farmed for them again. Cheap after the
+            # first pass (the account is remembered), and it must not run under
+            # the switch lock.
+            self._seed_daily_wins_for_current_account()
             if self._stop_requested or self.check_play_time_limit():
                 return
             if self._account_switch_in_progress:
