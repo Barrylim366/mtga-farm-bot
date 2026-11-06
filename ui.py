@@ -10,6 +10,8 @@ import time
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
 import json
 import threading
+import account_balances
+import account_login
 import overlay
 import runtime_status
 from bot_behavior import match_timeout_minutes as normalize_match_timeout
@@ -19,7 +21,12 @@ import update_checker
 from version import __version__ as APP_VERSION
 from Controller.Utilities.input_controller import InputControllerError, create_input_controller
 from runtime_paths import runtime_file
-from vision.window_locator import ArenaDetectionResult, run_arena_setup_check, supported_16x9_message
+from vision.window_locator import (
+    ArenaDetectionResult,
+    arena_integrity_problem,
+    run_arena_setup_check,
+    supported_16x9_message,
+)
 
 # Import bot components
 from Controller.MTGAController.Controller import Controller
@@ -2325,7 +2332,9 @@ class MTGBotUI(tk.Tk):
     # button stack, the status/queue/account info panel, the three daily-quest
     # rows and the footer without clipping.
     _MAIN_BASE_W = 460
-    _MAIN_BASE_H = 1140
+    # 1201, not 1140: the Account Manager added a seventh button to the stack,
+    # which needs its skin height (48) plus the button gap (13).
+    _MAIN_BASE_H = 1201
     # Extra room reserved at the bottom for the global topmost toggle.
     _MAIN_EXTRA_H = 134
     # Screen height the window cannot use: its own y origin plus a taskbar and
@@ -2352,6 +2361,9 @@ class MTGBotUI(tk.Tk):
         self.resizable(False, False)
 
         self.bot_running = False
+        # True while the Account Manager is signing an account in by hand. Start
+        # must wait: two owners of the mouse would click over each other.
+        self._manual_login_running = False
         self.game = None
         self.bot_thread = None
         self._watchdog_proc = None
@@ -2361,6 +2373,9 @@ class MTGBotUI(tk.Tk):
         self._last_settings_xy: tuple[int, int] | None = None
         self.ui_settings_window = None
         self.current_session_window = None
+        # Kept on the instance so the window survives and a second click reuses
+        # it instead of stacking another copy.
+        self.account_manager_window = None
         self._controller = None
         self._game_overlay = None
         # Settings -> Game Overlay is open: show the panel even while stopped.
@@ -2599,7 +2614,7 @@ class MTGBotUI(tk.Tk):
     def apply_window_topmost_mode(self, enabled: bool) -> None:
         enabled_flag = bool(enabled)
         _apply_window_topmost(self, enabled_flag)
-        for window in (self.settings_window, self.ui_settings_window, self.current_session_window):
+        for window in (self.settings_window, self.ui_settings_window, self.current_session_window, self.account_manager_window):
             if window is None:
                 continue
             try:
@@ -2614,7 +2629,7 @@ class MTGBotUI(tk.Tk):
         should_reopen_ui_settings = bool(reopen_ui_settings and was_settings_open)
 
         # Close subwindows so they are recreated with the new scale.
-        for attr in ("ui_settings_window", "settings_window", "current_session_window"):
+        for attr in ("ui_settings_window", "settings_window", "current_session_window", "account_manager_window"):
             window = getattr(self, attr, None)
             if window is None:
                 continue
@@ -3477,6 +3492,7 @@ class MTGBotUI(tk.Tk):
         self._create_canvas_menu_button("current_session", "Current Session", "Secondary.TButton", self._open_current_session, enabled=True)
         self._create_canvas_menu_button("change_queue", "Change Queue", "Secondary.TButton", self._toggle_queue_mode, enabled=True)
         self._create_canvas_menu_button("account_switch", "Account Switch", "Secondary.TButton", self._toggle_account_switch, enabled=True)
+        self._create_canvas_menu_button("account_manager", "Account Manager", "Secondary.TButton", self._open_account_manager, enabled=True)
         self._create_canvas_menu_button("settings", "Settings", "Secondary.TButton", self._open_settings, enabled=True)
 
         # Says what the bot is doing right now, in the title's molten-gold look
@@ -4430,8 +4446,36 @@ class MTGBotUI(tk.Tk):
         except Exception:
             pass
 
+    def _manual_login_in_progress(self) -> bool:
+        """True while the Account Manager's Log In worker is driving Arena."""
+        if getattr(self, "_manual_login_running", False):
+            return True
+        window = getattr(self, "account_manager_window", None)
+        try:
+            if window is not None and window.winfo_exists():
+                return bool(getattr(window, "_login_running", False))
+        except Exception:
+            pass
+        return False
+
     def _start_bot(self):
         if self.bot_running:
+            return
+        if self._manual_login_in_progress():
+            messagebox.showinfo(
+                "Account Manager",
+                "A manual account login is still running.\n\n"
+                "Wait for it to finish (Arena will be signed in), then press Start.",
+                parent=self,
+            )
+            return
+        # Windows silently discards input sent from a lower-integrity process to
+        # a higher-integrity window, which would make the bot look stuck with no
+        # error anywhere. Measured 2026-11-05: a copy of the bot in a folder with
+        # a "Low" mandatory label ran at Low against a Medium Arena.
+        integrity_problem = arena_integrity_problem()
+        if integrity_problem:
+            messagebox.showerror("Arena Integrity", integrity_problem, parent=self)
             return
 
         # Retry the arena setup check for a few seconds: MTGA's game-start /
@@ -5066,6 +5110,30 @@ class MTGBotUI(tk.Tk):
         if self.current_session_window and self.current_session_window.winfo_exists():
             self.current_session_window.update_stats(self.session_games, self.session_wins, self._switch_eta_text)
 
+    def _open_account_manager(self):
+        """Open the balance table, or bring the existing one back to the front.
+
+        The window reads Player.log itself, so it opens with the bot stopped and
+        needs no Controller.
+        """
+        if self.account_manager_window and self.account_manager_window.winfo_exists():
+            try:
+                self.account_manager_window.lift()
+                self.account_manager_window.focus_force()
+            except Exception:
+                pass
+            return
+        gap_px = int(self.winfo_fpixels("5m"))
+        self.update_idletasks()
+        target_x = int(self.winfo_x())
+        target_y = int(self.winfo_rooty() + self.winfo_height() + gap_px)
+        self.account_manager_window = AccountManagerWindow(
+            self,
+            self.config_manager,
+            spawn_xy=(target_x, target_y),
+        )
+        self.apply_window_topmost_mode(self.config_manager.get_ui_windows_topmost())
+
     def _open_settings(self):
         if self.settings_window and self.settings_window.winfo_exists():
             self.settings_window.lift()
@@ -5536,6 +5604,1001 @@ class CurrentSessionWindow(tk.Toplevel):
         switch_line = switch_eta_text if switch_eta_text is not None else "Account switch: off"
         self._canvas.itemconfigure(self._stats_text_item, text=f"{switch_line}\nGames played: {games}\nWin: {wins}")
         self._layout_scene()
+
+
+class AccountManagerWindow(tk.Toplevel):
+    """What every configured account owns, read from Player.log alone.
+
+    Deliberately independent of the bot: account_balances walks the log file, so
+    this answers "what does each account hold" with the bot stopped and MTGA
+    closed. The account list comes from ConfigManager.get_managed_accounts(),
+    the sanctioned path to the account folders -- this window never opens
+    credentials.json itself.
+
+    The balances are as fresh as the log: an account that has not signed in
+    since Player.log last rotated shows a dash, not a guess.
+    """
+
+    # Shortened from the full field names ("Mythic Wild Cards") so that six
+    # columns fit without truncating the numbers. The second member is a floor
+    # for the measured width, the fourth the account_balances field the column
+    # shows -- so column order and parser order cannot drift apart.
+    COLUMNS = (
+        ("Account", 200, "w", None),
+        ("Gems", 96, "e", "gems"),
+        ("Gold", 112, "e", "gold"),
+        ("Draft Tokens", 134, "e", "draft_tokens"),
+        ("Mythic WC", 118, "e", "mythic_wildcards"),
+        ("Rare WC", 110, "e", "rare_wildcards"),
+    )
+    # Not a balance, and not sortable: the per-row Log In button. Kept out of
+    # COLUMNS because that tuple drives the sortable data columns, whose sort key
+    # is the account_balances field name.
+    _LOGIN_FIELD = "__log_in__"
+    _LOGIN_COLUMN = ("Log In", 104, "e", _LOGIN_FIELD)
+    # Data columns plus the action column: layout, widths and the header row are
+    # measured over this, while sorting and the balance cells stay on COLUMNS.
+    ALL_COLUMNS = COLUMNS + (_LOGIN_COLUMN,)
+    # The row buttons are smaller than the main menu's 336x48 skins, so they are
+    # painted at this size by the same renderer (the glow padding is part of the
+    # image but transparent, which keeps the 28 px body inside the 40 px row).
+    _LOGIN_BTN_W = 84
+    _LOGIN_BTN_H = 28
+    # The skin's glow extends past the body, so the body is inset from the card's
+    # right rim by this much instead of ending flush against the orange border.
+    _LOGIN_RIGHT_PAD = 8
+    # Room reserved for a right-aligned header's sort arrow. It has to stay under
+    # _COLUMN_GAP (22 at 100% scale): the title slides left by this much and the
+    # arrow sits in the gap, so an active header cannot reach the next column.
+    _HEADER_ARROW_ROOM = 18
+    _MARGIN = 30
+    _ROWS_TOP = 140
+    _ROW_STEP = 40
+    _MAX_ROWS = 10
+    _NO_VALUE = "--"
+    # How much of Player.log the "which account is signed in" check reads. The
+    # logout record is written when the user logs out, so it sits near the end;
+    # the account itself comes from the balance records, which are read anyway.
+    _LOGIN_STATE_TAIL_BYTES = 2_000_000
+    # The table keeps its own size when the bot's UI scale is turned down; short
+    # bold labels survive that, six columns of numbers do not. 0.9, not 1.0: at a
+    # 50% UI scale (a common setting on a 2560x1440 screen) a full-size table
+    # reads as twice the rest of the interface. Below 0.9 the numbers stop being
+    # comfortable, so the window stops there.
+    _MIN_UI_SCALE = 0.9
+    # Header key for the name column; the others are account_balances fields.
+    _ACCOUNT_SORT = "account"
+    # Space between a column's right edge and the next header's start. Without
+    # it, right-aligned headers touch: "Draft TokensMythic WC".
+    _COLUMN_GAP = 22
+
+    def __init__(
+        self,
+        parent,
+        config_manager: ConfigManager,
+        spawn_xy: tuple[int, int] | None = None,
+    ):
+        super().__init__(parent)
+        # This window keeps a readability floor instead of following the bot's
+        # UI scale all the way down. On a 768 px-high screen the main window is
+        # squeezed to ~0.5, which puts this table at 6 px type: the chrome can
+        # shrink because its labels are short and bold, six columns of numbers
+        # cannot. The geometry below then clamps it back inside the screen.
+        self._ui_scale = max(self._MIN_UI_SCALE, _get_ui_scale_from_widget(parent))
+        self._config_manager = config_manager
+        # The bot's own dressing, not a neutral table palette: the same
+        # translucent red cards, orange rims and gold lettering as the
+        # Current Session window and the overlay.
+        self._theme = {
+            "bg": "#0F1115",
+            "title": "#FF9318",
+            "name": "#FFB841",
+            "value": "#F7E5B1",
+            "text_muted": "#B8A9AE",
+            "panel_fill": (50, 10, 2, 210),
+            "panel_outline": (255, 147, 24),
+            "band": (72, 17, 5),
+        }
+        self.title("Account Manager")
+        self._col_widths = self._measure_columns()
+        width = self._s(self._MARGIN * 2) + sum(self._col_widths)
+        # Still no room on a narrow screen? Take the window down as far as the
+        # screen needs, never further than it must.
+        usable_width = max(320, int(self.winfo_screenwidth()) - self._s(24))
+        if width > usable_width:
+            self._ui_scale = max(0.5, self._ui_scale * (usable_width / float(width)))
+            self._col_widths = self._measure_columns()
+            width = self._s(self._MARGIN * 2) + sum(self._col_widths)
+        # The table is sized to the accounts that exist, not to the maximum of
+        # ten: a three-account setup otherwise opens with half the window empty.
+        rows = max(1, min(self._MAX_ROWS, len(self._load_accounts())))
+        self._rows_bottom = self._s(self._ROWS_TOP + rows * self._ROW_STEP)
+        # Card, footer line and a full-width skin button below it.
+        height = self._rows_bottom + self._s(156)
+        self._win_width = width
+        parent.update_idletasks()
+        if spawn_xy is not None:
+            x, y = int(spawn_xy[0]), int(spawn_xy[1])
+        else:
+            gap_px = int(parent.winfo_fpixels("5m"))
+            x = parent.winfo_x()
+            y = parent.winfo_rooty() + parent.winfo_height() + gap_px
+        x = min(max(0, x), max(0, self.winfo_screenwidth() - width))
+        y = min(max(0, y), max(0, self.winfo_screenheight() - height))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.resizable(False, False)
+        self.configure(bg=self._theme["bg"])
+        _apply_submenu_theme(self)
+        _apply_window_topmost(self, _get_ui_topmost_setting_from_widget(parent))
+
+        self._row_items: list[int] = []
+        self._table_rows: list[dict] = []
+        # No column chosen yet: the list stays alphabetical. Clicking a header
+        # sorts by it, largest first, and clicking the same one again reverses.
+        self._sort_column: str | None = None
+        self._sort_descending = True
+        self._header_items: dict[str, int] = {}
+        self._bg_source_image = None
+        self._bg_photo = None
+        self._bg_item = None
+        self._panel_photo = None
+        self._panel_size = (0, 0)
+        self._refresh_btn = None
+        # One Log In button per row, rebuilt by every _render. Held so a login
+        # can disable them all without re-reading the 140 MB log.
+        self._row_buttons: list[dict] = []
+        self._login_skins = None
+        self._login_running = False
+        self._login_thread = None
+        self._login_controller = None
+        self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._load_background_image()
+        self._build_chrome()
+        self._create_refresh_button()
+        self._canvas.bind("<Configure>", lambda _e: self._refresh_background())
+        for delay in (40, 160, 420):
+            self.after(delay, self._refresh_background)
+        # Reading a 130 MB log in the Tk thread would delay the first paint, so
+        # the window opens empty and fills a moment later.
+        self.after(10, self._refresh)
+
+    # --- the bot's own look -----------------------------------------------
+
+    def _load_background_image(self):
+        """The main window's background art, as the other sub-windows use it."""
+        for path in (_image_path("background"), _image_path("background.png")):
+            if not os.path.exists(path):
+                continue
+            try:
+                with Image.open(path) as image:
+                    self._bg_source_image = image.convert("RGB")
+                    return
+            except Exception:
+                continue
+
+    def _refresh_background(self):
+        if self._bg_source_image is None:
+            return
+        width = max(2, self._canvas.winfo_width())
+        height = max(2, self._canvas.winfo_height())
+        try:
+            fitted = ImageOps.fit(
+                self._bg_source_image,
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            self._bg_photo = ImageTk.PhotoImage(fitted)
+            if self._bg_item is None:
+                self._bg_item = self._canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+            else:
+                self._canvas.coords(self._bg_item, 0, 0)
+                self._canvas.itemconfigure(self._bg_item, image=self._bg_photo)
+            self._canvas.tag_lower(self._bg_item)
+        except Exception:
+            pass
+
+    def _render_panel(self):
+        """The translucent red card with an orange rim, as the bot's panels are."""
+        width = max(2, self._panel_right - self._panel_left)
+        height = max(2, self._panel_bottom - self._panel_top)
+        if self._panel_photo is not None and self._panel_size == (width, height):
+            return
+        panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(panel)
+        draw.rectangle(
+            (0, 0, width - 1, height - 1),
+            fill=self._theme["panel_fill"],
+            outline=self._theme["panel_outline"] + (255,),
+            width=max(2, self._s(3)),
+        )
+        self._panel_photo = ImageTk.PhotoImage(panel)
+        self._panel_size = (width, height)
+        self._canvas.coords(self._panel_item, self._panel_left, self._panel_top)
+        self._canvas.itemconfigure(self._panel_item, image=self._panel_photo, state="normal")
+        self._canvas.tag_lower(self._panel_item, self._footer_item)
+
+    def _create_refresh_button(self):
+        """A skin button like the bot's own, so the window matches its siblings."""
+        parent_ui = getattr(self, "master", None)
+        skins_all = getattr(parent_ui, "_button_skins", {}) or {}
+        skins = skins_all.get("Secondary.TButton")
+        if skins is None and skins_all:
+            skins = next(iter(skins_all.values()))
+        if not skins:
+            # No main window to borrow skins from (unit tests, previews): a plain
+            # themed button keeps the window usable instead of shipping a gap.
+            _apply_submenu_theme(self)
+            self._refresh_fallback = ttk.Button(
+                self, text="Refresh", style="Submenu.TButton", command=self._refresh,
+            )
+            self._refresh_fallback.place(
+                relx=0.5, y=self._rows_bottom + self._s(84), anchor="n",
+            )
+            return
+
+        width = int(skins["normal"].width())
+        height = int(skins["normal"].height())
+        centre_x = self._win_width // 2
+        top = self._rows_bottom + self._s(84)
+        tag = "account_manager_refresh_btn"
+        bg_item = self._canvas.create_image(centre_x, top, anchor="n", image=skins["normal"], tags=(tag,))
+        text_item = self._canvas.create_text(
+            centre_x, top + height // 2, text="Refresh", fill="#F2F6FF",
+            font=self._font(13, "bold"), anchor="center", tags=(tag,),
+        )
+        self._refresh_btn = {
+            "skins": skins,
+            "bg_item": bg_item,
+            "text_item": text_item,
+            "hover": False,
+            "pressed": False,
+            "enabled": True,
+        }
+        self._canvas.tag_bind(tag, "<Enter>", self._on_refresh_enter)
+        self._canvas.tag_bind(tag, "<Leave>", self._on_refresh_leave)
+        self._canvas.tag_bind(tag, "<ButtonPress-1>", self._on_refresh_press)
+        self._canvas.tag_bind(tag, "<ButtonRelease-1>", self._on_refresh_release)
+        self._refresh_refresh_button_state()
+
+    def _refresh_refresh_button_state(self):
+        btn = self._refresh_btn
+        if not btn:
+            return
+        if btn["pressed"]:
+            state_key, text_color = "pressed", "#FFFFFF"
+        elif btn["hover"]:
+            state_key, text_color = "hover", "#FFFFFF"
+        else:
+            state_key, text_color = "normal", "#F2F6FF"
+        self._canvas.itemconfigure(btn["bg_item"], image=btn["skins"][state_key])
+        self._canvas.itemconfigure(btn["text_item"], fill=text_color)
+
+    def _on_refresh_enter(self, _event=None):
+        if not self._refresh_btn:
+            return
+        self._canvas.configure(cursor="hand2")
+        self._refresh_btn["hover"] = True
+        self._refresh_refresh_button_state()
+
+    def _on_refresh_leave(self, _event=None):
+        if not self._refresh_btn:
+            return
+        self._canvas.configure(cursor="")
+        self._refresh_btn["hover"] = False
+        self._refresh_btn["pressed"] = False
+        self._refresh_refresh_button_state()
+
+    def _on_refresh_press(self, _event=None):
+        if not self._refresh_btn:
+            return
+        self._refresh_btn["pressed"] = True
+        self._refresh_refresh_button_state()
+
+    def _on_refresh_release(self, _event=None):
+        btn = self._refresh_btn
+        if not btn:
+            return
+        fire = bool(btn["pressed"] and btn["hover"])
+        btn["pressed"] = False
+        self._refresh_refresh_button_state()
+        if fire:
+            self._refresh()
+
+    # --- scaling helpers --------------------------------------------------
+
+    def _s(self, value: int | float) -> int:
+        return max(1, int(round(float(value) * float(self._ui_scale))))
+
+    def _font(self, points: int, *styles):
+        # Canvas coordinates are pixels. Positive Tk font sizes are points and
+        # would grow independently of the layout with system DPI.
+        return ("Segoe UI", -self._s(points * 4 / 3 * 1.3), *styles)
+
+    # --- static chrome ----------------------------------------------------
+
+    def _measure_columns(self) -> list[int]:
+        """Column widths in pixels: the bold header plus a gap, never below its floor.
+
+        Measured rather than hardcoded because the header widths follow the font
+        and the DPI, and a column too narrow for its own header makes two
+        right-aligned headers touch.
+        """
+        header_font = tkfont.Font(font=self._font(12, "bold"))
+        gap = self._s(self._COLUMN_GAP)
+        widths = []
+        for title, floor, _anchor, _field in self.ALL_COLUMNS:
+            widths.append(max(self._s(floor), header_font.measure(title) + gap))
+        return widths
+
+    def _column_edges(self) -> list[tuple[int, int, str]]:
+        edges = []
+        x = self._s(self._MARGIN)
+        for width, (_title, _floor, anchor, _field) in zip(self._col_widths, self.ALL_COLUMNS):
+            edges.append((x, x + width, anchor))
+            x += width
+        return edges
+
+    def _build_chrome(self) -> None:
+        c = self._theme
+        self._canvas.create_text(
+            self._s(self._MARGIN), self._s(20), text="Account Manager",
+            fill=c["title"], font=self._font(22, "bold"), anchor="nw",
+        )
+        self._canvas.create_text(
+            self._s(self._MARGIN), self._s(58),
+            text="Balances read from Player.log. Log In signs an account in with the bot stopped.",
+            fill=c["text_muted"], font=self._font(12), anchor="nw",
+        )
+        edges = self._column_edges()
+        # The card the table sits on, drawn before its text so the text lands on
+        # top of it. Sized to the rows, so a two-account setup gets a small card.
+        self._panel_left = self._s(self._MARGIN) - self._s(10)
+        self._panel_right = edges[-1][1] + self._s(10)
+        self._panel_top = self._s(100)
+        self._panel_bottom = self._rows_bottom + self._s(64)
+        self._panel_item = self._canvas.create_image(0, 0, anchor="nw")
+        self._footer_item = self._canvas.create_text(
+            self._s(self._MARGIN), self._rows_bottom + self._s(30),
+            text="Reading Player.log...",
+            fill=c["text_muted"], font=self._font(12), anchor="nw",
+            width=self._panel_right - self._s(self._MARGIN) - self._s(20),
+        )
+        header_font = tkfont.Font(font=self._font(12, "bold"))
+        for (title, _w, anchor, field), (left, right, _a) in zip(self.ALL_COLUMNS, edges):
+            if field == self._LOGIN_FIELD:
+                # A label, not a sort key: there is nothing to order by, so this
+                # header is deliberately not clickable.
+                self._canvas.create_text(
+                    right - self._s(self._LOGIN_RIGHT_PAD), self._s(116), text=title,
+                    fill=c["title"], font=self._font(12, "bold"), anchor="e",
+                )
+                continue
+            key = self._ACCOUNT_SORT if field is None else field
+            tag = f"acct_hdr_{key}"
+            header_y = self._s(116)
+            base_x = left if anchor == "w" else right
+            text_item = self._canvas.create_text(
+                base_x, header_y,
+                text=title, fill=c["title"], font=self._font(12, "bold"),
+                anchor="w" if anchor == "w" else "e", tags=(tag,),
+            )
+            # The sort arrow is its OWN item, in the gap between columns. Appending
+            # "  ▼" to the header text instead made it grow into the next header
+            # whenever that column was clicked: right-aligned text grows leftwards,
+            # and the arrow (28 px) is wider than the 22 px column gap. Kept
+            # separate, the title never moves further than the gap allows and the
+            # arrow cannot collide with a neighbour. Its own (smaller) font keeps
+            # it inside the gap.
+            arrow_x = base_x if anchor != "w" else base_x + header_font.measure(title) + self._s(6)
+            arrow_item = self._canvas.create_text(
+                arrow_x, header_y, text="", fill=c["title"], font=self._font(9, "bold"),
+                anchor="w" if anchor == "w" else "e", state="hidden",
+            )
+            self._header_items[key] = {
+                "text_item": text_item,
+                "arrow_item": arrow_item,
+                "title": title,
+                "anchor": anchor,
+                "x": base_x,
+                "y": header_y,
+            }
+            self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, k=key: self._on_header_click(k))
+            self._canvas.tag_bind(tag, "<Enter>", lambda _e: self._canvas.configure(cursor="hand2"))
+            self._canvas.tag_bind(tag, "<Leave>", lambda _e: self._canvas.configure(cursor=""))
+        self._canvas.create_line(
+            self._s(self._MARGIN), self._s(132), edges[-1][1], self._s(132),
+            fill="#8A3B12",
+        )
+        self._render_panel()
+        self._refresh_headers()
+
+    def _refresh_headers(self) -> None:
+        """Show which column is sorting and which way, on the header itself."""
+        for title, _w, _anchor, field in self.COLUMNS:
+            key = self._ACCOUNT_SORT if field is None else field
+            entry = self._header_items.get(key)
+            if entry is None:
+                continue
+            text_item = entry["text_item"]
+            arrow_item = entry["arrow_item"]
+            if key != self._sort_column:
+                self._canvas.itemconfigure(text_item, text=title)
+                self._canvas.itemconfigure(arrow_item, text="", state="hidden")
+                # Right-aligned titles are shifted left when the arrow shows;
+                # put them back on their column edge when it does not.
+                self._canvas.coords(text_item, entry["x"], entry["y"])
+                continue
+            self._canvas.itemconfigure(
+                text_item, text=title,
+            )
+            self._canvas.itemconfigure(
+                arrow_item,
+                text="▼" if self._sort_descending else "▲",
+                state="normal",
+            )
+            if entry["anchor"] == "w":
+                # Left-aligned: the arrow already sits after the title.
+                self._canvas.coords(text_item, entry["x"], entry["y"])
+            else:
+                # Right-aligned: make room for the arrow INSIDE this column's own
+                # gap, so the header never grows into the neighbour.
+                self._canvas.coords(
+                    text_item, entry["x"] - self._s(self._HEADER_ARROW_ROOM), entry["y"]
+                )
+
+    def _on_header_click(self, key: str) -> None:
+        """First click on a column sorts it largest-first, the next reverses it."""
+        if key == self._sort_column:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_column = key
+            self._sort_descending = True
+        self._refresh()
+
+    # --- data -------------------------------------------------------------
+
+    def _load_accounts(self) -> list[dict]:
+        try:
+            accounts = self._config_manager.get_managed_accounts() or []
+        except Exception:
+            return []
+        accounts = [acc for acc in accounts if isinstance(acc, dict)]
+        # Alphabetical by what the table actually shows: the stored label can
+        # differ from the Arena name on display (a rename, or a row saved before
+        # the two were merged), and sorting on that label would then look unsorted.
+        accounts.sort(key=lambda acc: self._account_label(acc).casefold())
+        return accounts
+
+    @staticmethod
+    def _account_label(account: dict) -> str:
+        """The row's name as shown: the Arena name, without its `#digits`.
+
+        The discriminator is for telling two accounts apart, not for a list the
+        user reads, so it never reaches the table.
+        """
+        return account_balances.display_name(
+            str(account.get("screen_name", "")) or str(account.get("name", ""))
+        )
+
+    def _log_path(self) -> str:
+        """The configured Player.log, falling back to auto-detection."""
+        try:
+            configured = str(self._config_manager.get_log_path() or "").strip()
+        except Exception:
+            configured = ""
+        if configured:
+            return configured
+        try:
+            return str(self._config_manager.detect_player_log_path() or "").strip()
+        except Exception:
+            return ""
+
+    def _read_log_tail(self, max_bytes: int) -> str:
+        path = self._log_path()
+        if not path:
+            return ""
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - int(max_bytes)))
+                return handle.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    def _signed_in_account(self, accounts: list[dict], balances: dict[str, dict]) -> dict | None:
+        """The configured account that is signed in right now, or None.
+
+        Read from Player.log rather than remembered from the last button press:
+        the user can log out inside Arena or change account by hand, and the
+        highlight should follow what is really logged in.
+
+        The account comes from the NEWEST BALANCE record rather than the newest
+        login line: this log reaches 140 MB, so a login made hours ago is far
+        outside any tail that is cheap to read, while every arrival at the Home
+        screen writes an InventoryInfo that is attributed to the account that
+        just signed in. A client sitting on the login screen is signed in to
+        nobody -- that record is written at the moment of logging out, so the
+        small tail does catch it.
+        """
+        try:
+            text = self._read_log_tail(self._LOGIN_STATE_TAIL_BYTES)
+            if text and account_login.client_is_at_login_screen(text) is True:
+                return None
+            name = ""
+            if balances:
+                newest = max(
+                    balances.values(),
+                    key=lambda row: int(row.get(account_balances.SEQUENCE_FIELD, -1)),
+                )
+                name = str(newest.get(account_balances.LOGGED_NAME_FIELD, "") or "").strip()
+            if not name:
+                name = str(account_login.newest_login_name(text) or "").strip()
+            if not name:
+                return None
+            for account in accounts:
+                expected = (
+                    str(account.get("screen_name", "")).strip()
+                    or str(account.get("name", "")).strip()
+                )
+                if expected and account_login.same_account(name, expected):
+                    return account
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _balance_for(balances: dict[str, dict], account: dict) -> dict | None:
+        # The Arena name is the only identity the log carries; the credentials
+        # name is the fallback for a row saved before the two were merged.
+        return account_balances.find_balance(
+            balances,
+            str(account.get("screen_name", "")),
+            str(account.get("name", "")),
+        )
+
+    def _fitted(self, text: str, max_px: int, font) -> str:
+        """Truncate to the column, so a long name cannot push into the numbers."""
+        if tkfont.Font(font=font).measure(text) <= max_px:
+            return text
+        while text and tkfont.Font(font=font).measure(text + "...") > max_px:
+            text = text[:-1]
+        return (text + "...") if text else "..."
+
+    def _refresh(self, keep_footer: str | None = None) -> None:
+        accounts = self._load_accounts()
+        log_path = self._log_path()
+        balances: dict[str, dict] = {}
+        note = ""
+        if not accounts:
+            note = "No accounts configured yet. Add them under Settings, Manage Accounts."
+        elif not log_path:
+            note = "Player.log not found. Pick it under Settings."
+        else:
+            try:
+                balances = account_balances.read_balances(
+                    account_balances.player_log_paths(log_path)
+                )
+            except Exception as exc:
+                # An unreadable log must not take the window down with it.
+                note = f"Could not read Player.log: {exc}"
+        self._render(accounts, balances, self._signed_in_account(accounts, balances))
+        if keep_footer:
+            # After a sign-in there is no dialog any more, so the footer has to
+            # keep saying which account went in; the table still updates.
+            note = keep_footer
+        elif not note:
+            found = sum(1 for acc in accounts if self._balance_for(balances, acc) is not None)
+            note = "{} of {} accounts found in {} (read at {})".format(
+                found,
+                len(accounts),
+                os.path.basename(log_path),
+                datetime.now().strftime("%H:%M:%S"),
+            )
+        self._canvas.itemconfigure(self._footer_item, text=note)
+        self._refresh_headers()
+
+    @staticmethod
+    def _sort_accounts(accounts, balances, column, descending, label_of, balance_of):
+        """Rows in display order for one column; accounts with no figure sort last.
+
+        `label_of` and `balance_of` are passed in so this stays a pure function
+        (the window's own helpers need an instance, the tests do not).
+        """
+        if not column:
+            return sorted(accounts, key=lambda account: label_of(account).casefold())
+        if column == AccountManagerWindow._ACCOUNT_SORT:
+            return sorted(
+                accounts, key=lambda account: label_of(account).casefold(), reverse=descending
+            )
+
+        def value(account):
+            balance = balance_of(account)
+            return None if balance is None else int(balance.get(column, 0))
+
+        known = [account for account in accounts if value(account) is not None]
+        unknown = [account for account in accounts if value(account) is None]
+        known.sort(key=value, reverse=descending)
+        # A row with no reading stays at the bottom in both directions: it is
+        # missing data, not a zero, and must not head a "smallest first" list.
+        return known + unknown
+
+    def _render(
+        self,
+        accounts: list[dict],
+        balances: dict[str, dict],
+        current: dict | None = None,
+    ) -> None:
+        accounts = self._sort_accounts(
+            accounts,
+            balances,
+            self._sort_column,
+            self._sort_descending,
+            self._account_label,
+            lambda account: self._balance_for(balances, account),
+        )
+        for item in self._row_items:
+            self._canvas.delete(item)
+        self._row_items = []
+        self._row_buttons: list[dict] = []
+        # Kept for the layout test: one dict per row, with the item ids of the
+        # row band and each cell.
+        self._table_rows: list[dict] = []
+        edges = self._column_edges()
+        row_right = edges[-1][1]
+        row_left = self._s(self._MARGIN)
+
+        if not accounts:
+            return
+
+        name_font = self._font(15)
+        signed_in_font = self._font(15, "bold")
+        value_font = self._font(15)
+        current_name = str((current or {}).get("name", "")).strip().casefold()
+        name_width = edges[0][1] - edges[0][0] - self._s(8)
+        for idx, account in enumerate(accounts[: self._MAX_ROWS]):
+            top = self._s(self._ROWS_TOP + idx * self._ROW_STEP)
+            bottom = top + self._s(self._ROW_STEP)
+            mid = (top + bottom) // 2
+            # The account the log says is signed in right now: bold name, and a
+            # greyed-out button so the one row you cannot log in to is also the
+            # one you can see at a glance.
+            is_current = bool(current_name) and (
+                str(account.get("name", "")).strip().casefold() == current_name
+            )
+            band = None
+            if idx % 2:
+                band = self._canvas.create_rectangle(
+                    row_left, top, row_right, bottom,
+                    fill="#3A0D03", outline="",
+                )
+                self._row_items.append(band)
+            label = self._account_label(account)
+            balance = self._balance_for(balances, account)
+            row = {
+                "band": band,
+                "top": top,
+                "bottom": bottom,
+                "account": account,
+                "signed_in": is_current,
+                "name": self._canvas.create_text(
+                    edges[0][0], mid,
+                    text=self._fitted(label, name_width, name_font),
+                    fill=self._theme["name"],
+                    font=signed_in_font if is_current else name_font,
+                    anchor="w",
+                ),
+                "cells": {},
+            }
+            self._row_items.append(row["name"])
+            for (_title, _w, _anchor, field), (_left, right, _a) in zip(self.COLUMNS[1:], edges[1:]):
+                value = self._NO_VALUE
+                if balance is not None and field:
+                    value = f"{int(balance.get(field, 0)):,}"
+                item = self._canvas.create_text(
+                    right, mid, text=value, fill=self._theme["value"],
+                    font=value_font, anchor="e",
+                )
+                row["cells"][field] = item
+                self._row_items.append(item)
+            button = self._create_row_login_button(
+                account, idx, mid, edges[-1], is_current=is_current
+            )
+            row["log_in"] = button["bg_item"]
+            self._row_items.extend(button["items"])
+            self._table_rows.append(row)
+
+    # --- the per-row Log In button ----------------------------------------
+
+    def _login_buttons_enabled(self) -> bool:
+        """Log In is a stopped-bot action: a running bot rotates accounts itself."""
+        if self._login_running:
+            return False
+        return not bool(getattr(self.master, "bot_running", False))
+
+    def _login_button_skins(self):
+        """Small Secondary-coloured skins, painted by the main window's renderer.
+
+        The main menu's skins are 336x48 and cannot fit a 40 px row, so they are
+        re-rendered at the row size with the same palette and the same painter --
+        the window belongs to the bot and should look like it.
+        """
+        if self._login_skins is not None:
+            return self._login_skins
+        parent_ui = getattr(self, "master", None)
+        render = getattr(parent_ui, "_render_button_skin", None) if parent_ui is not None else None
+        if not callable(render):
+            # A parent that cannot paint (a bare test root): fall back to a flat
+            # canvas rectangle rather than shipping a gap.
+            return None
+        width = self._s(self._LOGIN_BTN_W)
+        height = self._s(self._LOGIN_BTN_H)
+        radius = max(6, int(height * 0.28))
+        palette = {
+            "normal": ("#3B4D74", "#24324D", "#6078A6", "#5E77A8"),
+            "hover": ("#47608D", "#2B3C5C", "#7E98C6", "#728EBE"),
+            "pressed": ("#253753", "#1C2940", "#4B628A", "#425A84"),
+            # Grey, not just darker: the painter ignores the body colours, so a
+            # dimmer blue rim would read as "still clickable".
+            "disabled": ("#4A5058", "#3A3F46", "#66707C", "#4C545E"),
+        }
+        try:
+            self._login_skins = {
+                state: render(width, height, radius, *colors)
+                for state, colors in palette.items()
+            }
+        except Exception:
+            self._login_skins = None
+        return self._login_skins
+
+    def _create_row_login_button(
+        self, account: dict, index: int, mid: int, edge, *, is_current: bool = False
+    ) -> dict:
+        """One button in the Log In column, right-aligned with the numbers above it."""
+        _left, right, _anchor = edge
+        skins = self._login_button_skins()
+        # The signed-in account has nothing to log in to: its button is shown
+        # greyed out and cannot be clicked.
+        enabled = self._login_buttons_enabled() and not is_current
+        state = "normal" if enabled else "disabled"
+        tag = f"acct_login_{index}"
+        centre_x = right - self._s(self._LOGIN_RIGHT_PAD) - self._s(self._LOGIN_BTN_W) // 2
+        fill = "#F2F6FF" if enabled else "#A5AFBF"
+        if skins is not None:
+            background = self._canvas.create_image(
+                centre_x, mid, anchor="center", image=skins[state], tags=(tag,),
+            )
+        else:
+            half_w = self._s(self._LOGIN_BTN_W) // 2
+            half_h = self._s(self._LOGIN_BTN_H) // 2
+            background = self._canvas.create_rectangle(
+                centre_x - half_w, mid - half_h, centre_x + half_w, mid + half_h,
+                fill="#3D130E", outline="#6078A6",
+                width=max(1, self._s(2)), tags=(tag,),
+            )
+        text = self._canvas.create_text(
+            centre_x, mid, text="Log In", fill=fill, font=self._font(11, "bold"),
+            anchor="center", tags=(tag,),
+        )
+        button = {
+            "skins": skins,
+            "bg_item": background,
+            "text_item": text,
+            "items": (background, text),
+            "account": account,
+            "is_current": bool(is_current),
+            "enabled": enabled,
+            "hover": False,
+            "pressed": False,
+        }
+        self._row_buttons.append(button)
+        self._canvas.tag_bind(tag, "<Enter>", lambda _e, b=button: self._on_login_enter(b))
+        self._canvas.tag_bind(tag, "<Leave>", lambda _e, b=button: self._on_login_leave(b))
+        self._canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e, b=button: self._on_login_press(b))
+        self._canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e, b=button: self._on_login_release(b))
+        return button
+
+    def _refresh_login_button(self, button: dict) -> None:
+        if button["enabled"]:
+            if button["pressed"]:
+                state, colour = "pressed", "#FFFFFF"
+            elif button["hover"]:
+                state, colour = "hover", "#FFFFFF"
+            else:
+                state, colour = "normal", "#F2F6FF"
+        else:
+            state, colour = "disabled", "#A5AFBF"
+        skins = button.get("skins")
+        if skins is not None:
+            self._canvas.itemconfigure(button["bg_item"], image=skins[state])
+        self._canvas.itemconfigure(button["text_item"], fill=colour)
+
+    def _set_row_buttons_enabled(self, enabled: bool) -> None:
+        """Enable/disable every row button without touching the table's data.
+
+        The signed-in row stays disabled whatever the caller asks for: there is
+        nothing to log in to on that row.
+        """
+        for button in self._row_buttons:
+            button["enabled"] = bool(enabled) and not button.get("is_current", False)
+            button["hover"] = False
+            button["pressed"] = False
+            self._refresh_login_button(button)
+
+    def _on_login_enter(self, button: dict) -> None:
+        if not button["enabled"]:
+            return
+        self._canvas.configure(cursor="hand2")
+        button["hover"] = True
+        self._refresh_login_button(button)
+
+    def _on_login_leave(self, button: dict) -> None:
+        self._canvas.configure(cursor="")
+        button["hover"] = False
+        button["pressed"] = False
+        self._refresh_login_button(button)
+
+    def _on_login_press(self, button: dict) -> None:
+        if not button["enabled"]:
+            return
+        button["pressed"] = True
+        self._refresh_login_button(button)
+
+    def _on_login_release(self, button: dict) -> None:
+        fire = bool(button["enabled"] and button["pressed"] and button["hover"])
+        button["pressed"] = False
+        self._refresh_login_button(button)
+        if fire:
+            self._start_login(button["account"])
+
+    # --- running one manual login -----------------------------------------
+
+    def _set_footer_text(self, text: str) -> None:
+        try:
+            self._canvas.itemconfigure(self._footer_item, text=text)
+        except Exception:
+            pass
+
+    def _post(self, callback) -> None:
+        """Hand a worker-thread update to Tk, if the window is still there."""
+        try:
+            if self.winfo_exists():
+                self.after(0, callback)
+        except Exception:
+            pass
+
+    def _set_parent_login_running(self, running: bool) -> None:
+        """Keep the main window's Start button out of a running login.
+
+        Held on the main window, not here: closing this window must not make the
+        app believe the login finished while its worker still drives Arena.
+        """
+        parent_ui = getattr(self, "master", None)
+        if parent_ui is not None:
+            try:
+                parent_ui._manual_login_running = bool(running)
+            except Exception:
+                pass
+
+    def _start_login(self, account: dict) -> None:
+        if self._login_running:
+            return
+        if getattr(self.master, "bot_running", False):
+            self._set_footer_text("Stop the bot before logging in by hand.")
+            return
+        label = self._account_label(account)
+        self._login_running = True
+        self._set_row_buttons_enabled(False)
+        self._set_footer_text(f"Logging in as {label}...")
+        self._set_parent_login_running(True)
+        self._login_thread = threading.Thread(
+            target=self._run_login,
+            args=(account, label),
+            name="account-manager-login",
+            daemon=True,
+        )
+        self._login_thread.start()
+
+    def _build_login_controller(self):
+        """A Controller configured the way a bot run configures one.
+
+        Account switching is off on purpose: this controller exists to sign one
+        account in, and nothing may start rotating accounts behind the person
+        who is about to play.
+        """
+        log_path = self._log_path()
+        if not log_path or not os.path.isfile(log_path):
+            raise RuntimeError("Player.log was not found. Set it under Settings first.")
+        return Controller(
+            log_path=log_path,
+            screen_bounds=self._config_manager.get_screen_bounds(),
+            click_targets=self._config_manager.get_click_targets(),
+            input_backend=self._config_manager.get_input_backend(),
+            account_switch_enabled=False,
+        )
+
+    def _run_login(self, account: dict, label: str) -> None:
+        """Worker thread: drive Arena, then hand the outcome back to Tk.
+
+        This must never run on the Tk thread -- the flow sleeps for tens of
+        seconds and the window has to stay alive while it does.
+        """
+        def on_status(text: str) -> None:
+            self._post(lambda: self._set_footer_text(text))
+
+        ok, message = False, "The login did not finish."
+        bundle_dir = None
+        try:
+            controller = self._build_login_controller()
+            self._login_controller = controller
+            ok, message = controller.sign_in_for_manual_play(account, on_status=on_status)
+            # Only failures that leave a debug bundle behind get a dialog: there
+            # is something to look at. Everything else is reported in the footer.
+            bundle_dir = getattr(controller, "_manual_login_bundle_dir", None)
+        except Exception as exc:
+            message = f"The login failed: {exc}"
+            try:
+                import bot_logger
+                bot_logger.log_error(f"Manual login (Account Manager): {exc}")
+            except Exception:
+                pass
+        finally:
+            # Release the main window's Start guard from HERE, not only from
+            # _finish_login: if this window was closed mid-login, the Tk-side
+            # callback is never scheduled and Start would stay blocked.
+            self._set_parent_login_running(False)
+        self._post(lambda: self._finish_login(label, ok, message, bundle_dir))
+
+    def _finish_login(self, label: str, ok: bool, message: str, bundle_dir: str | None = None) -> None:
+        self._login_running = False
+        self._set_parent_login_running(False)
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        self._set_row_buttons_enabled(self._login_buttons_enabled())
+        # The footer is one line under the table; the full text, with what the
+        # user can do about a failure, belongs in the dialog. Keep the first
+        # sentence here so the window still says what happened after a dismiss.
+        summary = message.split(". ", 1)[0].strip()
+        if summary and not summary.endswith("."):
+            summary += "."
+        self._set_footer_text(summary or message)
+        if ok:
+            # The same pin the main window's "which account is open in MTGA
+            # right now" menu sets, so rotation starts from the account the
+            # person just signed in to.
+            setter = getattr(self.master, "_set_current_account", None)
+            if callable(setter):
+                try:
+                    setter(label)
+                except Exception:
+                    pass
+            # No confirmation dialog: a successful sign-in is already shown in
+            # the footer, and the balance refresh keeps that line rather than
+            # replacing it with the read timestamp.
+            self.after(50, lambda: self._refresh_if_alive(summary))
+            return
+        if bundle_dir:
+            try:
+                messagebox.showerror(
+                    "Account Manager",
+                    f"{message}\n\nDetails and screenshots: {bundle_dir}",
+                    parent=self,
+                )
+            except Exception:
+                pass
+
+    def _refresh_if_alive(self, keep_footer: str | None = None) -> None:
+        """Re-read the log unless the window was closed while the modal was up."""
+        try:
+            if self.winfo_exists():
+                self._refresh(keep_footer=keep_footer)
+        except Exception:
+            pass
 
 
 class SettingsWindow(tk.Toplevel):

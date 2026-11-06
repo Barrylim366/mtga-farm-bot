@@ -179,16 +179,15 @@ class ScaleBandResolutionCoverageTests(unittest.TestCase):
             self.assertLessEqual(round(b - a, 4), 0.05, f"gap {a}->{b} too coarse")
 
     def test_logout_search_band_is_documented_to_cover_the_same_range(self):
-        """The logout call builds its band inline; pin the intent so a later edit
-        cannot quietly narrow it back to a range that drops 1280 and 3840."""
-        import inspect
+        """Pin the intent so a later edit cannot quietly narrow the Log Out search
+        back to a range that drops 1280 and 3840.
 
-        src = inspect.getsource(Controller._perform_account_switch_logout_clicks) \
-            if hasattr(Controller, "_perform_account_switch_logout_clicks") else None
-        if src is None:
-            src = inspect.getsource(Controller)
-        self.assertIn("logout_scales", src)
-        band = [round(0.45 + 0.05 * i, 2) for i in range(32)]
+        The band used to be built inline in the logout call; it now lives in
+        _log_out_search_scales(), so the band itself is what is pinned rather
+        than the name of a local variable.
+        """
+        band = list(Controller._log_out_search_scales())
+        self.assertEqual(band, [round(0.45 + 0.05 * i, 2) for i in range(32)])
         self._assert_covers(band, "logout band 0.45..2.00")
 
 
