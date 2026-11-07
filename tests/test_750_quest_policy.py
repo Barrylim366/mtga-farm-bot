@@ -212,9 +212,13 @@ class Quest750ConfigTests(unittest.TestCase):
         config.get_account_switch_daily_wins.return_value = 4
         config.get_account_switch_750_only.return_value = True
         window = Mock(config_manager=config)
+        # The mode/value lookup is exercised by the layout test; here the label
+        # just has to show the 750 flag of whichever settings it was given.
+        window._configured_quest_target = lambda: ("leave", 1, True)
         self.assertIn("750 only", ui.MTGBotUI._quests_switch_label(window))
         live = Mock()
         live.get_account_switch_main_quests.return_value = 2
         live.get_account_switch_daily_wins.return_value = 4
         live.get_account_switch_750_only.return_value = False
+        window._live_quest_target = lambda _controller: ("leave", 1, True)
         self.assertNotIn("750 only", ui.MTGBotUI._live_quests_switch_label(window, live))

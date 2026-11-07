@@ -137,6 +137,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         account_switch_minutes: int | None = None,
         account_switch_mode: str | None = None,
         account_switch_main_quests: int | None = None,
+        account_switch_quest_target: str | None = None,
+        account_switch_quests_to_complete: int | None = None,
         account_switch_daily_wins: int | None = None,
         daily_reset_utc_hour: int | None = None,
         account_cycle_index: int | None = None,
@@ -683,6 +685,32 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # regardless of thresholds or configured accounts.
         self._account_switch_enabled = bool(account_switch_enabled)
         self._account_switch_main_quests = max(0, min(3, int(account_switch_main_quests or 0)))
+        # How the quest target is measured:
+        #   "leave"    -- the original rule: leave at most `3 - main_quests` quests
+        #                 open (an empty slot counts, whenever it was emptied).
+        #   "complete" -- complete `quests_to_complete` quests TODAY, counted from
+        #                 the open-quest count since the bot first saw this account
+        #                 today. Empty slots carried over from an earlier day do
+        #                 not count, so a quest really is completed every day.
+        _quest_target = str(account_switch_quest_target or "leave").strip().lower()
+        self._quest_target_mode = (
+            _quest_target if _quest_target in ("leave", "complete") else "leave"
+        )
+        # On first use the count starts from the legacy value, so switching an
+        # existing install to "complete" means the number that was already set.
+        if account_switch_quests_to_complete is None:
+            self._account_switch_quests_to_complete = self._account_switch_main_quests
+        else:
+            self._account_switch_quests_to_complete = max(
+                0, min(3, int(account_switch_quests_to_complete))
+            )
+        # Set when the current account's quest cannot be played at all -- no deck
+        # thumbnail in its folder matches the quest's colours or forced file. The
+        # quest goal is then set aside for this visit (best effort: the wins are
+        # still farmed, and the account still moves on), rather than retrying a
+        # selection that can never succeed. Cleared on the next account and on a
+        # new session.
+        self._quest_target_unavailable = False
         self._account_switch_daily_wins = max(0, min(15, int(account_switch_daily_wins or 0)))
         # Arena's daily reset (UTC hour) decides which "day" the quest and win
         # counters belong to; 09:00 UTC is the game's own reset.
@@ -691,7 +719,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._account_switch_750_only = bool(account_switch_750_only)
         # Quest-mode tracking: a local win counter (the bot knows every match
         # result). Wins are tracked for stats/gold only -- the switch decision is
-        # driven purely by absolute main-quest completion (see _account_switch_due).
+        # driven purely by the configured quest target (see _main_quest_target_reason).
         self._daily_wins_this_account = 0
         self._win_counted_this_match = False
         # Wins the bot has seen per account across the WHOLE session, so a win
@@ -888,9 +916,13 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # _latch_identity_from_switch_target for why the log is the weaker source.
         self._identity_from_config = False
         bot_logger.log_info(
-            "Account-switch config: mode={} time_min={} main_quests={} daily_wins={}".format(
+            "Account-switch config: mode={} time_min={} quest_target={} complete_quests={} "
+            "leave_quests={} main_quests={} daily_wins={}".format(
                 self._account_switch_mode,
                 self._account_switch_interval // 60,
+                self._quest_target_mode,
+                self._account_switch_quests_to_complete,
+                max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests),
                 self._account_switch_main_quests,
                 self._account_switch_daily_wins,
             )
@@ -976,6 +1008,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._historic_selection_key: str | None = None
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
+        # Consecutive deck-selection misses FOR A QUEST TARGET (not navigation).
+        # A configured thumbnail that never appears on the grid would retry
+        # forever; after two misses the quest is set aside (best effort) so the
+        # wins can still be farmed. See _note_historic_deck_selection_failed.
+        self._historic_deck_selection_failures = 0
         # account name -> the deck thumbnail this bot last clicked on that
         # account's Historic grid. See _deck_is_known_selected.
         self._historic_selected_deck: dict[str, str] = {}
@@ -5486,29 +5523,66 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         bot_logger.log_info("Starter: Starter Deck Duel selected.")
         return True
 
+    def _quest_target_active(self) -> bool:
+        """Whether quests are a configured switch criterion at all.
+
+        "leave" is off when it asks to leave all three open (the legacy "0 main
+        quests" = no quest requirement); "complete" is off when it asks for none.
+        """
+        if getattr(self, "_quest_target_mode", "leave") == "complete":
+            return getattr(self, "_account_switch_quests_to_complete", 0) > 0
+        return getattr(self, "_account_switch_main_quests", 0) > 0
+
     def _main_quest_target_met(self) -> bool:
-        """Use the same absolute, fresh quest count for deck choice and switching."""
+        """The configured quest target, for deck choice and switching alike."""
         return self._main_quest_target_reason() is not None
 
     def _750_quest_policy_enabled(self) -> bool:
         return (
             getattr(self, "_account_switch_750_only", False)
             and self._account_switch_mode == "quests"
-            and self._account_switch_main_quests > 0
+            and self._quest_target_active()
         )
 
     def _main_quest_target_reason(self) -> str | None:
-        if self._account_switch_main_quests <= 0:
+        if not self._quest_target_active():
             return "quest target disabled"
+        # Best effort: a quest this install has no deck for is set aside once, not
+        # retried forever. The wins are still owed, and the account still moves on
+        # when they are in -- the same as when there are fewer quests open than
+        # the quota asks for (remaining 0 ends the quest pass in complete mode).
+        if getattr(self, "_quest_target_unavailable", False):
+            return "quest goal set aside for this account (no matching deck)"
         remaining = self._last_valid_quest_active_incomplete
         if remaining is None or not self._quest_count_confirmed_fresh:
             return None
-        # Completed quests disappear from Arena's three slots. This includes
-        # completions by the player before the bot started, just like switching.
+        if getattr(self, "_quest_target_mode", "leave") == "complete":
+            # "Complete N per account": N quests closed TODAY. The day's tally
+            # lives on disk (daily_progress), so a restart does not hand the
+            # account a fresh N -- unlike the absolute count, an empty slot
+            # carried over from an earlier day is not credited here, which is
+            # what makes this mode guarantee a completion every day.
+            if remaining <= 0:
+                return "no daily quests left to complete"
+            if self._quests_completed_today() >= getattr(
+                self, "_account_switch_quests_to_complete", 0
+            ):
+                return "configured daily quests completed"
+            return None
+        # "Leave N open": completed quests disappear from Arena's three slots.
+        # This includes completions by the player before the bot started, just
+        # like switching.
         remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
         if remaining <= remaining_target:
             return "configured quest target met"
-        if self._750_quest_policy_enabled() and remaining < self._DAILY_QUEST_SLOTS:
+        # The 750-gold policy's "free a slot for tomorrow" early finish belongs
+        # to the leave-open mode: in complete mode it would end the quest pass
+        # before the configured number was reached.
+        if (
+            getattr(self, "_quest_target_mode", "leave") == "leave"
+            and self._750_quest_policy_enabled()
+            and remaining < self._DAILY_QUEST_SLOTS
+        ):
             incomplete = [q for q in self._cached_quests if not (
                 q.get("goal") and q.get("progress", 0) >= q["goal"]
             )]
@@ -5616,6 +5690,15 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         configured quests and wins; the deck follows an open colour quest again.
         """
         preferred = self._normalize_starter_deck_code(self._preferred_starter_deck)
+        if getattr(self, "_quest_target_unavailable", False):
+            # The quest cannot be played here (no matching deck). Choosing its
+            # colours again would only repeat that failure, so play for the wins.
+            target = preferred or "WB"
+            bot_logger.log_info(
+                f"Starter: quest set aside for this account (no matching deck); "
+                f"selecting {target} win-farming deck."
+            )
+            return target
         if self._only_grind_preferred_deck and preferred:
             bot_logger.log_info(
                 f"Starter: only-grind preferred deck active; selecting {preferred} deck."
@@ -6377,6 +6460,17 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 return pref.upper(), None
             return "", pref
 
+        if getattr(self, "_quest_target_unavailable", False):
+            # No thumbnail in this account's folder can satisfy the quest, so the
+            # target was set aside (see _main_quest_target_reason). Play the win
+            # deck instead of re-attempting a selection that cannot succeed.
+            target_colors, target_forced = _resolve_historic_preferred()
+            bot_logger.log_info(
+                f"{log_prefix}: quest set aside for this account (no matching deck); "
+                f"using the win deck (colors={target_colors or '-'} forced={target_forced or '-'})."
+            )
+            return target_colors, target_forced
+
         if self._only_grind_preferred_deck and pref:
             target_colors, target_forced = _resolve_historic_preferred()
             bot_logger.log_info(
@@ -6512,6 +6606,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         first match of an account could still be played on the wrong deck.
         """
         has_target = bool(colors or forced_filename)
+        # Whether the account folder actually holds a thumbnail for this target.
+        # False means no click could ever succeed: the deck is not merely hard to
+        # find on screen, it was never configured.
+        saw_matching_image = False
         for candidate in self._historic_deck_candidate_accounts(planned_account):
             candidate_name = (
                 str(candidate.get("name", "")).strip()
@@ -6546,6 +6644,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                     )
                 )
                 continue
+            if has_target:
+                saw_matching_image = True
             # A deck TILE looks different once it is the selected one: MTGA lifts
             # it, outlines it and replaces the art with a fanned card spread, so a
             # thumbnail captured from the normal grid drops to ~0.44 against the
@@ -6602,13 +6702,40 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 )
                 return deck_image, candidate_name
         if has_target:
-            bot_logger.log_error(
-                "{}: no deck thumbnail matched quest target colors={} forced={}; "
-                "NOT queueing rather than farming the quest with the wrong deck.".format(
-                    label, colors or "-", forced_filename or "-"
+            if not saw_matching_image:
+                if getattr(self, "_quest_target_unavailable", False):
+                    # The quest is already set aside and this is the fallback
+                    # (preferred win deck) target: it has no thumbnail either.
+                    # Any deck will do now, so use the first tile below instead of
+                    # failing forever on a target the account does not own.
+                    bot_logger.log_info(
+                        "{}: preferred win deck '{}' has no thumbnail for this account "
+                        "either; selecting the first deck instead.".format(
+                            label, forced_filename or colors or "-"
+                        )
+                    )
+                else:
+                    # Hard case: no account thumbnail can satisfy the QUEST, so no
+                    # retry can ever select one. Set the quest aside instead of
+                    # idling on a selection that cannot work; the win goal still
+                    # applies and the account still moves on.
+                    self._quest_target_unavailable = True
+                    bot_logger.log_error(
+                        "{}: no configured deck thumbnail can satisfy quest target "
+                        "colors={} forced={}; setting the quest aside for this account "
+                        "and playing on (the wins still count).".format(
+                            label, colors or "-", forced_filename or "-"
+                        )
+                    )
+                    return None
+            else:
+                bot_logger.log_error(
+                    "{}: no deck thumbnail matched quest target colors={} forced={}; "
+                    "NOT queueing rather than farming the quest with the wrong deck.".format(
+                        label, colors or "-", forced_filename or "-"
+                    )
                 )
-            )
-            return None
+                return None
         # No target at all (no readable quest): any of this account's Historic
         # decks advances nothing in particular, so the first tile in its own list
         # is a safe way to get off whatever was left selected.
@@ -6811,6 +6938,31 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         )
         return False
 
+    def _note_historic_deck_selection_failed(
+        self, colors: str, forced_filename: str | None
+    ) -> None:
+        """Count a quest-target deck miss and set the quest aside once it is persistent.
+
+        One miss is usually a screen that was not the grid yet, and retrying is
+        right. Two in a row (with the backoff between them) means the configured
+        thumbnail never appears -- a stale capture after the deck was renamed or
+        deleted in Arena. Retrying that forever would stall the round, so the
+        quest aspect is treated as finished and the wins are farmed instead.
+        """
+        if not (colors or forced_filename):
+            return
+        self._historic_deck_selection_failures += 1
+        if self._historic_deck_selection_failures < 2:
+            return
+        self._quest_target_unavailable = True
+        bot_logger.log_error(
+            "Historic: no deck for quest target colors={} forced={} could be selected "
+            "after {} attempts; setting the quest aside for this account and playing "
+            "for the wins.".format(
+                colors or "-", forced_filename or "-", self._historic_deck_selection_failures
+            )
+        )
+
     @serialized_home_navigation
     def _ensure_historic_selection(self) -> bool:
         """Make MTGA's format+deck selection match the current quest before queueing.
@@ -6873,12 +7025,14 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             )
             return self._historic_selection_failed()
         if self._select_historic_deck_for_quest(colors, forced_filename) is None:
+            self._note_historic_deck_selection_failed(colors, forced_filename)
             return self._historic_selection_failed()
         time.sleep(1.0)
         if not self._historic_selection_screen_verified():
             return self._historic_selection_failed()
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
+        self._historic_deck_selection_failures = 0
         self._historic_selection_key = key
         bot_logger.log_info(f"Historic: selection verified for key={key}; ready to queue.")
         return True
@@ -7003,12 +7157,14 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             planned_account=account, label="Post-login", click_tag="POST_LOGIN_DECK",
         )
         if selection is None:
+            self._note_historic_deck_selection_failed(colors, forced_filename)
             bot_logger.log_error(
                 "Post-login: no deck satisfying the quest target could be selected; "
                 "not pressing Play. The queue loop re-checks this before every queue."
             )
             return False
         selected_deck, selected_account_name = selection
+        self._historic_deck_selection_failures = 0
 
         if selected_account_name and planned_name and selected_account_name != planned_name:
             bot_logger.log_info(
@@ -7062,7 +7218,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         quest_switching = (
             getattr(self, "_account_switch_enabled", False)
             and getattr(self, "_account_switch_mode", "") == "quests"
-            and getattr(self, "_account_switch_main_quests", 0) > 0
+            and self._quest_target_active()
         )
         if self._only_grind_preferred_deck and not quest_switching:
             return False
@@ -7135,15 +7291,21 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             ):
                 self._home_quest_check_done = True
             # Diagnostic: make the switch decision visible in the log on landing.
-            # Framed the way the criterion actually works: switch when the account
-            # has few enough daily quests LEFT (not "did literally N quests"). With
-            # the usual threshold 3 the target is 0 quests remaining -- i.e. clear
-            # whatever daily quests the account has (1, 2 or 3), then switch.
+            # The quest goal is spelled out for the configured mode: "leave <=X
+            # open" is the absolute rule, "complete N today" the day-count rule.
             remaining = self._last_valid_quest_active_incomplete
-            remaining_target = max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
+            if self._quest_target_mode == "complete":
+                quest_target = "complete {} today ({} done so far)".format(
+                    self._account_switch_quests_to_complete,
+                    self._quests_completed_today(),
+                )
+            else:
+                quest_target = "leave <={} open".format(
+                    max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
+                )
             bot_logger.log_info(
-                "SWITCH CHECK (account='{}'): enabled={} mode={}/{} | daily quests remaining={} "
-                "need<={} | wins(session)={} need>={} | attempt={} | due={} | "
+                "SWITCH CHECK (account='{}'): enabled={} mode={}/{} | quest target={} | "
+                "daily quests remaining={} | wins(session)={} need>={} | attempt={} | due={} | "
                 "750-only={} | quest result={}".format(
                     self._current_account_key(),
                     self._account_switch_enabled,
@@ -7151,6 +7313,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                     # Which pass of the round we are in (only two-phase when both
                     # thresholds are set, but always worth seeing in the log).
                     self._switch_phase,
+                    quest_target,
                     (
                         "unknown" if remaining is None
                         # Spell out WHY a present count is being ignored -- the
@@ -7159,7 +7322,6 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                         else remaining if self._quest_count_confirmed_fresh
                         else f"{remaining} (STALE - not this account's own read)"
                     ),
-                    remaining_target,
                     self._wins_seen_for_current_account(),
                     self._account_switch_daily_wins,
                     self._home_quest_check_attempts,
@@ -7344,6 +7506,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # quests that the daily reset has meanwhile handed out again.
         self._switch_phase = "quests"
         self._session_wins_by_account = {}
+        # A quest set aside because no deck could satisfy it is a per-visit
+        # judgement: a new session gets a fresh attempt (the user may have added
+        # the thumbnail between runs).
+        self._quest_target_unavailable = False
+        self._historic_deck_selection_failures = 0
         # The day's wins and quests live on disk (daily_progress) and survive this
         # reset by design; a manual skip does not, so a Start after it waits for
         # the button to be pressed again.
@@ -12505,6 +12672,15 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     def get_account_switch_main_quests(self) -> int:
         return self._account_switch_main_quests
 
+    def get_account_switch_quest_target(self) -> str:
+        return self._quest_target_mode
+
+    def get_account_switch_quests_to_complete(self) -> int:
+        return self._account_switch_quests_to_complete
+
+    def get_account_switch_quests_to_leave(self) -> int:
+        return max(0, self._DAILY_QUEST_SLOTS - self._account_switch_main_quests)
+
     def get_account_switch_daily_wins(self) -> int:
         return self._account_switch_daily_wins
 
@@ -12627,14 +12803,16 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # instead. Cleared by any confirmed switch.
         if self._switch_giveup_active():
             return False
-        # Quest mode: switch once BOTH criteria are met. Main quests are measured
-        # ABSOLUTELY (done by bot OR human). Daily wins are counted only for what
-        # the bot itself sees this session on this account -- wins finished
-        # manually before the bot started are intentionally NOT counted, so a
-        # fresh account always has to earn its configured wins under the bot. A 0
-        # threshold means "no requirement" for that dimension; both 0 disables it.
+        # Quest mode: switch once BOTH criteria are met. The quest target is
+        # either absolute ("leave N open", so a slot emptied by hand counts) or
+        # per-day ("complete N today", counted since the day's first read). Daily
+        # wins are counted only for what the bot itself sees this session on this
+        # account -- wins finished manually before the bot started are
+        # intentionally NOT counted, so a fresh account always has to earn its
+        # configured wins under the bot. A 0 threshold means "no requirement" for
+        # that dimension; both 0 disables it.
         if self._account_switch_mode == "quests":
-            if self._account_switch_main_quests <= 0 and self._account_switch_daily_wins <= 0:
+            if not self._quest_target_active() and self._account_switch_daily_wins <= 0:
                 return False
             # Anti-storm fallback: the clean "stop at end of round" is driven by
             # per-account completion tracking in _perform_account_switch
@@ -12648,7 +12826,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             # quests, pass 2 goes round again for the wins. The phase is advanced
             # in _perform_account_switch, where the end of a pass is detected.
             both_configured = (
-                self._account_switch_main_quests > 0
+                self._quest_target_active()
                 and self._account_switch_daily_wins > 0
             )
             if both_configured and self._switch_phase == "wins":
@@ -13162,6 +13340,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._historic_selection_key = None
         self._historic_selection_failures = 0
         self._historic_selection_retry_ts = 0.0
+        # A quest set aside for the OUTGOING account (no deck for it) says nothing
+        # about the incoming one, which has its own decks: give it its own chance.
+        self._quest_target_unavailable = False
+        self._historic_deck_selection_failures = 0
         self._forget_selected_deck()
         self._forget_starter_deck("account logout/switch")
         # A switch really happened, so the logout works -> clear the failed-attempt
@@ -13456,7 +13638,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 # second pass -- the same accounts again, judged on wins -- rather
                 # than ending the session half-done.
                 if (
-                    self._account_switch_main_quests > 0
+                    self._quest_target_active()
                     and self._account_switch_daily_wins > 0
                     and self._switch_phase == "quests"
                 ):

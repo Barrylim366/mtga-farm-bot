@@ -1,8 +1,12 @@
 """Exercise actual Tk geometry with dummy accounts; never capture the screen."""
+import json
+import os
 import re
+import tempfile
 import tkinter as tk
 from types import MethodType
 import unittest
+from unittest import mock
 
 import ui
 
@@ -15,7 +19,10 @@ class _Config:
     def get_account_play_order(self): return []
     def get_account_switch_mode(self): return "quests"
     def get_account_switch_minutes(self): return 30
-    def get_account_switch_main_quests(self): return 3
+    def get_account_switch_main_quests(self): return 1
+    def get_account_switch_quest_target(self): return "leave"
+    def get_account_switch_quests_to_leave(self): return 2
+    def get_account_switch_quests_to_complete(self): return 1
     def get_account_switch_daily_wins(self): return 15
     def get_account_switch_750_only(self): return False
     def get_shutdown_pc_when_round_complete(self): return False
@@ -84,6 +91,65 @@ class ManageAccountsLayoutTest(unittest.TestCase):
                         self.assertLessEqual(footer[3], canvas.canvasy(canvas.winfo_height()))
                     finally:
                         window.destroy()
+
+    def test_the_quest_target_dropdown_swaps_the_modes_number(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        root._render_button_skin = MethodType(ui.MTGBotUI._render_button_skin, root)
+        root._hex_to_rgb = ui.SwitchAccountWindow._hex_to_rgb
+        parent = tk.Frame(root)
+        parent._ui_scale = 0.5
+        window = ui.SwitchAccountWindow(parent, _Config())
+        window.withdraw()
+        self.addCleanup(window.destroy)
+        self.assertEqual(window.switch_quest_target_var.get(), "leave open")
+        self.assertEqual(window.switch_main_var.get(), "2")
+        window.switch_quest_target_var.set("complete")
+        window._sync_quest_target_entry()
+        self.assertEqual(window.switch_main_var.get(), "1")
+        self.assertEqual(ui.SwitchAccountWindow._quest_target_mode("leave open"), "leave")
+        self.assertEqual(ui.SwitchAccountWindow._quest_target_mode("complete"), "complete")
+
+    def test_saving_the_quest_target_keeps_each_modes_number(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        root._render_button_skin = MethodType(ui.MTGBotUI._render_button_skin, root)
+        root._hex_to_rgb = ui.SwitchAccountWindow._hex_to_rgb
+        parent = tk.Frame(root)
+        parent._ui_scale = 0.5
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = os.path.join(directory.name, "calibration_config.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "account_switch_mode": "quests",
+                    "account_switch_main_quests": 1,
+                    "account_switch_daily_wins": 4,
+                },
+                handle,
+            )
+        config = ui.ConfigManager(path)
+        window = ui.SwitchAccountWindow(parent, config)
+        window.withdraw()
+        self.addCleanup(window.destroy)
+        window.switch_quest_target_var.set("complete")
+        window._sync_quest_target_entry()
+        window.switch_main_var.set("1")
+        with mock.patch.object(ui.messagebox, "showinfo"):
+            window._save_switch_settings()
+        self.assertEqual(config.get_account_switch_quest_target(), "complete")
+        self.assertEqual(config.get_account_switch_quests_to_complete(), 1)
+        # The leave number the install already had is untouched.
+        self.assertEqual(config.get_account_switch_quests_to_leave(), 2)
 
 
 if __name__ == "__main__":

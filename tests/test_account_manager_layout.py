@@ -191,6 +191,68 @@ class SignedInRowTest(unittest.TestCase):
         self.assertFalse(buttons["alpha"]["enabled"])
         self.assertTrue(buttons["bravo"]["enabled"])
 
+    def test_a_successful_login_moves_the_mark_before_the_log_agrees(self):
+        # alpha's balance is still the newest record: the login to bravo has not
+        # reached Home yet. The mark must follow the account that was signed in,
+        # not the record that was written before it.
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", True, "bravo is signed in.")
+        rows = {row["account"]["name"]: row for row in window._table_rows}
+        buttons = {b["account"]["name"]: b for b in window._row_buttons}
+        self.assertTrue(rows["bravo"]["signed_in"])
+        self.assertIn("bold", window._canvas.itemcget(rows["bravo"]["name"], "font"))
+        self.assertNotIn("bold", window._canvas.itemcget(rows["alpha"]["name"], "font"))
+        self.assertFalse(buttons["bravo"]["enabled"])
+        self.assertTrue(buttons["alpha"]["enabled"])
+        self.assertTrue(buttons["bravo"]["is_current"])
+        self.assertFalse(buttons["alpha"]["is_current"])
+
+    def test_a_failed_login_leaves_the_mark_where_it_was(self):
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", False, "The login did not finish.")
+        rows = {row["account"]["name"]: row for row in window._table_rows}
+        buttons = {b["account"]["name"]: b for b in window._row_buttons}
+        self.assertTrue(rows["alpha"]["signed_in"])
+        self.assertIn("bold", window._canvas.itemcget(rows["alpha"]["name"], "font"))
+        self.assertNotIn("bold", window._canvas.itemcget(rows["bravo"]["name"], "font"))
+        self.assertFalse(buttons["alpha"]["enabled"])
+        self.assertTrue(buttons["bravo"]["enabled"])
+        self.assertIsNone(window._current_override)
+
+    def test_the_log_takes_the_mark_back_once_it_names_that_account(self):
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", True, "bravo is signed in.")
+        # The next refresh reads a log that has caught up: the override has done
+        # its job and must not outlive it.
+        window._signed_in_account = lambda accounts, _balances: next(
+            acc for acc in accounts if acc["name"] == "bravo"
+        )
+        window._refresh()
+        rows = {row["account"]["name"]: row for row in window._table_rows}
+        self.assertIsNone(window._current_override)
+        self.assertTrue(rows["bravo"]["signed_in"])
+        self.assertFalse(rows["alpha"]["signed_in"])
+
+    def test_the_log_wins_when_it_names_a_third_account(self):
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", True, "bravo is signed in.")
+        window._signed_in_account = lambda accounts, _balances: next(
+            acc for acc in accounts if acc["name"] == "charlie"
+        )
+        window._refresh()
+        rows = {row["account"]["name"]: row for row in window._table_rows}
+        self.assertIsNone(window._current_override)
+        self.assertTrue(rows["charlie"]["signed_in"])
+
+    def test_the_mark_does_not_outlive_a_later_sign_out(self):
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", True, "bravo is signed in.")
+        window._override_until = 0.0  # the bridging window has run out
+        window._signed_in_account = lambda _accounts, _balances: None
+        window._refresh()
+        self.assertIsNone(window._current_override)
+        self.assertFalse(any(row["signed_in"] for row in window._table_rows))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1594,6 +1594,10 @@ class ConfigManager:
             # The two modes are mutually exclusive.
             "account_switch_mode": "time",
             "account_switch_main_quests": 0,   # 0-3 main quests to complete
+            # How that number is read: "leave" keeps at most `3 - main_quests`
+            # quests open (the original rule); "complete" completes
+            # `account_switch_quests_to_complete` quests per account per day.
+            "account_switch_quest_target": "leave",
             "account_switch_daily_wins": 0,    # 0-15 daily wins to reach
             # Arena resets at a fixed 09:00 UTC, not at local midnight: 10pm in
             # Auckland during NZDT, 4am in New York. The day's quest and win
@@ -1839,6 +1843,54 @@ class ConfigManager:
             return
         self.config["account_switch_main_quests"] = max(0, min(3, value))
         self._save_config()
+
+    def get_account_switch_quest_target(self) -> str:
+        """How the quest target is measured: "leave" (open slots) or "complete"."""
+        target = str(self.config.get("account_switch_quest_target", "leave")).strip().lower()
+        return target if target in ("leave", "complete") else "leave"
+
+    def set_account_switch_quest_target(self, target: str) -> None:
+        target_s = str(target).strip().lower()
+        if target_s not in ("leave", "complete"):
+            target_s = "leave"
+        self.config["account_switch_quest_target"] = target_s
+        self._save_config()
+
+    def get_account_switch_quests_to_complete(self) -> int:
+        """Quests to complete per account per day in "complete" mode.
+
+        Defaults to the legacy main-quests number, so switching an existing
+        install over to the new mode starts from the value it already had.
+        """
+        default = self.get_account_switch_main_quests()
+        try:
+            value = int(self.config.get("account_switch_quests_to_complete", default))
+        except (TypeError, ValueError):
+            value = default
+        return max(0, min(3, value))
+
+    def set_account_switch_quests_to_complete(self, count: int) -> None:
+        try:
+            value = int(count)
+        except (TypeError, ValueError):
+            return
+        self.config["account_switch_quests_to_complete"] = max(0, min(3, value))
+        self._save_config()
+
+    def get_account_switch_quests_to_leave(self) -> int:
+        """Quests that may stay open per account in "leave" mode (0-3).
+
+        Derived from the legacy main-quests field so the two names can never
+        disagree: "leave 2" is the old "complete 1" (3 - 1).
+        """
+        return max(0, min(3, 3 - self.get_account_switch_main_quests()))
+
+    def set_account_switch_quests_to_leave(self, count: int) -> None:
+        try:
+            value = int(count)
+        except (TypeError, ValueError):
+            return
+        self.set_account_switch_main_quests(3 - max(0, min(3, value)))
 
     def get_account_switch_daily_wins(self) -> int:
         try:
@@ -3847,11 +3899,42 @@ class MTGBotUI(tk.Tk):
         else:
             self._set_status("Status: Not now (a switch is already running)", running=True)
 
+    def _configured_quest_target(self):
+        """(mode, number, active) for the quest target saved in the config."""
+        try:
+            target = self.config_manager.get_account_switch_quest_target()
+            if target == "complete":
+                number = self.config_manager.get_account_switch_quests_to_complete()
+                return target, number, number > 0
+            number = self.config_manager.get_account_switch_quests_to_leave()
+            return target, number, number < 3
+        except Exception:
+            return "leave", 3, False
+
+    def _live_quest_target(self, controller):
+        """(mode, number, active) from the LIVE controller, not the saved config."""
+        try:
+            target = controller.get_account_switch_quest_target()
+            if target == "complete":
+                number = controller.get_account_switch_quests_to_complete()
+                return target, number, number > 0
+            number = controller.get_account_switch_quests_to_leave()
+            return target, number, number < 3
+        except Exception:
+            return "leave", 3, False
+
+    @staticmethod
+    def _quest_target_phrase(mode: str, number: int) -> str:
+        """How the quest goal reads in the status line, e.g. "complete 1 per day"."""
+        if mode == "complete":
+            return f"complete {number} per day"
+        return f"leave {number} open"
+
     def _configured_switch_disabled(self) -> bool:
         """Whether account switching is effectively OFF for the configured mode.
 
         Time mode is off when minutes <= 0. Quests mode is off only when BOTH the
-        main-quest and daily-win thresholds are 0 (mirrors
+        quest and daily-win targets are 0/off (mirrors
         Controller._account_switch_due). Checking only the minutes -- which are 0
         in quests mode -- is what made the label read "off" for a correctly
         configured quest-based switch."""
@@ -3866,22 +3949,23 @@ class MTGBotUI(tk.Tk):
             mode = "time"
         try:
             if mode == "quests":
-                return (
-                    self.config_manager.get_account_switch_main_quests() <= 0
-                    and self.config_manager.get_account_switch_daily_wins() <= 0
-                )
+                _target, _number, active = self._configured_quest_target()
+                return not active and self.config_manager.get_account_switch_daily_wins() <= 0
             return self.config_manager.get_account_switch_minutes() <= 0
         except Exception:
             return True
 
     def _quests_switch_label(self) -> str:
         try:
-            m = self.config_manager.get_account_switch_main_quests()
+            mode, number, active = self._configured_quest_target()
             w = self.config_manager.get_account_switch_daily_wins()
         except Exception:
-            m, w = 0, 0
-        policy = " / 750 only" if m > 0 and self.config_manager.get_account_switch_750_only() else ""
-        return f"Account switch: on (quests: {m} main / {w} wins{policy})"
+            mode, number, active, w = "leave", 3, False, 0
+        policy = " / 750 only" if active and self.config_manager.get_account_switch_750_only() else ""
+        return (
+            f"Account switch: on (quests: {self._quest_target_phrase(mode, number)}"
+            f" / {w} wins{policy})"
+        )
 
     def _live_switch_disabled(self, controller) -> bool:
         """Mirror of _configured_switch_disabled but read from the LIVE, running
@@ -3899,22 +3983,23 @@ class MTGBotUI(tk.Tk):
             mode = "time"
         try:
             if mode == "quests":
-                return (
-                    controller.get_account_switch_main_quests() <= 0
-                    and controller.get_account_switch_daily_wins() <= 0
-                )
+                _target, _number, active = self._live_quest_target(controller)
+                return not active and controller.get_account_switch_daily_wins() <= 0
             return controller.get_account_switch_interval_minutes() <= 0
         except Exception:
             return True
 
     def _live_quests_switch_label(self, controller) -> str:
         try:
-            m = controller.get_account_switch_main_quests()
+            mode, number, active = self._live_quest_target(controller)
             w = controller.get_account_switch_daily_wins()
         except Exception:
-            m, w = 0, 0
-        policy = " / 750 only" if m > 0 and controller.get_account_switch_750_only() else ""
-        return f"Account switch: on (quests: {m} main / {w} wins{policy})"
+            mode, number, active, w = "leave", 3, False, 0
+        policy = " / 750 only" if active and controller.get_account_switch_750_only() else ""
+        return (
+            f"Account switch: on (quests: {self._quest_target_phrase(mode, number)}"
+            f" / {w} wins{policy})"
+        )
 
     def _get_configured_switch_eta_text(self) -> str:
         if self._configured_switch_disabled():
@@ -4785,6 +4870,10 @@ class MTGBotUI(tk.Tk):
             account_switch_minutes = self.config_manager.get_account_switch_minutes()
             account_switch_mode = self.config_manager.get_account_switch_mode()
             account_switch_main_quests = self.config_manager.get_account_switch_main_quests()
+            account_switch_quest_target = self.config_manager.get_account_switch_quest_target()
+            account_switch_quests_to_complete = (
+                self.config_manager.get_account_switch_quests_to_complete()
+            )
             account_switch_daily_wins = self.config_manager.get_account_switch_daily_wins()
             account_switch_750_only = self.config_manager.get_account_switch_750_only()
             account_cycle_index = self.config_manager.get_account_cycle_index()
@@ -4810,6 +4899,8 @@ class MTGBotUI(tk.Tk):
                                    account_switch_minutes=account_switch_minutes,
                                    account_switch_mode=account_switch_mode,
                                    account_switch_main_quests=account_switch_main_quests,
+                                   account_switch_quest_target=account_switch_quest_target,
+                                   account_switch_quests_to_complete=account_switch_quests_to_complete,
                                    account_switch_daily_wins=account_switch_daily_wins,
                                    account_switch_750_only=account_switch_750_only,
                                    account_cycle_index=account_cycle_index,
@@ -5310,10 +5401,17 @@ class CurrentSessionWindow(tk.Toplevel):
         # status.json, plus the screenName -> configured alias map.
         self._gold_rows: list[tuple[str, int]] = []
         self._gold_aliases: dict[str, str] = {}
-        # Quests completed today per account (daily_progress), shown beside the
-        # gold: the switch decision counts them for the day, so the panel shows
-        # the same number the bot is acting on.
+        # Quests completed and wins banked today per account (daily_progress),
+        # shown beside the gold: the switch decision counts them for the day, so
+        # the panel shows the same numbers the bot is acting on.
         self._quests_today: dict[str, int] = {}
+        self._wins_today: dict[str, int] = {}
+        # The account playing right now (status.json, alias form), so its row can
+        # be drawn bold.
+        self._current_account = ""
+        # One text item per account row: a single item cannot mix font weights,
+        # and the current account's row is bold.
+        self._gold_row_items: list[int] = []
         self._gold_panel_photo = None
         self._gold_panel_size = (0, 0)
         self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
@@ -5333,9 +5431,11 @@ class CurrentSessionWindow(tk.Toplevel):
         # Per-account gold list: a title, a framed panel, and its text rows.
         self._gold_panel_item = self._canvas.create_image(0, 0, anchor="nw")
         self._gold_title_item = self._canvas.create_text(
-            0, 0, text="Per account: gold farmed, quests done today", font=("Segoe UI", 11, "bold"),
+            0, 0, text="Per account: gold farmed, wins and quests today", font=("Segoe UI", 11, "bold"),
             anchor="nw", fill=self._theme["card_border"],
         )
+        # The column header line; the account rows below it are their own items
+        # (see _gold_row_items) so the signed-in account can be bold.
         self._gold_text_item = self._canvas.create_text(
             0, 0, text="No gold farmed yet.", font=("Consolas", 10), anchor="nw",
             justify="left", fill=self._theme["card_body"],
@@ -5473,34 +5573,105 @@ class CurrentSessionWindow(tk.Toplevel):
         self._gold_panel_size = (width, height)
         self._canvas.itemconfigure(self._gold_panel_item, image=self._gold_panel_photo)
 
-    def _quests_for(self, screen_name: str) -> int:
-        """Quests completed today for one row, by screenName or its alias."""
-        for key in (screen_name, self._gold_aliases.get(screen_name)):
+    @staticmethod
+    def _count_for(counts: dict[str, int], *keys: str | None) -> int:
+        """One stored tally for the first of `keys` that names an entry.
+
+        The tally is keyed by the Arena name the log carries; a row may be keyed
+        by the same screenName or only reachable through its configured alias, so
+        both spellings are tried, case-insensitively.
+        """
+        for key in keys:
             if not key:
                 continue
-            if key in self._quests_today:
-                return int(self._quests_today[key] or 0)
+            if key in counts:
+                return int(counts[key] or 0)
             lowered = str(key).casefold()
-            for stored, value in self._quests_today.items():
+            for stored, value in counts.items():
                 if str(stored).casefold() == lowered:
                     return int(value or 0)
         return 0
 
-    def _gold_text_block(self) -> str:
+    def _quests_for(self, screen_name: str) -> int:
+        """Quests completed today for one row, by screenName or its alias."""
+        return self._count_for(
+            self._quests_today, screen_name, self._gold_aliases.get(screen_name)
+        )
+
+    def _wins_for(self, screen_name: str) -> int:
+        """Wins banked today for one row, by screenName or its alias."""
+        return self._count_for(
+            self._wins_today, screen_name, self._gold_aliases.get(screen_name)
+        )
+
+    def _is_current_row(self, screen_name: str) -> bool:
+        """Whether this row is the account the bot is playing right now.
+
+        status.json publishes the current account in alias form, so match it the
+        same way the counters are matched: the row's screenName or its alias.
+        """
+        current = str(self._current_account or "").strip().casefold()
+        if not current:
+            return False
+        for key in (screen_name, self._gold_aliases.get(screen_name)):
+            if key and str(key).strip().casefold() == current:
+                return True
+        return False
+
+    def _gold_lines(self) -> list[tuple[str, bool]]:
+        """The header line and one line per account, with its bold flag.
+
+        Rows rather than one string because the account playing right now is
+        drawn bold, and a single canvas text item cannot mix weights.
+        """
         if not self._gold_rows:
-            return "No gold farmed yet."
-        # Fixed-width columns: account name, gold farmed, quests done today.
+            return [("No gold farmed yet.", False)]
+        # Fixed-width columns: account name, gold farmed, wins and quests today.
         # Prefer the configured alias; fall back to the raw screenName.
         label_w = 22
-        lines = [f"{'Account':<{label_w}} {'Gold':>7} {'Quests':>7}"]
+        lines = [
+            (f"{'Account':<{label_w}} {'Gold':>7} {'Wins':>5} {'Quests':>7}", False)
+        ]
         for screen_name, gold in self._gold_rows:
             name = str(self._gold_aliases.get(screen_name) or screen_name)
             if len(name) > label_w:
                 name = name[: label_w - 1] + "…"
             lines.append(
-                f"{name:<{label_w}} {int(gold):>7} {self._quests_for(screen_name):>7}"
+                (
+                    f"{name:<{label_w}} {int(gold):>7} {self._wins_for(screen_name):>5} "
+                    f"{self._quests_for(screen_name):>7}",
+                    self._is_current_row(screen_name),
+                )
             )
-        return "\n".join(lines)
+        return lines
+
+    def _gold_text_block(self) -> str:
+        """The whole block as one string, for tests and callers that want it whole."""
+        return "\n".join(text for text, _current in self._gold_lines())
+
+    def _sync_gold_rows(self, font, current_font) -> list[tuple[str, bool]]:
+        """Keep one canvas item per account row in step with the data.
+
+        The header keeps its own item; each account gets another so the one being
+        played right now can be bold. Returns the lines that were drawn.
+        """
+        lines = self._gold_lines()
+        wanted = len(lines) - 1
+        while len(self._gold_row_items) > wanted:
+            self._canvas.delete(self._gold_row_items.pop())
+        while len(self._gold_row_items) < wanted:
+            self._gold_row_items.append(
+                self._canvas.create_text(
+                    0, 0, text="", font=font, anchor="nw", justify="left",
+                    fill=self._theme["card_body"],
+                )
+            )
+        self._canvas.itemconfigure(self._gold_text_item, text=lines[0][0], font=font)
+        for (text, is_current), item in zip(lines[1:], self._gold_row_items):
+            self._canvas.itemconfigure(
+                item, text=text, font=current_font if is_current else font
+            )
+        return lines
 
     def _poll_gold(self):
         if not self.winfo_exists():
@@ -5509,6 +5680,7 @@ class CurrentSessionWindow(tk.Toplevel):
             status = runtime_status.read_status() or {}
             gold = status.get("gold_farmed") or {}
             aliases = status.get("account_aliases") or {}
+            current = str(status.get("current_account") or "")
             if isinstance(gold, dict):
                 rows = [(str(k), int(v or 0)) for k, v in gold.items()]
                 # Highest gold first, then alphabetical for stability.
@@ -5520,17 +5692,24 @@ class CurrentSessionWindow(tk.Toplevel):
                         str(name): int((entry or {}).get("quests") or 0)
                         for name, entry in daily.items()
                     }
+                    wins = {
+                        str(name): int((entry or {}).get("wins") or 0)
+                        for name, entry in daily.items()
+                    }
                 except Exception:
-                    quests = {}
+                    quests, wins = {}, {}
                 if (
                     rows != self._gold_rows
                     or aliases != self._gold_aliases
                     or quests != self._quests_today
+                    or wins != self._wins_today
+                    or current != self._current_account
                 ):
                     self._gold_rows = rows
                     self._gold_aliases = aliases
                     self._quests_today = quests
-                    self._canvas.itemconfigure(self._gold_text_item, text=self._gold_text_block())
+                    self._wins_today = wins
+                    self._current_account = current
                     self._layout_scene()
         except Exception:
             pass
@@ -5604,27 +5783,30 @@ class CurrentSessionWindow(tk.Toplevel):
         stats_font = self._font(11)
         title_font = self._font(11, bold=True)
         gold_font = self._font(10, mono=True)
+        gold_current_font = self._font(10, bold=True, mono=True)
         self._canvas.itemconfigure(self._stats_text_item, font=stats_font)
         self._canvas.itemconfigure(self._gold_title_item, font=title_font)
-        self._canvas.itemconfigure(self._gold_text_item, font=gold_font)
+        gold_lines = self._sync_gold_rows(gold_font, gold_current_font)
         sf = tkfont.Font(font=stats_font)
         gf = tkfont.Font(font=gold_font)
+        gcf = tkfont.Font(font=gold_current_font)
         tf = tkfont.Font(font=title_font)
         stats_lh = sf.metrics("linespace")
-        gold_lh = gf.metrics("linespace")
+        # A bold row must not make the panel jump, so every row uses the taller
+        # of the two line heights.
+        gold_lh = max(gf.metrics("linespace"), gcf.metrics("linespace"))
         title_lh = tf.metrics("linespace")
 
         # Size the window WIDTH to the widest actual line so nothing is clipped
-        # (the switch line "Account switch: on (quests: N main / M wins)" is the
-        # long one). Measure the real rendered text of each element.
+        # (the switch line "Account switch: on (quests: leave 2 open / 4 wins)" is
+        # the long one). Measure the real rendered text of each element.
         stats_text = self._canvas.itemcget(self._stats_text_item, "text")
-        gold_text = self._canvas.itemcget(self._gold_text_item, "text")
         title_text = self._canvas.itemcget(self._gold_title_item, "text")
         content_w = 0
         for line in str(stats_text).split("\n"):
             content_w = max(content_w, sf.measure(line))
-        for line in str(gold_text).split("\n"):
-            content_w = max(content_w, gf.measure(line))
+        for line, is_current in gold_lines:
+            content_w = max(content_w, (gcf if is_current else gf).measure(line))
         content_w = max(content_w, tf.measure(str(title_text)))
         box_w = content_w + 2 * inner
         back_w = int(self._back_btn["width"]) if self._back_btn else 0
@@ -5655,8 +5837,12 @@ class CurrentSessionWindow(tk.Toplevel):
         gold_h = inner * 2 + gold_lh * rows
         self._render_gold_panel(box_w, gold_h)
         self._canvas.coords(self._gold_panel_item, box_x, y)
+        # The header line, then one item per account positioned by line height.
         self._canvas.coords(self._gold_text_item, box_x + inner, y + inner)
         self._canvas.tag_raise(self._gold_text_item)
+        for index, item in enumerate(self._gold_row_items):
+            self._canvas.coords(item, box_x + inner, y + inner + gold_lh * (index + 1))
+            self._canvas.tag_raise(item)
         y += gold_h + s(12)
 
         # Close button.
@@ -5835,6 +6021,22 @@ class AccountManagerWindow(tk.Toplevel):
         self._login_running = False
         self._login_thread = None
         self._login_controller = None
+        # The account a manual login just signed in, shown as current until the
+        # log catches up: the client writes its balance record only once it
+        # reaches Home, so straight after the switch the newest record is still
+        # the account that was signed OUT.
+        self._current_override: dict | None = None
+        # The account that was marked current when that login started, and how
+        # long the override may bridge the gap. The log naming that account (or
+        # nobody) is expected for a few seconds and keeps the override; the log
+        # naming a third account, or a stale override, means it wins.
+        self._override_from: dict | None = None
+        self._override_until = 0.0
+        self._OVERRIDE_SECONDS = 120.0
+        # The last table data, kept so that mark can be redrawn without reading
+        # the whole log again on the Tk thread.
+        self._accounts: list[dict] = []
+        self._balances: dict[str, dict] = {}
         self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._load_background_image()
@@ -6192,6 +6394,70 @@ class AccountManagerWindow(tk.Toplevel):
         except Exception:
             return ""
 
+    def _same_account(self, first: dict | None, second: dict | None) -> bool:
+        """Whether two account dicts are the same configured account."""
+        if not first or not second:
+            return False
+        for field in ("name", "screen_name"):
+            left = str(first.get(field, "") or "").strip()
+            right = str(second.get(field, "") or "").strip()
+            try:
+                if account_login.same_account(left, right):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _account_for_label(self, label: str) -> dict | None:
+        """The table's account dict for a config label, if it is known."""
+        wanted = str(label or "").strip().casefold()
+        if not wanted:
+            return None
+        for account in self._accounts or self._load_accounts():
+            spellings = (
+                self._account_label(account),
+                str(account.get("screen_name", "") or ""),
+                str(account.get("name", "") or ""),
+            )
+            if any(str(name).strip().casefold() == wanted for name in spellings if str(name).strip()):
+                return account
+        return None
+
+    def _resolve_current(self, accounts: list[dict], balances: dict[str, dict]) -> dict | None:
+        """The row to show as signed in, honouring a just-finished manual login.
+
+        The log is the truth, but only once this login reaches Home and writes a
+        balance record. Until then the newest record still belongs to the account
+        that was signed out, so an override set by a successful login wins. The
+        first log-derived answer that agrees with it clears it and takes over;
+        so does the log naming a third account, and the override expires rather
+        than outliving a later sign-out.
+        """
+        current = self._signed_in_account(accounts, balances)
+        override = self._current_override
+        if override is None:
+            return current
+        if current is not None and self._same_account(current, override):
+            self._current_override = None
+            return current
+        expired = time.monotonic() >= self._override_until
+        if current is None and not expired:
+            # The client sits on the login screen mid-transition: no news yet.
+            return override
+        if (
+            not expired
+            and current is not None
+            and (
+                self._override_from is None
+                or self._same_account(current, self._override_from)
+            )
+        ):
+            # The log still names the account that was signed out, as expected
+            # straight after a switch. Keep the mark on the account just in.
+            return override
+        self._current_override = None
+        return current
+
     def _signed_in_account(self, accounts: list[dict], balances: dict[str, dict]) -> dict | None:
         """The configured account that is signed in right now, or None.
 
@@ -6268,7 +6534,9 @@ class AccountManagerWindow(tk.Toplevel):
             except Exception as exc:
                 # An unreadable log must not take the window down with it.
                 note = f"Could not read Player.log: {exc}"
-        self._render(accounts, balances, self._signed_in_account(accounts, balances))
+        self._accounts = accounts
+        self._balances = balances
+        self._render(accounts, balances, self._resolve_current(accounts, balances))
         if keep_footer:
             # After a sign-in there is no dialog any more, so the footer has to
             # keep saying which account went in; the table still updates.
@@ -6661,6 +6929,23 @@ class AccountManagerWindow(tk.Toplevel):
                     setter(label)
                 except Exception:
                     pass
+            # Mark that account as current right away. The log only names it once
+            # this login reaches Home, and until then its newest record is the
+            # account just signed out, so the refresh below would hand the
+            # highlight straight back. Redraw from the data already on screen
+            # rather than re-reading the log while the person waits.
+            self._current_override = self._account_for_label(label) or {"name": label}
+            self._override_from = next(
+                (row["account"] for row in self._table_rows if row.get("signed_in")),
+                None,
+            )
+            self._override_until = time.monotonic() + self._OVERRIDE_SECONDS
+            if self._accounts:
+                self._render(
+                    self._accounts,
+                    self._balances,
+                    self._resolve_current(self._accounts, self._balances),
+                )
             # No confirmation dialog: a successful sign-in is already shown in
             # the footer, and the balance refresh keeps that line rather than
             # replacing it with the read timestamp.
@@ -8376,6 +8661,13 @@ class UISettingsWindow(tk.Toplevel):
 
 
 class SwitchAccountWindow(tk.Toplevel):
+    # The quest target's two modes as the dropdown shows them. "complete" names
+    # the active rule (N quests a day); "leave open" is the original absolute
+    # rule (at most N unfinished), kept as its own display so the number beside
+    # it reads naturally in both modes.
+    _QUEST_TARGET_COMPLETE = "complete"
+    _QUEST_TARGET_LEAVE = "leave open"
+
     def __init__(
         self,
         parent: SettingsWindow,
@@ -9076,23 +9368,41 @@ class SwitchAccountWindow(tk.Toplevel):
         time_entry = self._make_entry(self, textvariable=self.switch_minutes_var, width=5)
         cv.create_window(282, 44, anchor="nw", window=time_entry, width=56)
         cv.create_text(360, 46, text="(0=off)", fill=c["text_muted"], font=self._font(8), anchor="nw")
-        # Row 2: quest-mode thresholds + save.
-        cv.create_text(26, 78, text="Main 0-3:", fill=c["text_muted"], font=self._font(9), anchor="nw")
-        self.switch_main_var = tk.StringVar(value=str(self._config_manager.get_account_switch_main_quests()))
+        # Row 2: quest-mode target + wins + save.
+        # "Quests:" is a mode and a number: complete N per account per day, or
+        # leave at most N open. The number field shows the active mode's value;
+        # switching the mode swaps it to that mode's stored number.
+        cv.create_text(26, 78, text="Quests:", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        self.switch_quest_target_var = tk.StringVar(
+            value=self._quest_target_display(self._config_manager.get_account_switch_quest_target())
+        )
+        quest_target_combo = ttk.Combobox(
+            self,
+            textvariable=self.switch_quest_target_var,
+            values=[self._QUEST_TARGET_COMPLETE, self._QUEST_TARGET_LEAVE],
+            state="readonly",
+            width=10,
+        )
+        quest_target_combo.configure(style="ManageFire.TCombobox")
+        cv.create_window(84, 76, anchor="nw", window=quest_target_combo, width=100)
+        self.switch_main_var = tk.StringVar(
+            value=str(self._quest_target_value(self._config_manager.get_account_switch_quest_target()))
+        )
         main_entry = self._make_entry(self, textvariable=self.switch_main_var, width=3)
-        cv.create_window(92, 76, anchor="nw", window=main_entry, width=32)
-        cv.create_text(150, 78, text="Wins 0-15:", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_window(188, 76, anchor="nw", window=main_entry, width=30)
+        cv.create_text(224, 78, text="Wins 0-15:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_daily_var = tk.StringVar(value=str(self._config_manager.get_account_switch_daily_wins()))
         daily_entry = self._make_entry(self, textvariable=self.switch_daily_var, width=3)
-        cv.create_window(226, 76, anchor="nw", window=daily_entry, width=32)
+        cv.create_window(304, 76, anchor="nw", window=daily_entry, width=30)
+        quest_target_combo.bind("<<ComboboxSelected>>", lambda _e: self._sync_quest_target_entry())
         for _e in (time_entry, main_entry, daily_entry):
             _e.bind("<Return>", lambda _ev: self._save_switch_settings())
         self._create_manage_canvas_button(
             name="save_switch",
             text="Save",
-            x=290,
+            x=340,
             y=74,
-            body_w=132,
+            body_w=92,
             body_h=26,
             command=self._save_switch_settings,
             primary=True,
@@ -9418,6 +9728,27 @@ class SwitchAccountWindow(tk.Toplevel):
             renames[old] = new
         return renames
 
+    @classmethod
+    def _quest_target_display(cls, target: str) -> str:
+        """The dropdown spelling of a stored quest-target mode."""
+        return cls._QUEST_TARGET_LEAVE if target == "leave" else cls._QUEST_TARGET_COMPLETE
+
+    @staticmethod
+    def _quest_target_mode(display: str) -> str:
+        """The stored mode for a dropdown spelling ("leave open" -> "leave")."""
+        return "leave" if str(display or "").strip().lower().startswith("leave") else "complete"
+
+    def _quest_target_value(self, target: str) -> int:
+        """The number the field shows for one mode: open slots, or completions."""
+        if target == "leave":
+            return self._config_manager.get_account_switch_quests_to_leave()
+        return self._config_manager.get_account_switch_quests_to_complete()
+
+    def _sync_quest_target_entry(self) -> None:
+        """Show the stored number for the mode just picked in the dropdown."""
+        target = self._quest_target_mode(self.switch_quest_target_var.get())
+        self.switch_main_var.set(str(self._quest_target_value(target)))
+
     def _save_switch_settings(self):
         try:
             self._config_manager.set_max_play_hours(self.max_play_hours_var.get())
@@ -9437,13 +9768,20 @@ class SwitchAccountWindow(tk.Toplevel):
                 self._config_manager.set_account_switch_minutes(minutes)
             except ValueError:
                 pass
-        # Main quests to complete (0-3).
+        # Quest target: complete N per account per day, or leave N open. The
+        # same field carries the number, and which setting it belongs to is
+        # decided by the mode.
+        target = self._quest_target_mode(self.switch_quest_target_var.get())
+        self._config_manager.set_account_switch_quest_target(target)
         raw_m = (self.switch_main_var.get() or "").strip()
         if raw_m != "":
             try:
                 mq = max(0, min(3, int(raw_m)))
                 self.switch_main_var.set(str(mq))
-                self._config_manager.set_account_switch_main_quests(mq)
+                if target == "leave":
+                    self._config_manager.set_account_switch_quests_to_leave(mq)
+                else:
+                    self._config_manager.set_account_switch_quests_to_complete(mq)
             except ValueError:
                 pass
         # Daily wins to reach (0-15).
@@ -9466,7 +9804,16 @@ class SwitchAccountWindow(tk.Toplevel):
             except ValueError:
                 pass
         if mode == "quests":
-            detail = f"quests ({self.switch_main_var.get()} main + {self.switch_daily_var.get()} wins)"
+            if target == "leave":
+                detail = (
+                    f"quests (leave {self.switch_main_var.get()} open + "
+                    f"{self.switch_daily_var.get()} wins)"
+                )
+            else:
+                detail = (
+                    f"quests (complete {self.switch_main_var.get()} per account + "
+                    f"{self.switch_daily_var.get()} wins)"
+                )
             if self._config_manager.get_account_switch_750_only():
                 detail += "; 750-gold quests only (free a slot if full; next run)"
         else:
