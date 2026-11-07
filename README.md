@@ -404,7 +404,7 @@ Arena writes the same account's name two ways: with its discriminator (`Name#123
 
 ### Gold Tracking
 
-The bot reads each account's real Gold balance from MTGA's own logs and tracks the delta (current balance minus the balance first seen this session) per account — no estimate. Open **Current Session** from the main window to see gold farmed per account (labeled with your account names), alongside games/wins for the session.
+The bot reads each account's real Gold balance from MTGA's own logs and tracks the delta (current balance minus the balance first seen this session) per account — no estimate. Open **Current Session** from the main window to see gold farmed per account (labeled with your account names), alongside games/wins for the session. The per-account block also has a **Quests** column: the quests each account has completed in the current Arena day, the same number the switch decision counts (see [Counting the day, not the run](#counting-the-day-not-the-run)).
 
 Accounts the bot switches into get their baseline read on arrival at Home, before they play, so their earnings are complete.
 

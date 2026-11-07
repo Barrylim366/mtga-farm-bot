@@ -5310,6 +5310,10 @@ class CurrentSessionWindow(tk.Toplevel):
         # status.json, plus the screenName -> configured alias map.
         self._gold_rows: list[tuple[str, int]] = []
         self._gold_aliases: dict[str, str] = {}
+        # Quests completed today per account (daily_progress), shown beside the
+        # gold: the switch decision counts them for the day, so the panel shows
+        # the same number the bot is acting on.
+        self._quests_today: dict[str, int] = {}
         self._gold_panel_photo = None
         self._gold_panel_size = (0, 0)
         self._canvas = tk.Canvas(self, bg=self._theme["bg"], highlightthickness=0, bd=0)
@@ -5329,7 +5333,7 @@ class CurrentSessionWindow(tk.Toplevel):
         # Per-account gold list: a title, a framed panel, and its text rows.
         self._gold_panel_item = self._canvas.create_image(0, 0, anchor="nw")
         self._gold_title_item = self._canvas.create_text(
-            0, 0, text="Gold farmed per account", font=("Segoe UI", 11, "bold"),
+            0, 0, text="Per account: gold farmed, quests done today", font=("Segoe UI", 11, "bold"),
             anchor="nw", fill=self._theme["card_border"],
         )
         self._gold_text_item = self._canvas.create_text(
@@ -5469,18 +5473,33 @@ class CurrentSessionWindow(tk.Toplevel):
         self._gold_panel_size = (width, height)
         self._canvas.itemconfigure(self._gold_panel_item, image=self._gold_panel_photo)
 
+    def _quests_for(self, screen_name: str) -> int:
+        """Quests completed today for one row, by screenName or its alias."""
+        for key in (screen_name, self._gold_aliases.get(screen_name)):
+            if not key:
+                continue
+            if key in self._quests_today:
+                return int(self._quests_today[key] or 0)
+            lowered = str(key).casefold()
+            for stored, value in self._quests_today.items():
+                if str(stored).casefold() == lowered:
+                    return int(value or 0)
+        return 0
+
     def _gold_text_block(self) -> str:
         if not self._gold_rows:
             return "No gold farmed yet."
-        # Align the gold value to the right of a fixed-width label column. Prefer
-        # the configured alias; fall back to the raw screenName.
+        # Fixed-width columns: account name, gold farmed, quests done today.
+        # Prefer the configured alias; fall back to the raw screenName.
         label_w = 22
-        lines = []
+        lines = [f"{'Account':<{label_w}} {'Gold':>7} {'Quests':>7}"]
         for screen_name, gold in self._gold_rows:
             name = str(self._gold_aliases.get(screen_name) or screen_name)
             if len(name) > label_w:
                 name = name[: label_w - 1] + "…"
-            lines.append(f"{name:<{label_w}} {int(gold):>6} gold")
+            lines.append(
+                f"{name:<{label_w}} {int(gold):>7} {self._quests_for(screen_name):>7}"
+            )
         return "\n".join(lines)
 
     def _poll_gold(self):
@@ -5495,9 +5514,22 @@ class CurrentSessionWindow(tk.Toplevel):
                 # Highest gold first, then alphabetical for stability.
                 rows.sort(key=lambda kv: (-kv[1], kv[0].casefold()))
                 aliases = {str(k): str(v) for k, v in aliases.items()} if isinstance(aliases, dict) else {}
-                if rows != self._gold_rows or aliases != self._gold_aliases:
+                try:
+                    daily = daily_progress.snapshot() or {}
+                    quests = {
+                        str(name): int((entry or {}).get("quests") or 0)
+                        for name, entry in daily.items()
+                    }
+                except Exception:
+                    quests = {}
+                if (
+                    rows != self._gold_rows
+                    or aliases != self._gold_aliases
+                    or quests != self._quests_today
+                ):
                     self._gold_rows = rows
                     self._gold_aliases = aliases
+                    self._quests_today = quests
                     self._canvas.itemconfigure(self._gold_text_item, text=self._gold_text_block())
                     self._layout_scene()
         except Exception:
@@ -5618,7 +5650,8 @@ class CurrentSessionWindow(tk.Toplevel):
         y += title_lh + s(4)
 
         # Gold list panel (one row per account).
-        rows = max(1, len(self._gold_rows))
+        # +1 for the column header line.
+        rows = len(self._gold_rows) + 1 if self._gold_rows else 1
         gold_h = inner * 2 + gold_lh * rows
         self._render_gold_panel(box_w, gold_h)
         self._canvas.coords(self._gold_panel_item, box_x, y)
