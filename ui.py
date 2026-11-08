@@ -6023,14 +6023,16 @@ class AccountManagerWindow(tk.Toplevel):
         self._login_controller = None
         # The account a manual login just signed in, shown as current until the
         # log catches up: the client writes its balance record only once it
-        # reaches Home, so straight after the switch the newest record is still
-        # the account that was signed OUT.
+        # reaches Home, so straight after the switch the newest BALANCE record is
+        # still the account that was signed OUT. The login record is written at
+        # sign-in, so that is what _resolve_current consults to decide whether
+        # the log has caught up.
         self._current_override: dict | None = None
-        # The account that was marked current when that login started, and how
-        # long the override may bridge the gap. The log naming that account (or
-        # nobody) is expected for a few seconds and keeps the override; the log
-        # naming a third account, or a stale override, means it wins.
-        self._override_from: dict | None = None
+        # The account the log had last signed in when that mark was set. It is
+        # deliberately the LOGIN record: the balance record for the new account
+        # is only written on Home, so it still names the account signed out.
+        self._override_login_account: dict | None = None
+        # Backstop for a log with no usable login marker at all.
         self._override_until = 0.0
         self._OVERRIDE_SECONDS = 120.0
         # The last table data, kept so that mark can be redrawn without reading
@@ -6423,15 +6425,49 @@ class AccountManagerWindow(tk.Toplevel):
                 return account
         return None
 
+    def _match_account_name(self, accounts: list[dict], name: str | None) -> dict | None:
+        """The configured account a log name refers to, if it is one of them."""
+        wanted = str(name or "").strip()
+        if not wanted:
+            return None
+        for account in accounts:
+            expected = (
+                str(account.get("screen_name", "")).strip()
+                or str(account.get("name", "")).strip()
+            )
+            if expected and account_login.same_account(wanted, expected):
+                return account
+        return None
+
+    def _login_record(self, accounts: list[dict]) -> tuple[bool | None, dict | None]:
+        """(client is on the login screen, last account the log signed in).
+
+        One tail read answers both: the login record is written the moment Arena
+        confirms the sign-in, while the balance record only appears on Home, so
+        this is the part of the log that is current straight after a login.
+        """
+        try:
+            text = self._read_log_tail(self._LOGIN_STATE_TAIL_BYTES)
+            if not text:
+                return None, None
+            return (
+                account_login.client_is_at_login_screen(text),
+                self._match_account_name(accounts, account_login.newest_login_name(text)),
+            )
+        except Exception:
+            return None, None
+
     def _resolve_current(self, accounts: list[dict], balances: dict[str, dict]) -> dict | None:
         """The row to show as signed in, honouring a just-finished manual login.
 
-        The log is the truth, but only once this login reaches Home and writes a
-        balance record. Until then the newest record still belongs to the account
-        that was signed out, so an override set by a successful login wins. The
-        first log-derived answer that agrees with it clears it and takes over;
-        so does the log naming a third account, and the override expires rather
-        than outliving a later sign-out.
+        The balance record lags a sign-in -- it is only written when the client
+        reaches Home -- so the override is cleared by the LOGIN record, which is
+        written the moment Arena confirms the sign-in. The newest balance at that
+        moment still names the account that was signed out, and deciding from it
+        is what used to put the highlight back on the wrong row. A different
+        account in the login record is a real later sign-in and wins at once; the
+        client sitting on the login screen means nobody is signed in. The expiry
+        is only a backstop for a log with no usable login marker.
         """
         current = self._signed_in_account(accounts, balances)
         override = self._current_override
@@ -6440,20 +6476,23 @@ class AccountManagerWindow(tk.Toplevel):
         if current is not None and self._same_account(current, override):
             self._current_override = None
             return current
-        expired = time.monotonic() >= self._override_until
-        if current is None and not expired:
-            # The client sits on the login screen mid-transition: no news yet.
-            return override
-        if (
-            not expired
-            and current is not None
-            and (
-                self._override_from is None
-                or self._same_account(current, self._override_from)
-            )
-        ):
-            # The log still names the account that was signed out, as expected
-            # straight after a switch. Keep the mark on the account just in.
+        at_login, signed_in = self._login_record(accounts)
+        if at_login is True:
+            self._current_override = None
+            return None
+        if signed_in is not None:
+            if self._same_account(signed_in, override):
+                # The sign-in is confirmed; only its balance record is pending.
+                return override
+            if not self._same_account(signed_in, self._override_login_account):
+                # A different account has signed in since the override was set:
+                # a real later switch, so the log wins immediately. A login
+                # record that is unchanged from the one seen when the override
+                # was set is the account that was signed OUT, and must not undo
+                # the mark just because its balance is the newest one.
+                self._current_override = None
+                return signed_in
+        if time.monotonic() < self._override_until:
             return override
         self._current_override = None
         return current
@@ -6930,15 +6969,12 @@ class AccountManagerWindow(tk.Toplevel):
                 except Exception:
                     pass
             # Mark that account as current right away. The log only names it once
-            # this login reaches Home, and until then its newest record is the
-            # account just signed out, so the refresh below would hand the
+            # this login reaches Home, and until then its newest balance record is
+            # the account just signed out, so the refresh below would hand the
             # highlight straight back. Redraw from the data already on screen
             # rather than re-reading the log while the person waits.
             self._current_override = self._account_for_label(label) or {"name": label}
-            self._override_from = next(
-                (row["account"] for row in self._table_rows if row.get("signed_in")),
-                None,
-            )
+            self._override_login_account = self._login_record(self._accounts)[1]
             self._override_until = time.monotonic() + self._OVERRIDE_SECONDS
             if self._accounts:
                 self._render(

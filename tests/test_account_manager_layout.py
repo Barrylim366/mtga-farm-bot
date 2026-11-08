@@ -233,22 +233,72 @@ class SignedInRowTest(unittest.TestCase):
         self.assertTrue(rows["bravo"]["signed_in"])
         self.assertFalse(rows["alpha"]["signed_in"])
 
+    def test_a_lagging_balance_record_cannot_undo_the_mark(self):
+        # The reported bug: the sign-in to bravo is confirmed, but the newest
+        # BALANCE record still names alpha (bravo has not reached Home). The
+        # login record names bravo, so the mark must stay on bravo.
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", True, "bravo is signed in.")
+        window._signed_in_account = lambda accounts, _balances: next(
+            acc for acc in accounts if acc["name"] == "alpha"
+        )
+        window._login_record = lambda accounts: (
+            False, next(acc for acc in accounts if acc["name"] == "bravo")
+        )
+        window._refresh()
+        rows = {row["account"]["name"]: row for row in window._table_rows}
+        self.assertTrue(rows["bravo"]["signed_in"])
+        self.assertFalse(rows["alpha"]["signed_in"])
+
+    def test_an_unchanged_login_record_is_the_signed_out_account_not_a_third(self):
+        # Same shape, with the stale login record still naming alpha: that is the
+        # account just signed OUT, not a new sign-in, so it must not win either.
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", True, "bravo is signed in.")
+        window._signed_in_account = lambda accounts, _balances: next(
+            acc for acc in accounts if acc["name"] == "alpha"
+        )
+        window._refresh()
+        rows = {row["account"]["name"]: row for row in window._table_rows}
+        self.assertTrue(rows["bravo"]["signed_in"])
+        self.assertFalse(rows["alpha"]["signed_in"])
+
     def test_the_log_wins_when_it_names_a_third_account(self):
         window = self.make_window(SIGNED_IN_LOG)
         window._finish_login("bravo", True, "bravo is signed in.")
         window._signed_in_account = lambda accounts, _balances: next(
-            acc for acc in accounts if acc["name"] == "charlie"
+            acc for acc in accounts if acc["name"] == "alpha"
+        )
+        window._login_record = lambda accounts: (
+            False, next(acc for acc in accounts if acc["name"] == "charlie")
         )
         window._refresh()
         rows = {row["account"]["name"]: row for row in window._table_rows}
         self.assertIsNone(window._current_override)
         self.assertTrue(rows["charlie"]["signed_in"])
 
+    def test_a_real_later_login_record_moves_the_mark(self):
+        # End to end against the log parser: a newer sign-in by another account
+        # is a real switch, so it takes the mark even though the newest balance
+        # record (alpha) has not changed.
+        window = self.make_window(SIGNED_IN_LOG)
+        window._finish_login("bravo", True, "bravo is signed in.")
+        with open(window._log_path(), "a", encoding="utf-8") as handle:
+            handle.write(
+                "[Accounts - Login] Logged in successfully. Display Name: charlie#33333\n"
+            )
+        window._refresh()
+        rows = {row["account"]["name"]: row for row in window._table_rows}
+        self.assertTrue(rows["charlie"]["signed_in"])
+        self.assertFalse(rows["bravo"]["signed_in"])
+        self.assertIsNone(window._current_override)
+
     def test_the_mark_does_not_outlive_a_later_sign_out(self):
         window = self.make_window(SIGNED_IN_LOG)
         window._finish_login("bravo", True, "bravo is signed in.")
-        window._override_until = 0.0  # the bridging window has run out
+        # The client is back on the login screen: nobody is signed in.
         window._signed_in_account = lambda _accounts, _balances: None
+        window._login_record = lambda _accounts: (True, None)
         window._refresh()
         self.assertIsNone(window._current_override)
         self.assertFalse(any(row["signed_in"] for row in window._table_rows))
