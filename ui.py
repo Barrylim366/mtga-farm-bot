@@ -8703,6 +8703,9 @@ class SwitchAccountWindow(tk.Toplevel):
     # it reads naturally in both modes.
     _QUEST_TARGET_COMPLETE = "complete"
     _QUEST_TARGET_LEAVE = "leave open"
+    # Total scrollable content height. Grows with the rows and the spacing below;
+    # _apply_content_minsize and _reveal_manage_field both read it.
+    _CONTENT_HEIGHT = 1030
 
     def __init__(
         self,
@@ -8889,7 +8892,7 @@ class SwitchAccountWindow(tk.Toplevel):
                 bounds = cv.bbox(item)
                 top = cv.canvasy(0)
                 height = cv.winfo_height()
-                total = self._s(916)
+                total = self._s(self._CONTENT_HEIGHT)
                 if bounds[1] < top:
                     cv.yview_moveto(max(0, bounds[1] - self._s(12)) / total)
                 elif bounds[3] > top + height:
@@ -8976,9 +8979,9 @@ class SwitchAccountWindow(tk.Toplevel):
         self._apply_content_minsize()
 
     def _apply_content_minsize(self):
-        self._canvas.configure(scrollregion=(0, 0, self._s(460), self._s(916)))
+        self._canvas.configure(scrollregion=(0, 0, self._s(460), self._s(self._CONTENT_HEIGHT)))
         width = self._s(460) + self._scrollbar.winfo_reqwidth()
-        height = min(self._s(916), max(240, self.winfo_screenheight() - 80))
+        height = min(self._s(self._CONTENT_HEIGHT), max(240, self.winfo_screenheight() - 80))
         self.minsize(width, min(height, self._s(560)))
         if (self.winfo_width(), self.winfo_height()) != (width, height):
             self.geometry(f"{width}x{height}")
@@ -9016,7 +9019,7 @@ class SwitchAccountWindow(tk.Toplevel):
         if self._manage_bg_source_image is None:
             return
         width = max(2, self._canvas.winfo_width())
-        height = max(2, self._s(916), self._canvas.winfo_height())
+        height = max(2, self._s(self._CONTENT_HEIGHT), self._canvas.winfo_height())
         try:
             fitted = ImageOps.fit(
                 self._manage_bg_source_image,
@@ -9386,9 +9389,9 @@ class SwitchAccountWindow(tk.Toplevel):
         self._canvas_buttons = {}
         self._manage_button_skin_cache = {}
         # Leave space for the run-wide shutdown timer below the completion toggle.
-        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=212)
-        self._create_manage_group_panel("accounts_block", x=16, y=254, width=428, height=410)
-        self._create_manage_group_panel("order_block", x=16, y=676, width=428, height=220)
+        self._create_manage_group_panel("switch_block", x=16, y=30, width=428, height=250)
+        self._create_manage_group_panel("accounts_block", x=16, y=292, width=428, height=470)
+        self._create_manage_group_panel("order_block", x=16, y=774, width=428, height=246)
 
         # Row 1: switch trigger mode (time vs quests, mutually exclusive) + time.
         cv.create_text(26, 46, text="Switch by:", fill=c["text"], font=self._font(10), anchor="nw")
@@ -9398,12 +9401,12 @@ class SwitchAccountWindow(tk.Toplevel):
             state="readonly", width=8,
         )
         mode_combo.configure(style="ManageFire.TCombobox")
-        cv.create_window(104, 44, anchor="nw", window=mode_combo, width=90)
-        cv.create_text(206, 46, text="Time min:", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_window(116, 44, anchor="nw", window=mode_combo, width=90)
+        cv.create_text(216, 46, text="Time min:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_minutes_var = tk.StringVar(value=str(self._config_manager.get_account_switch_minutes()))
         time_entry = self._make_entry(self, textvariable=self.switch_minutes_var, width=5)
-        cv.create_window(282, 44, anchor="nw", window=time_entry, width=56)
-        cv.create_text(360, 46, text="(0=off)", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_window(292, 44, anchor="nw", window=time_entry, width=56)
+        cv.create_text(372, 46, text="(0=off)", fill=c["text_muted"], font=self._font(8), anchor="nw")
         # Row 2: quest-mode target + wins + save.
         # "Quests:" is a mode and a number: complete N per account per day, or
         # leave at most N open. The number field shows the active mode's value;
@@ -9420,25 +9423,25 @@ class SwitchAccountWindow(tk.Toplevel):
             width=10,
         )
         quest_target_combo.configure(style="ManageFire.TCombobox")
-        cv.create_window(84, 76, anchor="nw", window=quest_target_combo, width=100)
+        cv.create_window(88, 78, anchor="nw", window=quest_target_combo, width=100)
         self.switch_main_var = tk.StringVar(
             value=str(self._quest_target_value(self._config_manager.get_account_switch_quest_target()))
         )
         main_entry = self._make_entry(self, textvariable=self.switch_main_var, width=3)
-        cv.create_window(188, 76, anchor="nw", window=main_entry, width=30)
-        cv.create_text(224, 78, text="Wins 0-15:", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_window(196, 78, anchor="nw", window=main_entry, width=30)
+        cv.create_text(232, 80, text="Wins 0-15:", fill=c["text_muted"], font=self._font(9), anchor="nw")
         self.switch_daily_var = tk.StringVar(value=str(self._config_manager.get_account_switch_daily_wins()))
         daily_entry = self._make_entry(self, textvariable=self.switch_daily_var, width=3)
-        cv.create_window(304, 76, anchor="nw", window=daily_entry, width=30)
+        cv.create_window(312, 78, anchor="nw", window=daily_entry, width=30)
         quest_target_combo.bind("<<ComboboxSelected>>", lambda _e: self._sync_quest_target_entry())
         for _e in (time_entry, main_entry, daily_entry):
             _e.bind("<Return>", lambda _ev: self._save_switch_settings())
         self._create_manage_canvas_button(
             name="save_switch",
             text="Save",
-            x=340,
-            y=74,
-            body_w=92,
+            x=350,
+            y=76,
+            body_w=80,
             body_h=26,
             command=self._save_switch_settings,
             primary=True,
@@ -9446,35 +9449,37 @@ class SwitchAccountWindow(tk.Toplevel):
         # Row 3: what happens after the LAST account finishes. It belongs here
         # rather than in the general settings because it only ever fires on the
         # end of an account rotation, which is configured in this very block.
-        self._build_750_quest_toggle(y=106)
-        self._build_shutdown_toggle(y=134)
+        self._build_750_quest_toggle(y=114)
+        self._build_shutdown_toggle(y=146)
 
-        cv.create_text(26, 174, text="Max play time (hours):", fill=c["text"], font=self._font(9), anchor="nw")
+        max_play_label = "Max play time:"
+        cv.create_text(26, 192, text=max_play_label, fill=c["text"], font=self._font(9), anchor="nw")
         self.max_play_hours_var = tk.StringVar(value=format(self._config_manager.get_max_play_hours(), "g"))
         limit_entry = self._make_entry(self, textvariable=self.max_play_hours_var, width=7)
-        cv.create_window(178, 172, anchor="nw", window=limit_entry, width=64)
+        cv.create_window(178, 190, anchor="nw", window=limit_entry, width=56)
         limit_entry.bind("<Return>", lambda _e: self._save_switch_settings())
-        cv.create_text(250, 174, text="(0 = off; next run)", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_text(250, 192, text="(hours; 0 = off, next run)", fill=c["text_muted"], font=self._font(8), anchor="nw")
         # Arena's daily reset decides which "day" the quest/win counters belong
         # to; it is a fixed UTC instant (09:00 by default), not local midnight.
-        cv.create_text(26, 204, text="Daily reset (UTC hour):", fill=c["text"], font=self._font(9), anchor="nw")
+        reset_label = "Reset (UTC hour):"
+        cv.create_text(26, 224, text=reset_label, fill=c["text"], font=self._font(9), anchor="nw")
         self.daily_reset_var = tk.StringVar(value=str(self._config_manager.get_daily_reset_utc_hour()))
         reset_entry = self._make_entry(self, textvariable=self.daily_reset_var, width=3)
-        cv.create_window(178, 202, anchor="nw", window=reset_entry, width=40)
+        cv.create_window(178, 222, anchor="nw", window=reset_entry, width=40)
         reset_entry.bind("<Return>", lambda _e: self._save_switch_settings())
-        cv.create_text(226, 204, text="(0-23; Arena resets at 9 UTC)", fill=c["text_muted"], font=self._font(8), anchor="nw")
-        cv.create_text(26, 226, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_text(226, 224, text="(0-23 UTC)", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_text(26, 250, text="Finishes current match, then shuts down. 2 min to cancel.", fill=c["text_muted"], font=self._font(8), anchor="nw")
 
-        cv.create_text(26, 248, text="Accounts (max 10)", fill=c["text"], font=self._font(13, "bold"), anchor="nw")
-        cv.create_text(26, 276, text="#", fill=c["text_muted"], font=self._font(9), anchor="nw")
-        cv.create_text(62, 276, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
-        cv.create_text(208, 276, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(26, 306, text="Accounts (max 10)", fill=c["text"], font=self._font(13, "bold"), anchor="nw")
+        cv.create_text(26, 336, text="#", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(62, 336, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(208, 336, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
 
         self._table_rows = []
-        # Segoe UI at _font(9) is ~21px tall, so a row needs 22px. Text is
-        # centred vertically; the last row ends at 516, above the details at 520.
-        row_y_start = 296
-        row_step = 22
+        # Segoe UI at _font(9) needs a little air; 24 px rows keep names and
+        # emails off each other's baselines at the reduced UI scales too.
+        row_y_start = 356
+        row_step = 24
         for idx in range(self._max_accounts):
             y = row_y_start + idx * row_step
             mid = y + row_step // 2
@@ -9495,27 +9500,27 @@ class SwitchAccountWindow(tk.Toplevel):
         # that appeared nowhere in Arena. The Arena name is the only identity the
         # Player.log exposes, so it is the one that has to be right; the label is
         # now just the same string.
-        cv.create_text(26, 522, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(26, 612, text="Arena Name", fill=c["text_muted"], font=self._font(9), anchor="nw")
         name_entry = self._make_entry(self, textvariable=self.account_name_var, width=24)
         name_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 520, anchor="nw", window=name_entry, width=168)
-        cv.create_text(280, 522, text="(as shown in Arena)", fill=c["text_muted"], font=self._font(8), anchor="nw")
+        cv.create_window(118, 610, anchor="nw", window=name_entry, width=140)
+        cv.create_text(280, 612, text="(as shown in Arena)", fill=c["text_muted"], font=self._font(8), anchor="nw")
 
-        cv.create_text(26, 552, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(26, 642, text="Email", fill=c["text_muted"], font=self._font(9), anchor="nw")
         email_entry = self._make_entry(self, textvariable=self.account_email_var, width=34)
         email_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 550, anchor="nw", window=email_entry, width=318)
+        cv.create_window(118, 640, anchor="nw", window=email_entry, width=302)
 
-        cv.create_text(26, 582, text="Password", fill=c["text_muted"], font=self._font(9), anchor="nw")
+        cv.create_text(26, 672, text="Password", fill=c["text_muted"], font=self._font(9), anchor="nw")
         password_entry = self._make_entry(self, textvariable=self.account_pw_var, width=34, show="*")
         password_entry.bind("<Return>", lambda _e: self._save_selected_account())
-        cv.create_window(104, 580, anchor="nw", window=password_entry, width=318)
+        cv.create_window(118, 670, anchor="nw", window=password_entry, width=302)
 
         self._create_manage_canvas_button(
             name="save_row",
             text="Save Row",
             x=26,
-            y=616,
+            y=706,
             body_w=104,
             body_h=30,
             command=self._save_selected_account,
@@ -9526,7 +9531,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="delete_row",
             text="Delete Row",
             x=134,
-            y=616,
+            y=706,
             body_w=104,
             body_h=30,
             command=self._clear_selected_account_row,
@@ -9537,15 +9542,15 @@ class SwitchAccountWindow(tk.Toplevel):
             name="save_accounts",
             text="Save Accounts",
             x=244,
-            y=616,
+            y=706,
             body_w=158,
             body_h=30,
             command=self._save_accounts,
             primary=False,
         )
 
-        cv.create_text(26, 688, text="Account Play Order", fill=c["text"], font=self._font(10), anchor="nw")
-        cv.create_line(22, 705, 438, 705, fill=c["table_border"], width=1)
+        cv.create_text(26, 788, text="Account Play Order", fill=c["text"], font=self._font(10), anchor="nw")
+        cv.create_line(22, 807, 438, 807, fill=c["table_border"], width=1)
         current_order = self._config_manager.get_account_play_order()
         self._order_vars = []
         self._order_combos = []
@@ -9555,7 +9560,7 @@ class SwitchAccountWindow(tk.Toplevel):
             col = idx // 5
             row = idx % 5
             lx, cx = col_x[col]
-            y = 712 + row * 24
+            y = 814 + row * 27
             cv.create_text(lx, y, text=str(idx + 1), fill=c["text_muted"], font=self._font(9), anchor="nw")
             var = tk.StringVar(value=current_order[idx] if idx < len(current_order) else "")
             combo = ttk.Combobox(
@@ -9570,13 +9575,13 @@ class SwitchAccountWindow(tk.Toplevel):
             self._order_vars.append(var)
             self._order_combos.append(combo)
         # vertical divider between columns
-        cv.create_line(230, 708, 230, 834, fill=c["table_border"], width=1)
+        cv.create_line(230, 810, 230, 948, fill=c["table_border"], width=1)
 
         self._create_manage_canvas_button(
             name="save_order",
             text="Save Order",
             x=26,
-            y=844,
+            y=958,
             body_w=140,
             body_h=34,
             command=self._save_account_play_order,
@@ -9586,7 +9591,7 @@ class SwitchAccountWindow(tk.Toplevel):
             name="close_bottom",
             text="Back",
             x=246,
-            y=844,
+            y=958,
             body_w=120,
             body_h=34,
             command=self.destroy,
