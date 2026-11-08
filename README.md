@@ -724,6 +724,12 @@ Controller   DummyAI        ← AI decides what to play (generate_move / generat
 
 `Controller` and `AI` each carry an informal interface file (`ControllerInterface.py` / `AIInterface.py`) documenting the methods `Game.py` relies on. Only one Controller (`Controller/MTGAController/Controller.py`, the real MTGA controller) and one AI (`AI/DummyAI.py`) are actually wired up today, and `Game.py` is typed directly against those two concrete classes — the interface files are documentation of the expected contract, not a runtime abstraction that makes swapping either one a drop-in change.
 
+### Screen-state classification
+
+`vision/screen_state.py` identifies the Arena page from the client frame instead of from `Player.log` or from the presence of the Home tab. The Home tab is visible on every page, so it is not an identity: on 2026-11-09 the bot read Mastery as Home, pressed ESC and clicked the blind Log Out point into the Mastery reward track.
+
+The classifier uses two exclusive signals: the **selected top-nav tab**, found by its continuous orange underline (selected tabs measured 98–110 px; the orange notification diamonds are 10 px or less), and, for Home, the large **Play button** (`play_btn.png` scores 0.94 on Home and about 0.60 on Store/Mastery). A near-black frame is a transition (`Waiting for the Server…`), and everything else is `unknown`; callers must not click on either. The module is pure (frame in, no capture or input) and is regression-tested against the labelled captures in `tests/fixtures/screen_state/`. It is the first piece of the verified-screen session runner; the controller is not wired to it yet.
+
 ### Static type checking
 
 A [Pyright](https://microsoft.github.io/pyright/) pass (developer-only, not run by the bot or its launchers) covers the AI decision layer -- `AI/`, `Game.py` and `Controller/Utilities/GameState.py` -- in `basic` (non-strict) mode, scoped via `pyrightconfig.json`. Run it from an activated project `.venv`:
