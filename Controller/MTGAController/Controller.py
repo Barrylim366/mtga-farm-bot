@@ -5277,6 +5277,13 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         """
         if not self._starter_navigation_may_act():
             return False
+        # The switch can become due between the post-login decision and this
+        # point: the account's fresh quest count lands on the log-reader thread,
+        # and the routine's earlier check can miss it by milliseconds. Re-check
+        # before navigating, so a finished account does not spend the next 30
+        # seconds in Play > Events > deck selection only to have Play blocked.
+        if self._switch_became_due_before_play("Starter"):
+            return False
 
         # A post-match reward popup covers the Play/Events controls; clear it
         # first so navigation is not stuck retrying against a blocked screen.
@@ -7162,6 +7169,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         play_btn = os.path.join(buttons_dir, "play_btn.png")
 
         bot_logger.log_info("Post-login: navigating Play > Find Match > Historic Play > My Decks.")
+        # The same late-count re-check as the Starter path: do not spend the
+        # navigation on an account whose switch became due since the decision.
+        if self._switch_became_due_before_play("Post-login"):
+            return False
         # Only the out-of-band navigation asserts the state/anchor of every screen
         # it passes through. The legacy fallback below clicks by image alone and
         # can finish somewhere unintended, so what it leaves selected is not

@@ -97,6 +97,20 @@ class SwitchDueBeforePlayTest(_GuardCase):
         self.assertFalse(self.c._press_starter_event_play())
         self.assertEqual(calls, [])
 
+    def test_starter_navigation_is_skipped_when_the_switch_is_due(self):
+        # The fresh quest count arrived 48 ms after the post-login decision in
+        # the 2026-11-09 log. The re-check here must stop the 30-second
+        # Play > Events > deck navigation, not just the final Play click.
+        self.c._account_switch_due = lambda: True
+        self.c._account_switch_pending = False
+        self.c._starter_navigation_may_act = lambda: True
+        calls = []
+        self.c._dismiss_reward_popup = lambda: calls.append("popup") or False
+        self.c._resolve_starter_target_colors = lambda: calls.append("colors") or "WB"
+
+        self.assertFalse(self.c._navigate_starter_deck())
+        self.assertEqual(calls, [])
+
     def test_the_starter_play_clicks_when_the_switch_is_not_due(self):
         self.c._account_switch_due = lambda: False
         self.c._account_switch_pending = False
