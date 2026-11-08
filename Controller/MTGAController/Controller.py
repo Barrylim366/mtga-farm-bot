@@ -4866,6 +4866,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # every event's Play button.
         if not self._starter_event_page_confirmed("STARTER_EVENT_PLAY_GATE"):
             return False
+        if self._switch_became_due_before_play("Starter"):
+            return False
         runtime_status.set_startup_phase("Pressing Play")
         if self._click_image_in_scaled_arena_region(
             event_play, "STARTER_EVENT_PLAY", rel_region=self._EVENT_PLAY_ROI,
@@ -6287,6 +6289,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             return False
         if self._stop_requested or self.check_play_time_limit():
             return False
+        if self._switch_became_due_before_play("Starter"):
+            return False
         if self._click_starter_button("event_play.png", "STARTER_EVENT_PLAY"):
             bot_logger.log_info("Starter: queued from the event page via Play.")
             time.sleep(1.0)
@@ -7037,6 +7041,58 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         bot_logger.log_info(f"Historic: selection verified for key={key}; ready to queue.")
         return True
 
+    def _wait_for_quest_count_fresh(self, timeout: float = 2.0) -> bool:
+        """Give the log reader a moment to confirm this account's quest count.
+
+        The post-login routine runs the instant the login is confirmed, while the
+        quests block is parsed on the log-reader thread. Deciding the switch
+        before it arrives used to send the routine into a 30-second deck
+        selection and a Play press; the queue loop then saw the freshly confirmed
+        target and began the logout with a match already queueing. Returns
+        whether the count became fresh within the timeout; either way the caller
+        proceeds exactly as before.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while not self._stop_requested and time.monotonic() < deadline:
+            if self._quest_count_confirmed_fresh:
+                return True
+            time.sleep(0.1)
+        return bool(self._quest_count_confirmed_fresh)
+
+    def _switch_became_due_before_play(self, label: str) -> bool:
+        """True when a switch is due and Play must not be pressed.
+
+        Deck selection can take ~30 seconds. The switch can become due during
+        that window (a fresh quest count, a banked win, a manual Skip), and
+        pressing Play then queues a match at the same moment the queue loop
+        begins the logout. The match starts while the logout is clicking; on an
+        event page those clicks can land on the Store (2026-11-09). Re-check at
+        the last possible moment and let the loop switch instead.
+        """
+        try:
+            due = bool(self._account_switch_due() or self._account_switch_pending)
+        except Exception:
+            return False
+        if due:
+            bot_logger.log_info(
+                f"{label}: account switch became due while preparing the queue; "
+                "not pressing Play."
+            )
+        return due
+
+    @staticmethod
+    def _logout_fallback_allowed(last_scene: str | None, options_visible: bool) -> bool:
+        """Whether the blind Log Out point may be clicked on this screen.
+
+        The point is calibrated for the Options overlay. Clicking it on an event
+        landing page or the Store is what put a live switch on the Store page
+        (2026-11-09): the template had failed and the last scene was
+        EventLanding, yet the fallback clicked anyway. Home, an unknown scene
+        (the switch's normal starting point) or a verified Options overlay are
+        safe; anything else must abort the switch and let it retry from Home.
+        """
+        return bool(not last_scene or last_scene == "Home" or options_visible)
+
     @serialized_home_navigation
     def _run_post_login_routine(self, account: dict, all_accounts: list[dict]) -> bool:
         # `all_accounts` is no longer consulted for deck selection: thumbnails are
@@ -7090,6 +7146,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # In the wins pass, this account may already have banked its target wins
         # during the quest pass. The queue loop will switch it next; selecting and
         # pressing Play here would queue a match immediately before that switch.
+        # Wait for the log reader to confirm the account's own quest count first:
+        # deciding on a pending count is how the routine used to choose "not due",
+        # spend the deck-selection window, and press Play just as the count
+        # arrived (and with it the switch).
+        self._wait_for_quest_count_fresh()
         if self._account_switch_due():
             bot_logger.log_info("Post-login: account switch already due; skipping deck selection and queue.")
             return True
@@ -7171,6 +7232,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 f"Post-login: account mismatch detected (planned '{planned_name}', used '{selected_account_name}')."
             )
 
+        if self._switch_became_due_before_play("Post-login"):
+            return False
         time.sleep(1.0)
         if not self._click_image_in_scaled_arena_region(
             play_btn,
@@ -7458,6 +7521,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 )
             )
         if self._stop_requested or self.check_play_time_limit():
+            return
+        if self._switch_became_due_before_play("Queue"):
             return
         bot_logger.log_info("Queue attempt: clicking queue button.")
         bot_logger.log_click(target[0], target[1], "QUEUE_BUTTON")
@@ -14070,6 +14135,23 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             )
             self._click_abs(int(logout_point[0]), int(logout_point[1]), "LOG_OUT_BTN")
         elif allow_coordinate_fallback:
+            # The blind point assumes the Options overlay. Do not use it from an
+            # event landing page or the Store: on 2026-11-09 that click put a
+            # live switch on the Store page while a match was queueing. Home, an
+            # unknown scene, or a verified overlay are the only safe places.
+            last_scene = self._get_last_scene_name()
+            options_visible = (
+                self._manual_login_options_visible()
+                if last_scene and last_scene != "Home"
+                else False
+            )
+            if not self._logout_fallback_allowed(last_scene, options_visible):
+                bot_logger.log_error(
+                    "Account switch: LOG_OUT_BTN image match failed and the last "
+                    f"scene is {last_scene!r}, not Home or a verified Options "
+                    "overlay; not clicking the coordinate fallback."
+                )
+                return False
             log_out_target, log_out_source = self._resolve_target_from_queue_anchor_rebase(
                 config_key="log_out_btn",
                 raw_point=self.log_out_btn_coors,
