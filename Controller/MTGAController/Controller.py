@@ -13519,6 +13519,25 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._set_runtime_home_mode("home_ready")
         self.start_queueing()
 
+    def _ensure_home_before_logout(self) -> bool:
+        """Get to Home before pressing ESC for the logout.
+
+        A switch can start on the Starter event landing page: the post-login
+        routine leaves the client there when a switch becomes due before Play.
+        ESC from that page does not reliably open Options, and the blind Log Out
+        fallback is now refused on non-Home scenes, so the switch would fail and
+        the account would resume playing. Navigate Home first; a failed
+        navigation aborts the switch instead of pressing ESC on an unknown
+        screen.
+        """
+        last_scene = self._get_last_scene_name()
+        if not last_scene or last_scene == "Home":
+            return True
+        bot_logger.log_info(
+            f"Account switch: leaving '{last_scene}' for Home before logout."
+        )
+        return bool(self._navigate_to_home())
+
     def _perform_account_switch(self) -> None:
         if self._stop_requested or self.check_play_time_limit():
             return
@@ -13791,6 +13810,13 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             # Remember which alias we're switching to, so the next quests block we
             # latch (the new account's) can be mapped screenName -> alias.
             self._pending_switch_alias = account_name or None
+            if not self._ensure_home_before_logout():
+                bot_logger.log_error(
+                    "Account switch: could not reach Home before logout; not pressing ESC."
+                )
+                self._abort_switch_and_resume("could not reach Home before logout")
+                queued_after_login = True
+                return
             self._post_login_action_done = False
             logout_log_offset = self._get_log_size(self._log_path)
             self._run_mapped_logout_sequence()

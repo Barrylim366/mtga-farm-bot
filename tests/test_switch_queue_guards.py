@@ -151,5 +151,28 @@ class LogoutFallbackGuardTest(_GuardCase):
         self.assertGreaterEqual(len(clicked), 1)
 
 
+class HomeBeforeLogoutTest(_GuardCase):
+    def test_home_needs_no_navigation(self):
+        self.c._get_last_scene_name = lambda: "Home"
+
+        def unexpected():
+            raise AssertionError("Home must not be re-navigated")
+
+        self.c._navigate_to_home = unexpected
+        self.assertTrue(self.c._ensure_home_before_logout())
+
+    def test_an_event_page_is_left_for_home_before_logout(self):
+        self.c._get_last_scene_name = lambda: "EventLanding"
+        calls = []
+        self.c._navigate_to_home = lambda: calls.append(1) or True
+        self.assertTrue(self.c._ensure_home_before_logout())
+        self.assertEqual(calls, [1])
+
+    def test_a_failed_home_navigation_aborts_the_switch(self):
+        self.c._get_last_scene_name = lambda: "EventLanding"
+        self.c._navigate_to_home = lambda: False
+        self.assertFalse(self.c._ensure_home_before_logout())
+
+
 if __name__ == "__main__":
     unittest.main()
