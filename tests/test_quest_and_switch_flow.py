@@ -931,6 +931,8 @@ class LandingQuestCheckTests(_QuestLogTestBase):
         clicked = []
         c._click_abs = lambda x, y, label: clicked.append((x, y, label))
         c._locate_image_center_in_scaled_arena_region = lambda *a, **k: (100, 100)
+        # The verification is now the visual Home classifier, not the nav anchor.
+        c._is_home_screen = lambda: True
         with mock.patch("time.sleep"):
             self.assertTrue(c._navigate_to_home())
         self.assertEqual(len(clicked), 1)

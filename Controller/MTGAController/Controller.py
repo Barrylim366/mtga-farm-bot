@@ -38,6 +38,7 @@ from actions import navigation_flow as nav_rois
 from actions.navigation_flow import build_post_login_navigation_actions
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
 from vision.vision import VisionEngine
+from vision.screen_state import is_home
 from vision.window_locator import (
     ArenaRegionProvider,
     _describe_foreground_window,
@@ -4381,12 +4382,44 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     # main screen regardless of which tab is currently active.
     _HOME_TAB_POINT_1920 = (104, 39)
 
+    def _capture_home_frame(self):
+        """Capture the client frame for the Home classifier, or None.
+
+        A capture failure is treated as "not Home": the caller aborts instead of
+        falling back to Player.log's scene name, which is what let the switch
+        press ESC on the Mastery page.
+        """
+        try:
+            arena = self._arena_region or self._ensure_arena_region(force_reacquire=False)
+            if arena is None:
+                arena = self._get_ui_action_arena_region(force_reacquire=False, label="HOME_VERIFY")
+            if arena is None:
+                return None
+            self._vision.begin_tick()
+            return self._vision.capture(arena)
+        except Exception as exc:
+            bot_logger.log_error(f"Home verification: frame capture failed: {exc}")
+            return None
+
+    def _is_home_screen(self) -> bool:
+        """True only when the frame is Home: selected tab and Play button."""
+        frame = self._capture_home_frame()
+        if frame is None:
+            return False
+        try:
+            return is_home(frame)
+        except Exception as exc:
+            bot_logger.log_error(f"Home verification: classifier failed: {exc}")
+            return False
+
     def _navigate_to_home(self, *, dismiss_popups: bool = True) -> bool:
         """Return to the Home screen by clicking the fixed top-left Home tab.
 
         Clicks a fixed 1920-frame coordinate (not a template match, which only
-        works when Home is already the active tab) and verifies we actually landed
-        on Home (its anchor then matches). Returns True only if Home was reached."""
+        works when Home is already the active tab) and verifies with exclusive
+        evidence: the selected Home tab plus the Home Play button. The nav tab
+        alone is visible on every page and is not an identity. Returns True only
+        if Home was reached."""
         if self._stop_requested:
             return False
         if dismiss_popups and self._dismiss_reward_popup():
@@ -4414,18 +4447,22 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         point = self._map_base_point_into_arena(arena, self._HOME_TAB_POINT_1920)
         self._click_abs(int(point[0]), int(point[1]), "GO_HOME")
         time.sleep(1.5)
-        # Verify we reached Home: its tab is now active, so the anchor matches.
-        home_tab = self._app_path("assets", "assert", "home_anchor.png")
-        reached = self._locate_image_center_in_scaled_arena_region(
-            home_tab, "GO_HOME_VERIFY", rel_region=(0, 0, 760, 260),
-            confidence=0.75, timeout=2.0,
-        ) is not None
+        # Verify with exclusive evidence. A nav tab alone is on every page, and a
+        # popup or transition can hide the Play button, so retry briefly instead
+        # of accepting the first frame.
+        reached = False
+        for attempt in range(3):
+            if self._is_home_screen():
+                reached = True
+                break
+            if attempt < 2:
+                time.sleep(0.5)
         if reached:
             self._arena_region = arena
             self._remember_arena_region(arena)
-            bot_logger.log_info("Quest refresh: reached Home (fixed-coord click).")
+            bot_logger.log_info("Quest refresh: reached Home (verified tab + Play button).")
         else:
-            bot_logger.log_info("Quest refresh: Home click did not land on Home; will retry.")
+            bot_logger.log_info("Quest refresh: Home click did not verify; will retry.")
         return reached
 
     def _refresh_quests_from_home(self) -> bool:
@@ -13533,21 +13570,30 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     def _ensure_home_before_logout(self) -> bool:
         """Get to Home before pressing ESC for the logout.
 
-        A switch can start on the Starter event landing page: the post-login
-        routine leaves the client there when a switch becomes due before Play.
-        ESC from that page does not reliably open Options, and the blind Log Out
-        fallback is now refused on non-Home scenes, so the switch would fail and
-        the account would resume playing. Navigate Home first; a failed
-        navigation aborts the switch instead of pressing ESC on an unknown
-        screen.
+        Verifies the frame (selected Home tab plus Play button) rather than
+        trusting Player.log's scene name: on 2026-11-09 the log still said Home
+        while the client was on Mastery, so the switch pressed ESC there and
+        clicked the blind Log Out point into the reward track. A switch can also
+        start on the Starter event landing page when a switch becomes due before
+        Play. Navigate Home first; a failed navigation, or a frame that still is
+        not Home afterwards, aborts the switch instead of pressing ESC on an
+        unknown screen.
         """
-        last_scene = self._get_last_scene_name()
-        if not last_scene or last_scene == "Home":
+        if self._is_home_screen():
             return True
+        last_scene = self._get_last_scene_name() or "unknown"
         bot_logger.log_info(
-            f"Account switch: leaving '{last_scene}' for Home before logout."
+            f"Account switch: frame is not Home (log scene '{last_scene}'); "
+            "navigating Home before logout."
         )
-        return bool(self._navigate_to_home())
+        if not self._navigate_to_home():
+            return False
+        if not self._is_home_screen():
+            bot_logger.log_error(
+                "Account switch: frame is still not Home after navigating; not pressing ESC."
+            )
+            return False
+        return True
 
     def _perform_account_switch(self) -> None:
         if self._stop_requested or self.check_play_time_limit():
