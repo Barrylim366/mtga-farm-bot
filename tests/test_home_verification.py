@@ -80,12 +80,24 @@ class EnsureHomeBeforeLogoutTest(_HomeGateCase):
         self.assertTrue(self.c._ensure_home_before_logout())
         self.assertEqual(calls, [1])
 
+    def test_a_handled_popup_gets_another_home_attempt(self):
+        # The first Home attempt is consumed by a reward popup (nav returns
+        # False); the gate waits and tries again instead of aborting.
+        seen = [False, False, True]
+        self.c._is_home_screen = lambda: seen.pop(0)
+        nav = [False, True]
+        self.c._navigate_to_home = lambda: nav.pop(0)
+        with mock.patch("time.sleep"):
+            self.assertTrue(self.c._ensure_home_before_logout())
+
     def test_failed_navigation_aborts(self):
+        self.c._HOME_BEFORE_LOGOUT_TIMEOUT = 0.0
         self.c._is_home_screen = lambda: False
         self.c._navigate_to_home = lambda: False
         self.assertFalse(self.c._ensure_home_before_logout())
 
     def test_a_still_non_home_frame_after_navigation_aborts(self):
+        self.c._HOME_BEFORE_LOGOUT_TIMEOUT = 0.0
         seen = [False, False]
         self.c._is_home_screen = lambda: seen.pop(0)
         self.c._navigate_to_home = lambda: True
@@ -93,6 +105,7 @@ class EnsureHomeBeforeLogoutTest(_HomeGateCase):
 
     def test_the_log_scene_home_does_not_bypass_the_frame(self):
         # The exact 2026-11-09 false pass: log says Home, frame says Mastery.
+        self.c._HOME_BEFORE_LOGOUT_TIMEOUT = 0.0
         self.c._get_last_scene_name = lambda: "Home"
         self.c._is_home_screen = lambda: False
         self.c._navigate_to_home = lambda: False

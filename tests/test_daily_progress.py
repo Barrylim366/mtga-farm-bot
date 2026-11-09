@@ -209,11 +209,14 @@ class SkipToNextAccountTest(_ControllerCase):
         self.assertFalse(self.c.request_skip_to_next_account())
         self.assertFalse(self.c._skip_to_next_account_requested)
 
-    def test_the_give_up_guard_still_applies_to_a_request(self):
+    def test_a_request_resets_the_give_up_guard(self):
         self.c._max_failed_switch_attempts = 3
         self.c._failed_switch_attempts = 3
-        self.c.request_skip_to_next_account()
-        self.assertFalse(self.c._account_switch_due())
+        self.c._failed_switch_giveup_logged = True
+        self.assertTrue(self.c.request_skip_to_next_account())
+        self.assertEqual(self.c._failed_switch_attempts, 0)
+        self.assertFalse(self.c._failed_switch_giveup_logged)
+        self.assertTrue(self.c._account_switch_due())
 
 
 if __name__ == "__main__":

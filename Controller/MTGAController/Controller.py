@@ -114,6 +114,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     # update. The login splash only appears after that load, so the old 40 s cap
     # declared the switch failed while the client was still loading.
     _LOGOUT_LOGIN_TIMEOUT = 120.0
+    # How long the switch's Home gate waits for a popup/transition to settle and
+    # another Home attempt. Aborting on the first "popup owns the screen" result
+    # used to lose a whole switch and trip the repeated-failure guard.
+    _HOME_BEFORE_LOGOUT_TIMEOUT = 20.0
     # Manual login (Account Manager's per-account Log In button, bot stopped) --
     # see sign_in_for_manual_play. All bounded: the button runs on a worker thread
     # behind a window that must not hang for ever on a broken logout.
@@ -12909,6 +12913,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         if self._stop_requested or self._account_switch_in_progress:
             return False
         self._skip_to_next_account_requested = True
+        # An explicit skip is a fresh instruction. Give the switch its attempts
+        # again even if the automatic repeated-failure guard had tripped; if the
+        # underlying problem persists the same bound re-trips after a few tries.
+        self._failed_switch_attempts = 0
+        self._failed_switch_giveup_logged = False
         bot_logger.log_info(
             "Skip to next account requested; the switch runs after the current match."
         )
@@ -12925,9 +12934,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             self._failed_switch_giveup_logged = True
             bot_logger.log_error(
                 "Account switching disabled for this session: {} consecutive failed "
-                "switch attempts (logout never reached the login screen). Check the "
-                "Log Out / confirm button calibration. The bot keeps playing on the "
-                "current account.".format(self._failed_switch_attempts)
+                "switch attempts (could not reach Home, or the logout never reached "
+                "the login screen). Check the Log Out / confirm button calibration "
+                "and that Arena is showing a readable screen. The bot keeps playing "
+                "on the current account.".format(self._failed_switch_attempts)
             )
         return True
 
@@ -13586,11 +13596,13 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         Verifies the frame (selected Home tab plus Play button) rather than
         trusting Player.log's scene name: on 2026-11-09 the log still said Home
         while the client was on Mastery, so the switch pressed ESC there and
-        clicked the blind Log Out point into the reward track. A switch can also
-        start on the Starter event landing page when a switch becomes due before
-        Play. Navigate Home first; a failed navigation, or a frame that still is
-        not Home afterwards, aborts the switch instead of pressing ESC on an
-        unknown screen.
+        clicked the blind Log Out point into the reward track.
+
+        A reward popup or a transition can consume the first Home attempt: the
+        popup handler owns the screen and deliberately does not click through it,
+        and aborting the switch on that result used to lose the switch and trip
+        the repeated-failure guard. Retry for a bounded window instead; a screen
+        that still is not Home at the end aborts without pressing ESC.
         """
         if self._is_home_screen():
             return True
@@ -13599,14 +13611,23 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             f"Account switch: frame is not Home (log scene '{last_scene}'); "
             "navigating Home before logout."
         )
-        if not self._navigate_to_home():
-            return False
-        if not self._is_home_screen():
+        deadline = time.monotonic() + self._HOME_BEFORE_LOGOUT_TIMEOUT
+        while not self._stop_requested and time.monotonic() < deadline:
+            if self._navigate_to_home() and self._is_home_screen():
+                return True
+            if self._is_home_screen():
+                return True
+            if self._stop_requested:
+                break
+            # The popup may have been handled; give the screen a moment to
+            # settle, then try Home again.
+            time.sleep(2.0)
+        if not self._stop_requested:
             bot_logger.log_error(
-                "Account switch: frame is still not Home after navigating; not pressing ESC."
+                "Account switch: frame did not reach Home before the logout window; "
+                "not pressing ESC."
             )
-            return False
-        return True
+        return False
 
     def _perform_account_switch(self) -> None:
         if self._stop_requested or self.check_play_time_limit():

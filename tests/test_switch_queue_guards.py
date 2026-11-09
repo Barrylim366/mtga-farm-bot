@@ -186,6 +186,7 @@ class HomeBeforeLogoutTest(_GuardCase):
 
     def test_a_failed_home_navigation_aborts_the_switch(self):
         self.c._get_last_scene_name = lambda: "EventLanding"
+        self.c._HOME_BEFORE_LOGOUT_TIMEOUT = 0.0
         self.c._is_home_screen = lambda: False
         self.c._navigate_to_home = lambda: False
         self.assertFalse(self.c._ensure_home_before_logout())
