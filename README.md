@@ -736,6 +736,8 @@ The classifier uses two exclusive signals: the **selected top-nav tab**, found b
 
 `Controller/MTGAController/round_policy.py` answers the companion question: after an account is marked complete, does the pass continue, start the win pass, or end the round? It is the pure form of the completion block in `_perform_account_switch`; the controller still performs the logout, records the mark, resets the pass and stops the bot. Both modules are building blocks for the session runner, which will own the ordering; the queue loop and switch still perform their existing actions.
 
+`Controller/MTGAController/session_runner.py` names that ordering as an explicit state machine: `LOGIN → VERIFY_HOME → READ_STATE → DECIDE → PLAY` (or `SWITCH` back to `VERIFY_HOME`), with `DECIDE → ROUND_DONE` when the round policy says every pass is finished. The snapshot defaults describe "nothing known yet", so the machine waits rather than acting on a guess. It is scaffolding: the controller still performs the actions, and moving the post-login, queue and switch actions behind the runner is the next step.
+
 ### Static type checking
 
 A [Pyright](https://microsoft.github.io/pyright/) pass (developer-only, not run by the bot or its launchers) covers the AI decision layer -- `AI/`, `Game.py` and `Controller/Utilities/GameState.py` -- in `basic` (non-strict) mode, scoped via `pyrightconfig.json`. Run it from an activated project `.venv`:
