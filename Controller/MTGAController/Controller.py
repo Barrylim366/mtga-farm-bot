@@ -20,6 +20,12 @@ import AI.Utilities.CardInfo as CardInfo
 import AI.Utilities.LifegainLogic as LifegainLogic
 from Controller.MTGAController.LogReader import LogReader
 from Controller.MTGAController.popup_recovery import PopupRecoveryMixin
+from Controller.MTGAController.round_policy import (
+    ROUND_COMPLETE,
+    START_WIN_PASS,
+    RoundProgress,
+    next_round_step,
+)
 from Controller.MTGAController.switch_policy import (
     QuestSwitchCriteria,
     quest_switch_due,
@@ -13757,46 +13763,47 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             # End of the round: if we have now completed every configured account
             # this session, stop instead of logging into an account we have already
             # finished. Quests mode only (time mode never "completes" a round).
-            if (
-                self._account_switch_mode == "quests"
-                and self._known_account_count
-                and len(self._completed_account_keys) >= self._known_account_count
-            ):
+            round_step = next_round_step(
+                RoundProgress(
+                    mode=self._account_switch_mode,
+                    known_account_count=int(self._known_account_count or 0),
+                    completed_count=len(self._completed_account_keys),
+                    quests_active=self._quest_target_active(),
+                    wins_target=self._account_switch_daily_wins,
+                    phase=self._switch_phase,
+                )
+            )
+            if round_step == START_WIN_PASS:
                 # With both thresholds configured this is only the end of the
                 # FIRST pass (every account's daily quests are banked). Start the
                 # second pass -- the same accounts again, judged on wins -- rather
                 # than ending the session half-done.
-                if (
-                    self._quest_target_active()
-                    and self._account_switch_daily_wins > 0
-                    and self._switch_phase == "quests"
-                ):
-                    banked = sorted(self._completed_account_keys)
-                    self._switch_phase = "wins"
-                    self._completed_account_keys = set()
-                    self._pending_completed_key = None
-                    self._switches_without_match = 0
-                    bot_logger.log_info(
-                        "Quest pass complete on all {} account(s) ({}); starting the "
-                        "win pass ({} win(s) per account, wins already earned this "
-                        "session count).".format(
-                            self._known_account_count,
-                            banked,
-                            self._account_switch_daily_wins,
-                        )
+                banked = sorted(self._completed_account_keys)
+                self._switch_phase = "wins"
+                self._completed_account_keys = set()
+                self._pending_completed_key = None
+                self._switches_without_match = 0
+                bot_logger.log_info(
+                    "Quest pass complete on all {} account(s) ({}); starting the "
+                    "win pass ({} win(s) per account, wins already earned this "
+                    "session count).".format(
+                        self._known_account_count,
+                        banked,
+                        self._account_switch_daily_wins,
                     )
-                    # Fall through: the switch itself still happens, so the win
-                    # pass starts on the next account instead of idling here.
-                else:
-                    bot_logger.log_info(
-                        "Round complete: all {} configured account(s) finished this session "
-                        "({}); stopping the bot instead of switching.".format(
-                            self._known_account_count,
-                            sorted(self._completed_account_keys),
-                        )
+                )
+                # Fall through: the switch itself still happens, so the win
+                # pass starts on the next account instead of idling here.
+            elif round_step == ROUND_COMPLETE:
+                bot_logger.log_info(
+                    "Round complete: all {} configured account(s) finished this session "
+                    "({}); stopping the bot instead of switching.".format(
+                        self._known_account_count,
+                        sorted(self._completed_account_keys),
                     )
-                    self._request_stop_bot("all accounts completed this round")
-                    return
+                )
+                self._request_stop_bot("all accounts completed this round")
+                return
             if not self.log_out_btn_coors or not self.log_out_ok_btn_coors:
                 self._abort_switch_and_resume("missing calibrated Log Out button(s)")
                 queued_after_login = True

@@ -732,7 +732,9 @@ The classifier uses two exclusive signals: the **selected top-nav tab**, found b
 
 ### Session decision policy
 
-`Controller/MTGAController/switch_policy.py` is the pure form of "does this account still owe anything in this pass?". With both dimensions configured, the quest pass leaves an account as soon as its quest target is met (wins are the second pass), and the win pass leaves when the day's wins are in; a single configured dimension is judged alone. The controller supplies the quest and win inputs as callables, so a win-pass decision never reads the quest state and a quest-pass decision still uses the same rule. `_account_switch_due` delegates to this module; the manual skip, master switch, give-up and time-mode guards stay in the controller. This is the decision core the session runner will wrap; the queue loop and switch still own their existing actions.
+`Controller/MTGAController/switch_policy.py` is the pure form of "does this account still owe anything in this pass?". With both dimensions configured, the quest pass leaves an account as soon as its quest target is met (wins are the second pass), and the win pass leaves when the day's wins are in; a single configured dimension is judged alone. The controller supplies the quest and win inputs as callables, so a win-pass decision never reads the quest state and a quest-pass decision still uses the same rule. `_account_switch_due` delegates to this module; the manual skip, master switch, give-up and time-mode guards stay in the controller.
+
+`Controller/MTGAController/round_policy.py` answers the companion question: after an account is marked complete, does the pass continue, start the win pass, or end the round? It is the pure form of the completion block in `_perform_account_switch`; the controller still performs the logout, records the mark, resets the pass and stops the bot. Both modules are building blocks for the session runner, which will own the ordering; the queue loop and switch still perform their existing actions.
 
 ### Static type checking
 
