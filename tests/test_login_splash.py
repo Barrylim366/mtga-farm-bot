@@ -44,17 +44,23 @@ class LoginSplashTests(unittest.TestCase):
         mock_focus.assert_called_once()
 
     def test_wait_for_logout_returns_true_on_playerlog_marker(self):
-        self.c._wait_for_playerlog_marker = Mock(return_value=True)
+        self.c._playerlog_contains_marker_since = Mock(return_value=True)
         self.c._is_login_splash_button_visible = Mock(return_value=False)
         self.assertTrue(self.c._wait_for_logout_to_reach_login_screen(start_offset=0))
         self.c._is_login_splash_button_visible.assert_not_called()
 
     def test_wait_for_logout_falls_back_to_splash_button(self):
-        self.c._wait_for_playerlog_marker = Mock(return_value=False)
+        self.c._playerlog_contains_marker_since = Mock(return_value=False)
         self.c._is_login_splash_button_visible = Mock(return_value=True)
         self.assertTrue(self.c._wait_for_logout_to_reach_login_screen(start_offset=0))
 
     def test_wait_for_logout_returns_false_when_neither_marker_nor_splash_found(self):
-        self.c._wait_for_playerlog_marker = Mock(return_value=False)
+        self.c._playerlog_contains_marker_since = Mock(return_value=False)
         self.c._is_login_splash_button_visible = Mock(return_value=False)
-        self.assertFalse(self.c._wait_for_logout_to_reach_login_screen(start_offset=0))
+        self.assertFalse(
+            self.c._wait_for_logout_to_reach_login_screen(start_offset=0, timeout_sec=0.01)
+        )
+
+    def test_the_logout_timeout_tolerates_a_client_reload(self):
+        # The 2026-11-09 reload sat on the loading screen for over 50 s.
+        self.assertGreaterEqual(Controller._LOGOUT_LOGIN_TIMEOUT, 90.0)

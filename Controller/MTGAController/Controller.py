@@ -109,6 +109,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     # up reading and just plays, rather than dipping to Home forever.
     _HOME_QUEST_CHECK_MAX_ATTEMPTS = 3
     _POST_LOGIN_HOME_READY_TIMEOUT = 20.0
+    # A logout can trigger Arena's full reload: on 2026-11-09 the client sat on
+    # "Initializing localization database" for over 50 s after the Star Trek
+    # update. The login splash only appears after that load, so the old 40 s cap
+    # declared the switch failed while the client was still loading.
+    _LOGOUT_LOGIN_TIMEOUT = 120.0
     # Manual login (Account Manager's per-account Log In button, bot stopped) --
     # see sign_in_for_manual_play. All bounded: the button runs on a worker thread
     # behind a window that must not hang for ever on a broken logout.
@@ -2721,21 +2726,33 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         return False
 
     def _wait_for_logout_to_reach_login_screen(self, *, start_offset: int, timeout_sec: float = 8.0) -> bool:
-        reached = self._wait_for_playerlog_marker(
-            [
-                "Sending player back to Login screen.",
-                "ALT_Prefab.LoginPanelPrefab",
-                "CredentialLoginContext created",
-            ],
-            start_offset=start_offset,
-            timeout_sec=timeout_sec,
-            label="LOGOUT_WAIT",
-        )
-        if reached:
-            return True
-        if self._is_login_splash_button_visible():
-            bot_logger.log_info("LOGOUT_WAIT: login splash screen button detected on screen.")
-            return True
+        """Wait for the login screen after logout, tolerating a full client reload.
+
+        Arena can spend a minute or more on its loading screen after a logout
+        (observed 2026-11-09: "Initializing localization database" for over 50 s
+        after the Star Trek update). Poll both the Player.log login markers and
+        the Register/Log In splash during the wait, instead of checking the
+        splash only after the marker wait has expired.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        markers = [
+            "Sending player back to Login screen.",
+            "ALT_Prefab.LoginPanelPrefab",
+            "CredentialLoginContext created",
+        ]
+        next_splash_check = 0.0
+        while not self._stop_requested and time.monotonic() < deadline:
+            if self._playerlog_contains_marker_since(markers, start_offset=start_offset):
+                return True
+            now = time.monotonic()
+            if now >= next_splash_check:
+                if self._is_login_splash_button_visible():
+                    bot_logger.log_info("LOGOUT_WAIT: login splash screen button detected on screen.")
+                    return True
+                next_splash_check = now + 3.0
+            time.sleep(0.25)
+        if self._stop_requested:
+            bot_logger.log_info("LOGOUT_WAIT: wait aborted (stop requested).")
         return False
 
     def _playerlog_contains_marker_since(self, markers: list[str], *, start_offset: int) -> bool:
@@ -13872,10 +13889,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             self._post_login_action_done = False
             logout_log_offset = self._get_log_size(self._log_path)
             self._run_mapped_logout_sequence()
-            runtime_status.set_intentional_wait(max(40.0, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
+            runtime_status.set_intentional_wait(max(self._LOGOUT_LOGIN_TIMEOUT, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
             logout_ok = self._wait_for_logout_to_reach_login_screen(
                 start_offset=logout_log_offset,
-                timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
+                timeout_sec=max(self._LOGOUT_LOGIN_TIMEOUT, self._login_delete_delay_sec + 3.0),
             )
             if not logout_ok:
                 # The switch did not happen: we are still signed in on the current
@@ -14365,7 +14382,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             self._run_mapped_logout_sequence()
             return self._wait_for_logout_to_reach_login_screen(
                 start_offset=logout_log_offset,
-                timeout_sec=max(40.0, self._login_delete_delay_sec + 3.0),
+                timeout_sec=max(self._LOGOUT_LOGIN_TIMEOUT, self._login_delete_delay_sec + 3.0),
             )
         except Exception as e:
             bot_logger.log_error(f"Built-in logout test sequence failed: {e}")
