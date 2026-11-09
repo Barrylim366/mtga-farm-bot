@@ -20,6 +20,11 @@ import AI.Utilities.CardInfo as CardInfo
 import AI.Utilities.LifegainLogic as LifegainLogic
 from Controller.MTGAController.LogReader import LogReader
 from Controller.MTGAController.popup_recovery import PopupRecoveryMixin
+from Controller.MTGAController.switch_policy import (
+    QuestSwitchCriteria,
+    quest_switch_due,
+    time_switch_due,
+)
 from Controller.MTGAController.block_recovery import BlockRecoveryMixin
 from Controller.MTGAController.group_recovery import GroupRecoveryMixin
 from Controller.MTGAController.ability_activation import AbilityActivationMixin
@@ -12925,41 +12930,24 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # configured wins under the bot. A 0 threshold means "no requirement" for
         # that dimension; both 0 disables it.
         if self._account_switch_mode == "quests":
-            if not self._quest_target_active() and self._account_switch_daily_wins <= 0:
-                return False
-            # Anti-storm fallback: the clean "stop at end of round" is driven by
-            # per-account completion tracking in _perform_account_switch
-            # (_completed_account_keys). This guard only matters if that tracking
-            # can't identify accounts (no screenName), so an unrelated inability to
-            # play can't become an endless logout/login loop -- it just plays on.
-            if self._known_account_count and self._switches_without_match >= self._known_account_count:
-                return False
-            # Two-phase round: with both thresholds set, each pass judges the
-            # accounts on ONE criterion. Pass 1 banks every account's daily
-            # quests, pass 2 goes round again for the wins. The phase is advanced
-            # in _perform_account_switch, where the end of a pass is detected.
-            both_configured = (
-                self._quest_target_active()
-                and self._account_switch_daily_wins > 0
-            )
-            if both_configured and self._switch_phase == "wins":
-                # Quests were cleared in pass 1; this pass is wins only.
-                return (
-                    self._wins_seen_for_current_account()
-                    >= self._account_switch_daily_wins
+            return quest_switch_due(
+                QuestSwitchCriteria(
+                    quests_active=self._quest_target_active(),
+                    wins_target=self._account_switch_daily_wins,
+                    phase=getattr(self, "_switch_phase", "quests"),
+                    anti_storm=bool(
+                        self._known_account_count
+                        and self._switches_without_match >= self._known_account_count
+                    ),
+                    quest_target_met=self._main_quest_target_met,
+                    wins_seen=self._wins_seen_for_current_account,
                 )
-            if both_configured and self._switch_phase == "quests":
-                # Wins are pass 2's problem -- leave as soon as the quests are in.
-                wins_required = 0
-            else:
-                wins_required = self._account_switch_daily_wins
-            main_ok = self._main_quest_target_met()
-            wins_ok = self._wins_seen_for_current_account() >= wins_required
-            return main_ok and wins_ok
+            )
         # Time mode (default): switch every N minutes.
-        if self._account_switch_interval <= 0:
-            return False
-        return (time.time() - self._last_account_switch_ts) >= self._account_switch_interval
+        return time_switch_due(
+            self._account_switch_interval,
+            time.time() - self._last_account_switch_ts,
+        )
 
     def set_stop_bot_callback(self, method) -> None:
         """Register a UI callback the controller can use to stop the bot."""

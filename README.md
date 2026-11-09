@@ -730,6 +730,10 @@ Controller   DummyAI        ← AI decides what to play (generate_move / generat
 
 The classifier uses two exclusive signals: the **selected top-nav tab**, found by its continuous orange underline (selected tabs measured 98–110 px; the orange notification diamonds are 10 px or less), and, for Home, the large **Play button** (`play_btn.png` scores 0.94 on Home and about 0.60 on Store/Mastery). A near-black frame is a transition (`Waiting for the Server…`), and everything else is `unknown`; callers must not click on either. The module is pure (frame in, no capture or input) and is regression-tested against the labelled captures in `tests/fixtures/screen_state/`. It is wired into the switch's Home gate (`_ensure_home_before_logout`) and into `_navigate_to_home`'s verification, replacing the log-derived Home check; the rest of the verified-screen session runner migration is still to come.
 
+### Session decision policy
+
+`Controller/MTGAController/switch_policy.py` is the pure form of "does this account still owe anything in this pass?". With both dimensions configured, the quest pass leaves an account as soon as its quest target is met (wins are the second pass), and the win pass leaves when the day's wins are in; a single configured dimension is judged alone. The controller supplies the quest and win inputs as callables, so a win-pass decision never reads the quest state and a quest-pass decision still uses the same rule. `_account_switch_due` delegates to this module; the manual skip, master switch, give-up and time-mode guards stay in the controller. This is the decision core the session runner will wrap; the queue loop and switch still own their existing actions.
+
 ### Static type checking
 
 A [Pyright](https://microsoft.github.io/pyright/) pass (developer-only, not run by the bot or its launchers) covers the AI decision layer -- `AI/`, `Game.py` and `Controller/Utilities/GameState.py` -- in `basic` (non-strict) mode, scoped via `pyrightconfig.json`. Run it from an activated project `.venv`:
