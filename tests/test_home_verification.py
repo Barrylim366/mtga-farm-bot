@@ -41,6 +41,7 @@ class _HomeGateCase(unittest.TestCase):
         self.c.input = mock.Mock()
         self.c._home_probe_detail = lambda: "test probe"
         self.c._write_nav_debug_bundle = lambda *a, **k: None
+        self.c._manual_login_options_visible = lambda: False
         self.c._arena_region = (0, 0, 1920, 1080)
         self.c._ensure_arena_region = lambda force_reacquire=False: (0, 0, 1920, 1080)
         self.c._map_base_point_into_arena = lambda arena, point: (10, 20)
@@ -72,6 +73,15 @@ class EnsureHomeBeforeLogoutTest(_HomeGateCase):
         self.c._is_home_screen = lambda: True
         self.c._navigate_to_home = lambda: (_ for _ in ()).throw(
             AssertionError("Home must not be re-navigated")
+        )
+        self.assertTrue(self.c._ensure_home_before_logout())
+
+    def test_an_open_options_dialog_is_a_valid_logout_start(self):
+        # The 15:40 run left Options open; logging out from it is correct.
+        self.c._is_home_screen = lambda: False
+        self.c._manual_login_options_visible = lambda: True
+        self.c._navigate_to_home = lambda: (_ for _ in ()).throw(
+            AssertionError("Options is already open; no Home navigation")
         )
         self.assertTrue(self.c._ensure_home_before_logout())
 

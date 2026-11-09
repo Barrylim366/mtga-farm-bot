@@ -35,6 +35,7 @@ class _GuardCase(unittest.TestCase):
         self.c.input = mock.Mock()
         self.c._home_probe_detail = lambda: "test probe"
         self.c._write_nav_debug_bundle = lambda *a, **k: None
+        self.c._manual_login_options_visible = lambda: False
 
     def tearDown(self):
         self.c._stop_requested = False

@@ -13654,6 +13654,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         """
         if self._is_home_screen():
             return True
+        if self._manual_login_options_visible():
+            bot_logger.log_info(
+                "Account switch: Options is already open; logging out from it."
+            )
+            return True
         last_scene = self._get_last_scene_name() or "unknown"
         bot_logger.log_info(
             f"Account switch: frame is not Home (log scene '{last_scene}'); "
@@ -13662,6 +13667,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         deadline = time.monotonic() + self._HOME_BEFORE_LOGOUT_TIMEOUT
         escaped = False
         while not self._stop_requested and time.monotonic() < deadline:
+            if self._manual_login_options_visible():
+                bot_logger.log_info(
+                    "Account switch: Options opened; logging out from it."
+                )
+                return True
             if self._navigate_to_home() and self._is_home_screen():
                 return True
             if self._is_home_screen():
@@ -13980,7 +13990,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 return
             self._post_login_action_done = False
             logout_log_offset = self._get_log_size(self._log_path)
-            self._run_mapped_logout_sequence()
+            self._run_mapped_logout_sequence(verify_options=True)
             runtime_status.set_intentional_wait(max(self._LOGOUT_LOGIN_TIMEOUT, self._login_delete_delay_sec + 3.0), "logout_transition_wait")
             logout_ok = self._wait_for_logout_to_reach_login_screen(
                 start_offset=logout_log_offset,
@@ -14464,12 +14474,25 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     def _locate_log_out_button(
         self, *, timeout: float, scales: list[float] | None = None
     ) -> tuple[int, int] | None:
-        """Where the Options overlay's Log Out link is, or None."""
-        logout_img = os.path.join(self._buttons_dir(), "log_out_btn.png")
-        return self._locate_image_center_in_scaled_arena_region(
-            logout_img, "LOG_OUT_BTN_IMG", rel_region=None,
-            confidence=0.80, timeout=timeout, scales=scales or self._log_out_search_scales(),
-        )
+        """Where the Options overlay's Log Out link is, or None.
+
+        Two templates: the original link and the 2026-11-09 client's link, whose
+        text is a different size/weight. The old template scores ~0.56 on the
+        new overlay, so searching only it fell through to the coordinate
+        fallback on every switch.
+        """
+        for filename in ("log_out_btn.png", "log_out_btn_new.png"):
+            logout_img = os.path.join(self._buttons_dir(), filename)
+            if not os.path.exists(logout_img):
+                continue
+            point = self._locate_image_center_in_scaled_arena_region(
+                logout_img, "LOG_OUT_BTN_IMG", rel_region=None,
+                confidence=0.80, timeout=timeout,
+                scales=scales or self._log_out_search_scales(),
+            )
+            if point is not None:
+                return point
+        return None
 
     def run_mapped_logout_sequence_for_test(self) -> bool:
         """Run only the built-in macOS-style logout sequence (no account/login steps)."""

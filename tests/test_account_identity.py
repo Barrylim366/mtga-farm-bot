@@ -395,7 +395,7 @@ class SwitchFlowIdentityTest(unittest.TestCase):
         # The switch verifies Home from the frame before logging out; these
         # tests are about the login/identity flow, so present a verified Home.
         self.c._is_home_screen = lambda: True
-        self.c._run_mapped_logout_sequence = lambda: None
+        self.c._run_mapped_logout_sequence = lambda **kwargs: None
         self.c._wait_for_logout_to_reach_login_screen = lambda **kw: True
         self.c._run_post_login_routine = lambda account, all_accounts: True
         self.c.start_queueing = lambda: None
