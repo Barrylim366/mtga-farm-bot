@@ -14572,6 +14572,15 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             if detection is not None and detection.ok and detection.region is not None:
                 self._arena_region = tuple(int(v) for v in detection.region)
                 self._remember_arena_region(self._arena_region)
+                # The Wizards Accounts form carries the same top-right gear as
+                # Home, so the Options anchor matches it. The form's e-mail field
+                # is the tie-breaker: a real login screen has nothing to log out
+                # of, so recognise it before treating the anchor as a menu.
+                if self._login_form_email_point() is not None:
+                    bot_logger.log_info(
+                        "Manual login: Wizards Accounts form detected; no logout needed."
+                    )
+                    return "login", ""
                 if detection.matched_anchor == "options_anchor.png":
                     # A menu screen, but one whose ESC would only close it and
                     # leave the logout sequence clicking at nothing.

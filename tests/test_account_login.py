@@ -327,7 +327,22 @@ class ScreenKindTest(_ControllerTestCase):
             [self.detection(True, "ok", anchor="home_anchor.png")]
         )
         controller._remember_arena_region = lambda _r: None
+        controller._login_form_email_point = lambda **_k: None
         self.assertEqual(controller._manual_login_screen_kind(), ("menu", ""))
+
+    def test_the_wizards_form_wins_over_the_options_anchor(self):
+        # The login form's top-right gear matches the Options anchor; the form's
+        # e-mail field is the tie-breaker and means "login", not "log out".
+        controller = self.make_controller("ALT_Prefab.LoginPanelPrefab\n")
+        controller._arena_region_provider = self.Provider(
+            [self.detection(True, "ok", anchor="options_anchor.png")]
+        )
+        controller._remember_arena_region = lambda _r: None
+        controller._login_form_email_point = lambda **_k: (960, 634)
+        controller.input = mock.Mock()
+
+        self.assertEqual(controller._manual_login_screen_kind(), ("login", ""))
+        controller.input.tap_escape.assert_not_called()
 
     def test_no_anchor_and_a_login_panel_in_the_log_is_the_login_screen(self):
         controller = self.make_controller(
