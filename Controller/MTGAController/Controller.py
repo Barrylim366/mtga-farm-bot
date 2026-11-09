@@ -121,10 +121,12 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
     # How long the login screen may take to appear after the Log Out confirmation.
     # Measured on this client: 18.4 s from the OK click to the
     # "ALT_Prefab.LoginPanelPrefab" record, and the account switch's own wait is
-    # 40 s for the same reason. The first manual version used 12 s, declared a
-    # successful logout failed, and its retry walked the client out of the
-    # credentials form -- see _manual_logout_for_manual_login.
-    _MANUAL_LOGOUT_WAIT_SEC = 40.0
+    # A client reload after logout can exceed a minute (2026-11-09: over 50 s),
+    # so the manual path uses the same two-minute budget as the switch. The first
+    # manual version used 12 s, declared a successful logout failed, and its retry
+    # walked the client out of the credentials form -- see
+    # _manual_logout_for_manual_login.
+    _MANUAL_LOGOUT_WAIT_SEC = 120.0
     # How many times one logout attempt may press ESC before giving up on it.
     _MANUAL_OPTIONS_ESC_ROUNDS = 2
     # Every successful ESC -> Log Out image match in the live 86 MB log landed

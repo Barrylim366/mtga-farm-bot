@@ -64,6 +64,8 @@ class LoginSplashTests(unittest.TestCase):
     def test_the_logout_timeout_tolerates_a_client_reload(self):
         # The 2026-11-09 reload sat on the loading screen for over 50 s.
         self.assertGreaterEqual(Controller._LOGOUT_LOGIN_TIMEOUT, 90.0)
+        # The manual path's logout has its own budget and needed the same.
+        self.assertGreaterEqual(Controller._MANUAL_LOGOUT_WAIT_SEC, 90.0)
 
     def test_focus_login_form_email_clicks_the_wizards_field(self):
         self.c._login_form_email_point = Mock(return_value=(960, 634))
