@@ -49,7 +49,7 @@ from actions import navigation_flow as nav_rois
 from actions.navigation_flow import build_post_login_navigation_actions
 from state.state_machine import BotState, PlayerLogStateTracker, get_state_from_playerlog
 from vision.vision import VisionEngine
-from vision.screen_state import is_home
+from vision.screen_state import classify_screen, is_home
 from vision.window_locator import (
     ArenaRegionProvider,
     _describe_foreground_window,
@@ -13624,6 +13624,20 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._set_runtime_home_mode("home_ready")
         self.start_queueing()
 
+    def _home_probe_detail(self) -> str:
+        """One line describing what the Home classifier sees, for the log."""
+        frame = self._capture_home_frame()
+        if frame is None:
+            return "no frame"
+        try:
+            guess = classify_screen(frame)
+            return (
+                f"{guess.kind} tab={guess.tab or '-'} play={guess.play_btn_score:.2f} "
+                f"underline={guess.underline_run} brightness={guess.brightness:.0f}"
+            )
+        except Exception as exc:
+            return f"classifier error: {exc}"
+
     def _ensure_home_before_logout(self) -> bool:
         """Get to Home before pressing ESC for the logout.
 
@@ -13654,6 +13668,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 return True
             if self._stop_requested:
                 break
+            bot_logger.log_info(f"Account switch: Home probe: {self._home_probe_detail()}")
             if not escaped:
                 # A Starter deck chooser or event overlay can swallow the Home
                 # tab (the queue's own Home dips fail the same way). ESC closes
@@ -13672,10 +13687,15 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             # settle, then try Home again.
             time.sleep(2.0)
         if not self._stop_requested:
+            detail = self._home_probe_detail()
             bot_logger.log_error(
-                "Account switch: frame did not reach Home before the logout window; "
-                "not pressing ESC."
+                "Account switch: frame did not reach Home before the logout window "
+                f"(last probe: {detail}); not pressing ESC."
             )
+            try:
+                self._write_nav_debug_bundle("switch_home_not_verified")
+            except Exception as exc:
+                bot_logger.log_error(f"Account switch: could not write the Home debug bundle: {exc}")
         return False
 
     def _perform_account_switch(self) -> None:

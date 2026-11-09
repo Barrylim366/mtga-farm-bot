@@ -39,6 +39,8 @@ class _HomeGateCase(unittest.TestCase):
         self.c = Controller(self.log_path)
         self.c._stop_requested = False
         self.c.input = mock.Mock()
+        self.c._home_probe_detail = lambda: "test probe"
+        self.c._write_nav_debug_bundle = lambda *a, **k: None
         self.c._arena_region = (0, 0, 1920, 1080)
         self.c._ensure_arena_region = lambda force_reacquire=False: (0, 0, 1920, 1080)
         self.c._map_base_point_into_arena = lambda arena, point: (10, 20)

@@ -33,6 +33,8 @@ class _GuardCase(unittest.TestCase):
         self.c._stop_requested = False
         self.c._account_switch_pending = False
         self.c.input = mock.Mock()
+        self.c._home_probe_detail = lambda: "test probe"
+        self.c._write_nav_debug_bundle = lambda *a, **k: None
 
     def tearDown(self):
         self.c._stop_requested = False
