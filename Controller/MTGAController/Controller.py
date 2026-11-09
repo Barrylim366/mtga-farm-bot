@@ -13990,6 +13990,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 return
             if focus_mtga_window():
                 time.sleep(0.2)
+            if self._focus_login_form_email():
+                bot_logger.log_info(
+                    "Account switch: focused the Wizards Accounts e-mail field."
+                )
             self.input.tap_delete()
             time.sleep(0.2)
             self.input.type_text(account.get("email", ""))
@@ -14603,9 +14607,41 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                     continue
             if self._manual_login_splash_point() is not None:
                 return "login", ""
+            if self._login_form_email_point() is not None:
+                bot_logger.log_info(
+                    "Manual login: Wizards Accounts e-mail/password form detected."
+                )
+                return "login", ""
             if time.monotonic() >= deadline:
                 return "unknown", ""
             time.sleep(self._MANUAL_LOGIN_PROBE_DELAY_SEC)
+
+    def _login_form_email_point(self, *, timeout: float = 1.0):
+        """Center of the Wizards Accounts e-mail field, or None.
+
+        The 2026-11-09 client presents a full Wizards Accounts form (Email
+        Address / Password / Log In) instead of the old LoginPanel splash. The
+        e-mail placeholder is the form's stable, unique anchor.
+        """
+        template = os.path.join(self._buttons_dir(), "login_email_field.png")
+        if not os.path.exists(template):
+            return None
+        return self._locate_image_center_in_scaled_arena_region(
+            template,
+            "LOGIN_EMAIL_FIELD",
+            rel_region=(600, 500, 760, 420),
+            confidence=0.80,
+            timeout=timeout,
+        )
+
+    def _focus_login_form_email(self) -> bool:
+        """Click the Wizards Accounts e-mail field so typing lands in it."""
+        point = self._login_form_email_point()
+        if point is None:
+            return False
+        self._click_abs(int(point[0]), int(point[1]), "LOGIN_EMAIL_FIELD")
+        time.sleep(0.3)
+        return True
 
     def _clear_manual_login_popup(self) -> bool:
         """Click one blocking popup the bot already recognizes, if one is up.
@@ -14910,6 +14946,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             )
         if focus_mtga_window():
             time.sleep(0.2)
+        if self._focus_login_form_email():
+            bot_logger.log_info("Manual login: focused the Wizards Accounts e-mail field.")
         login_offset = self._get_log_size(self._log_path)
         self.input.tap_delete()
         time.sleep(0.2)

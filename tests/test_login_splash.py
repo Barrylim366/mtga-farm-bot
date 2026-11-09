@@ -64,3 +64,30 @@ class LoginSplashTests(unittest.TestCase):
     def test_the_logout_timeout_tolerates_a_client_reload(self):
         # The 2026-11-09 reload sat on the loading screen for over 50 s.
         self.assertGreaterEqual(Controller._LOGOUT_LOGIN_TIMEOUT, 90.0)
+
+    def test_focus_login_form_email_clicks_the_wizards_field(self):
+        self.c._login_form_email_point = Mock(return_value=(960, 634))
+        self.assertTrue(self.c._focus_login_form_email())
+        self.c._click_abs.assert_called_once_with(960, 634, "LOGIN_EMAIL_FIELD")
+
+    def test_focus_login_form_email_is_false_when_the_form_is_absent(self):
+        self.c._login_form_email_point = Mock(return_value=None)
+        self.assertFalse(self.c._focus_login_form_email())
+        self.c._click_abs.assert_not_called()
+
+    def test_manual_login_screen_kind_recognizes_the_wizards_form(self):
+        from types import SimpleNamespace
+
+        self.c._stop_requested = False
+        self.c._arena_region_provider = SimpleNamespace(
+            detect=lambda **kw: SimpleNamespace(
+                ok=False, code="anchor_not_found", region=None, message=""
+            )
+        )
+        self.c._read_log_tail = lambda *a, **k: "no login markers"
+        self.c._manual_login_splash_point = Mock(return_value=None)
+        self.c._login_form_email_point = Mock(return_value=(960, 634))
+
+        kind, _detail = self.c._manual_login_screen_kind()
+        self.assertEqual(kind, "login")
+        self.c._login_form_email_point.assert_called()

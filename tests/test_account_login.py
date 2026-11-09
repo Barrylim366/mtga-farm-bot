@@ -350,6 +350,7 @@ class ScreenKindTest(_ControllerTestCase):
         controller._arena_region_provider = self.Provider([self.detection(False, "anchor_not_found")])
         controller._remember_arena_region = lambda _r: None
         controller._manual_login_splash_point = lambda **_k: None
+        controller._login_form_email_point = lambda **_k: None
         controller._clear_manual_login_popup = lambda: False
         self.assertEqual(controller._manual_login_screen_kind(), ("unknown", ""))
 
