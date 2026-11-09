@@ -12984,6 +12984,33 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             time.time() - self._last_account_switch_ts,
         )
 
+    def _pass_criteria_met(self) -> bool:
+        """The pass rule without the switch guards: is this account finished?
+
+        Used when the switch itself cannot run (repeated failures / give-up): a
+        finished account must stop, not be farmed for no reason.
+        """
+        if self._account_switch_mode != "quests":
+            return False
+        return quest_switch_due(
+            QuestSwitchCriteria(
+                quests_active=self._quest_target_active(),
+                wins_target=self._account_switch_daily_wins,
+                phase=getattr(self, "_switch_phase", "quests"),
+                anti_storm=False,
+                quest_target_met=self._main_quest_target_met,
+                wins_seen=self._wins_seen_for_current_account,
+            )
+        )
+
+    def _should_stop_instead_of_queueing(self) -> bool:
+        """A finished account must not be farmed just because switching failed."""
+        return bool(
+            self._account_switch_mode == "quests"
+            and self._switch_giveup_active()
+            and self._pass_criteria_met()
+        )
+
     def set_stop_bot_callback(self, method) -> None:
         """Register a UI callback the controller can use to stop the bot."""
         self.__stop_bot_callback = method
@@ -13420,6 +13447,13 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 # with a post-match trigger is harmless.
                 bot_logger.log_info("Account switch due; performing switch now.")
                 self._input_thread(target=self._perform_account_switch, daemon=True).start()
+                return
+            if self._should_stop_instead_of_queueing():
+                bot_logger.log_error(
+                    "Account pass is complete but switching is disabled after repeated "
+                    "failures; stopping instead of farming a finished account."
+                )
+                self._request_stop_bot("account complete but switching is disabled")
                 return
             self._probe_report_dialog_if_queue_is_stuck()
             self.start_game_from_home_screen()

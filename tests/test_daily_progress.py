@@ -219,5 +219,30 @@ class SkipToNextAccountTest(_ControllerCase):
         self.assertTrue(self.c._account_switch_due())
 
 
+class FinishedAccountFallbackTest(_ControllerCase):
+    def _finished(self):
+        self.c._account_switch_mode = "quests"
+        self.c._quest_target_mode = "complete"
+        self.c._account_switch_quests_to_complete = 1
+        self.c._quest_count_confirmed_fresh = True
+        self.c._last_valid_quest_active_incomplete = 0
+        self.c._max_failed_switch_attempts = 3
+        self.c._failed_switch_attempts = 3
+
+    def test_a_finished_account_stops_when_switching_is_disabled(self):
+        self._finished()
+        self.assertTrue(self.c._should_stop_instead_of_queueing())
+
+    def test_no_give_up_does_not_stop(self):
+        self._finished()
+        self.c._failed_switch_attempts = 0
+        self.assertFalse(self.c._should_stop_instead_of_queueing())
+
+    def test_an_unfinished_account_still_plays(self):
+        self._finished()
+        self.c._last_valid_quest_active_incomplete = 2
+        self.assertFalse(self.c._should_stop_instead_of_queueing())
+
+
 if __name__ == "__main__":
     unittest.main()
