@@ -13612,6 +13612,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             "navigating Home before logout."
         )
         deadline = time.monotonic() + self._HOME_BEFORE_LOGOUT_TIMEOUT
+        escaped = False
         while not self._stop_requested and time.monotonic() < deadline:
             if self._navigate_to_home() and self._is_home_screen():
                 return True
@@ -13619,6 +13620,20 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 return True
             if self._stop_requested:
                 break
+            if not escaped:
+                # A Starter deck chooser or event overlay can swallow the Home
+                # tab (the queue's own Home dips fail the same way). ESC closes
+                # the overlay; Home is re-verified afterwards, so this is not a
+                # blind navigation click.
+                escaped = True
+                bot_logger.log_info(
+                    "Account switch: Home is blocked; pressing ESC to close the event overlay."
+                )
+                try:
+                    self.input.tap_escape()
+                except Exception as exc:
+                    bot_logger.log_error(f"Account switch: ESC recovery failed: {exc}")
+                time.sleep(1.0)
             # The popup may have been handled; give the screen a moment to
             # settle, then try Home again.
             time.sleep(2.0)

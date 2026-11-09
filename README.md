@@ -299,7 +299,7 @@ Manage accounts via **Settings → Manage Accounts**. Set a switch timer and pla
 
 A logout can trigger Arena's own reload: after the 2026-11-09 client update the loading screen ("Initializing localization database") lasted over 50 seconds. The switch now waits up to two minutes for that load, polling both the log's login markers and the Register / Log In splash, instead of declaring the logout failed while the client is still loading.
 
-Before the logout, the bot confirms it is actually on Home. A reward popup or a screen transition can consume the first attempt; the gate gives it a short retry window rather than counting it as a failed switch.
+Before the logout, the bot confirms it is actually on Home. A reward popup or a screen transition can consume the first attempt; the gate gives it a short retry window rather than counting it as a failed switch. If a deck chooser or event overlay is swallowing the Home tab, it presses ESC once and re-verifies.
 
 The Manage Accounts dialog scales its text, fields and buttons together with the UI scale setting. Long account names and emails stay inside their table columns, and a scrollbar keeps all controls accessible on shorter screens.
 

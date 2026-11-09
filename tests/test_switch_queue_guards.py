@@ -32,6 +32,7 @@ class _GuardCase(unittest.TestCase):
         self.c = Controller(self.log_path)
         self.c._stop_requested = False
         self.c._account_switch_pending = False
+        self.c.input = mock.Mock()
 
     def tearDown(self):
         self.c._stop_requested = False

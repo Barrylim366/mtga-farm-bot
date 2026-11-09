@@ -38,6 +38,7 @@ class _HomeGateCase(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(self.log_path) and os.unlink(self.log_path))
         self.c = Controller(self.log_path)
         self.c._stop_requested = False
+        self.c.input = mock.Mock()
         self.c._arena_region = (0, 0, 1920, 1080)
         self.c._ensure_arena_region = lambda force_reacquire=False: (0, 0, 1920, 1080)
         self.c._map_base_point_into_arena = lambda arena, point: (10, 20)
@@ -89,6 +90,19 @@ class EnsureHomeBeforeLogoutTest(_HomeGateCase):
         self.c._navigate_to_home = lambda: nav.pop(0)
         with mock.patch("time.sleep"):
             self.assertTrue(self.c._ensure_home_before_logout())
+
+    def test_a_blocked_home_gets_an_escape_and_a_retry(self):
+        # A deck chooser or event overlay swallows the Home tab; ESC closes it
+        # and the next Home attempt verifies.
+        self.c._HOME_BEFORE_LOGOUT_TIMEOUT = 10.0
+        self.c.input = mock.Mock()
+        seen = [False, False, True]
+        nav = [False, True]
+        self.c._is_home_screen = lambda: seen.pop(0)
+        self.c._navigate_to_home = lambda: nav.pop(0)
+        with mock.patch("time.sleep"):
+            self.assertTrue(self.c._ensure_home_before_logout())
+        self.c.input.tap_escape.assert_called_once()
 
     def test_failed_navigation_aborts(self):
         self.c._HOME_BEFORE_LOGOUT_TIMEOUT = 0.0
