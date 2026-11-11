@@ -62,7 +62,7 @@ class _StarterBase(unittest.TestCase):
         self.c.refresh_quests_cache = lambda: None
         self.c._cached_quests = [{"id": "q1"}]
         self.c._resolve_starter_target_colors = lambda: ""
-        self.c._swap_starter_deck_for_quest = lambda colors: None
+        self.c._swap_starter_deck_for_quest = lambda colors: True
         self.c._navigate_to_home = Mock(return_value=True)
         self.c._write_nav_debug_bundle = Mock()
         self.options_open = False

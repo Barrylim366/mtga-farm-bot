@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -66,6 +67,24 @@ class HomeScreenCheckTest(_HomeGateCase):
     def test_a_failed_capture_is_not_home(self):
         self.c._capture_home_frame = lambda: None
         self.assertFalse(self.c._is_home_screen())
+
+    def test_the_capture_pipeline_frame_is_converted_from_bgr(self):
+        """The pipeline returns BGR and the classifier wants RGB.
+
+        Measured live on 2026-11-11: the same Home frame scores underline_run=0
+        (unknown) read as BGR and underline_run=72 (home) read as RGB. Before
+        the conversion every switch logged "Home is blocked", and when the
+        ESC -> Options detour failed three times in a row the give-up guard
+        stopped the bot mid-round with accounts still owing wins.
+        """
+        bgr = cv2.cvtColor(frame("home_star_trek.jpg"), cv2.COLOR_RGB2BGR)
+        vision = mock.Mock()
+        vision.capture.return_value = bgr
+        self.c._vision = vision
+        self.assertTrue(self.c._is_home_screen())
+        # The base case stubs the probe line; restore the real one for this check.
+        del self.c._home_probe_detail
+        self.assertTrue(self.c._home_probe_detail().startswith("home"))
 
 
 class EnsureHomeBeforeLogoutTest(_HomeGateCase):

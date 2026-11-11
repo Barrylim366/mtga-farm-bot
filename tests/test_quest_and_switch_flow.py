@@ -290,7 +290,7 @@ class QuestTargetSelectionTests(_QuestLogTestBase):
         self.controller._click_image_in_scaled_arena_region = (
             lambda *a, **k: True
         )
-        self.controller._swap_starter_deck_for_quest = swapped_with.append
+        self.controller._swap_starter_deck_for_quest = lambda colors: swapped_with.append(colors) or True
         # The quest changed (re-rolled/completed) since the colors above were read.
         self.append(quests_block(GOLGARI, quest_id="q-2"))
 

@@ -115,6 +115,57 @@ class StarterDeckResolutionTests(_ThrowawayControllerBase):
         self.c._cached_active_colors = "UR"
         self.assertEqual(self.c._resolve_starter_target_colors(), "UR")
 
+    def _complete_mode(self, done_today=1):
+        self.c._preferred_starter_deck = "RG"
+        self.c._account_switch_mode = "quests"
+        self.c._quest_target_mode = "complete"
+        self.c._account_switch_quests_to_complete = 1
+        self.c._account_switch_daily_wins = 4
+        self.c._last_valid_quest_active_incomplete = 2
+        self.c._quest_count_confirmed_fresh = True
+        self.c._quests_completed_today = lambda: done_today
+        self.c._cached_quests = [{"type": "guild", "guild": "Izzet", "goal": 30, "progress": 0}]
+        self.c._cached_active_colors = "UR"
+
+    def test_complete_mode_win_pass_ignores_an_open_quest(self):
+        """2026-11-11: with "complete 1" already banked, the 4-win pass kept
+        playing whatever colour quest was open. Mycoides played a UR quest to
+        completion and then a GW one (no shared colours), turning 1 into 2; the
+        accounts that finished their wins ended the day with 4."""
+        self._complete_mode(done_today=1)
+        self.c._switch_phase = "wins"
+        self.assertTrue(self.c._main_quest_target_met())
+        self.assertEqual(self.c._resolve_starter_target_colors(), "RG")
+
+    def test_complete_mode_win_pass_falls_back_to_wb_without_a_preferred_deck(self):
+        self._complete_mode(done_today=1)
+        self.c._preferred_starter_deck = ""
+        self.c._switch_phase = "wins"
+        self.assertEqual(self.c._resolve_starter_target_colors(), "WB")
+
+    def test_complete_mode_quest_pass_still_follows_the_open_quest(self):
+        """Before the day's quota is banked the quest is the whole point."""
+        self._complete_mode(done_today=0)
+        self.c._switch_phase = "quests"
+        self.assertFalse(self.c._main_quest_target_met())
+        self.assertEqual(self.c._resolve_starter_target_colors(), "UR")
+
+    def test_leave_mode_win_pass_still_follows_the_open_quest(self):
+        """c6726c0's fix must survive: "leave N open" keeps playing the open
+        quest even once the leave target is met, and the win pass is no exception.
+        """
+        self.c._preferred_starter_deck = "RG"
+        self.c._account_switch_mode = "quests"
+        self.c._account_switch_main_quests = 1
+        self.c._account_switch_daily_wins = 4
+        self.c._last_valid_quest_active_incomplete = 2
+        self.c._quest_count_confirmed_fresh = True
+        self.c._cached_quests = [{"type": "guild", "guild": "Izzet", "goal": 30, "progress": 0}]
+        self.c._cached_active_colors = "UR"
+        self.c._switch_phase = "wins"
+        self.assertTrue(self.c._main_quest_target_met())
+        self.assertEqual(self.c._resolve_starter_target_colors(), "UR")
+
     def test_default_mode_plays_quest_deck_when_quest_active(self):
         self.c._preferred_starter_deck = "RG"
         self.c._only_grind_preferred_deck = False

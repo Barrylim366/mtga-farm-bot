@@ -80,7 +80,7 @@ class DeckSwapRestoredTests(unittest.TestCase):
         self.c.refresh_quests_cache = lambda: None
 
         self.swaps: list[str] = []
-        self.c._swap_starter_deck_for_quest = lambda colors: self.swaps.append(colors)
+        self.c._swap_starter_deck_for_quest = lambda colors: self.swaps.append(colors) or True
 
     def test_guarded_reward_claim_still_reaches_the_deck_swap(self):
         self.assertTrue(self.c._navigate_starter_deck())
@@ -94,7 +94,7 @@ class DeckSwapRestoredTests(unittest.TestCase):
     def test_swap_happens_before_the_queue_click(self):
         """Order matters: pressing Play before swapping queues the old deck."""
         order: list[str] = []
-        self.c._swap_starter_deck_for_quest = lambda colors: order.append("swap")
+        self.c._swap_starter_deck_for_quest = lambda colors: order.append("swap") or True
 
         def click_tpl(image_path, label, **kw):
             if label == "STARTER_EVENT_PLAY":
@@ -209,7 +209,7 @@ class StarterDeckNavigationFilterFallbackTests(unittest.TestCase):
         self.c._get_state_from_log = lambda: "home"
         self.c.refresh_quests_cache = lambda: None
         self.c._resolve_starter_target_colors = lambda: ""
-        self.c._swap_starter_deck_for_quest = lambda colors: None
+        self.c._swap_starter_deck_for_quest = lambda colors: True
         # The banner led to Starter Deck Duel's page; the gate itself is covered
         # in test_foreign_event_guard.py.
         self.c._starter_event_page_confirmed = lambda label: True

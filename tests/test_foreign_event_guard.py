@@ -69,7 +69,7 @@ class _GuardTestBase(unittest.TestCase):
         self.c.refresh_quests_cache = lambda: None
         self.c._cached_quests = [{"id": "q1"}]
         self.c._resolve_starter_target_colors = lambda: ""
-        self.c._swap_starter_deck_for_quest = lambda colors: None
+        self.c._swap_starter_deck_for_quest = lambda colors: True
         self.c._navigate_to_home = Mock(return_value=True)
 
         # Which templates are "on screen"; everything else does not match.

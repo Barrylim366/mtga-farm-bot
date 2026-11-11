@@ -1015,6 +1015,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # @serialized_home_navigation.
         self._starter_dead_ends = 0
         self._starter_dead_end_bundle_ts = 0.0
+        # Consecutive failed starter-deck selections (see
+        # _prepare_starter_deck_for_queue). A failed swap skips the queue attempt
+        # instead of playing the wrong deck, but only up to a bound: an
+        # unreachable chooser must not stop the bot queueing forever.
+        self._starter_swap_failures = 0
         self._post_match_ready_ts = None
         self._post_match_delay_sec = 20
         self._stop_requested = False
@@ -4247,6 +4252,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._home_quest_check_done = False
         self._home_quest_check_attempts = 0
         self._quests_last_valid_read_ts = 0.0
+        # A new Start gets a fresh deck-selection retry budget.
+        self._starter_swap_failures = 0
         try:
             runtime_status.update_status(
                 quests=[], active_quest_id="", active_quest_colors="",
@@ -4430,7 +4437,23 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             if arena is None:
                 return None
             self._vision.begin_tick()
-            return self._vision.capture(arena)
+            frame = self._vision.capture(arena)
+            if frame is None:
+                return None
+            # The capture pipeline hands back BGR (mss grabs BGRA and the Windows
+            # grabber is BGR). vision.screen_state expects RGB, the same as its
+            # fixtures, so convert here. Passing BGR straight through made the
+            # classifier reject a perfectly visible Home page -- measured live on
+            # 2026-11-11: the same frame scores underline_run=0 / unknown as BGR
+            # and underline_run=72 / home as RGB. Every switch therefore logged
+            # "Home is blocked" and only the ESC -> Options detour kept switching
+            # alive; when that detour failed three times the give-up guard
+            # stopped the bot mid-round.
+            import cv2
+
+            if getattr(frame, "ndim", 0) == 3 and frame.shape[2] == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return frame
         except Exception as exc:
             bot_logger.log_error(f"Home verification: frame capture failed: {exc}")
             return None
@@ -4929,8 +4952,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 f"{refreshed_colors or '-'}); using the new target."
             )
             target_colors = refreshed_colors
-        # Swap to the deck that best advances the top quest, then queue.
-        self._swap_starter_deck_for_quest(target_colors)
+        # Swap to the deck that best advances the top quest, then queue. A swap
+        # that cannot be made must not start a match on the old deck: the win pass
+        # is meant to run on the preferred colours. Skip this attempt instead.
+        if not self._prepare_starter_deck_for_queue(target_colors):
+            return False
         if not self._starter_navigation_may_act():
             return False
         # Re-prove the page: the swap navigated in between, and this pill is
@@ -5468,7 +5494,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                     f"Starter: no Play/Events chrome, but we are on the event's "
                     f"'{screen}' screen; continuing the deck selection there."
                 )
-                self._swap_starter_deck_for_quest(target_colors)
+                if not self._prepare_starter_deck_for_queue(target_colors):
+                    return False
                 # The swap leaves us on the event page with Play in the corner;
                 # press it here rather than via _queue_from_event_landing, which
                 # would run a second, redundant deck swap.
@@ -5578,8 +5605,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             return False
         time.sleep(1.5)
 
-        # 4.5) Swap to the quest-matched starter deck before pressing Play.
-        self._swap_starter_deck_for_quest(target_colors)
+        # 4.5) Swap to the quest-matched starter deck before pressing Play. If it
+        # cannot be selected, do not press Play on the old deck; the queue loop
+        # retries (bounded, see _prepare_starter_deck_for_queue).
+        if not self._prepare_starter_deck_for_queue(target_colors):
+            return False
         if not self._starter_navigation_may_act():
             return False
 
@@ -5749,6 +5779,24 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 return True
         return False
 
+    def _win_pass_ignores_open_quests(self) -> bool:
+        """True when the win deck must win over an open colour quest.
+
+        "Complete N today" is a daily goal, and the round's second pass is judged
+        on wins alone (see switch_policy). Once the day's N quests are banked, an
+        open quest must not pull the account back onto a colour deck: the bot
+        completes quests the user did not ask for, and the weaker colour decks
+        lose more, which stretches the win pass and completes even more of them.
+
+        Only the complete mode is affected. In "leave N open" the open quest is
+        still what the account should be playing (see c6726c0), and with a single
+        configured dimension there is no win pass at all.
+        """
+        return bool(
+            getattr(self, "_quest_target_mode", "leave") == "complete"
+            and getattr(self, "_switch_phase", "quests") == "wins"
+        )
+
     def _resolve_starter_target_colors(self) -> str:
         """Colors of the deck that best advances the current top quest.
 
@@ -5759,7 +5807,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         While any daily quest is still open its colours decide the deck; the
         preferred starter deck (or WB) is used once the fresh list says every
         quest is complete, and for the win-farming pass when there is no colour
-        quest left to play.
+        quest left to play. In "complete N today" mode the win pass also ignores
+        an open quest once the day's N are banked (see _win_pass_ignores_open_quests).
 
         1.11.0 put the win-farming branch in front of the quest colours: as soon
         as the quest *target* was met it returned the preferred deck "even if
@@ -5789,17 +5838,26 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         # left to play. 1.11.0 took this branch as soon as the quest *target* was
         # met, "even if other quests remain open" (its own words), so an account
         # holding one open quest farmed wins on the wrong colours and never played
-        # it. With a colour target open, its colours win instead.
+        # it. With a colour target open, its colours win instead -- EXCEPT in the
+        # win pass of "complete N today" mode, where the day's quests are already
+        # banked and an open quest would only be completed by accident.
+        win_pass = self._win_pass_ignores_open_quests()
         if (
             self._account_switch_mode == "quests"
             and self._account_switch_daily_wins > 0
             and self._main_quest_target_met()
-            and not self._cached_active_colors
+            and (win_pass or not self._cached_active_colors)
         ):
             target = preferred or "WB"
-            bot_logger.log_info(
-                f"Starter: quest target met and no colour quest to play; selecting {target} win-farming deck."
-            )
+            if win_pass:
+                bot_logger.log_info(
+                    f"Starter: daily quest target met; win pass ignoring the open "
+                    f"{self._cached_active_colors or '-'} quest; selecting {target} win-farming deck."
+                )
+            else:
+                bot_logger.log_info(
+                    f"Starter: quest target met and no colour quest to play; selecting {target} win-farming deck."
+                )
             return target
 
         if (self._last_valid_quest_active_incomplete == 0
@@ -6391,19 +6449,27 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             bot_logger.log_info(f"Starter: forgetting selected deck ({reason}).")
         self._starter_selected_deck = None
 
-    def _swap_starter_deck_for_quest(self, target_colors: str) -> None:
+    def _swap_starter_deck_for_quest(self, target_colors: str) -> bool:
         """Change the selected starter deck to one matching the quest colors.
 
-        Best-effort: a miss leaves the current deck in place -- we never block the
-        queue. Flow: reach the deck-chooser grid from whichever of the event's
-        screens we are on (_open_starter_deck_chooser), click the quest deck, then
-        Submit Deck.
+        Returns True when the desired deck is selected (or nothing needs
+        selecting: no colour target, or no starter template matches it) and False
+        when the selection could not be made. The caller decides what a miss
+        means -- since 2026-11-11 the queue path skips the attempt rather than
+        pressing Play with the old deck (see _prepare_starter_deck_for_queue);
+        it used to be silently best-effort, which is how an expired GW deck got
+        queued for mycoides during a WB win pass.
+
+        Flow: reach the deck-chooser grid from whichever of the event's screens
+        we are on (_open_starter_deck_chooser), click the quest deck, then Submit
+        Deck.
         """
         if not self._starter_navigation_may_act():
-            return
+            return False
         desired_tpl = self._choose_starter_deck_template(target_colors)
         if not desired_tpl:
-            return
+            # Nothing to select: the caller keeps whatever deck is current.
+            return True
         desired_name = os.path.splitext(os.path.basename(desired_tpl))[0].upper()
         # Use the real identity, never _current_account_key's generic fallback.
         account = (self._current_account_screen_name or "").strip().casefold()
@@ -6418,11 +6484,11 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                 )
             )
             if not self._starter_navigation_may_act():
-                return
+                return False
             if (confirmed and self._starter_selected_deck == selection
                     and (self._current_account_screen_name or "").strip().casefold() == account):
                 bot_logger.log_info(f"Starter: reusing remembered deck {desired_name}; skipping deck selection.")
-                return
+                return True
         # Clear BEFORE any selection work: a failed/interrupted attempt must not
         # leave an old deck trusted, even if navigation backs out successfully.
         self._forget_starter_deck("selection required or event page unconfirmed")
@@ -6432,7 +6498,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             bot_logger.log_error(
                 f"Starter: no chooser grid position for deck '{desired_name}'; keeping current deck."
             )
-            return
+            return False
 
         submit_btn = os.path.join(self._buttons_dir(), "submit_deck.PNG")
 
@@ -6442,7 +6508,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         #    from a single ambiguous template, and backs out of the read-only card
         #    list if we somehow ended up there.
         if not self._open_starter_deck_chooser():
-            return
+            return False
 
         # 2) Select the quest deck. Prefer locating the deck's art thumbnail in the
         #    grid by image match (robust to layout/scale/reordering, and clicks the
@@ -6488,7 +6554,7 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             bot_logger.log_info("Starter: submitted deck (template).")
         else:
             if not self._starter_navigation_may_act():
-                return
+                return False
             sub_target, sub_src = self._map_abs_point_to_arena(
                 self._STARTER_SUBMIT_DECK_BASE, label="STARTER_SUBMIT_DECK"
             )
@@ -6505,13 +6571,14 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         #    rather than leaving the bot parked on an unrecognized screen.
         screen = self._detect_starter_screen("STARTER_SWAP_VERIFY")
         if not self._starter_navigation_may_act():
-            return
+            return False
         if screen == self._STARTER_SCREEN_PLAY:
             bot_logger.log_info(f"Starter: deck {desired_name} submitted; event page ready to queue.")
             if account and (self._current_account_screen_name or "").strip().casefold() == account:
                 self._starter_selected_deck = selection
                 bot_logger.log_info(f"Starter: remembered selected deck {desired_name} for {account}.")
-        elif screen == self._STARTER_SCREEN_CHOOSER:
+            return True
+        if screen == self._STARTER_SCREEN_CHOOSER:
             bot_logger.log_error(
                 "Starter: still on the deck chooser after submitting; backing out to the event page."
             )
@@ -6523,6 +6590,54 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
             )
             self._click_starter_back_arrow()
             time.sleep(1.5)
+        else:
+            bot_logger.log_error(
+                f"Starter: submitted {desired_name} but landed on the '{screen}' screen, not the "
+                "event Play page; treating the deck swap as failed."
+            )
+        return False
+
+    # Consecutive failed deck selections before the queue is allowed to proceed
+    # with the deck that is already selected.
+    _STARTER_SWAP_MAX_FAILURES = 3
+
+    def _prepare_starter_deck_for_queue(self, target_colors: str) -> bool:
+        """Select the queued deck, and skip this queue attempt if that fails.
+
+        Until 2026-11-11 the swap was best-effort: a miss left the current deck
+        in place and the caller pressed Play anyway ("we never block the queue").
+        That is how mycoides queued its expired GW deck during the WB win pass --
+        the chooser could not be reached, the newly-chosen WB target was dropped,
+        and the match ran on the old deck (found live, 2026-11-11 11:17).
+
+        A failed selection now skips this queue attempt; the queue loop retries.
+        Bounded, so a permanently unreachable chooser cannot stop the bot playing:
+        after _STARTER_SWAP_MAX_FAILURES consecutive misses it queues with the
+        current deck and logs STARTER_DECK_FALLBACK, which alerts.log picks up.
+        """
+        if not self._starter_navigation_may_act():
+            return False
+        if self._swap_starter_deck_for_quest(target_colors):
+            self._starter_swap_failures = 0
+            return True
+        failures = int(getattr(self, "_starter_swap_failures", 0)) + 1
+        if failures >= self._STARTER_SWAP_MAX_FAILURES:
+            bot_logger.log_error(
+                "STARTER_DECK_FALLBACK: could not select the {} deck after {} attempts; "
+                "queueing with the current deck so the account keeps playing.".format(
+                    target_colors or "target", failures
+                )
+            )
+            self._starter_swap_failures = 0
+            return True
+        self._starter_swap_failures = failures
+        bot_logger.log_info(
+            "Starter: deck selection for {} failed (attempt {}/{}); not queueing this "
+            "attempt, retrying.".format(
+                target_colors or "target", failures, self._STARTER_SWAP_MAX_FAILURES
+            )
+        )
+        return False
 
     def _quest_deck_target(self, log_prefix: str = "Post-login") -> tuple[str, str | None]:
         """Deck target for the current top quest: ``(color_letters, forced_file)``.
@@ -13453,7 +13568,10 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
                     "Account pass is complete but switching is disabled after repeated "
                     "failures; stopping instead of farming a finished account."
                 )
-                self._request_stop_bot("account complete but switching is disabled")
+                self._request_stop_bot(
+                    "account switching gave up after repeated failures; this account is "
+                    "finished, but other accounts may still owe quests or wins"
+                )
                 return
             self._probe_report_dialog_if_queue_is_stuck()
             self.start_game_from_home_screen()
@@ -13497,6 +13615,8 @@ class Controller(BlockRecoveryMixin, AbilityActivationMixin, GroupRecoveryMixin,
         self._last_quests_read_was_fresh = False
         self._home_quest_check_done = False
         self._home_quest_check_attempts = 0
+        # A fresh account starts with a clean deck-selection retry budget.
+        self._starter_swap_failures = 0
         # Drop the outgoing account's cached quest view so nothing (UI, deck-color
         # selection, refresh change-detection) reuses it before the incoming
         # account's quests are read.
