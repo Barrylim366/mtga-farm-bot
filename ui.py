@@ -2868,12 +2868,51 @@ class MTGBotUI(tk.Tk):
             int(c1[2] + (c2[2] - c1[2]) * t),
         )
 
-    def _render_title_image(self, text: str, font_px: int | None = None):
+    @staticmethod
+    def _title_text_lines(text: str, font, max_width: int | None) -> list[str]:
+        """Split `text` into lines that fit `max_width` pixels.
+
+        Returns the text unchanged (one line) when it already fits or when no
+        width is given. Words are never broken; a single word wider than the
+        limit becomes its own line (nothing better can be done without
+        hyphenating a status message).
+        """
+        text = str(text or "")
+        if not max_width or max_width <= 0:
+            return [text]
+        try:
+            if font.getlength(text) <= max_width:
+                return [text]
+        except Exception:
+            return [text]
+        words = text.split()
+        if not words:
+            return [text]
+        lines: list[str] = []
+        current = words[0]
+        for word in words[1:]:
+            trial = f"{current} {word}"
+            try:
+                fits = font.getlength(trial) <= max_width
+            except Exception:
+                fits = True
+            if fits:
+                current = trial
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
+    def _render_title_image(self, text: str, font_px: int | None = None, max_width: int | None = None):
         """Render the main title as a single image with a warm 'molten gold'
         vertical gradient, a warm emboss shadow and a soft ember glow
         (design proposal #4). Returns an ImageTk.PhotoImage, or None on failure
         (callers fall back to plain canvas text). font_px renders the same look
-        at another size (the "Daily Quests" heading, the startup-phase line)."""
+        at another size (the "Daily Quests" heading, the startup-phase line).
+        max_width wraps the text onto as many lines as it needs to fit: at a
+        small UI scale the fixed-minimum font can be wider than the window, and
+        a single-line image simply ran off both sides."""
         try:
             if font_px is None:
                 font_px = max(28, self._scale_value(41))
@@ -2910,14 +2949,32 @@ class MTGBotUI(tk.Tk):
 
             pad = max(6, int(font_px * 0.42))
             probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-            x0, y0, x1, y1 = probe.textbbox((0, 0), text, font=font)
+            lines = self._title_text_lines(text, font, max_width)
+            spacing = max(2, int(font_px * 0.18))
+            if len(lines) > 1:
+                block = "\n".join(lines)
+                x0, y0, x1, y1 = probe.multiline_textbbox(
+                    (0, 0), block, font=font, spacing=spacing, align="center",
+                )
+            else:
+                block = lines[0]
+                x0, y0, x1, y1 = probe.textbbox((0, 0), block, font=font)
+            # Pillow's multiline_textbbox returns floats (textbbox returns ints);
+            # Image.new rejects a float size, which silently disabled wrapping.
+            x0, y0, x1, y1 = (int(round(v)) for v in (x0, y0, x1, y1))
             tw, th = (x1 - x0), (y1 - y0)
             size = (tw + pad * 2, th + pad * 2)
             ox, oy = pad - x0, pad - y0
 
             # Glyph mask.
             mask = Image.new("L", size, 0)
-            ImageDraw.Draw(mask).text((ox, oy), text, font=font, fill=255)
+            draw = ImageDraw.Draw(mask)
+            if len(lines) > 1:
+                draw.multiline_text(
+                    (ox, oy), block, font=font, fill=255, spacing=spacing, align="center",
+                )
+            else:
+                draw.text((ox, oy), block, font=font, fill=255)
             return self._gold_photo_from_mask(mask, pad, th, font_px)
         except Exception:
             return None
@@ -2997,47 +3054,111 @@ class MTGBotUI(tk.Tk):
         except Exception:
             return None
 
-    def _gold_text_photo(self, text: str, font_px: int):
-        """Title-look image for a short line, cached: the startup-phase line is
-        relabelled up to four times a second with the same handful of texts."""
+    def _gold_text_photo(self, text: str, font_px: int, max_width: int | None = None):
+        """Title-look image for a line (or wrapped lines), cached: the
+        startup-phase line is relabelled up to four times a second with the same
+        handful of texts."""
         cache = self.__dict__.setdefault("_gold_text_cache", {})
-        key = (text, int(font_px))
+        key = (text, int(font_px), int(max_width or 0))
         if key not in cache:
             if len(cache) > 48:
                 cache.clear()
-            cache[key] = self._render_title_image(text, font_px=font_px)
+            cache[key] = self._render_title_image(
+                text, font_px=font_px, max_width=max_width,
+            )
         return cache[key]
 
-    def _create_gold_text(self, text: str, font_px: int, fallback_font) -> int:
+    def _create_gold_text(self, text: str, font_px: int, fallback_font, max_width: int | None = None) -> int:
         """Canvas item showing text in the title's molten-gold look, or plain
-        accent-colored text where that cannot be rendered."""
-        photo = self._gold_text_photo(text, font_px)
+        accent-colored text where that cannot be rendered.
+
+        max_width wraps the text instead of letting it run past the card; the
+        layout re-wraps it as the window resizes (see _fit_gold_text_width).
+        """
+        spec = self.__dict__.setdefault("_gold_text_specs", {})
+        photo = self._gold_text_photo(text, font_px, max_width)
         if photo is not None:
             item = self._card_canvas.create_image(0, 0, image=photo, anchor="n")
             self.__dict__.setdefault("_gold_text_heights", {})[item] = photo.height()
             # The item's own reference: the cache may evict the photo, and Tk
             # blanks an image whose last Python reference is gone.
             self.__dict__.setdefault("_gold_text_photos", {})[item] = photo
+            spec[item] = (str(text or ""), int(font_px), int(max_width or 0))
             return item
-        return self._card_canvas.create_text(
+        item = self._card_canvas.create_text(
             0, 0, text=text, fill="#ffb841", font=fallback_font, anchor="n",
+            justify="center",
         )
+        if max_width:
+            self._card_canvas.itemconfigure(item, width=int(max_width))
+        spec[item] = (str(text or ""), int(font_px), int(max_width or 0))
+        return item
 
-    def _set_gold_text(self, item: int, text: str, font_px: int) -> None:
-        if self._card_canvas.type(item) == "image":
-            photo = self._gold_text_photo(text, font_px)
-            if photo is not None:
-                self._card_canvas.itemconfigure(item, image=photo)
-                self.__dict__.setdefault("_gold_text_photos", {})[item] = photo
-                heights = self.__dict__.setdefault("_gold_text_heights", {})
-                changed = heights.get(item) != photo.height()
-                heights[item] = photo.height()
-                if changed:
-                    # Glyphs with descenders make a taller image; re-space the
-                    # bar below it rather than let the two overlap.
-                    self._refresh_card_layout()
+    def _apply_gold_text(self, item: int, text: str, font_px: int, max_width: int | None = None) -> bool:
+        """Render `text` into `item`; True when the item's height changed.
+
+        Deliberately does not run the card layout: the layout pass itself uses
+        this to re-wrap text at the current width, and re-entering the layout
+        from inside it would recurse.
+        """
+        spec = self.__dict__.setdefault("_gold_text_specs", {})
+        if self._card_canvas.type(item) == "text":
+            # Plain-text fallback (the gold image renderer needs a Pillow whose
+            # textbbox returns ints). Wrapping is native here, and a wrapped item
+            # is taller, so its real height must reach the layout.
+            self._card_canvas.itemconfigure(item, text=text, justify="center")
+            if max_width:
+                self._card_canvas.itemconfigure(item, width=int(max_width))
+            self._card_canvas.update_idletasks()
+            heights = self.__dict__.setdefault("_gold_text_heights", {})
+            box = self._card_canvas.bbox(item)
+            changed = False
+            if box:
+                height = int(box[3] - box[1])
+                changed = heights.get(item) != height
+                heights[item] = height
+            spec[item] = (str(text or ""), int(font_px), int(max_width or 0))
+            return changed
+        photo = self._gold_text_photo(text, font_px, max_width)
+        if photo is None:
+            return False
+        self._card_canvas.itemconfigure(item, image=photo)
+        self.__dict__.setdefault("_gold_text_photos", {})[item] = photo
+        heights = self.__dict__.setdefault("_gold_text_heights", {})
+        changed = heights.get(item) != photo.height()
+        heights[item] = photo.height()
+        spec[item] = (str(text or ""), int(font_px), int(max_width or 0))
+        return changed
+
+    def _set_gold_text(self, item: int, text: str, font_px: int, max_width: int | None = None) -> None:
+        if max_width is None:
+            # Keep the width the layout fitted this item to. A relabelled line
+            # is almost always the same single-line height, so without this the
+            # unchanged height skipped the layout and the new text stayed on one
+            # unwrapped line that ran off both sides of the card.
+            spec = getattr(self, "_gold_text_specs", {}).get(item)
+            if spec and int(spec[2] or 0) > 0:
+                max_width = int(spec[2])
+        changed = self._apply_gold_text(item, text, font_px, max_width)
+        if changed and not getattr(self, "_in_card_layout", False):
+            # Glyphs with descenders, or an extra wrapped line, make a taller
+            # image; re-space the block below it rather than let them overlap.
+            self._refresh_card_layout()
+
+    def _fit_gold_text_width(self, item: int | None, max_width: int) -> None:
+        """Re-wrap a gold-text item to `max_width` if it was rendered at another
+        width (the window resized, or the UI scale changed under it)."""
+        if item is None:
             return
-        self._card_canvas.itemconfigure(item, text=text)
+        spec = getattr(self, "_gold_text_specs", {}).get(item)
+        if not spec:
+            return
+        text, font_px, width = spec
+        if int(width or 0) == int(max_width or 0):
+            return
+        changed = self._apply_gold_text(item, text, font_px, max_width)
+        if changed and not getattr(self, "_in_card_layout", False):
+            self._refresh_card_layout()
 
     def _gold_text_height(self, item: int, fallback_h: int) -> int:
         return int(getattr(self, "_gold_text_heights", {}).get(item, fallback_h))
@@ -3677,6 +3798,23 @@ class MTGBotUI(tk.Tk):
         self._set_running_state(False)
 
     def _refresh_card_layout(self):
+        """Lay the card out, guarding against re-entry from a wrapped text.
+
+        Fitting the gold text to the current width re-renders its image, which
+        changes the height the layout is about to measure; without the guard
+        that re-render would call this method again mid-pass.
+        """
+        if getattr(self, "_in_card_layout", False):
+            return
+        if not hasattr(self, "_card_canvas"):
+            return
+        self._in_card_layout = True
+        try:
+            self._refresh_card_layout_inner()
+        finally:
+            self._in_card_layout = False
+
+    def _refresh_card_layout_inner(self):
         if not hasattr(self, "_card_canvas"):
             return
         sp = self.ui_theme["spacing"]
@@ -3691,6 +3829,13 @@ class MTGBotUI(tk.Tk):
         self.update_idletasks()
 
         center_x = canvas_w // 2
+        # Keep the two gold status lines inside the window. Their font has a
+        # fixed minimum size, so at a small UI scale a long phase label
+        # ("Looking for Starter Deck Duel in All Events") can be wider than the
+        # whole card; wrap it instead of running off both edges.
+        text_max_w = max(80, canvas_w - 2 * self._scale_value(20))
+        self._fit_gold_text_width(getattr(self, "_loading_text_item", None), text_max_w)
+        self._fit_gold_text_width(getattr(self, "_status_text_item", None), text_max_w)
         button_gap = self._scale_value(13)
 
         menu_buttons = [self._menu_buttons[name] for name in self._menu_button_order if name in self._menu_buttons]
